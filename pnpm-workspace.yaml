@@ -1,0 +1,12 @@
+enableGlobalVirtualStore: false
+
+ignoreWorkspaceRootCheck: true
+
+linkWorkspacePackages: true
+
+lockfileIncludeTarballUrl: true
+
+onlyBuiltDependencies:
+  - esbuild
+
+preferWorkspacePackages: true
