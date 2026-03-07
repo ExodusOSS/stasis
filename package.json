@@ -3,6 +3,19 @@
   "version": "1.0.0-alpha.0",
   "description": "A research project",
   "main": "index.js",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./esbuild": "./src/esbuild.js",
+    "./webpack": "./src/webpack.js",
+    "./loader": "./src/loader.js"
+  },
+  "engines": {
+    "node": "^22.15.0 || >=24.0.0"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
