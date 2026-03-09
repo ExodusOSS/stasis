@@ -11,6 +11,8 @@ const version = 0
 
 assert.equal(sep, '/', 'Not tested on Windows')
 
+const sha512integrity = (x) => `sha512-${hash('sha512', x, 'base64')}`
+
 function sortPaths(a, b) {
   const [al, bl] = [a.split(sep), b.split(sep)]
   while (al[0] === bl[0]) {
@@ -170,9 +172,8 @@ export class State {
     const buf = typeof source === 'string' ? Buffer.from(source) : source
     assert.deepStrictEqual(readFileSync(absolute), buf)
 
-    const sha512 = hash('sha512', source)
     if (isEntry) this.entries.add(file)
-    noupsert(this.hashes, file, sha512)
+    noupsert(this.hashes, file, sha512integrity(source))
     noupsert(this.sources, file, str)
     if (format) noupsert(this.formats, file, format)
   }
@@ -182,7 +183,7 @@ export class State {
     const source = this.sources.get(file)
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
     assert.ok(source !== undefined)
-    assert.equal(this.hashes.get(file), hash('sha512', source))
+    assert.equal(this.hashes.get(file), sha512integrity(source))
     return { source, format }
   }
 
