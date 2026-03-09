@@ -31,6 +31,7 @@
   },
   "homepage": "https://github.com/ExodusMovement/stasis#readme",
   "devDependencies": {
-    "@exodus/bytes": "^1.15.0"
+    "@exodus/bytes": "^1.15.0",
+    "esbuild": "^0.27.3"
   }
 }
