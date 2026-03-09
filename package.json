@@ -28,5 +28,8 @@
   "bugs": {
     "url": "https://github.com/ExodusMovement/stasis/issues"
   },
-  "homepage": "https://github.com/ExodusMovement/stasis#readme"
+  "homepage": "https://github.com/ExodusMovement/stasis#readme",
+  "devDependencies": {
+    "@exodus/bytes": "^1.15.0"
+  }
 }
