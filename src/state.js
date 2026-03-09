@@ -56,11 +56,16 @@ function noupsert(map, key, value) {
   }
 }
 
+const isPlainObject = (x) => x && [null, Object.prototype].includes(Object.getPrototypeOf(x))
 const fileSetToObject = (set) => [...set].sort((a, b) => sortPaths(a, b))
 const fileMapToObject = (map) => Object.fromEntries(
   [...map]
     .sort((a, b) => sortPaths(a[0], b[0]))
     .map(([k, v]) => [k, v instanceof Map ? fileMapToObject(v) : v])
+)
+
+const objectToMaps = (obj) => new Map(
+  [...Object.entries(obj)].map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
 
 const FILE_CONFIG = 'stasis.config.json'
@@ -132,6 +137,7 @@ export class State {
           assert.ok(json.sources)
           this.sources = new Map(Object.entries(json.sources))
           this.formats = new Map(Object.entries(json.formats))
+          this.imports = objectToMaps(json.imports)
         }
       }
     }
@@ -187,22 +193,35 @@ export class State {
     return { source, format }
   }
 
-  addImport(parentURL, specifier, url, { conditions,format }) {
-    if (conditions) {
+  addImport(parentURL, specifier, url, { conditions = '*', format } = {}) {
+    if (conditions !== '*') {
       assert.ok(Array.isArray(conditions))
       conditions = conditions.join(', ')
-    } else {
-      conditions = '*'
     }
 
     const parent = this.relative(this.absolute(parentURL))
-    const resolved = this.relative(this.absolute(url))
+    const file = this.relative(this.absolute(url))
 
     if (!this.imports.has(conditions)) this.imports.set(conditions, new Map())
     const imports = this.imports.get(conditions)
     if (!imports.has(parent)) imports.set(parent, new Map())
-    noupsert(imports.get(parent), specifier, resolved)
-    if (format) noupsert(this.formats, resolved, format)
+    const specifiers = imports.get(parent)
+    noupsert(specifiers, specifier, file)
+    if (format) noupsert(this.formats, file, format)
+  }
+
+  getImport(parentURL, specifier, { conditions = '*' } = {}) {
+    if (conditions !== '*') {
+      assert.ok(Array.isArray(conditions))
+      conditions = conditions.join(', ')
+    }
+
+    const parent = this.relative(this.absolute(parentURL))
+    const file = this.imports.get(conditions)?.get(parent)?.get(specifier)
+    assert.ok(file)
+    const url = pathToFileURL(resolve(this.root, file)).toString()
+    const format = this.formats.get(file) // might be undefined e.g. for some bundlers
+    return { url, format }
   }
 
   get shouldLoad() {
