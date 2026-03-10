@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve, relative, dirname } from 'node:path'
+import { join, resolve, relative, basename, dirname } from 'node:path'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
@@ -21,6 +21,8 @@ const version = 0
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
 const FILE_TREE = 'stasis.tree.br'
+
+// TODO: stricter format validation
 
 export class State {
   hashes = new Map()
@@ -72,11 +74,34 @@ export class State {
         if (lock) {
           const json = JSON.parse(lock)
           assert.equal(json.version, version)
-          assert.ok(Array.isArray(json.entries))
-          assert.ok(json.files)
-          this.entries = new Set(json.entries)
+          assert.ok(['node_modules', 'full'].includes(json.config?.scope))
+          if (this.config.frozen) assert.equal(json.config.scope, this.config.scope)
+
+          const full = json.config.scope === 'full'
+          assert.equal(!!json.entries, full)
+          assert.equal(!!json.sources, full)
+          assert.ok(json.modules)
+
           this.modules = new Map(Object.entries(json.modules))
-          this.hashes = new Map(Object.entries(json.files))
+          for (const [dir] of this.modules) assert.ok(dir.includes('node_modules'))
+          if (full && this.config.full) {
+            assert.ok(Array.isArray(json.entries))
+            this.entries = new Set(json.entries)
+            assert.ok(json.sources)
+            for (const [dir, info] of Object.entries(json.sources)) {
+              assert.ok(!dir.includes('node_modules'))
+              this.modules.set(dir, info)
+            }
+          }
+
+          for (const [dir, { files }] of this.modules) {
+            assert.ok(!dir.startsWith('..'))
+            assert.ok(files)
+            for (const [name, hash] of Object.entries(files)) {
+             assert.ok(!name.startsWith('..'))
+              noupsert(this.hashes, join(dir, name), hash)
+            }
+          }
         }
 
         if (sources) {
@@ -117,11 +142,16 @@ export class State {
     const pkgAbsolute = findPackageJSON(url)
     const pkg = this.relative(pkgAbsolute)
     assert.ok(pkg === 'package.json' || pkg.endsWith('/package.json'))
+    assert.equal(basename(pkg), 'package.json')
+    const dir = dirname(pkg)
     const jsonbuf = readFileSync(pkgAbsolute)
     assert.ok(isUtf8(jsonbuf))
     const json = jsonbuf.toString()
     const { name, version } = JSON.parse(json)
-    noupsert(this.modules, pkg, `${name}@${version}`)
+    if (!this.modules.has(dir)) this.modules.set(dir, { name, version, files: Object.create(null) })
+    const module = this.modules.get(dir)
+    assert.equal(module.name, name)
+    assert.equal(module.version, version)
 
     if (typeof source === 'string') {
       assert.ok(source.isWellFormed())
@@ -135,7 +165,13 @@ export class State {
     assert.deepStrictEqual(readFileSync(absolute), buf)
 
     if (isEntry) this.entries.add(file)
-    noupsert(this.hashes, file, sha512integrity(source))
+    const integrity = sha512integrity(source)
+    noupsert(this.hashes, file, integrity)
+    const rel = relative(dir, file)
+    assert.ok(!rel.startsWith('..'))
+    if (!Object.hasOwn(module.files), rel) module.files[rel] = integrity
+    assert.equal(module.files[rel], integrity)
+
     noupsert(this.sources, file, str)
     if (format) noupsert(this.formats, file, format)
   }
@@ -183,9 +219,17 @@ export class State {
   get lockData() {
     const config = this.config.values
     const entries = fileSetToObject(this.entries)
-    const modules = fileMapToObject(this.modules)
-    const files = fileMapToObject(this.hashes)
-    return JSON.stringify({ version, config, entries, modules, files }, undefined, 2)
+    const modules = Object.create(null)
+    const sources = Object.create(null)
+    for (const [dir, { name, version, files }] of this.modules) {
+      const type = dir.includes('node_modules') ? modules : sources
+      type[dir] = { name, version, files }
+    }
+
+    const store = { version, config }
+    if (this.config.full) Object.assign(store, { entries, sources })
+    Object.assign(store, { modules })
+    return JSON.stringify(store, undefined, 2) + '\n'
   }
 
   get sourceData() {
@@ -198,6 +242,7 @@ export class State {
 
   write() {
     writeFileSync(join(this.root, FILE_LOCK), this.lockData)
+    writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     if (this.config.writeBundle) writeFileSync(join(this.root, FILE_TREE), this.sourceData)
   }
 }

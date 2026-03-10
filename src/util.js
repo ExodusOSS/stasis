@@ -44,7 +44,7 @@ export function readFileSyncMaybe(dir, file, encoding) {
 
 export function noupsert(map, key, value) {
   if (map.has(key)) {
-    assert.equal(map.get(key), value)
+    assert.deepStrictEqual(map.get(key), value)
   } else {
     map.set(key, value)
   }
