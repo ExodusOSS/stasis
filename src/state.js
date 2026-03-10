@@ -6,6 +6,7 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 
+import { Config } from './config.js'
 import {
   sha512integrity,
   readFileSyncMaybe,
@@ -22,18 +23,16 @@ const FILE_LOCK = 'stasis.lock.json'
 const FILE_TREE = 'stasis.tree.br'
 
 export class State {
-  hashes
-  entries
+  hashes = new Map()
+  entries = new Set()
+  sources = new Map()
+  formats = new Map()
+  modules = new Map()
+  imports = new Map()
+  config = new Config()
   root
 
   constructor(root) {
-    this.hashes = new Map()
-    this.entries = new Set()
-    this.sources = new Map()
-    this.formats = new Map()
-    this.modules = new Map()
-    this.imports = new Map()
-
     const potentialRoots = []
     let dir = root
     while (dir) {
@@ -68,9 +67,7 @@ export class State {
         loaded = true
         this.root = dir
 
-        if (config) {
-          // TODO: process config
-        }
+        if (config) this.config.loadConfig(config)
 
         if (lock) {
           const json = JSON.parse(lock)
@@ -83,6 +80,10 @@ export class State {
         }
 
         if (sources) {
+          if (!this.config.writeBundle && !this.config.loadBundle) {
+            throw new Error(`Unexpected ${join(dir, FILE_TREE)} with config.bundle = 'none'`)
+          }
+
           const json = JSON.parse(brotliDecompressSync(sources))
           assert.equal(json.version, version)
           assert.ok(json.sources)
@@ -116,7 +117,10 @@ export class State {
     const pkgAbsolute = findPackageJSON(url)
     const pkg = this.relative(pkgAbsolute)
     assert.ok(pkg === 'package.json' || pkg.endsWith('/package.json'))
-    const { name, version } = JSON.parse(readFileSync(pkgAbsolute), 'utf-8')
+    const jsonbuf = readFileSync(pkgAbsolute)
+    assert.ok(isUtf8(jsonbuf))
+    const json = jsonbuf.toString()
+    const { name, version } = JSON.parse(json)
     noupsert(this.modules, pkg, `${name}@${version}`)
 
     if (typeof source === 'string') {
@@ -176,26 +180,24 @@ export class State {
     return { url, format }
   }
 
-  get shouldLoad() {
-    return false
-  }
-
   get lockData() {
+    const config = this.config.values
     const entries = fileSetToObject(this.entries)
     const modules = fileMapToObject(this.modules)
     const files = fileMapToObject(this.hashes)
-    return JSON.stringify({ version, entries, modules, files }, undefined, 2)
+    return JSON.stringify({ version, config, entries, modules, files }, undefined, 2)
   }
 
   get sourceData() {
+    const config = this.config.values
     const sources = fileMapToObject(this.sources)
     const formats = fileMapToObject(this.formats)
     const imports = fileMapToObject(this.imports)
-    return brotliCompressSync(JSON.stringify({ version, formats, imports, sources }, undefined, 2))
+    return brotliCompressSync(JSON.stringify({ version, config, formats, imports, sources }, undefined, 2))
   }
 
   write() {
     writeFileSync(join(this.root, FILE_LOCK), this.lockData)
-    writeFileSync(join(this.root, FILE_TREE), this.sourceData)
+    if (this.config.writeBundle) writeFileSync(join(this.root, FILE_TREE), this.sourceData)
   }
 }

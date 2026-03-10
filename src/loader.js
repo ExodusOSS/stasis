@@ -18,7 +18,7 @@ function load(url, context, nextLoad) {
     return result
   }
 
-  if (state && state.shouldLoad) {
+  if (state && state.config.loadBundle) {
     const { source, format } = state.getFile(url)
     assert.equal(format, context.format)
     assert.ok(format === 'module') // TODO: cjs
@@ -61,7 +61,7 @@ function resolve(specifier, context, nextResolve) {
   assert.equal(Object.keys(context.importAttributes).length, 0) // unsupported yet
   const { parentURL, conditions } = context
 
-  if (state && state.shouldLoad) {
+  if (state && state.config.loadBundle) {
     const { url, format } = state.getImport(parentURL, specifier, { conditions })
     return { url, format, importAttributes: undefined, shortCircuit: true }
   }
