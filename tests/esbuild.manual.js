@@ -1,14 +1,15 @@
-import { join } from 'node:path'
+import { resolve } from 'node:path'
 import { rm } from 'node:fs/promises'
 import * as esbuild from 'esbuild'
 import { StasisEsbuild } from '../src/esbuild.js'
 
-const dist = join(import.meta.dirname, '../tests.dist')
+const entry = resolve(import.meta.dirname, 'bytes.test.js')
+const dist = resolve(import.meta.dirname, '../tests.dist/esbuild')
 
 await esbuild.build({
-  entryPoints: [join(import.meta.dirname, 'bytes.test.js')],
+  entryPoints: [entry],
   bundle: true,
-  outdir: join(import.meta.dirname, '../tests.dist'),
+  outdir: dist,
   platform: 'node',
   format: 'esm',
   keepNames: true,

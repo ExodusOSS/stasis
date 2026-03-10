@@ -34,6 +34,8 @@
   "devDependencies": {
     "@exodus/bytes": "^1.15.0",
     "esbuild": "^0.27.3",
-    "oxlint": "^1.52.0"
+    "oxlint": "^1.52.0",
+    "string-replace-loader": "^2.3.0",
+    "webpack": "^4.47.0"
   }
 }
