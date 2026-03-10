@@ -24,6 +24,8 @@ const FILE_TREE = 'stasis.tree.br'
 
 // TODO: stricter format validation
 
+let instance
+
 export class State {
   hashes = new Map()
   entries = new Set()
@@ -35,6 +37,8 @@ export class State {
   root
 
   constructor(root) {
+    assert.ok(!instance, 'Only a single Stasis instance is supported')
+    instance = this
     const potentialRoots = []
     let dir = root
     while (dir) {
@@ -118,6 +122,10 @@ export class State {
         }
       }
     }
+  }
+
+  static get loaded() {
+    return !!instance
   }
 
   absolute(url) {

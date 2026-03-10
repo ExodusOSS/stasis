@@ -58,9 +58,11 @@ function resolve(specifier, context, nextResolve) {
     return res
   }
 
-  const expectedAttrs = Object.create(null) // Saving is not supported yet, so we ensure expected ones
-  if (extname(specifier) === '.json' && context.importAttributes?.type) expectedAttrs.type = 'json'
-  assert.deepStrictEqual(context.importAttributes, expectedAttrs)
+  if (context.importAttributes !== undefined) {
+    const expectedAttrs = Object.create(null) // Saving is not supported yet, so we ensure expected ones
+    if (extname(specifier) === '.json' && context.importAttributes?.type) expectedAttrs.type = 'json'
+    assert.deepStrictEqual(context.importAttributes, expectedAttrs)
+  }
 
   const { parentURL, conditions } = context
 
