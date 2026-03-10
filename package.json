@@ -17,6 +17,7 @@
     "node": "^22.15.0 || >=24.0.0"
   },
   "scripts": {
+    "lint": "oxlint",
     "test": "node --run test:coherence",
     "test:coherence": "node --test"
   },
@@ -32,6 +33,7 @@
   "homepage": "https://github.com/ExodusMovement/stasis#readme",
   "devDependencies": {
     "@exodus/bytes": "^1.15.0",
-    "esbuild": "^0.27.3"
+    "esbuild": "^0.27.3",
+    "oxlint": "^1.52.0"
   }
 }

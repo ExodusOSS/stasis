@@ -61,5 +61,5 @@ export const fileMapToObject = (map) => Object.fromEntries(
 )
 
 export const objectToMaps = (obj) => new Map(
-  [...Object.entries(obj)].map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
+  Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
