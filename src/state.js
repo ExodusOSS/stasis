@@ -233,7 +233,8 @@ export class State {
     const sources = []
     for (const [dir, { name, version, files }] of this.modules) {
       const type = dir.includes('node_modules') ? modules : sources
-      type.push([dir, { name, version, files }])
+      const sorted = Object.fromEntries(Object.entries(files).sort((a, b) => sortPaths(a[0], b[0])))
+      type.push([dir, { name, version, files: sorted }])
     }
 
     modules.sort((a, b) => sortPaths(a[0], b[0]))
