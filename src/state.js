@@ -66,6 +66,8 @@ export class State {
         if (loaded) throw new Error('Stasis config already loaded')
         if (sources && !lock) throw new Error('stasis.lock.json missing, can not use sources')
         loaded = true
+        this.root = dir
+
         if (config) {
           // TODO: process config
         }
@@ -111,9 +113,10 @@ export class State {
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
 
-    const pkg = this.relative(findPackageJSON(url))
+    const pkgAbsolute = findPackageJSON(url)
+    const pkg = this.relative(pkgAbsolute)
     assert.ok(pkg === 'package.json' || pkg.endsWith('/package.json'))
-    const { name, version } = JSON.parse(readFileSync(pkg), 'utf-8')
+    const { name, version } = JSON.parse(readFileSync(pkgAbsolute), 'utf-8')
     noupsert(this.modules, pkg, `${name}@${version}`)
 
     if (typeof source === 'string') {
