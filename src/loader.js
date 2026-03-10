@@ -1,5 +1,5 @@
 import { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, extname } from 'node:path'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
@@ -58,7 +58,10 @@ function resolve(specifier, context, nextResolve) {
     return res
   }
 
-  assert.equal(Object.keys(context.importAttributes).length, 0) // unsupported yet
+  const expectedAttrs = Object.create(null) // Saving is not supported yet, so we ensure expected ones
+  if (extname(specifier) === '.json' && context.importAttributes?.type) expectedAttrs.type = 'json'
+  assert.deepStrictEqual(context.importAttributes, expectedAttrs)
+
   const { parentURL, conditions } = context
 
   if (state && state.config.loadBundle) {
