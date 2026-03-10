@@ -7,7 +7,7 @@ export const sha512integrity = (x) => `sha512-${hash('sha512', x, 'base64')}`
 
 assert.equal(sep, '/', 'Not tested on Windows')
 
-function sortPaths(a, b) {
+export function sortPaths(a, b) {
   const [al, bl] = [a.split(sep), b.split(sep)]
   while (al[0] === bl[0]) {
     al.shift()

@@ -10,6 +10,7 @@ import { Config } from './config.js'
 import {
   sha512integrity,
   readFileSyncMaybe,
+  sortPaths,
   fileSetToObject,
   fileMapToObject,
   objectToMaps,
@@ -124,8 +125,8 @@ export class State {
     }
   }
 
-  static get loaded() {
-    return !!instance
+  static get instance() {
+    return instance
   }
 
   absolute(url) {
@@ -164,6 +165,7 @@ export class State {
     if (typeof source === 'string') {
       assert.ok(source.isWellFormed())
     } else {
+      if (source === undefined) source = readFileSync(absolute)
       assert.ok(Buffer.isBuffer(source))
       assert.ok(isUtf8(source))
     }
@@ -227,16 +229,19 @@ export class State {
   get lockData() {
     const config = this.config.values
     const entries = fileSetToObject(this.entries)
-    const modules = Object.create(null)
-    const sources = Object.create(null)
+    const modules = []
+    const sources = []
     for (const [dir, { name, version, files }] of this.modules) {
       const type = dir.includes('node_modules') ? modules : sources
-      type[dir] = { name, version, files }
+      type.push([dir, { name, version, files }])
     }
 
+    modules.sort((a, b) => sortPaths(a[0], b[0]))
+    sources.sort((a, b) => sortPaths(a[0], b[0]))
+
     const store = { version, config }
-    if (this.config.full) Object.assign(store, { entries, sources })
-    Object.assign(store, { modules })
+    if (this.config.full) Object.assign(store, { entries, sources: Object.fromEntries(sources) })
+    Object.assign(store, { modules: Object.fromEntries(modules) })
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 
