@@ -21,7 +21,8 @@ const version = 0
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
-const FILE_TREE = 'stasis.tree.br'
+const FILE_CODE = 'stasis.code.br'
+const FILE_RESOURCES = 'stasis.resources.br'
 
 // TODO: stricter format validation
 
@@ -31,6 +32,7 @@ export class State {
   hashes = new Map()
   entries = new Set()
   sources = new Map()
+  resources = new Map()
   formats = new Map()
   modules = new Map()
   imports = new Map()
@@ -48,7 +50,8 @@ export class State {
       } else if (
         existsSync(join(dir, FILE_CONFIG)) ||
         existsSync(join(dir, FILE_LOCK)) ||
-        existsSync(join(dir, FILE_TREE))) {
+        existsSync(join(dir, FILE_CODE)) ||
+        existsSync(join(dir, FILE_RESOURCES))) {
         throw new Error('Unexpected stasis config without package.json')
       }
 
@@ -67,8 +70,9 @@ export class State {
     for (const dir of potentialRoots) {
       const config = readFileSyncMaybe(dir, FILE_CONFIG, 'utf-8')
       const lock = readFileSyncMaybe(dir, FILE_LOCK, 'utf-8')
-      const sources = readFileSyncMaybe(dir, FILE_TREE)
-      if (config !== null || lock !== null || sources !== null) {
+      const sources = readFileSyncMaybe(dir, FILE_CODE)
+      const resources = readFileSyncMaybe(dir, FILE_RESOURCES)
+      if (config !== null || lock !== null || sources !== null || resources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
         if (sources && !lock) throw new Error('stasis.lock.json missing, can not use sources')
         loaded = true
@@ -111,15 +115,28 @@ export class State {
 
         if (sources) {
           if (!this.config.writeBundle && !this.config.loadBundle) {
-            throw new Error(`Unexpected ${join(dir, FILE_TREE)} with config.bundle = 'none'`)
+            throw new Error(`Unexpected ${join(dir, FILE_CODE)} with config.bundle = 'none'`)
           }
 
           const json = JSON.parse(brotliDecompressSync(sources))
           assert.equal(json.version, version)
           assert.ok(json.sources)
+          assert.ok(json.formats)
+          assert.ok(json.imports)
           this.sources = new Map(Object.entries(json.sources))
           this.formats = new Map(Object.entries(json.formats))
           this.imports = objectToMaps(json.imports)
+        }
+
+        if (resources) {
+          if (!this.config.writeBundle && !this.config.loadBundle) {
+            throw new Error(`Unexpected ${join(dir, FILE_RESOURCES)} with config.bundle = 'none'`)
+          }
+
+          const json = JSON.parse(brotliDecompressSync(sources))
+          assert.equal(json.version, version)
+          assert.ok(json.resources)
+          this.resources = new Map(Object.entries(json.resources))
         }
       }
     }
@@ -143,7 +160,7 @@ export class State {
     return file
   }
 
-  addFile(url, source, format, isEntry) {
+  addFile(url, { source, format, isEntry, isBinary } = {}) {
     const absolute = this.absolute(url)
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
@@ -167,10 +184,9 @@ export class State {
     } else {
       if (source === undefined) source = readFileSync(absolute)
       assert.ok(Buffer.isBuffer(source))
-      assert.ok(isUtf8(source))
+      if (!isBinary) assert.ok(isUtf8(source), `File is not UTF-8: ${file}`)
     }
 
-    const str = typeof source === 'string' ? source : source.toString()
     const buf = typeof source === 'string' ? Buffer.from(source) : source
     assert.deepStrictEqual(readFileSync(absolute), buf)
 
@@ -182,7 +198,14 @@ export class State {
     if (!Object.hasOwn(module.files), rel) module.files[rel] = integrity
     assert.equal(module.files[rel], integrity)
 
-    noupsert(this.sources, file, str)
+    if (this.config.bundle) {
+      if (isBinary) {
+        noupsert(this.resources, file, buf.toString('base64'))
+      } else {
+        noupsert(this.sources, file, typeof source === 'string' ? source : source.toString())
+      }
+    }
+
     if (format) noupsert(this.formats, file, format)
   }
 
@@ -200,6 +223,8 @@ export class State {
       assert.ok(Array.isArray(conditions))
       conditions = conditions.join(', ')
     }
+
+    // TODO: empty parent support
 
     const parent = this.relative(this.absolute(parentURL))
     const file = this.relative(this.absolute(url))
@@ -257,6 +282,6 @@ export class State {
   write() {
     writeFileSync(join(this.root, FILE_LOCK), this.lockData)
     writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
-    if (this.config.writeBundle) writeFileSync(join(this.root, FILE_TREE), this.sourceData)
+    if (this.config.writeBundle) writeFileSync(join(this.root, FILE_CODE), this.sourceData)
   }
 }

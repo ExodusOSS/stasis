@@ -26,7 +26,8 @@ function load(url, context, nextLoad) {
   }
 
   const result = nextLoad(url, context)
-  assert.notEqual(result.format, 'builtin')
+  const { source, format } = result
+  assert.notEqual(format, 'builtin')
 
   const isEntry = !state
   if (!state) {
@@ -46,7 +47,7 @@ function load(url, context, nextLoad) {
 
 
   assert.equal(saved, false)
-  state.addFile(url, result.source, result.format, isEntry)
+  state.addFile(url, { source, format, isEntry })
 
   return result
 }

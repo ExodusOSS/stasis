@@ -29,6 +29,10 @@ export class Config {
     return { scope: this.#scope }
   }
 
+  get bundle() {
+    return this.#bundle !== 'none'
+  }
+
   get writeBundle() {
     return this.#bundle === 'save'
   }
