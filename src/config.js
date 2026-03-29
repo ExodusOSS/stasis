@@ -14,7 +14,7 @@ export class Config {
     } = JSON.parse(json)
     assert.ok(['node_modules', 'full'].includes(scope))
     assert.ok(['update', 'frozen'].includes(mode))
-    assert.ok(['none', 'save', 'load'].includes(this.#bundle))
+    assert.ok(['none', 'ignore', 'save', 'load'].includes(this.#bundle))
     assert.equal(Object.keys(rest).length, 0)
     this.#scope = scope
     this.#mode = mode
@@ -30,7 +30,11 @@ export class Config {
   }
 
   get bundle() {
-    return this.#bundle !== 'none'
+    return this.#bundle !== 'none' && this.#bundle !== 'ignore'
+  }
+
+  get ignoreBundle() {
+    return this.#bundle === 'ignore'
   }
 
   get writeBundle() {

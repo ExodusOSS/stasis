@@ -1,3 +1,7 @@
+
+allowBuilds:
+  esbuild: false
+
 enableGlobalVirtualStore: false
 
 ignoreWorkspaceRootCheck: true
@@ -5,8 +9,5 @@ ignoreWorkspaceRootCheck: true
 linkWorkspacePackages: true
 
 lockfileIncludeTarballUrl: true
-
-onlyBuiltDependencies:
-  - esbuild
 
 preferWorkspacePackages: true
