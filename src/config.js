@@ -1,28 +1,52 @@
 import assert from 'node:assert/strict'
 
+const {
+  EXODUS_STASIS_SCOPE: envScope,
+  EXODUS_STASIS_MODE: envMode,
+  EXODUS_STASIS_BUNDLE: envBundle,
+  EXODUS_STASIS_DEBUG: envDebug,
+} = process.env
+
 export class Config {
-  #scope = 'node_modules'
-  #mode = 'update'
-  #bundle = 'none'
+  #scope = envScope || 'node_modules'
+  #mode = envMode || 'update'
+  #bundle = envBundle || 'none'
+  #debug = envDebug && envDebug !== '0'
 
   loadConfig(json) {
     const {
       scope = this.#scope,
       mode = this.#mode,
       bundle = this.#bundle,
+      debug = this.#debug,
       ...rest
     } = JSON.parse(json)
     assert.ok(['node_modules', 'full'].includes(scope))
     assert.ok(['update', 'frozen'].includes(mode))
-    assert.ok(['none', 'ignore', 'save', 'load'].includes(this.#bundle))
+    assert.ok(['none', 'ignore', 'save', 'load'].includes(bundle))
+    assert.ok([false, true].includes(debug))
     assert.equal(Object.keys(rest).length, 0)
     this.#scope = scope
     this.#mode = mode
     this.#bundle = bundle
+    this.#debug = debug
 
     if (this.#bundle === 'load' && this.#mode !== 'frozen') {
       throw new RangeError('bundle=load requires mode=frozen')
     }
+
+    try {
+      if (envScope) assert.equal(this.#scope, envScope)
+      if (envMode) assert.equal(this.#mode, envMode)
+      if (envBundle) assert.equal(this.#bundle, envBundle)
+      if (envDebug) assert.equal(this.#debug, envDebug && envDebug !== '0')
+    } catch (cause) {
+      throw new Error('Flags/env can not override stasis.config.json', { cause })
+    }
+  }
+
+  get debug() {
+    return this.#debug
   }
 
   get values() {

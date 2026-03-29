@@ -1,14 +1,11 @@
 #!/usr/bin/env node
 
-import { spawn, execFile as execFileCallback } from 'node:child_process'
-import { promisify, parseArgs } from 'node:util'
+import { spawn } from 'node:child_process'
+import { parseArgs } from 'node:util'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { basename, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
-import { existsSync, rmSync, realpathSync } from 'node:fs'
-import { writeFile, unlink } from 'node:fs/promises'
-import { tmpdir, availableParallelism, homedir } from 'node:os'
+import { basename } from 'node:path'
+import { existsSync, realpathSync } from 'node:fs'
 import assert from 'node:assert/strict'
 
 const argv = [...process.argv]
@@ -30,6 +27,12 @@ function usage(prefix = '') {
   process.exit(1)
 }
 
+function setEnv(name, value) {
+  const env = process.env[name]
+  if (env && env !== value) throw new Error(`env conflict: ${name}="${env}", effective: "${value}"`)
+  process.env[name] = value === undefined ? '' : value
+}
+
 const command = argv.shift()
 
 if (command === 'run') {
@@ -42,8 +45,10 @@ if (command === 'run') {
     update: { type: 'boolean' },
     frozen: { type: 'boolean' },
     bundle: { type: 'string', default: 'none' },
+    debug: { type: 'boolean' },
     full: { type: 'boolean' },
   }
+
   const { values } = parseArgs({ args: flags, options })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
   if (values.update && values.frozen) usage('Error: --update conflicts with --frozen')
@@ -51,9 +56,14 @@ if (command === 'run') {
   const mode = values.update ? 'update' : 'frozen'
   const scope = values.full ? 'full' : 'node_modules'
   const bundle = values.bundle
+  const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'save', 'load'].includes(bundle)) usage('Error: invalid --bundle value')
-  console.warn(`Running stasis with mode=${mode}, scope=${scope}, bundle=${bundle}`)
-  // TODO: use config
+  console.warn('[stasis] Running stasis with config:', { mode, scope, bundle })
+  if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
+  setEnv('EXODUS_STASIS_MODE', mode)
+  setEnv('EXODUS_STASIS_SCOPE', scope)
+  setEnv('EXODUS_STASIS_BUNDLE', bundle)
+  setEnv('EXODUS_STASIS_DEBUG', debug)
   const child = spawn('node', ['--import', import.meta.resolve('../src/loader.js'), ...argv], { stdio: 'inherit' })
   const [code] = await once(child, 'close')
   process.exitCode = code
