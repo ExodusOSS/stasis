@@ -77,6 +77,10 @@ export class Config {
     return this.#mode === 'frozen'
   }
 
+  get scope() {
+    return this.#scope
+  }
+
   get json() {
     const data = { scope: this.#scope, mode: this.#mode, bundle: this.#bundle }
     return JSON.stringify(data, undefined, 2) + '\n'
