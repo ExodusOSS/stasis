@@ -22,7 +22,7 @@ function usage(prefix = '') {
  stasis run --frozen [--bundle=(save|load|ignore)] [--full] path/to/file.js ...
  stasis bundle create path/to/lockfile
  statis bundle verify path/to/lockfile
- statis bundle audit path/to/lockfile
+ statis advisories path/to/lockfile
 `.trim())
   process.exit(1)
 }
