@@ -80,6 +80,7 @@ export class State {
 
         if (config) this.config.loadConfig(config)
 
+        if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
         if (lock) {
           const json = JSON.parse(lock)
           assert.equal(json.version, version)
@@ -195,7 +196,12 @@ export class State {
     noupsert(this.hashes, file, integrity)
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
-    if (!Object.hasOwn(module.files), rel) module.files[rel] = integrity
+
+    if (this.config.frozen&& (dir.includes('node_modules') || this.config.full)) {
+      assert.ok(Object.hasOwn(module.files, rel))
+    }
+
+    if (!Object.hasOwn(module.files, rel)) module.files[rel] = integrity
     assert.equal(module.files[rel], integrity)
 
     if (this.config.bundle) {
@@ -280,8 +286,9 @@ export class State {
   }
 
   write() {
-    writeFileSync(join(this.root, FILE_LOCK), this.lockData)
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
+    if (this.config.frozen) return
+    writeFileSync(join(this.root, FILE_LOCK), this.lockData)
     if (this.config.writeBundle) writeFileSync(join(this.root, FILE_CODE), this.sourceData)
   }
 }
