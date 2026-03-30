@@ -11,7 +11,7 @@ export class Config {
   #scope = envScope || 'node_modules'
   #mode = envMode || 'update'
   #bundle = envBundle || 'none'
-  #debug = envDebug && envDebug !== '0'
+  #debug = Boolean(envDebug && envDebug !== '0')
 
   loadConfig(json) {
     const {
@@ -39,7 +39,7 @@ export class Config {
       if (envScope) assert.equal(this.#scope, envScope)
       if (envMode) assert.equal(this.#mode, envMode)
       if (envBundle) assert.equal(this.#bundle, envBundle)
-      if (envDebug) assert.equal(this.#debug, envDebug && envDebug !== '0')
+      if (envDebug) assert.equal(this.#debug, Boolean(envDebug && envDebug !== '0'))
     } catch (cause) {
       throw new Error('Flags/env can not override stasis.config.json', { cause })
     }
