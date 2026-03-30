@@ -281,7 +281,7 @@ export class State {
 
   write() {
     writeFileSync(join(this.root, FILE_LOCK), this.lockData)
-    writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
+    // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     if (this.config.writeBundle) writeFileSync(join(this.root, FILE_CODE), this.sourceData)
   }
 }
