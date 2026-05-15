@@ -1,0 +1,20 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.js"
+  ],
+  "sources": {
+    ".": {
+      "name": "stasis-cli-run",
+      "version": "0.0.0",
+      "files": {
+        "src/entry.js": "sha512-YqnS311IE7qoMw2RJDeaMEx+mfePIpPPMK+6xteMSaOZ43qhSowlh+wWnvtMF7D76I7wo6Zrtk7ml5wkcU2mGA==",
+        "src/hello.js": "sha512-52E85RLYK5DnVBcWjE7MSUZ7gnHxjFJOJp3inn/Cmhmls0lqCD7iOx9lV42umAL+FPFu68V7GPyEFhaWdK8wVg=="
+      }
+    }
+  },
+  "modules": {}
+}
