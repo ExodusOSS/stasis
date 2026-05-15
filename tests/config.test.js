@@ -21,7 +21,7 @@ test('Config json output has trailing newline and stable shape', (t) => {
   const c = new Config()
   const out = c.json
   t.assert.equal(out.at(-1), '\n')
-  t.assert.deepEqual(JSON.parse(out), { scope: 'full', mode: 'update', bundle: 'none' })
+  t.assert.deepEqual(JSON.parse(out), { scope: 'full', lock: 'update', bundle: 'none' })
 })
 
 test('loadConfig accepts empty object and keeps defaults', (t) => {
@@ -40,10 +40,36 @@ test('loadConfig with scope=node_modules', (t) => {
   t.assert.deepEqual(c.values, { scope: 'node_modules' })
 })
 
-test('loadConfig with mode=frozen', (t) => {
+test('loadConfig with lock=frozen', (t) => {
   const c = new Config()
-  c.loadConfig(json({ mode: 'frozen' }))
+  c.loadConfig(json({ lock: 'frozen' }))
   t.assert.equal(c.frozen, true)
+  t.assert.equal(c.useLockfile, true)
+  t.assert.equal(c.writeLockfile, false)
+})
+
+test('loadConfig with lock=none requires bundle non-none', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ lock: 'none' })), RangeError)
+})
+
+test('loadConfig with lock=none and bundle=save', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'none', bundle: 'save' }))
+  t.assert.equal(c.lock, 'none')
+  t.assert.equal(c.frozen, false)
+  t.assert.equal(c.useLockfile, false)
+  t.assert.equal(c.writeLockfile, false)
+  t.assert.equal(c.writeBundle, true)
+})
+
+test('loadConfig with lock=none and bundle=load', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'none', bundle: 'load' }))
+  t.assert.equal(c.lock, 'none')
+  t.assert.equal(c.frozen, false)
+  t.assert.equal(c.useLockfile, false)
+  t.assert.equal(c.loadBundle, true)
 })
 
 test('loadConfig bundle=save -> writeBundle, bundle truthy', (t) => {
@@ -55,14 +81,14 @@ test('loadConfig bundle=save -> writeBundle, bundle truthy', (t) => {
   t.assert.equal(c.ignoreBundle, false)
 })
 
-test('loadConfig bundle=load requires mode=frozen', (t) => {
+test('loadConfig bundle=load rejects lock=update', (t) => {
   const c = new Config()
   t.assert.throws(() => c.loadConfig(json({ bundle: 'load' })), RangeError)
 })
 
-test('loadConfig bundle=load works with mode=frozen', (t) => {
+test('loadConfig bundle=load works with lock=frozen', (t) => {
   const c = new Config()
-  c.loadConfig(json({ bundle: 'load', mode: 'frozen' }))
+  c.loadConfig(json({ bundle: 'load', lock: 'frozen' }))
   t.assert.equal(c.bundle, true)
   t.assert.equal(c.loadBundle, true)
   t.assert.equal(c.writeBundle, false)
@@ -96,9 +122,9 @@ test('loadConfig rejects invalid scope', (t) => {
   t.assert.throws(() => c.loadConfig(json({ scope: 'whatever' })))
 })
 
-test('loadConfig rejects invalid mode', (t) => {
+test('loadConfig rejects invalid lock', (t) => {
   const c = new Config()
-  t.assert.throws(() => c.loadConfig(json({ mode: 'thawed' })))
+  t.assert.throws(() => c.loadConfig(json({ lock: 'thawed' })))
 })
 
 test('loadConfig rejects invalid bundle', (t) => {
@@ -124,10 +150,10 @@ test('loadConfig rejects malformed JSON', (t) => {
 
 test('json reflects loaded values', (t) => {
   const c = new Config()
-  c.loadConfig(json({ scope: 'node_modules', mode: 'frozen', bundle: 'load' }))
+  c.loadConfig(json({ scope: 'node_modules', lock: 'frozen', bundle: 'load' }))
   t.assert.deepEqual(JSON.parse(c.json), {
     scope: 'node_modules',
-    mode: 'frozen',
+    lock: 'frozen',
     bundle: 'load',
   })
 })

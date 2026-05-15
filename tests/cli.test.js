@@ -12,7 +12,7 @@ const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cl
 
 // strip any inherited stasis env vars so the CLI's env-conflict guard doesn't trip
 const {
-  EXODUS_STASIS_MODE: _m,
+  EXODUS_STASIS_LOCK: _l,
   EXODUS_STASIS_SCOPE: _s,
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
@@ -52,40 +52,52 @@ test('unknown command prints usage and exits 1', (t) => {
 })
 
 test('run with no path prints "Nothing to run"', (t) => {
-  const r = run(['run', '--update'])
+  const r = run(['run', '--lock=update'])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /Nothing to run/)
 })
 
-test('run rejects --update together with --frozen', (t) => {
-  const r = run(['run', '--update', '--frozen', 'a.js'])
-  t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--update conflicts with --frozen/)
-})
-
-test('run requires --update or --frozen', (t) => {
+test('run requires --lock', (t) => {
   const r = run(['run', 'a.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--frozen or --update is required/)
+  t.assert.match(r.stderr, /--lock=\(update\|frozen\|none\) is required/)
+})
+
+test('run rejects an invalid --lock value', (t) => {
+  const r = run(['run', '--lock=bogus', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /invalid --lock value/)
 })
 
 test('run rejects an invalid --bundle value', (t) => {
-  const r = run(['run', '--update', '--bundle=bogus', 'a.js'])
+  const r = run(['run', '--lock=update', '--bundle=bogus', 'a.js'])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /invalid --bundle value/)
 })
 
 test('run rejects --bundle-file without a non-none --bundle', (t) => {
-  const r = run(['run', '--update', '--bundle-file=/tmp/nope.br', 'a.js'])
+  const r = run(['run', '--lock=update', '--bundle-file=/tmp/nope.br', 'a.js'])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /--bundle-file requires --bundle/)
 })
 
-test('run --update --full executes the entry and rewrites the lockfile idempotently', (t) => {
+test('run rejects --bundle=load with --lock=update', (t) => {
+  const r = run(['run', '--lock=update', '--bundle=load', '--bundle-file=/tmp/x.br', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--bundle=load requires --lock=frozen or --lock=none/)
+})
+
+test('run rejects --lock=none without a bundle', (t) => {
+  const r = run(['run', '--lock=none', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--lock=none requires --bundle/)
+})
+
+test('run --lock=update --full executes the entry and rewrites the lockfile idempotently', (t) => {
   const lockPath = join(runFixture, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
 
-  const r = run(['run', '--update', '--full', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--lock=update', '--full', 'src/entry.js'], { cwd: runFixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
   t.assert.match(r.stderr, /\[stasis\] Running stasis with config:/)
@@ -100,23 +112,23 @@ test('run --update --full executes the entry and rewrites the lockfile idempoten
   t.assert.ok(parsed.sources['.'].files['src/hello.js'].startsWith('sha512-'))
 })
 
-test('run --frozen --full executes the entry using the committed lockfile', (t) => {
-  const r = run(['run', '--frozen', '--full', 'src/entry.js'], { cwd: runFixture })
+test('run --lock=frozen --full executes the entry using the committed lockfile', (t) => {
+  const r = run(['run', '--lock=frozen', '--full', 'src/entry.js'], { cwd: runFixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
-  t.assert.match(r.stderr, /mode: 'frozen'/)
+  t.assert.match(r.stderr, /lock: 'frozen'/)
 })
 
-test('run --frozen fails when scope conflicts with the committed lockfile', (t) => {
+test('run --lock=frozen fails when scope conflicts with the committed lockfile', (t) => {
   // lockfile in the fixture was generated with scope=full; running without --full
   // sets EXODUS_STASIS_SCOPE=node_modules, which can't override stasis.config.json
-  const r = run(['run', '--frozen', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: runFixture })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Flags\/env can not override stasis\.config\.json/)
 })
 
 test('run --debug emits the debug warning on stderr', (t) => {
-  const r = run(['run', '--update', '--full', '--debug', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--lock=update', '--full', '--debug', 'src/entry.js'], { cwd: runFixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stderr, /stasis debug mode active/)
 })
@@ -124,7 +136,7 @@ test('run --debug emits the debug warning on stderr', (t) => {
 test('run --bundle=save --bundle-file writes the bundle at the chosen path/filename', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
-    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -146,46 +158,46 @@ test('run --bundle=save --bundle-file writes the bundle at the chosen path/filen
 test('run --bundle=load --bundle-file round-trips through a save', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   const load = run(
-    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'hello, world\n')
-  t.assert.match(load.stderr, /mode: 'frozen'/)
+  t.assert.match(load.stderr, /lock: 'frozen'/)
   t.assert.match(load.stderr, /bundle: 'load'/)
 }))
 
 test('run --bundle=load fails when --bundle-file does not exist', withTmp((t, tmp) => {
   const r = run(
-    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${join(tmp, 'missing.br')}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${join(tmp, 'missing.br')}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.notEqual(r.status, 0)
 }))
 
-test('run --frozen --bundle=save writes the bundle without rewriting the lockfile', withTmp((t, tmp) => {
+test('run --lock=frozen --bundle=save writes the bundle without rewriting the lockfile', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const lockPath = join(runFixture, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
 
   const r = run(
-    ['run', '--frozen', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
-  t.assert.match(r.stderr, /mode: 'frozen'/)
+  t.assert.match(r.stderr, /lock: 'frozen'/)
   t.assert.match(r.stderr, /bundle: 'save'/)
 
   t.assert.ok(existsSync(bundlePath), 'bundle should be at the configured path')
   t.assert.ok(!existsSync(join(runFixture, 'stasis.code.br')), 'bundle should not pollute the fixture')
-  t.assert.equal(readFileSync(lockPath, 'utf-8'), before, 'frozen mode must not rewrite the lockfile')
+  t.assert.equal(readFileSync(lockPath, 'utf-8'), before, 'lock=frozen must not rewrite the lockfile')
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
   t.assert.equal(decoded.version, 0)
@@ -196,16 +208,16 @@ test('run --frozen --bundle=save writes the bundle without rewriting the lockfil
   t.assert.equal(decoded.formats['src/hello.js'], 'module')
 }))
 
-test('run --frozen --bundle=save round-trips through --bundle=load', withTmp((t, tmp) => {
+test('run --lock=frozen --bundle=save round-trips through --bundle=load', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--frozen', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   const load = run(
-    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -215,7 +227,7 @@ test('run --frozen --bundle=save round-trips through --bundle=load', withTmp((t,
 test('run --bundle=save creates intermediate directories for --bundle-file', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'nested', 'deeper', 'out.br')
   const save = run(
-    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -227,7 +239,7 @@ test('run --bundle=load serves the entry from the bundle when its source is abse
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -236,7 +248,7 @@ test('run --bundle=load serves the entry from the bundle when its source is abse
   rmSync(join(tmp, 'src'), { recursive: true })
 
   const load = run(
-    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -248,7 +260,7 @@ test('run --bundle=load serves the entry from the bundle when only the entry is 
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -257,9 +269,53 @@ test('run --bundle=load serves the entry from the bundle when only the entry is 
   rmSync(join(tmp, 'src', 'entry.js'))
 
   const load = run(
-    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+test('run --lock=none --bundle=save writes the bundle without touching the lockfile', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  rmSync(lockPath)
+
+  const r = run(
+    ['run', '--lock=none', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /lock: 'none'/)
+  t.assert.ok(existsSync(bundlePath), 'bundle should be written')
+  t.assert.ok(!existsSync(lockPath), 'lockfile must not be created')
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
+}))
+
+test('run --lock=none --bundle=load runs from a bundle with no lockfile on disk', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const save = run(
+    ['run', '--lock=none', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Remove all sources so the bundle is the only thing left.
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const load = run(
+    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+  t.assert.match(load.stderr, /lock: 'none'/)
 }))
