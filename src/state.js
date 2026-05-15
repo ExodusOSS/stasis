@@ -75,14 +75,17 @@ export class State {
       const resources = readFileSyncMaybe(dir, FILE_RESOURCES)
       if (config !== null || lock !== null || sources !== null || resources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
-        if (sources && !lock) throw new Error('stasis.lock.json missing, can not use sources')
         loaded = true
         this.root = dir
 
         if (config) this.config.loadConfig(config)
 
+        if (sources && !lock && this.config.useLockfile) {
+          throw new Error('stasis.lock.json missing, can not use sources')
+        }
+
         if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
-        if (lock) {
+        if (lock && this.config.useLockfile) {
           const json = JSON.parse(lock)
           assert.equal(json.version, version)
           assert.ok(['node_modules', 'full'].includes(json.config?.scope))
@@ -128,6 +131,12 @@ export class State {
           this.sources = new Map(Object.entries(json.sources))
           this.formats = new Map(Object.entries(json.formats))
           this.imports = objectToMaps(json.imports)
+
+          if (!this.config.useLockfile) {
+            for (const [file, source] of this.sources) {
+              noupsert(this.hashes, file, sha512integrity(source))
+            }
+          }
         }
 
         if (resources) {
@@ -291,7 +300,7 @@ export class State {
 
   write() {
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
-    if (!this.config.frozen) {
+    if (this.config.writeLockfile) {
       writeFileSync(join(this.root, FILE_LOCK), this.lockData)
     }
     if (this.config.writeBundle) {

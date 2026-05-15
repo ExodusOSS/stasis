@@ -18,8 +18,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --update [--bundle=(save|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
- stasis run --frozen [--bundle=(save|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
+ stasis run --lock=(none|update|frozen) [--bundle=(save|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
  stasis bundle create path/to/lockfile
  stasis bundle verify path/to/lockfile
  stasis advisories path/to/lockfile
@@ -37,14 +36,13 @@ const command = argv.shift()
 
 if (command === 'run') {
   const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file'])
+  const valueFlags = new Set(['--bundle', '--bundle-file', '--lock'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
 
   const options = {
-    update: { type: 'boolean' },
-    frozen: { type: 'boolean' },
+    lock: { type: 'string' },
     bundle: { type: 'string', default: 'none' },
     'bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
@@ -53,18 +51,20 @@ if (command === 'run') {
 
   const { values } = parseArgs({ args: flags, options })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
-  if (values.update && values.frozen) usage('Error: --update conflicts with --frozen')
-  if (!values.update && !values.frozen) usage('Error: --frozen or --update is required')
-  const mode = values.update ? 'update' : 'frozen'
+  if (!values.lock) usage('Error: --lock=(none|update|frozen) is required')
+  if (!['none', 'update', 'frozen'].includes(values.lock)) usage('Error: invalid --lock value')
+  const lock = values.lock
   const scope = values.full ? 'full' : 'node_modules'
   const bundle = values.bundle
   const bundleFile = values['bundle-file'] ? resolve(values['bundle-file']) : ''
   const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'save', 'load'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(save|load|ignore)')
-  console.warn('[stasis] Running stasis with config:', { mode, scope, bundle, ...(bundleFile && { bundleFile }) })
+  if (bundle === 'load' && lock === 'update') usage('Error: --bundle=load requires --lock=frozen or --lock=none')
+  if (lock === 'none' && bundle === 'none') usage('Error: --lock=none requires --bundle=(save|load|ignore)')
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
-  setEnv('EXODUS_STASIS_MODE', mode)
+  setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)

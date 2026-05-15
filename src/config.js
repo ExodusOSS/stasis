@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 
 const {
   EXODUS_STASIS_SCOPE: envScope,
-  EXODUS_STASIS_MODE: envMode,
+  EXODUS_STASIS_LOCK: envLock,
   EXODUS_STASIS_BUNDLE: envBundle,
   EXODUS_STASIS_BUNDLE_FILE: envBundleFile,
   EXODUS_STASIS_DEBUG: envDebug,
@@ -10,7 +10,7 @@ const {
 
 export class Config {
   #scope = envScope || 'full'
-  #mode = envMode || 'update'
+  #lock = envLock || 'update'
   #bundle = envBundle || 'none'
   #bundleFile = envBundleFile || undefined
   #debug = Boolean(envDebug && envDebug !== '0')
@@ -18,28 +18,32 @@ export class Config {
   loadConfig(json) {
     const {
       scope = this.#scope,
-      mode = this.#mode,
+      lock = this.#lock,
       bundle = this.#bundle,
       debug = this.#debug,
       ...rest
     } = JSON.parse(json)
     assert.ok(['node_modules', 'full'].includes(scope))
-    assert.ok(['update', 'frozen'].includes(mode))
+    assert.ok(['none', 'update', 'frozen'].includes(lock))
     assert.ok(['none', 'ignore', 'save', 'load'].includes(bundle))
     assert.ok([false, true].includes(debug))
     assert.equal(Object.keys(rest).length, 0)
     this.#scope = scope
-    this.#mode = mode
+    this.#lock = lock
     this.#bundle = bundle
     this.#debug = debug
 
-    if (this.#bundle === 'load' && this.#mode !== 'frozen') {
-      throw new RangeError('bundle=load requires mode=frozen')
+    if (this.#bundle === 'load' && this.#lock === 'update') {
+      throw new RangeError('bundle=load requires lock=frozen or lock=none')
+    }
+
+    if (this.#lock === 'none' && this.#bundle === 'none') {
+      throw new RangeError('lock=none requires bundle=(save|load|ignore)')
     }
 
     try {
       if (envScope) assert.equal(this.#scope, envScope)
-      if (envMode) assert.equal(this.#mode, envMode)
+      if (envLock) assert.equal(this.#lock, envLock)
       if (envBundle) assert.equal(this.#bundle, envBundle)
       if (envBundleFile) assert.equal(this.#bundleFile, envBundleFile)
       if (envDebug) assert.equal(this.#debug, Boolean(envDebug && envDebug !== '0'))
@@ -81,15 +85,27 @@ export class Config {
   }
 
   get frozen() {
-    return this.#mode === 'frozen'
+    return this.#lock === 'frozen'
+  }
+
+  get useLockfile() {
+    return this.#lock !== 'none'
+  }
+
+  get writeLockfile() {
+    return this.#lock === 'update'
   }
 
   get scope() {
     return this.#scope
   }
 
+  get lock() {
+    return this.#lock
+  }
+
   get json() {
-    const data = { scope: this.#scope, mode: this.#mode, bundle: this.#bundle }
+    const data = { scope: this.#scope, lock: this.#lock, bundle: this.#bundle }
     return JSON.stringify(data, undefined, 2) + '\n'
   }
 }
