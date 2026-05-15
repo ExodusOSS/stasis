@@ -4,6 +4,7 @@ const {
   EXODUS_STASIS_SCOPE: envScope,
   EXODUS_STASIS_MODE: envMode,
   EXODUS_STASIS_BUNDLE: envBundle,
+  EXODUS_STASIS_BUNDLE_FILE: envBundleFile,
   EXODUS_STASIS_DEBUG: envDebug,
 } = process.env
 
@@ -11,6 +12,7 @@ export class Config {
   #scope = envScope || 'full'
   #mode = envMode || 'update'
   #bundle = envBundle || 'none'
+  #bundleFile = envBundleFile || undefined
   #debug = Boolean(envDebug && envDebug !== '0')
 
   loadConfig(json) {
@@ -39,10 +41,15 @@ export class Config {
       if (envScope) assert.equal(this.#scope, envScope)
       if (envMode) assert.equal(this.#mode, envMode)
       if (envBundle) assert.equal(this.#bundle, envBundle)
+      if (envBundleFile) assert.equal(this.#bundleFile, envBundleFile)
       if (envDebug) assert.equal(this.#debug, Boolean(envDebug && envDebug !== '0'))
     } catch (cause) {
       throw new Error('Flags/env can not override stasis.config.json', { cause })
     }
+  }
+
+  get bundleFile() {
+    return this.#bundleFile
   }
 
   get debug() {

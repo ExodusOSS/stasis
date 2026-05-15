@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve, relative, basename, dirname } from 'node:path'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -70,7 +70,8 @@ export class State {
     for (const dir of potentialRoots) {
       const config = readFileSyncMaybe(dir, FILE_CONFIG, 'utf-8')
       const lock = readFileSyncMaybe(dir, FILE_LOCK, 'utf-8')
-      const sources = readFileSyncMaybe(dir, FILE_CODE)
+      const sourcesPath = this.config.bundleFile || join(dir, FILE_CODE)
+      const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
       const resources = readFileSyncMaybe(dir, FILE_RESOURCES)
       if (config !== null || lock !== null || sources !== null || resources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
@@ -116,7 +117,7 @@ export class State {
 
         if (sources) {
           if (!this.config.writeBundle && !this.config.loadBundle) {
-            throw new Error(`Unexpected ${join(dir, FILE_CODE)} with config.bundle = 'none'`)
+            throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
           }
 
           const json = JSON.parse(brotliDecompressSync(sources))
@@ -289,6 +290,10 @@ export class State {
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     if (this.config.frozen) return
     writeFileSync(join(this.root, FILE_LOCK), this.lockData)
-    if (this.config.writeBundle) writeFileSync(join(this.root, FILE_CODE), this.sourceData)
+    if (this.config.writeBundle) {
+      const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
+      mkdirSync(dirname(sourcesPath), { recursive: true })
+      writeFileSync(sourcesPath, this.sourceData)
+    }
   }
 }
