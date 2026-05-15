@@ -235,8 +235,7 @@ export class State {
       conditions = conditions.join(', ')
     }
 
-    // TODO: empty parent support
-
+    assert.ok(parentURL, 'addImport requires a parent (entries go through addFile)')
     const parent = this.relative(this.absolute(parentURL))
     const file = this.relative(this.absolute(url))
 
