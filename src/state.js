@@ -221,7 +221,10 @@ export class State {
     const source = this.sources.get(file)
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
     assert.ok(source !== undefined)
-    assert.equal(this.hashes.get(file), sha512integrity(source))
+    // In node_modules scope the lockfile only tracks node_modules files, so non-tracked
+    // sources have no recorded hash to compare against — the bundle itself is authoritative.
+    const expected = this.hashes.get(file)
+    if (expected !== undefined) assert.equal(expected, sha512integrity(source))
     return { source, format }
   }
 

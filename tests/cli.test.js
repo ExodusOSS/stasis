@@ -8,6 +8,7 @@ import { brotliDecompressSync } from 'node:zlib'
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'stasis.js')
 const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run')
+const nmFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm')
 
 // strip any inherited stasis env vars so the CLI's env-conflict guard doesn't trip
 const {
@@ -203,6 +204,25 @@ test('run --frozen --bundle=save round-trips through --bundle=load', withTmp((t,
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+test('run --frozen --bundle=load works in node_modules scope with non-tracked sources', withTmp((t, tmp) => {
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--update', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: nmFixture }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'hello, world\n')
+
+  const load = run(
+    ['run', '--frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: nmFixture }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+  t.assert.match(load.stderr, /scope: 'node_modules'/)
+  t.assert.match(load.stderr, /bundle: 'load'/)
 }))
 
 test('run --bundle=save creates intermediate directories for --bundle-file', withTmp((t, tmp) => {
