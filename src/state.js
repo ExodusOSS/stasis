@@ -225,6 +225,10 @@ export class State {
     return { source, format }
   }
 
+  getFormat(url) {
+    return this.formats.get(this.relative(this.absolute(url)))
+  }
+
   addImport(parentURL, specifier, url, { conditions = '*', format } = {}) {
     if (conditions !== '*') {
       assert.ok(Array.isArray(conditions))

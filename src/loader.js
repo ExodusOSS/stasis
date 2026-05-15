@@ -82,23 +82,19 @@ function resolve(specifier, context, nextResolve) {
   }
 
   if (state && state.config.loadBundle) {
-    // A file URL specifier means the URL is already resolved: Node does this for CLI
-    // entry paths, and the ESM-to-CJS translator passes resolved require() targets
-    // through the resolve hook the same way.
-    if (specifier.startsWith('file:')) {
-      const url = specifier
-      const format = state.formats.get(state.relative(state.absolute(url)))
-      return { url, format, importAttributes: undefined, shortCircuit: true }
-    }
-    if (parentURL) {
+    // Bare specifier with a parent is the regular ESM import: look up the recorded
+    // import map. Otherwise we have either a pre-resolved file URL (CLI entries and
+    // ESM-to-CJS translator require() targets both arrive that way) or a bare entry
+    // specifier we anchor to cwd -- either way, skip nextResolve so the entry file
+    // doesn't need to exist on disk.
+    if (parentURL && !specifier.startsWith('file:')) {
       const { url, format } = state.getImport(parentURL, specifier, { conditions })
       return { url, format, importAttributes: undefined, shortCircuit: true }
     }
-    // Bare entry specifier without a parent: anchor to cwd so nextResolve doesn't
-    // need the file on disk.
-    const url = pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
-    const format = state.formats.get(state.relative(state.absolute(url)))
-    return { url, format, importAttributes: undefined, shortCircuit: true }
+    const url = specifier.startsWith('file:')
+      ? specifier
+      : pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
+    return { url, format: state.getFormat(url), importAttributes: undefined, shortCircuit: true }
   }
 
   const res = nextResolve(specifier)
