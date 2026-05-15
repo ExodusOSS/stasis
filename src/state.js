@@ -109,7 +109,7 @@ export class State {
             assert.ok(!dir.startsWith('..'))
             assert.ok(files)
             for (const [name, hash] of Object.entries(files)) {
-             assert.ok(!name.startsWith('..'))
+              assert.ok(!name.startsWith('..'))
               noupsert(this.hashes, join(dir, name), hash)
             }
           }
@@ -135,7 +135,7 @@ export class State {
             throw new Error(`Unexpected ${join(dir, FILE_RESOURCES)} with config.bundle = 'none'`)
           }
 
-          const json = JSON.parse(brotliDecompressSync(sources))
+          const json = JSON.parse(brotliDecompressSync(resources))
           assert.equal(json.version, version)
           assert.ok(json.resources)
           this.resources = new Map(Object.entries(json.resources))
@@ -198,7 +198,7 @@ export class State {
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
 
-    if (this.config.frozen&& (dir.includes('node_modules') || this.config.full)) {
+    if (this.config.frozen && (dir.includes('node_modules') || this.config.full)) {
       assert.ok(Object.hasOwn(module.files, rel))
     }
 

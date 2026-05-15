@@ -15,10 +15,11 @@ function initState(root) {
   state = new State(root)
 
   const save = () => {
-    if (!saved) state.write()
+    if (saved) return
+    saved = true
+    state.write()
   }
 
-  process.on('nextTick', save)
   process.on('beforeExit', save)
   process.on('exit', save)
 }
