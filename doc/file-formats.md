@@ -38,7 +38,7 @@ into the lockfile/bundle `config` block.
   "config": { "scope": "full" },
   "entries": ["src/index.js"],
   "sources": {
-    "": {
+    ".": {
       "name": "@exodus/stasis",
       "version": "1.0.0-alpha.0",
       "files": { "src/index.js": "sha512-…" }
@@ -56,7 +56,8 @@ into the lockfile/bundle `config` block.
 
 - `entries` and `sources` are present only when `scope = full`; `modules` is
   always present.
-- `sources` keys are first-party package dirs (must not contain
+- `sources` keys are workspace package dirs — `"."` for the top-level
+  package, workspace-relative paths for any others (must not contain
   `node_modules`); `modules` keys are dependency dirs (must contain
   `node_modules`).
 - Each module record's `name`/`version` come from the owning `package.json`.
