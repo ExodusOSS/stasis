@@ -19,8 +19,16 @@ const {
   ...cleanEnv
 } = process.env
 
-const run = (args, opts = {}) =>
-  spawnSync(process.execPath, [cli, ...args], { encoding: 'utf-8', env: cleanEnv, ...opts })
+// util.inspect colorises strings when stderr supports colours (e.g. pnpm/npm running
+// scripts in a TTY, or FORCE_COLOR set), so strip ANSI before matching.
+const stripAnsi = (s) => s.replaceAll(/\[[0-9;]*m/g, '')
+
+const run = (args, opts = {}) => {
+  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf-8', env: cleanEnv, ...opts })
+  r.stdout = stripAnsi(r.stdout)
+  r.stderr = stripAnsi(r.stderr)
+  return r
+}
 
 const withTmp = (fn) => (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-'))
