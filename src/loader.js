@@ -21,7 +21,7 @@ function load(url, context, nextLoad) {
   if (state && state.config.loadBundle) {
     const { source, format } = state.getFile(url)
     assert.equal(format, context.format)
-    assert.ok(format === 'module') // TODO: cjs
+    assert.equal(format, 'module') // TODO: commonjs
     return { source, format, shortCircuit: true }
   }
 

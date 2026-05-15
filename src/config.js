@@ -8,7 +8,7 @@ const {
 } = process.env
 
 export class Config {
-  #scope = envScope || 'node_modules'
+  #scope = envScope || 'full'
   #mode = envMode || 'update'
   #bundle = envBundle || 'none'
   #debug = Boolean(envDebug && envDebug !== '0')

@@ -1,8 +1,10 @@
 # `@exodus/stasis`
 
-A research project
+Per-file lockfiles + analyzeable source code bundles with resolutions
 
-It will be eventually opensourced
+## Lockfiles
+
+## Bundles
 
 ## License
 

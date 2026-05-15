@@ -67,8 +67,10 @@ if (command === 'run') {
   const child = spawn('node', ['--import', import.meta.resolve('../src/loader.js'), ...argv], { stdio: 'inherit' })
   const [code] = await once(child, 'close')
   process.exitCode = code
+} else if (command === 'run-bundle') {
+  usage('bundle-run command is not implemented yet')
 } else if (command === 'bundle') {
-  usage('Bundle command is not implemented yet')
+  usage('bundle command is not implemented yet')
 } else {
   usage()
 }
