@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -81,6 +81,28 @@ test('run --bundle=load executes a CJS program from a saved bundle', withTmp((t,
   const load = run(
     ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
     { cwd: fixture }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+test('run --bundle=load executes a CJS program when only the entry .cjs is missing on disk', withTmp((t, tmp) => {
+  cpSync(fixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(
+    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Node's CJS resolver stats sub-files on disk before our resolve hook fires, so
+  // only the entry itself can be removed; require()d files still need to be present.
+  rmSync(join(tmp, 'src', 'entry.cjs'))
+
+  const load = run(
+    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
+    { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'hello, world\n')

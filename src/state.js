@@ -225,14 +225,17 @@ export class State {
     return { source, format }
   }
 
+  getFormat(url) {
+    return this.formats.get(this.relative(this.absolute(url)))
+  }
+
   addImport(parentURL, specifier, url, { conditions = '*', format } = {}) {
     if (conditions !== '*') {
       assert.ok(Array.isArray(conditions))
       conditions = conditions.join(', ')
     }
 
-    // TODO: empty parent support
-
+    assert.ok(parentURL, 'addImport requires a parent (entries go through addFile)')
     const parent = this.relative(this.absolute(parentURL))
     const file = this.relative(this.absolute(url))
 
