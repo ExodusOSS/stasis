@@ -169,6 +169,49 @@ test('run --bundle=load fails when --bundle-file does not exist', withTmp((t, tm
   t.assert.notEqual(r.status, 0)
 }))
 
+test('run --frozen --bundle=save writes the bundle without rewriting the lockfile', withTmp((t, tmp) => {
+  const bundlePath = join(tmp, 'snapshot.br')
+  const lockPath = join(runFixture, 'stasis.lock.json')
+  const before = readFileSync(lockPath, 'utf-8')
+
+  const r = run(
+    ['run', '--frozen', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: runFixture }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /mode: 'frozen'/)
+  t.assert.match(r.stderr, /bundle: 'save'/)
+
+  t.assert.ok(existsSync(bundlePath), 'bundle should be at the configured path')
+  t.assert.ok(!existsSync(join(runFixture, 'stasis.code.br')), 'bundle should not pollute the fixture')
+  t.assert.equal(readFileSync(lockPath, 'utf-8'), before, 'frozen mode must not rewrite the lockfile')
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.version, 0)
+  t.assert.deepEqual(decoded.config, { scope: 'full' })
+  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['src/hello.js'], readFileSync(join(runFixture, 'src/hello.js'), 'utf-8'))
+  t.assert.equal(decoded.formats['src/entry.js'], 'module')
+  t.assert.equal(decoded.formats['src/hello.js'], 'module')
+}))
+
+test('run --frozen --bundle=save round-trips through --bundle=load', withTmp((t, tmp) => {
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--frozen', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: runFixture }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const load = run(
+    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: runFixture }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
 test('run --bundle=save creates intermediate directories for --bundle-file', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'nested', 'deeper', 'out.br')
   const save = run(

@@ -288,8 +288,9 @@ export class State {
 
   write() {
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
-    if (this.config.frozen) return
-    writeFileSync(join(this.root, FILE_LOCK), this.lockData)
+    if (!this.config.frozen) {
+      writeFileSync(join(this.root, FILE_LOCK), this.lockData)
+    }
     if (this.config.writeBundle) {
       const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
       mkdirSync(dirname(sourcesPath), { recursive: true })
