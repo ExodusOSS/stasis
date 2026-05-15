@@ -88,20 +88,20 @@ export class Config {
     return this.#lock === 'frozen'
   }
 
-  get scope() {
-    return this.#scope
-  }
-
-  get lock() {
-    return this.#lock
-  }
-
   get useLockfile() {
     return this.#lock !== 'none'
   }
 
   get writeLockfile() {
     return this.#lock === 'update'
+  }
+
+  get scope() {
+    return this.#scope
+  }
+
+  get lock() {
+    return this.#lock
   }
 
   get json() {
