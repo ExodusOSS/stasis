@@ -41,7 +41,6 @@ export class Config {
       if (envScope) assert.equal(this.#scope, envScope)
       if (envMode) assert.equal(this.#mode, envMode)
       if (envBundle) assert.equal(this.#bundle, envBundle)
-      if (envBundleFile) assert.equal(this.#bundleFile, envBundleFile)
       if (envDebug) assert.equal(this.#debug, Boolean(envDebug && envDebug !== '0'))
     } catch (cause) {
       throw new Error('Flags/env can not override stasis.config.json', { cause })

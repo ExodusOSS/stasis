@@ -9,10 +9,11 @@ assert.equal(sep, '/', 'Not tested on Windows')
 
 export function sortPaths(a, b) {
   const [al, bl] = [a.split(sep), b.split(sep)]
-  while (al[0] === bl[0]) {
+  while (al.length > 0 && al[0] === bl[0]) {
     al.shift()
     bl.shift()
   }
+  if (al.length === 0 && bl.length === 0) return 0
 
   // First process each file in dir, then subdirs
   if (al.length < 2) return bl.length < 2 && al > bl ? 1 : -1
