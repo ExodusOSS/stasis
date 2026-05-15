@@ -1,7 +1,7 @@
 import { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
-import { basename, dirname, extname } from 'node:path'
+import { basename, dirname, extname, resolve as resolvePath } from 'node:path'
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
@@ -10,6 +10,18 @@ import { State } from './state.js'
 
 let state
 let saved = false
+
+function initState(root) {
+  state = new State(root)
+
+  const save = () => {
+    if (!saved) state.write()
+  }
+
+  process.on('nextTick', save)
+  process.on('beforeExit', save)
+  process.on('exit', save)
+}
 
 function load(url, context, nextLoad) {
   assert.equal(typeof url, 'string')
@@ -39,18 +51,8 @@ function load(url, context, nextLoad) {
   if (!state) {
     const pkg = findPackageJSON(url)
     assert.equal(basename(pkg), 'package.json')
-    const root = dirname(pkg)
-    state = new State(root)
-
-    const save = () => {
-      if (!saved) state.write()
-    }
-
-    process.on('nextTick', save)
-    process.on('beforeExit', save)
-    process.on('exit', save)
+    initState(dirname(pkg))
   }
-
 
   assert.equal(saved, false)
   state.addFile(url, { source, format, isEntry })
@@ -73,8 +75,29 @@ function resolve(specifier, context, nextResolve) {
 
   const { parentURL, conditions } = context
 
+  // In load mode, the entry point must be served from the bundle without touching disk.
+  // Initialise state up front (using cwd, since findPackageJSON needs the entry file to exist).
+  if (!state && !parentURL && process.env.EXODUS_STASIS_BUNDLE === 'load') {
+    initState(process.cwd())
+  }
+
   if (state && state.config.loadBundle) {
-    const { url, format } = state.getImport(parentURL, specifier, { conditions })
+    // A file URL specifier means the URL is already resolved: Node does this for CLI
+    // entry paths, and the ESM-to-CJS translator passes resolved require() targets
+    // through the resolve hook the same way.
+    if (specifier.startsWith('file:')) {
+      const url = specifier
+      const format = state.formats.get(state.relative(state.absolute(url)))
+      return { url, format, importAttributes: undefined, shortCircuit: true }
+    }
+    if (parentURL) {
+      const { url, format } = state.getImport(parentURL, specifier, { conditions })
+      return { url, format, importAttributes: undefined, shortCircuit: true }
+    }
+    // Bare entry specifier without a parent: anchor to cwd so nextResolve doesn't
+    // need the file on disk.
+    const url = pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
+    const format = state.formats.get(state.relative(state.absolute(url)))
     return { url, format, importAttributes: undefined, shortCircuit: true }
   }
 

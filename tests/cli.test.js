@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -220,4 +220,46 @@ test('run --bundle=save creates intermediate directories for --bundle-file', wit
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   t.assert.ok(existsSync(bundlePath))
+}))
+
+test('run --bundle=load serves the entry from the bundle when its source is absent on disk', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(
+    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Remove every source file -- bundle=load must run entirely from the bundle.
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const load = run(
+    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+test('run --bundle=load serves the entry from the bundle when only the entry is missing', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(
+    ['run', '--update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Keep the imported hello.js on disk, but make the entry missing.
+  rmSync(join(tmp, 'src', 'entry.js'))
+
+  const load = run(
+    ['run', '--frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
 }))
