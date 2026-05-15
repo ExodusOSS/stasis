@@ -38,7 +38,7 @@ into the lockfile/bundle `config` block.
   "config": { "scope": "full" },
   "entries": ["src/index.js"],
   "sources": {
-    "": {
+    ".": {
       "name": "@exodus/stasis",
       "version": "1.0.0-alpha.0",
       "files": { "src/index.js": "sha512-…" }
