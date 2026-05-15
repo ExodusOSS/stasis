@@ -1,0 +1,20 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.cjs"
+  ],
+  "sources": {
+    ".": {
+      "name": "stasis-cli-run-cjs",
+      "version": "0.0.0",
+      "files": {
+        "src/entry.cjs": "sha512-+0bvgV7+/WFLlIh5d3RBwo64XYtxuogM1g0XaSmMlSXyyRBu4Ehim18B4RkWlZQueIRg3IQWRKc+nrvJB3T/Tg==",
+        "src/hello.cjs": "sha512-chNfEB6cB7TTvAEXZqqJvliSvxptmmAKsXmWEHsROiFtJeAxtqceKe+un0s94cxUKIN/9MVeAYY746eNU/ufEA=="
+      }
+    }
+  },
+  "modules": {}
+}
