@@ -18,6 +18,7 @@ export class StasisEsbuild {
       assert.equal(res.suffix, '')
       assert.equal(res.pluginData, undefined)
       const { path, errors, warnings, suffix, pluginData, ...meta } = res
+      console.debug({ errors, warnings, suffix, pluginData })
       console.log('resolve', specifier, path, meta)
       return res
     })
