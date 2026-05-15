@@ -1,0 +1,34 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.js"
+  ],
+  "sources": {
+    ".": {
+      "name": "stasis-cli-run-mixed",
+      "version": "0.0.0",
+      "files": {
+        "src/entry.js": "sha512-LwzrRIYzCJ3vSdvSlGfWCgqBSmF7BoiDCsuAJRqC/YFxs6rRkf0dTvdNQ1ujzXAGEXLzWNo3uaBUyuAR8jV7Rw=="
+      }
+    }
+  },
+  "modules": {
+    "node_modules/fake-cjs-pkg": {
+      "name": "fake-cjs-pkg",
+      "version": "1.0.0",
+      "files": {
+        "index.js": "sha512-DCw5oPuCRdfLC0vFsO7FVEcK739tQEVHn0xaZ4fsBmaOqrnQcsft4JjuDTgmFn1R1ofrdT6XNKvPIorNlqt/Rg=="
+      }
+    },
+    "node_modules/fake-esm-pkg": {
+      "name": "fake-esm-pkg",
+      "version": "1.0.0",
+      "files": {
+        "index.js": "sha512-Gs7VspnGD8yxeCA/ImI3ip2n2sosjP1bZzD+jRgx30/4fjIOO9JyZKxh4qp9Yp44xtd2Kh/TAhNjn5yTbOYfEQ=="
+      }
+    }
+  }
+}
