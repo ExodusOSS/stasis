@@ -31,9 +31,11 @@ exports.validRange = (...a) => getSemver().validRange(...a)
 exports.valid = (version, options) => {
   // Fast path for certainly valid versions
   if (
-    (options === undefined && typeof version === 'string' && version.length <= 256,
+    options === undefined &&
+    typeof version === 'string' &&
+    version.length <= 256 &&
     // 1-15 chars because it must fit in Number.MAX_SAFE_INTEGER
-    /^(0|[1-9]\d{0,14})\.(0|[1-9]\d{0,14})\.(0|[1-9]\d{0,14})$/iu.test(version))
+    /^(0|[1-9]\d{0,14})\.(0|[1-9]\d{0,14})\.(0|[1-9]\d{0,14})$/iu.test(version)
   ) {
     return version
   }

@@ -21,8 +21,8 @@ function usage(prefix = '') {
  stasis run --update [--bundle=(save|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
  stasis run --frozen [--bundle=(save|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
  stasis bundle create path/to/lockfile
- statis bundle verify path/to/lockfile
- statis advisories path/to/lockfile
+ stasis bundle verify path/to/lockfile
+ stasis advisories path/to/lockfile
 `.trim())
   process.exit(1)
 }
