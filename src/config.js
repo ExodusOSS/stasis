@@ -80,14 +80,6 @@ export class Config {
     return this.#bundle === 'load'
   }
 
-  get useLockfile() {
-    return this.#lock !== 'none'
-  }
-
-  get writeLockfile() {
-    return this.#lock === 'update'
-  }
-
   get full() {
     return this.#scope === 'full'
   }
@@ -102,6 +94,14 @@ export class Config {
 
   get lock() {
     return this.#lock
+  }
+
+  get useLockfile() {
+    return this.#lock !== 'none'
+  }
+
+  get writeLockfile() {
+    return this.#lock === 'update'
   }
 
   get json() {
