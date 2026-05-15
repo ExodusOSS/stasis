@@ -1,5 +1,7 @@
 import { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
 import { basename, dirname, extname } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
@@ -21,13 +23,17 @@ function load(url, context, nextLoad) {
   if (state && state.config.loadBundle) {
     const { source, format } = state.getFile(url)
     assert.equal(format, context.format)
-    assert.equal(format, 'module') // TODO: commonjs
+    assert.ok(format === 'module' || format === 'commonjs')
     return { source, format, shortCircuit: true }
   }
 
   const result = nextLoad(url, context)
-  const { source, format } = result
+  let { source } = result
+  const { format } = result
   assert.notEqual(format, 'builtin')
+
+  // Node's CJS loader may return source=null and read from disk itself; capture it for the bundle
+  if (source == null && format === 'commonjs') source = readFileSync(fileURLToPath(url))
 
   const isEntry = !state
   if (!state) {

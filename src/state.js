@@ -184,7 +184,7 @@ export class State {
     if (typeof source === 'string') {
       assert.ok(source.isWellFormed())
     } else {
-      if (source === undefined) source = readFileSync(absolute)
+      if (source === undefined || source === null) source = readFileSync(absolute)
       assert.ok(Buffer.isBuffer(source))
       if (!isBinary) assert.ok(isUtf8(source), `File is not UTF-8: ${file}`)
     }
