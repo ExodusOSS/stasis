@@ -24,7 +24,7 @@ export class Config {
       ...rest
     } = JSON.parse(json)
     assert.ok(['node_modules', 'full'].includes(scope))
-    assert.ok(['update', 'frozen', 'none'].includes(lock))
+    assert.ok(['none', 'update', 'frozen'].includes(lock))
     assert.ok(['none', 'ignore', 'save', 'load'].includes(bundle))
     assert.ok([false, true].includes(debug))
     assert.equal(Object.keys(rest).length, 0)

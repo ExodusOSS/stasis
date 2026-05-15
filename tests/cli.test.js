@@ -60,7 +60,7 @@ test('run with no path prints "Nothing to run"', (t) => {
 test('run requires --lock', (t) => {
   const r = run(['run', 'a.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--lock=\(update\|frozen\|none\) is required/)
+  t.assert.match(r.stderr, /--lock=\(none\|update\|frozen\) is required/)
 })
 
 test('run rejects an invalid --lock value', (t) => {
