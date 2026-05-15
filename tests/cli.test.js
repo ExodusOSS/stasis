@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'stasis.js')
@@ -21,12 +22,10 @@ const {
 
 // util.inspect colorises strings when stderr supports colours (e.g. pnpm/npm running
 // scripts in a TTY, or FORCE_COLOR set), so strip ANSI before matching.
-const stripAnsi = (s) => s.replaceAll(/\[[0-9;]*m/g, '')
-
 const run = (args, opts = {}) => {
   const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf-8', env: cleanEnv, ...opts })
-  r.stdout = stripAnsi(r.stdout)
-  r.stderr = stripAnsi(r.stderr)
+  r.stdout = stripVTControlCharacters(r.stdout)
+  r.stderr = stripVTControlCharacters(r.stderr)
   return r
 }
 
