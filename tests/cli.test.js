@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -505,6 +505,39 @@ test('run --lock=frozen --bundle=load works in node_modules scope with non-track
   t.assert.equal(load.stdout, 'hello, world\n')
   t.assert.match(load.stderr, /scope: 'node_modules'/)
   t.assert.match(load.stderr, /bundle: 'load'/)
+}))
+
+// Regression: in node_modules scope, the resolve hook delegates non-nm parents to Node's
+// default resolver, so the load hook receives `context.format` set by Node rather than by
+// our own shortCircuit. This exercises that path with a CJS dep, which is the case most
+// at risk of a format mismatch (commonjs vs module) between our recorded value and Node's.
+test('run --lock=frozen --bundle=load roundtrips a CJS node_modules dep under node_modules scope', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'),
+    JSON.stringify({ name: 'nm-cjs-fixture', version: '0.0.0', private: true, type: 'module' }) + '\n')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'node_modules' }) + '\n')
+  mkdirSync(join(tmp, 'src'))
+  writeFileSync(join(tmp, 'src/entry.js'),
+    "import pkg from 'fake-cjs-nm'\nconsole.log(pkg.greet('world'))\n")
+  mkdirSync(join(tmp, 'node_modules/fake-cjs-nm'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules/fake-cjs-nm/package.json'),
+    JSON.stringify({ name: 'fake-cjs-nm', version: '1.0.0', main: 'index.js' }) + '\n')
+  writeFileSync(join(tmp, 'node_modules/fake-cjs-nm/index.js'),
+    "module.exports = { greet: (n) => `hello, ${n}` }\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'hello, world\n')
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
 }))
 
 test('run --lock=frozen --bundle=load reads non-node_modules sources from disk in node_modules scope', withTmp((t, tmp) => {
