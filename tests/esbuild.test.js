@@ -11,6 +11,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const helper = join(here, 'esbuild-run.helper.js')
 const fullFixture = join(here, 'fixtures', 'esbuild-full')
 const nmFixture = join(here, 'fixtures', 'esbuild-nm')
+const jsonFixture = join(here, 'fixtures', 'esbuild-json')
 
 // drop inherited stasis env so child processes get a clean slate per test
 const {
@@ -294,6 +295,57 @@ test('node_modules scope lock=frozen tolerates changes to non-tracked src/ files
     env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'node_modules' },
   })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+}))
+
+test('lock=add --full records a .json import alongside the entry', withTmp((t, tmp) => {
+  cpSync(jsonFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const r = run(['src/entry.js'], { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.deepEqual(lock.entries, ['src/entry.js'])
+  t.assert.ok(lock.sources['.'].files['src/entry.js'].startsWith('sha512-'))
+  t.assert.ok(lock.sources['.'].files['src/data.json'].startsWith('sha512-'))
+}))
+
+test('lock=frozen --full succeeds with a committed .json import', withTmp((t, tmp) => {
+  cpSync(jsonFixture, tmp, { recursive: true })
+  const before = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+
+  const r = run(['src/entry.js'], { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), before)
+}))
+
+test('lock=frozen --full rejects a changed .json import', withTmp((t, tmp) => {
+  cpSync(jsonFixture, tmp, { recursive: true })
+  writeFileSync(join(tmp, 'src', 'data.json'), '{ "who": "mars" }\n')
+
+  const r = run(['src/entry.js'], { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Build failed|ERR_ASSERTION/)
+}))
+
+test('bundle=add --full captures a .json import in the bundle', withTmp((t, tmp) => {
+  cpSync(jsonFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const r = run(['src/entry.js'], {
+    cwd: tmp,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+    },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.sources['src/data.json'], readFileSync(join(tmp, 'src/data.json'), 'utf-8'))
+  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
 }))
 
 test('config scope conflict with env is reported', withTmp((t, tmp) => {

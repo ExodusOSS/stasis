@@ -1,0 +1,20 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.js"
+  ],
+  "sources": {
+    ".": {
+      "name": "stasis-esbuild-json",
+      "version": "0.0.0",
+      "files": {
+        "src/data.json": "sha512-KEUoxs9PMHag56kPfGvJkM547e4wljPF7e9rIyQVTvY0NOGw/CRuE82Dbv42pQEr9+C4WcuS6jEY7UFyB2CppA==",
+        "src/entry.js": "sha512-ZdaZCW3OY60NUIM+kcbh5vCbcc5J3yTm2v8ciUjTrqbC7opHdSFOmcixs1bSNPfvgR00Zh5z87+bB+9WyaE4Yw=="
+      }
+    }
+  },
+  "modules": {}
+}

@@ -49,7 +49,7 @@ export class StasisEsbuild {
       if (isBinary) return { contents: source, loader: 'binary' }
 
       const loader = extname(path).replace(/^\.[cm]?/, '')
-      assert(['js', 'ts', 'jsx', 'tsx'].includes(loader))
+      assert(['js', 'ts', 'jsx', 'tsx', 'json'].includes(loader))
       return { contents: source, loader }
     })
   }
