@@ -133,6 +133,24 @@ test('loadConfig bundle=ignore', (t) => {
   t.assert.equal(c.loadBundle, false)
 })
 
+test('loadConfig lock=ignore', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'ignore' }))
+  t.assert.equal(c.lock, 'ignore')
+  t.assert.equal(c.useLockfile, false)
+  t.assert.equal(c.ignoreLockfile, true)
+  t.assert.equal(c.writeLockfile, false)
+  t.assert.equal(c.replaceLockfile, false)
+  t.assert.equal(c.frozen, false)
+})
+
+test('loadConfig bundle=load works with lock=ignore', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ bundle: 'load', lock: 'ignore' }))
+  t.assert.equal(c.loadBundle, true)
+  t.assert.equal(c.ignoreLockfile, true)
+})
+
 test('loadConfig bundle=none', (t) => {
   const c = new Config()
   c.loadConfig(json({ bundle: 'none' }))

@@ -22,16 +22,18 @@ lockfile; none may start with `..`.
 | Key | Values | Default | Env var |
 | --- | --- | --- | --- |
 | `scope` | `"node_modules"`, `"full"` | `"full"` | `EXODUS_STASIS_SCOPE` |
-| `lock` | `"none"`, `"add"`, `"replace"`, `"frozen"` | `"add"` | `EXODUS_STASIS_LOCK` |
+| `lock` | `"none"`, `"ignore"`, `"add"`, `"replace"`, `"frozen"` | `"add"` | `EXODUS_STASIS_LOCK` |
 | `bundle` | `"none"`, `"ignore"`, `"add"`, `"replace"`, `"load"` | `"none"` | `EXODUS_STASIS_BUNDLE` |
 | `debug` | boolean | `false` | `EXODUS_STASIS_DEBUG` |
 
 `add` loads existing data and refuses to modify it; `replace` ignores it and
 rebuilds from scratch; `frozen` loads it read-only and requires every
-observed file to match. `bundle = load` requires `lock = frozen | none`;
-`lock = none` requires a non-`none` `bundle`. Unknown keys are rejected. If
-both the file and env var set a key, they must match. Only `scope` is
-persisted into the lockfile/bundle `config` block.
+observed file to match; `none` rejects the file's presence (footgun guard);
+`ignore` tolerates it without loading or writing. `bundle = load` requires
+`lock = frozen | none | ignore`; `lock = none` requires a non-`none`
+`bundle`. Unknown keys are rejected. If both the file and env var set a
+key, they must match. Only `scope` is persisted into the lockfile/bundle
+`config` block.
 
 ## `stasis.lock.json`
 

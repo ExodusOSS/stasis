@@ -24,7 +24,7 @@ export class Config {
       ...rest
     } = JSON.parse(json)
     assert.ok(['node_modules', 'full'].includes(scope))
-    assert.ok(['none', 'add', 'replace', 'frozen'].includes(lock))
+    assert.ok(['none', 'ignore', 'add', 'replace', 'frozen'].includes(lock))
     assert.ok(['none', 'ignore', 'add', 'replace', 'load'].includes(bundle))
     assert.ok([false, true].includes(debug))
     assert.equal(Object.keys(rest).length, 0)
@@ -33,8 +33,8 @@ export class Config {
     this.#bundle = bundle
     this.#debug = debug
 
-    if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none') {
-      throw new RangeError('bundle=load requires lock=frozen or lock=none')
+    if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
+      throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
     }
 
     if (this.#lock === 'none' && this.#bundle === 'none') {
@@ -92,7 +92,11 @@ export class Config {
   }
 
   get useLockfile() {
-    return this.#lock !== 'none'
+    return this.#lock !== 'none' && this.#lock !== 'ignore'
+  }
+
+  get ignoreLockfile() {
+    return this.#lock === 'ignore'
   }
 
   get writeLockfile() {
