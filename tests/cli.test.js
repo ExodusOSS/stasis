@@ -540,6 +540,61 @@ test('run --lock=frozen --bundle=load roundtrips a CJS node_modules dep under no
   t.assert.equal(load.stdout, 'hello, world\n')
 }))
 
+// Pins format='json' through bundle=load: a `with { type: 'json' }` import resolves to
+// format='json', which the load hook used to reject (only module/commonjs were allowed).
+test('run --lock=frozen --bundle=load roundtrips a JSON import with type:json attribute', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'),
+    JSON.stringify({ name: 'json-attr-fixture', version: '0.0.0', private: true, type: 'module' }) + '\n')
+  mkdirSync(join(tmp, 'src'))
+  writeFileSync(join(tmp, 'src/entry.js'),
+    "import data from './data.json' with { type: 'json' }\nconsole.log(data.who)\n")
+  writeFileSync(join(tmp, 'src/data.json'), '{"who":"world"}\n')
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'world\n')
+
+  // Remove the json so the bundle is the only source.
+  rmSync(join(tmp, 'src/data.json'))
+
+  const load = run(
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'world\n')
+}))
+
+// Regression: a malicious lockfile with a `__proto__` key under a module's files map must
+// not poison Object.prototype. The loader normalizes module.files to a null-prototype on
+// load so the assertion path's `Object.hasOwn(module.files, rel)` + `files[rel] = …` writes
+// remain own-data-property operations regardless of the key.
+test('run --lock=frozen rejects forged __proto__ key in lockfile without polluting Object.prototype', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  // Inject a hostile entry: `__proto__` mapped to a "polluted":1 object. A vulnerable
+  // loader would later do `module.files['__proto__'] = integrity` and set the prototype,
+  // making `({}).polluted === 1` in the loader process.
+  lock.sources['.'].files.__proto__ = { polluted: 1 }
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  // Run with a probe that crashes hard if Object.prototype.polluted is set. The lockfile
+  // is invalid (extra entry), but the failure mode must not be prototype pollution.
+  writeFileSync(join(tmp, 'src/probe.js'),
+    "if (({}).polluted !== undefined) { console.error('POLLUTED'); process.exit(2) }\n"
+    + "import { greet } from './hello.js'\nconsole.log(greet('world'))\n")
+
+  const r = run(['run', '--lock=frozen', '--full', 'src/probe.js'], { cwd: tmp })
+  t.assert.doesNotMatch(r.stderr, /POLLUTED/)
+  t.assert.doesNotMatch(r.stdout, /POLLUTED/)
+  t.assert.notEqual(r.status, 2, 'prototype must not be polluted')
+}))
+
 test('run --lock=frozen --bundle=load reads non-node_modules sources from disk in node_modules scope', withTmp((t, tmp) => {
   cpSync(nmFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')

@@ -36,7 +36,8 @@ export class Config {
     // bundle=load needs a trust root: either the lockfile (frozen) verifies the bundle on
     // load, or the bundle is itself authoritative -- lock=none with no lockfile on disk, or
     // lock=ignore with a lockfile that's deliberately bypassed. add/replace are forbidden
-    // because consuming the bundle while also rewriting it would be incoherent.
+    // because the lockfile would be rewritten from bundle-loaded sources, attesting only to
+    // what the bundle already said -- which defeats the lockfile's purpose.
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
     }

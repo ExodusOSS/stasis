@@ -248,8 +248,9 @@ export class State {
   // attributes (e.g. `import x from './data.json' with { type: 'json' }` vs without), so
   // the attributes participate in the lookup key. NUL is illegal in specifiers / paths.
   #importKey(specifier, importAttributes) {
-    if (!importAttributes) return specifier
-    const parts = Object.entries(importAttributes).sort(([a], [b]) => (a < b ? -1 : 1))
+    const entries = importAttributes ? Object.entries(importAttributes) : []
+    if (entries.length === 0) return specifier
+    const parts = entries.sort(([a], [b]) => (a < b ? -1 : 1))
     return `${specifier}\0${parts.map(([k, v]) => `${k}=${v}`).join(',')}`
   }
 

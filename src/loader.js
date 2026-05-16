@@ -44,7 +44,7 @@ function load(url, context, nextLoad) {
     // scope, where non-nm parents go through nextResolve and Node's default doesn't
     // populate format for the load hook). Only cross-check when the chain provided one.
     if (context.format != null) assert.equal(format, context.format)
-    assert.ok(format === 'module' || format === 'commonjs')
+    assert.ok(['module', 'commonjs', 'json'].includes(format))
     return { source, format, shortCircuit: true }
   }
 
