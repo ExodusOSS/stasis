@@ -21,8 +21,8 @@ function usage(prefix = '') {
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
  stasis bundle create path/to/lockfile
  stasis bundle verify path/to/lockfile
- stasis advisories path/to/lockfile
  stasis prune [path/to/project]
+ stasis audit path/to/file ...
 `.trim())
   process.exit(1)
 }
@@ -80,6 +80,13 @@ if (command === 'run') {
   const { prune } = await import('../src/prune.js')
   const { removed, validated } = prune({ root })
   console.warn(`[stasis] prune: validated ${validated.length} file(s), removed ${removed.length} file(s)`)
+} else if (command === 'audit') {
+  if (argv.length === 0) usage('Nothing to audit: no path to file given')
+  const { audit, printAuditReport } = await import('../src/audit.js')
+  const files = argv.map((f) => resolve(f))
+  const report = await audit(files)
+  printAuditReport(report)
+  process.exitCode = report.rows.length === 0 ? 0 : 1
 } else {
   usage()
 }
