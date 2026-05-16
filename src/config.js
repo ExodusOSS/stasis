@@ -36,11 +36,18 @@ export class Config {
     // bundle=load needs a trust root for source bytes: frozen pins each file's sha512 in
     // the lockfile and we cross-check it on load; otherwise the bundle is itself
     // authoritative -- lock=none with no lockfile on disk, or lock=ignore with a lockfile
-    // deliberately bypassed. Note: the lockfile only attests to source bytes; the bundle's
-    // formats/imports metadata is NOT covered by it today, so a tampered bundle can still
-    // flip e.g. commonjs <-> module for a hash-valid file (TODO: include format/imports in
-    // lockfile-verified data). add/replace are forbidden because the lockfile would be
-    // rewritten from bundle-loaded sources, attesting only to what the bundle already said.
+    // deliberately bypassed.
+    //
+    // WARNING: today's lockfile attests only to source BYTES, not bundle METADATA.
+    // The bundle's `formats` and `imports` maps are loaded without integrity coverage,
+    // so frozen+load is not fully anchored: a tampered bundle can (a) flip a file's
+    // format -- e.g. module <-> commonjs -- for a hash-valid file, or (b) redirect a
+    // recorded `import 'x' from parent` to a different hash-valid file in the bundle.
+    // Both bypass the per-file hash check. TODO: pin format and imports in the
+    // lockfile-verified data so frozen really anchors the whole bundle.
+    //
+    // add/replace are forbidden because the lockfile would be rewritten from bundle-loaded
+    // sources, attesting only to what the bundle already said -- defeating its purpose.
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
     }

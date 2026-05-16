@@ -119,6 +119,22 @@ test('addImport keys by importAttributes: same specifier with vs without {type:j
   t.assert.equal(state.getImport(parentURL, './ambiguous').url, jsURL)
 })
 
+test('addImport: attribute keys are unambiguous across delimiter-containing values', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  // The naive `${k}=${v}` join would collide on these two attribute objects:
+  //   {type: 'a,b'}       -> "type=a,b"
+  //   {type: 'a', b: ''}  -> "type=a,b="
+  // The JSON-based encoding keeps them distinct.
+  state.addImport(parentURL, './edge', pathToFileURL(fileAbs).toString(), { importAttributes: { type: 'a,b' } })
+  state.addImport(parentURL, './edge', pathToFileURL(fileAbs2).toString(), { importAttributes: { type: 'a', b: '' } })
+
+  const a = state.getImport(parentURL, './edge', { importAttributes: { type: 'a,b' } })
+  const b = state.getImport(parentURL, './edge', { importAttributes: { type: 'a', b: '' } })
+  t.assert.equal(a.url, pathToFileURL(fileAbs).toString())
+  t.assert.equal(b.url, pathToFileURL(fileAbs2).toString())
+  t.assert.notEqual(a.url, b.url)
+})
+
 test('addImport: empty {} importAttributes is equivalent to undefined', (t) => {
   const parentURL = pathToFileURL(fileAbs2).toString()
   const childURL = pathToFileURL(fileAbs).toString()
