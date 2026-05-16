@@ -80,12 +80,12 @@ export class State {
 
         if (config) this.config.loadConfig(config)
 
-        if (sources && !lock && this.config.useLockfile) {
+        if (sources && !lock && this.config.useLockfile && !this.config.replaceLockfile) {
           throw new Error('stasis.lock.json missing, can not use sources')
         }
 
         if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
-        if (lock && this.config.useLockfile) {
+        if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
           const json = JSON.parse(lock)
           assert.equal(json.version, version)
           assert.ok(['node_modules', 'full'].includes(json.config?.scope))
@@ -123,18 +123,20 @@ export class State {
             throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
           }
 
-          const json = JSON.parse(brotliDecompressSync(sources))
-          assert.equal(json.version, version)
-          assert.ok(json.sources)
-          assert.ok(json.formats)
-          assert.ok(json.imports)
-          this.sources = new Map(Object.entries(json.sources))
-          this.formats = new Map(Object.entries(json.formats))
-          this.imports = objectToMaps(json.imports)
+          if (!this.config.replaceBundle) {
+            const json = JSON.parse(brotliDecompressSync(sources))
+            assert.equal(json.version, version)
+            assert.ok(json.sources)
+            assert.ok(json.formats)
+            assert.ok(json.imports)
+            this.sources = new Map(Object.entries(json.sources))
+            this.formats = new Map(Object.entries(json.formats))
+            this.imports = objectToMaps(json.imports)
 
-          if (!this.config.useLockfile) {
-            for (const [file, source] of this.sources) {
-              noupsert(this.hashes, file, sha512integrity(source))
+            if (!this.config.useLockfile) {
+              for (const [file, source] of this.sources) {
+                noupsert(this.hashes, file, sha512integrity(source))
+              }
             }
           }
         }
@@ -144,10 +146,12 @@ export class State {
             throw new Error(`Unexpected ${join(dir, FILE_RESOURCES)} with config.bundle = 'none'`)
           }
 
-          const json = JSON.parse(brotliDecompressSync(resources))
-          assert.equal(json.version, version)
-          assert.ok(json.resources)
-          this.resources = new Map(Object.entries(json.resources))
+          if (!this.config.replaceBundle) {
+            const json = JSON.parse(brotliDecompressSync(resources))
+            assert.equal(json.version, version)
+            assert.ok(json.resources)
+            this.resources = new Map(Object.entries(json.resources))
+          }
         }
       }
     }

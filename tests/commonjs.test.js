@@ -30,11 +30,11 @@ const withTmp = (fn) => (t) => {
   }
 }
 
-test('run --lock=update --full records a CJS entry and its require()d files idempotently', (t) => {
+test('run --lock=add --full records a CJS entry and its require()d files idempotently', (t) => {
   const lockPath = join(fixture, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
 
-  const r = run(['run', '--lock=update', '--full', 'src/entry.cjs'], { cwd: fixture })
+  const r = run(['run', '--lock=add', '--full', 'src/entry.cjs'], { cwd: fixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
 
@@ -53,10 +53,10 @@ test('run --lock=frozen --full replays a CJS program from the committed lockfile
   t.assert.equal(r.stdout, 'hello, world\n')
 })
 
-test('run --bundle=save records commonjs format for CJS files', withTmp((t, tmp) => {
+test('run --bundle=add records commonjs format for CJS files', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
-    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
     { cwd: fixture }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -73,7 +73,7 @@ test('run --bundle=save records commonjs format for CJS files', withTmp((t, tmp)
 test('run --bundle=load executes a CJS program from a saved bundle', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
     { cwd: fixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -91,7 +91,7 @@ test('run --bundle=load executes a CJS program when only the entry .cjs is missi
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)

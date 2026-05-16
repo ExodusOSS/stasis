@@ -32,11 +32,11 @@ const withTmp = (fn) => (t) => {
 
 const expectedOut = 'hello from esm, esm\nhello from cjs, cjs\n'
 
-test('run --lock=update --full records an ESM entry that imports both ESM and CJS node_modules', (t) => {
+test('run --lock=add --full records an ESM entry that imports both ESM and CJS node_modules', (t) => {
   const lockPath = join(fixture, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
 
-  const r = run(['run', '--lock=update', '--full', 'src/entry.js'], { cwd: fixture })
+  const r = run(['run', '--lock=add', '--full', 'src/entry.js'], { cwd: fixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, expectedOut)
 
@@ -55,10 +55,10 @@ test('run --lock=frozen --full replays the mixed program from the committed lock
   t.assert.equal(r.stdout, expectedOut)
 })
 
-test('run --bundle=save records module and commonjs formats side by side', withTmp((t, tmp) => {
+test('run --bundle=add records module and commonjs formats side by side', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
-    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: fixture }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -74,7 +74,7 @@ test('run --bundle=save records module and commonjs formats side by side', withT
 test('run --bundle=load executes the mixed program from a saved bundle', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=update', '--full', '--bundle=save', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: fixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)

@@ -10,7 +10,7 @@ const {
 
 export class Config {
   #scope = envScope || 'full'
-  #lock = envLock || 'update'
+  #lock = envLock || 'add'
   #bundle = envBundle || 'none'
   #bundleFile = envBundleFile || undefined
   #debug = Boolean(envDebug && envDebug !== '0')
@@ -24,8 +24,8 @@ export class Config {
       ...rest
     } = JSON.parse(json)
     assert.ok(['node_modules', 'full'].includes(scope))
-    assert.ok(['none', 'update', 'frozen'].includes(lock))
-    assert.ok(['none', 'ignore', 'save', 'load'].includes(bundle))
+    assert.ok(['none', 'add', 'replace', 'frozen'].includes(lock))
+    assert.ok(['none', 'ignore', 'add', 'replace', 'load'].includes(bundle))
     assert.ok([false, true].includes(debug))
     assert.equal(Object.keys(rest).length, 0)
     this.#scope = scope
@@ -33,12 +33,12 @@ export class Config {
     this.#bundle = bundle
     this.#debug = debug
 
-    if (this.#bundle === 'load' && this.#lock === 'update') {
+    if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none') {
       throw new RangeError('bundle=load requires lock=frozen or lock=none')
     }
 
     if (this.#lock === 'none' && this.#bundle === 'none') {
-      throw new RangeError('lock=none requires bundle=(save|load|ignore)')
+      throw new RangeError('lock=none requires bundle=(add|replace|load|ignore)')
     }
 
     try {
@@ -72,7 +72,11 @@ export class Config {
   }
 
   get writeBundle() {
-    return this.#bundle === 'save'
+    return this.#bundle === 'add' || this.#bundle === 'replace'
+  }
+
+  get replaceBundle() {
+    return this.#bundle === 'replace'
   }
 
   get loadBundle() {
@@ -92,7 +96,11 @@ export class Config {
   }
 
   get writeLockfile() {
-    return this.#lock === 'update'
+    return this.#lock === 'add' || this.#lock === 'replace'
+  }
+
+  get replaceLockfile() {
+    return this.#lock === 'replace'
   }
 
   get scope() {
