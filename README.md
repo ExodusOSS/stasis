@@ -1,10 +1,10 @@
 # `@exodus/stasis`
 
-Per-file lockfiles + analyzeable source code bundles with resolutions
-
-## Lockfiles
+Analyzeable source code bundles with resolutions + per-file lockfiles
 
 ## Bundles
+
+## Lockfiles
 
 ## License
 
