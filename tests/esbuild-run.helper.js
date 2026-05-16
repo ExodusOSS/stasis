@@ -3,7 +3,8 @@
 // spawnSync, so each test gets a fresh State singleton in its own process.
 //
 // Usage: node tests/esbuild-run.helper.js <entry> [<entry>...]
-// Project root and stasis config come from process.cwd() and the EXODUS_STASIS_* env.
+// If STASIS_TEST_PLUGIN_OPTIONS is set in env (JSON-encoded), pass them to the plugin
+// constructor and let it construct State. Otherwise pre-construct State via env vars.
 
 import { resolve, join } from 'node:path'
 import { rm, mkdtemp } from 'node:fs/promises'
@@ -18,8 +19,11 @@ if (entries.length === 0) {
   process.exit(2)
 }
 
-// Construct State BEFORE importing the plugin: the plugin module reads State.instance at top level.
-const state = new State(process.cwd())
+const pluginOptionsRaw = process.env.STASIS_TEST_PLUGIN_OPTIONS
+const pluginOptions = pluginOptionsRaw ? JSON.parse(pluginOptionsRaw) : undefined
+
+const _preState = pluginOptions === undefined ? new State(process.cwd()) : undefined
+
 const { StasisEsbuild } = await import('../src/esbuild.js')
 
 const dist = await mkdtemp(join(tmpdir(), 'stasis-esbuild-test-'))
@@ -32,10 +36,10 @@ try {
     format: 'esm',
     write: false,
     logLevel: 'silent',
-    plugins: [new StasisEsbuild()],
+    plugins: [new StasisEsbuild(pluginOptions)],
   })
 } finally {
   await rm(dist, { recursive: true, force: true })
 }
 
-state.write()
+State.instance.write()

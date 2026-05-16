@@ -5,12 +5,21 @@ import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
-
-const state = State.instance
-assert.ok(state, 'Stasis preload is not active')
+import { assertOptionsMatchConfig, validatePluginOptions } from './config.js'
 
 export class StasisEsbuild {
   #seen = new Set()
+  #state
+
+  constructor(options = {}) {
+    validatePluginOptions('StasisEsbuild', options)
+    if (State.instance) {
+      assertOptionsMatchConfig(State.instance.config, options)
+      this.#state = State.instance
+    } else {
+      this.#state = new State(process.cwd(), options)
+    }
+  }
 
   get name() {
     return 'stasis'
@@ -29,7 +38,7 @@ export class StasisEsbuild {
         if (!isEntry) {
           const parentURL = pathToFileURL(args.importer).toString()
           const url = pathToFileURL(res.path).toString()
-          state.addImport(parentURL, specifier, url)
+          this.#state.addImport(parentURL, specifier, url)
         }
       }
 
@@ -43,7 +52,7 @@ export class StasisEsbuild {
 
       if (!this.#seen.has(path)) {
         this.#seen.add(path)
-        state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, isBinary })
+        this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, isBinary })
       }
 
       if (isBinary) return { contents: source, loader: 'binary' }

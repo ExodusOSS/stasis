@@ -175,10 +175,10 @@ test('bundle=add --full writes a bundle whose sources match disk', withTmp((t, t
   t.assert.ok(existsSync(bundlePath))
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.version, 0)
+  t.assert.equal(decoded.version, 1)
   t.assert.deepEqual(decoded.config, { scope: 'full' })
-  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
-  t.assert.equal(decoded.sources['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
 }))
 
 test('bundle=add detects a tampered source against disk on the next run', withTmp((t, tmp) => {
@@ -198,7 +198,7 @@ test('bundle=add detects a tampered source against disk on the next run', withTm
 
   // tamper: swap hello.js source for an attacker payload, then re-run with bundle=add (pre-loads bundle)
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  decoded.sources['src/hello.js'] = 'exports.greet = (n) => `pwned, ${n}`\n'
+  decoded.sources['.'].files['src/hello.js'] = 'exports.greet = (n) => `pwned, ${n}`\n'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run('src/entry.js', {
@@ -230,7 +230,7 @@ test('bundle=replace rewrites a bundle that had stale orphan entries', withTmp((
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  decoded.sources['src/orphan.js'] = 'exports.x = 0\n'
+  decoded.sources['.'].files['src/orphan.js'] = 'exports.x = 0\n'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run('src/entry.js', {
@@ -301,4 +301,172 @@ test('config scope conflict with env is reported', withTmp((t, tmp) => {
   })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Flags\/env can not override stasis\.config\.json/)
+}))
+
+// Plugin options: passed as JSON via STASIS_TEST_PLUGIN_OPTIONS so the helper hands them
+// to the plugin constructor, which then constructs State with those options.
+const withOpts = (opts, extra = {}) => ({ STASIS_TEST_PLUGIN_OPTIONS: JSON.stringify(opts), ...extra })
+
+test('options.lock=add records the entry like the env path', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'add' }) })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.deepEqual(lock.entries, ['src/entry.js'])
+  t.assert.ok(lock.sources['.'].files['src/hello.js'].startsWith('sha512-'))
+}))
+
+test('options.lock=frozen succeeds with the committed lockfile', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const before = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'frozen' }) })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), before)
+}))
+
+test('options.lock=frozen rejects a changed source file', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'exports.greet = (n) => `bonjour, ${n}`\n')
+
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'frozen' }) })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION|sha512-|ModuleBuildError/)
+}))
+
+test('options.lock=replace rewrites after a source change', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const before = readFileSync(lockPath, 'utf-8')
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'exports.greet = (n) => `bonjour, ${n}`\n')
+
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'replace' }) })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const newHash = JSON.parse(readFileSync(lockPath, 'utf-8')).sources['.'].files['src/hello.js']
+  const oldHash = JSON.parse(before).sources['.'].files['src/hello.js']
+  t.assert.notEqual(newHash, oldHash)
+}))
+
+test('options.lock=ignore tolerates the committed lockfile', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const before = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+  // bundle=add satisfies the "lock=none requires bundle != none" rule -- but ignore is fine alone
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'ignore' }) })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), before)
+}))
+
+test('options.lock=none requires a bundle', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'none' }) })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /lock=none requires bundle/)
+}))
+
+test('options.bundle=add with bundleFile writes the bundle at the chosen path', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: withOpts({ lock: 'add', bundle: 'add', bundleFile: bundlePath }),
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.ok(existsSync(bundlePath))
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
+}))
+
+test('options.bundle=replace overwrites an existing bundle', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run('src/entry.js', {
+    cwd: tmp,
+    env: withOpts({ lock: 'add', bundle: 'add', bundleFile: bundlePath }),
+  })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // forge an orphan; replace must drop it
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.sources['.'].files['src/orphan.js'] = 'exports.x = 0\n'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: withOpts({ lock: 'replace', bundle: 'replace', bundleFile: bundlePath }),
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const after = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(after.sources['.'].files['src/orphan.js'], undefined)
+}))
+
+test('options.bundle=load with frozen lock rejects a tampered source', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run('src/entry.js', {
+    cwd: tmp,
+    env: withOpts({ lock: 'add', bundle: 'add', bundleFile: bundlePath }),
+  })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Tamper the bundle's stored source for hello.js. The on-disk file is left intact so
+  // webpack can resolve normally; addFile then noupserts the disk bytes against the
+  // tampered source already in state.sources and rejects the disagreement.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.sources['.'].files['src/hello.js'] = 'exports.greet = (n) => `pwned, ${n}`\n'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: withOpts({ lock: 'frozen', bundle: 'load', bundleFile: bundlePath }),
+  })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION|sha512-|ModuleBuildError/)
+}))
+
+test('options.bundle=load requires lock=(frozen|none|ignore)', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: withOpts({ lock: 'add', bundle: 'load', bundleFile: bundlePath }),
+  })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /bundle=load requires lock/)
+}))
+
+test('options conflict with env is reported', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: { ...withOpts({ lock: 'frozen' }), EXODUS_STASIS_LOCK: 'add' },
+  })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Config options can not override stasis env/)
+}))
+
+test('unknown plugin option is rejected', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'add', bogus: 'x' }) })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Unknown StasisWebpack options/)
+}))
+
+test('invalid plugin option value is rejected', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+
+  const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'bogus' }) })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Invalid lock/)
 }))

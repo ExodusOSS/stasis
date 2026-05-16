@@ -3,7 +3,8 @@
 // via spawnSync, so each test gets a fresh State singleton in its own process.
 //
 // Usage: node tests/webpack-run.helper.js <entry>
-// Project root and stasis config come from process.cwd() and the EXODUS_STASIS_* env.
+// If STASIS_TEST_PLUGIN_OPTIONS is set in env (JSON-encoded), pass them to the plugin
+// constructor and let it construct State. Otherwise pre-construct State via env vars.
 
 import { resolve, join } from 'node:path'
 import { rm, mkdtemp } from 'node:fs/promises'
@@ -19,8 +20,13 @@ if (entries.length !== 1) {
   process.exit(2)
 }
 
-// Construct State BEFORE importing the plugin: the plugin module reads State.instance at top level.
-const state = new State(process.cwd())
+const pluginOptionsRaw = process.env.STASIS_TEST_PLUGIN_OPTIONS
+const pluginOptions = pluginOptionsRaw ? JSON.parse(pluginOptionsRaw) : undefined
+
+// Without explicit plugin options, pre-construct State so env vars drive Config.
+// With plugin options, defer to the plugin so its options drive Config.
+const _preState = pluginOptions === undefined ? new State(process.cwd()) : undefined
+
 const { StasisWebpack } = await import('../src/webpack.js')
 
 const dist = await mkdtemp(join(tmpdir(), 'stasis-webpack-test-'))
@@ -30,7 +36,7 @@ try {
     target: 'node',
     entry: resolve(process.cwd(), entries[0]),
     output: { path: dist, filename: 'bundle.js' },
-    plugins: [new StasisWebpack()],
+    plugins: [new StasisWebpack(pluginOptions)],
   })
 
   const stats = await promisify(compiler.run.bind(compiler))()
@@ -42,4 +48,4 @@ try {
   await rm(dist, { recursive: true, force: true })
 }
 
-state.write()
+State.instance.write()

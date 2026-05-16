@@ -3,15 +3,20 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { State } from './state.js'
-
-const state = State.instance
-assert.ok(state, 'Stasis preload is not active')
+import { assertOptionsMatchConfig, validatePluginOptions } from './config.js'
 
 export class StasisWebpack {
   #seen = new Set()
+  #state
 
-  constructor(options) {
-    assert.equal(options, undefined, 'No options expected')
+  constructor(options = {}) {
+    validatePluginOptions('StasisWebpack', options)
+    if (State.instance) {
+      assertOptionsMatchConfig(State.instance.config, options)
+      this.#state = State.instance
+    } else {
+      this.#state = new State(process.cwd(), options)
+    }
   }
 
   apply(compiler) {
@@ -25,12 +30,12 @@ export class StasisWebpack {
 
         if (!isEntry) {
           const parentURL = pathToFileURL(path.resolve(issuer)).toString()
-          state.addImport(parentURL, data.rawRequest, url)
+          this.#state.addImport(parentURL, data.rawRequest, url)
         }
 
         if (!this.#seen.has(filePath)) {
           this.#seen.add(filePath)
-          state.addFile(url, { isEntry })
+          this.#state.addFile(url, { isEntry })
         }
       })
     })
