@@ -131,8 +131,7 @@ export class State {
         if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
           const json = JSON.parse(brotliDecompressSync(sources))
           assert.equal(json.version, version)
-          assert.ok(['node_modules', 'full'].includes(json.config?.scope))
-          if (this.config.frozen) assert.equal(json.config.scope, this.config.scope)
+          assert.equal(json.config?.scope, this.config.scope)
           assert.ok(json.sources)
           assert.ok(json.formats)
           assert.ok(json.imports)

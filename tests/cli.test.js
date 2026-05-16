@@ -693,3 +693,24 @@ test('run --lock=frozen --bundle=load rejects a bundle with mismatching scope', 
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION/)
 }))
+
+test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not only frozen)', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.config.scope = 'node_modules'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+}))
