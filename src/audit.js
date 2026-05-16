@@ -97,10 +97,15 @@ export function formatTable(rows, columns) {
   if (rows.length === 0) return ''
   const widths = columns.map((c) => Math.max(c.length, ...rows.map((r) => String(r[c] ?? '').length)))
   const pad = (s, w) => String(s).padEnd(w)
-  const header = columns.map((c, i) => pad(c, widths[i])).join('  ')
-  const sep = widths.map((w) => '-'.repeat(w)).join('  ')
-  const body = rows.map((r) => columns.map((c, i) => pad(r[c] ?? '', widths[i])).join('  '))
-  return [header, sep, ...body].join('\n')
+  const line = (l, m, r, fill) => l + widths.map((w) => fill.repeat(w + 2)).join(m) + r
+  const row = (vals) => '│ ' + vals.map((v, i) => pad(v, widths[i])).join(' │ ') + ' │'
+  return [
+    line('┌', '┬', '┐', '─'),
+    row(columns),
+    line('├', '┼', '┤', '─'),
+    ...rows.map((r) => row(columns.map((c) => r[c] ?? ''))),
+    line('└', '┴', '┘', '─'),
+  ].join('\n')
 }
 
 export async function audit(files) {

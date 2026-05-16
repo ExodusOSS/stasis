@@ -127,7 +127,7 @@ test('flattenAdvisories sorts by severity then package', (t) => {
   ])
 })
 
-test('formatTable produces aligned header + rows', (t) => {
+test('formatTable produces a boxed table with header and separator', (t) => {
   const out = formatTable(
     [
       { a: 'x', b: 'yyy' },
@@ -136,9 +136,11 @@ test('formatTable produces aligned header + rows', (t) => {
     ['a', 'b']
   )
   const lines = out.split('\n')
-  t.assert.equal(lines.length, 4)
-  t.assert.match(lines[0], /^a  +b/)
-  t.assert.match(lines[1], /^-+  +-+$/)
+  t.assert.equal(lines.length, 6)
+  t.assert.match(lines[0], /^┌─+┬─+┐$/u)
+  t.assert.match(lines[1], /^│ a +│ b +│$/u)
+  t.assert.match(lines[2], /^├─+┼─+┤$/u)
+  t.assert.match(lines[5], /^└─+┴─+┘$/u)
 })
 
 // CLI integration
