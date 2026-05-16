@@ -13,7 +13,11 @@ test('Config defaults', (t) => {
   t.assert.equal(c.bundle, false)
   t.assert.equal(c.ignoreBundle, false)
   t.assert.equal(c.writeBundle, false)
+  t.assert.equal(c.replaceBundle, false)
   t.assert.equal(c.loadBundle, false)
+  t.assert.equal(c.lock, 'add')
+  t.assert.equal(c.writeLockfile, true)
+  t.assert.equal(c.replaceLockfile, false)
   t.assert.deepEqual(c.values, { scope: 'full' })
 })
 
@@ -21,7 +25,7 @@ test('Config json output has trailing newline and stable shape', (t) => {
   const c = new Config()
   const out = c.json
   t.assert.equal(out.at(-1), '\n')
-  t.assert.deepEqual(JSON.parse(out), { scope: 'full', lock: 'update', bundle: 'none' })
+  t.assert.deepEqual(JSON.parse(out), { scope: 'full', lock: 'add', bundle: 'none' })
 })
 
 test('loadConfig accepts empty object and keeps defaults', (t) => {
@@ -53,9 +57,9 @@ test('loadConfig with lock=none requires bundle non-none', (t) => {
   t.assert.throws(() => c.loadConfig(json({ lock: 'none' })), RangeError)
 })
 
-test('loadConfig with lock=none and bundle=save', (t) => {
+test('loadConfig with lock=none and bundle=add', (t) => {
   const c = new Config()
-  c.loadConfig(json({ lock: 'none', bundle: 'save' }))
+  c.loadConfig(json({ lock: 'none', bundle: 'add' }))
   t.assert.equal(c.lock, 'none')
   t.assert.equal(c.frozen, false)
   t.assert.equal(c.useLockfile, false)
@@ -72,18 +76,43 @@ test('loadConfig with lock=none and bundle=load', (t) => {
   t.assert.equal(c.loadBundle, true)
 })
 
-test('loadConfig bundle=save -> writeBundle, bundle truthy', (t) => {
+test('loadConfig bundle=add -> writeBundle, bundle truthy, not replace', (t) => {
   const c = new Config()
-  c.loadConfig(json({ bundle: 'save' }))
+  c.loadConfig(json({ bundle: 'add' }))
   t.assert.equal(c.bundle, true)
   t.assert.equal(c.writeBundle, true)
+  t.assert.equal(c.replaceBundle, false)
   t.assert.equal(c.loadBundle, false)
   t.assert.equal(c.ignoreBundle, false)
 })
 
-test('loadConfig bundle=load rejects lock=update', (t) => {
+test('loadConfig bundle=replace -> writeBundle and replaceBundle', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ bundle: 'replace' }))
+  t.assert.equal(c.bundle, true)
+  t.assert.equal(c.writeBundle, true)
+  t.assert.equal(c.replaceBundle, true)
+  t.assert.equal(c.loadBundle, false)
+})
+
+test('loadConfig lock=replace -> writeLockfile and replaceLockfile', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'replace' }))
+  t.assert.equal(c.lock, 'replace')
+  t.assert.equal(c.useLockfile, true)
+  t.assert.equal(c.writeLockfile, true)
+  t.assert.equal(c.replaceLockfile, true)
+  t.assert.equal(c.frozen, false)
+})
+
+test('loadConfig bundle=load rejects lock=add', (t) => {
   const c = new Config()
   t.assert.throws(() => c.loadConfig(json({ bundle: 'load' })), RangeError)
+})
+
+test('loadConfig bundle=load rejects lock=replace', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ bundle: 'load', lock: 'replace' })), RangeError)
 })
 
 test('loadConfig bundle=load works with lock=frozen', (t) => {
@@ -155,6 +184,16 @@ test('json reflects loaded values', (t) => {
     scope: 'node_modules',
     lock: 'frozen',
     bundle: 'load',
+  })
+})
+
+test('json reflects replace modes', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'replace', bundle: 'replace' }))
+  t.assert.deepEqual(JSON.parse(c.json), {
+    scope: 'full',
+    lock: 'replace',
+    bundle: 'replace',
   })
 })
 

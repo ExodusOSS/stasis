@@ -16,19 +16,40 @@ lockfile; none may start with `..`.
 ## `stasis.config.json`
 
 ```json
-{ "scope": "node_modules", "mode": "update", "bundle": "none", "debug": false }
+{ "scope": "node_modules", "lock": "add", "bundle": "none", "debug": false }
 ```
 
 | Key | Values | Default | Env var |
 | --- | --- | --- | --- |
 | `scope` | `"node_modules"`, `"full"` | `"full"` | `EXODUS_STASIS_SCOPE` |
-| `mode` | `"update"`, `"frozen"` | `"update"` | `EXODUS_STASIS_MODE` |
-| `bundle` | `"none"`, `"ignore"`, `"save"`, `"load"` | `"none"` | `EXODUS_STASIS_BUNDLE` |
+| `lock` | `"none"`, `"add"`, `"replace"`, `"frozen"` | `"add"` | `EXODUS_STASIS_LOCK` |
+| `bundle` | `"none"`, `"ignore"`, `"add"`, `"replace"`, `"load"` | `"none"` | `EXODUS_STASIS_BUNDLE` |
 | `debug` | boolean | `false` | `EXODUS_STASIS_DEBUG` |
 
-`bundle = load` requires `mode = frozen`. Unknown keys are rejected. If both
-the file and env var set a key, they must match. Only `scope` is persisted
-into the lockfile/bundle `config` block.
+`lock` controls how `stasis.lock.json` is treated:
+- `none` — no lockfile is loaded or written (requires a non-`none` `bundle`).
+- `add` — load the existing lockfile, append new entries, refuse to modify
+  existing ones (any file whose hash changed throws). Write on exit.
+- `replace` — ignore any existing lockfile data; record everything observed
+  this run and write the lockfile from scratch.
+- `frozen` — load the existing lockfile and treat it as read-only: every
+  observed file must already be listed with the same hash. Don't write.
+
+`bundle` controls how `stasis.code.br` / `stasis.resources.br` are treated:
+- `none` — no bundle is loaded or written. The bundle file's presence is an
+  error.
+- `ignore` — like `none` but the bundle file's presence is not an error.
+- `add` — load the existing bundle, append new entries, refuse to modify
+  existing ones. Write on exit.
+- `replace` — ignore any existing bundle data; record everything observed
+  this run and write the bundle from scratch.
+- `load` — read from the bundle for module resolution and source loading;
+  do not write.
+
+`bundle = load` requires `lock = frozen` or `lock = none`. `lock = none`
+requires `bundle` in `add | replace | load | ignore`. Unknown keys are
+rejected. If both the file and env var set a key, they must match. Only
+`scope` is persisted into the lockfile/bundle `config` block.
 
 ## `stasis.lock.json`
 
@@ -68,8 +89,9 @@ into the lockfile/bundle `config` block.
 
 ## `stasis.code.br`
 
-Brotli-compressed JSON, written when `bundle = save`, read when
-`bundle = save | load`. Requires a sibling `stasis.lock.json`.
+Brotli-compressed JSON, written when `bundle = add | replace`, read when
+`bundle = add | load` (skipped for `replace`, which rebuilds from scratch).
+Requires a sibling `stasis.lock.json` unless `lock = none | replace`.
 
 ```json
 {

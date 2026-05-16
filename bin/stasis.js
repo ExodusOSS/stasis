@@ -18,7 +18,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(none|update|frozen) [--bundle=(save|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
+ stasis run --lock=(none|add|replace|frozen) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
  stasis bundle create path/to/lockfile
  stasis bundle verify path/to/lockfile
  stasis advisories path/to/lockfile
@@ -51,17 +51,17 @@ if (command === 'run') {
 
   const { values } = parseArgs({ args: flags, options })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
-  if (!values.lock) usage('Error: --lock=(none|update|frozen) is required')
-  if (!['none', 'update', 'frozen'].includes(values.lock)) usage('Error: invalid --lock value')
+  if (!values.lock) usage('Error: --lock=(none|add|replace|frozen) is required')
+  if (!['none', 'add', 'replace', 'frozen'].includes(values.lock)) usage('Error: invalid --lock value')
   const lock = values.lock
   const scope = values.full ? 'full' : 'node_modules'
   const bundle = values.bundle
   const bundleFile = values['bundle-file'] ? resolve(values['bundle-file']) : ''
   const debug = values.debug ? '1' : ''
-  if (!['none', 'ignore', 'save', 'load'].includes(bundle)) usage('Error: invalid --bundle value')
-  if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(save|load|ignore)')
-  if (bundle === 'load' && lock === 'update') usage('Error: --bundle=load requires --lock=frozen or --lock=none')
-  if (lock === 'none' && bundle === 'none') usage('Error: --lock=none requires --bundle=(save|load|ignore)')
+  if (!['none', 'ignore', 'add', 'replace', 'load'].includes(bundle)) usage('Error: invalid --bundle value')
+  if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|ignore)')
+  if (bundle === 'load' && lock !== 'frozen' && lock !== 'none') usage('Error: --bundle=load requires --lock=frozen or --lock=none')
+  if (lock === 'none' && bundle === 'none') usage('Error: --lock=none requires --bundle=(add|replace|load|ignore)')
   console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
