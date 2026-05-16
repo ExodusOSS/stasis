@@ -80,6 +80,16 @@ export class State {
 
         if (config) this.config.loadConfig(config)
 
+        if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
+          throw new Error(`Unexpected ${join(dir, FILE_LOCK)} with config.lock = 'none'`)
+        }
+        if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
+          throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
+        }
+        if (resources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
+          throw new Error(`Unexpected ${join(dir, FILE_RESOURCES)} with config.bundle = 'none'`)
+        }
+
         if (sources && !lock && this.config.useLockfile && !this.config.replaceLockfile) {
           throw new Error('stasis.lock.json missing, can not use sources')
         }
@@ -118,40 +128,23 @@ export class State {
           }
         }
 
-        if (sources) {
-          if (!this.config.writeBundle && !this.config.loadBundle) {
-            throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
-          }
-
-          if (!this.config.replaceBundle) {
-            const json = JSON.parse(brotliDecompressSync(sources))
-            assert.equal(json.version, version)
-            assert.ok(json.sources)
-            assert.ok(json.formats)
-            assert.ok(json.imports)
-            this.sources = new Map(Object.entries(json.sources))
-            this.formats = new Map(Object.entries(json.formats))
-            this.imports = objectToMaps(json.imports)
-
-            if (!this.config.useLockfile) {
-              for (const [file, source] of this.sources) {
-                noupsert(this.hashes, file, sha512integrity(source))
-              }
-            }
-          }
+        if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
+          const json = JSON.parse(brotliDecompressSync(sources))
+          assert.equal(json.version, version)
+          assert.equal(json.config?.scope, this.config.scope)
+          assert.ok(json.sources)
+          assert.ok(json.formats)
+          assert.ok(json.imports)
+          this.sources = new Map(Object.entries(json.sources))
+          this.formats = new Map(Object.entries(json.formats))
+          this.imports = objectToMaps(json.imports)
         }
 
-        if (resources) {
-          if (!this.config.writeBundle && !this.config.loadBundle) {
-            throw new Error(`Unexpected ${join(dir, FILE_RESOURCES)} with config.bundle = 'none'`)
-          }
-
-          if (!this.config.replaceBundle) {
-            const json = JSON.parse(brotliDecompressSync(resources))
-            assert.equal(json.version, version)
-            assert.ok(json.resources)
-            this.resources = new Map(Object.entries(json.resources))
-          }
+        if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
+          const json = JSON.parse(brotliDecompressSync(resources))
+          assert.equal(json.version, version)
+          assert.ok(json.resources)
+          this.resources = new Map(Object.entries(json.resources))
         }
       }
     }
@@ -234,7 +227,9 @@ export class State {
     const source = this.sources.get(file)
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
     assert.ok(source !== undefined)
-    assert.equal(this.hashes.get(file), sha512integrity(source))
+    // Without a lockfile the bundle is self-attesting: hashes would be derived
+    // from the same source bytes we'd then verify, which is a tautology.
+    if (this.config.useLockfile) assert.equal(this.hashes.get(file), sha512integrity(source))
     return { source, format }
   }
 
