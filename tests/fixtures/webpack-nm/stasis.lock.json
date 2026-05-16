@@ -1,0 +1,15 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "node_modules"
+  },
+  "modules": {
+    "node_modules/fake-cjs-pkg": {
+      "name": "fake-cjs-pkg",
+      "version": "1.0.0",
+      "files": {
+        "index.js": "sha512-chNfEB6cB7TTvAEXZqqJvliSvxptmmAKsXmWEHsROiFtJeAxtqceKe+un0s94cxUKIN/9MVeAYY746eNU/ufEA=="
+      }
+    }
+  }
+}

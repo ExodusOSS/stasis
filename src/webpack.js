@@ -1,4 +1,4 @@
-import assert from 'node:assert'
+import assert from 'node:assert/strict'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -7,7 +7,6 @@ import { State } from './state.js'
 const state = State.instance
 assert.ok(state, 'Stasis preload is not active')
 
-// Webpack plugin interface
 export class StasisWebpack {
   #seen = new Set()
 
@@ -16,32 +15,23 @@ export class StasisWebpack {
   }
 
   apply(compiler) {
-    compiler.plugin('normal-module-factory', (nmf) => {
-      nmf.plugin('after-resolve', (data, callback) => {
-        assert(data.resource === data.resourceResolveData.path)
-        const filePath = path.resolve(data.resource) // resolve just in case, don't remove
+    compiler.hooks.normalModuleFactory.tap('Stasis', (nmf) => {
+      nmf.hooks.afterResolve.tap('Stasis', (data) => {
+        assert.equal(data.resource, data.resourceResolveData.path)
+        const filePath = path.resolve(data.resource)
+        const url = pathToFileURL(filePath).toString()
+        const issuer = data.resourceResolveData.context?.issuer
+        const isEntry = !issuer
 
-        // TODO: record resolutions
-        /*
-        const meta = {
-          resource: data.resource,
-          source: data.resourceResolveData.context.issuer,
-          query: data.rawRequest,
-          // Note: data.userRequest is different and can contain loader prefixes
-          moduleName: data.resourceResolveData.descriptionFileData.name,
-          modulePackage: data.resourceResolveData.descriptionFilePath,
+        if (!isEntry) {
+          const parentURL = pathToFileURL(path.resolve(issuer)).toString()
+          state.addImport(parentURL, data.rawRequest, url)
         }
-
-        console.log(meta)
-        //state.addImport(parentURL, specifier, url, { conditions: 'webpack ...', format })
-        */
 
         if (!this.#seen.has(filePath)) {
-          state.addFile(pathToFileURL(filePath).toString())
           this.#seen.add(filePath)
+          state.addFile(url, { isEntry })
         }
-
-        return callback(null, data)
       })
     })
   }
