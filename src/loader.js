@@ -43,6 +43,10 @@ function load(url, context, nextLoad) {
     // context.format may be null when the resolve chain didn't set it (e.g. node_modules
     // scope, where non-nm parents go through nextResolve and Node's default doesn't
     // populate format for the load hook). Only cross-check when the chain provided one.
+    // TODO: format here is sourced from the bundle's `formats` map, which the lockfile
+    // does not currently cover; a tampered bundle can flip module<->commonjs for a
+    // hash-valid file. Derive format from extension + module.type (recorded in the
+    // lockfile) and reject the bundle's claim when it disagrees.
     if (context.format != null) assert.equal(format, context.format)
     assert.ok(['module', 'commonjs', 'json'].includes(format))
     return { source, format, shortCircuit: true }

@@ -1,0 +1,14 @@
+{
+  "version": 0,
+  "config": { "scope": "node_modules" },
+  "modules": {
+    "node_modules/widget": {
+      "name": "widget",
+      "version": "1.2.3",
+      "files": {
+        "index.js": "sha512-abc",
+        "__proto__": "sha512-evil"
+      }
+    }
+  }
+}

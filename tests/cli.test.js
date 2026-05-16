@@ -569,32 +569,6 @@ test('run --lock=frozen --bundle=load roundtrips a JSON import with type:json at
   t.assert.equal(load.stdout, 'world\n')
 }))
 
-// Regression: a malicious lockfile with a `__proto__` key under a module's files map must
-// not poison Object.prototype. The loader normalizes module.files to a null-prototype on
-// load so the assertion path's `Object.hasOwn(module.files, rel)` + `files[rel] = …` writes
-// remain own-data-property operations regardless of the key.
-test('run --lock=frozen rejects forged __proto__ key in lockfile without polluting Object.prototype', withTmp((t, tmp) => {
-  cpSync(runFixture, tmp, { recursive: true })
-  const lockPath = join(tmp, 'stasis.lock.json')
-  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
-  // Inject a hostile entry: `__proto__` mapped to a "polluted":1 object. A vulnerable
-  // loader would later do `module.files['__proto__'] = integrity` and set the prototype,
-  // making `({}).polluted === 1` in the loader process.
-  lock.sources['.'].files.__proto__ = { polluted: 1 }
-  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
-
-  // Run with a probe that crashes hard if Object.prototype.polluted is set. The lockfile
-  // is invalid (extra entry), but the failure mode must not be prototype pollution.
-  writeFileSync(join(tmp, 'src/probe.js'),
-    "if (({}).polluted !== undefined) { console.error('POLLUTED'); process.exit(2) }\n"
-    + "import { greet } from './hello.js'\nconsole.log(greet('world'))\n")
-
-  const r = run(['run', '--lock=frozen', '--full', 'src/probe.js'], { cwd: tmp })
-  t.assert.doesNotMatch(r.stderr, /POLLUTED/)
-  t.assert.doesNotMatch(r.stdout, /POLLUTED/)
-  t.assert.notEqual(r.status, 2, 'prototype must not be polluted')
-}))
-
 test('run --lock=frozen --bundle=load reads non-node_modules sources from disk in node_modules scope', withTmp((t, tmp) => {
   cpSync(nmFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')

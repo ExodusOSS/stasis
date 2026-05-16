@@ -123,11 +123,21 @@ test('addImport: empty {} importAttributes is equivalent to undefined', (t) => {
   const parentURL = pathToFileURL(fileAbs2).toString()
   const childURL = pathToFileURL(fileAbs).toString()
 
-  // Recording with {} must collide with a prior recording with undefined attributes;
-  // noupsert lets the call pass only because the URL matches.
+  // The earlier "addImport / getImport roundtrip" test already added (parent, './foo.js',
+  // child) with no importAttributes. Reading back with {} must find that same entry --
+  // not a separate `${specifier}\0` keyed entry.
+  const gotWithEmpty = state.getImport(parentURL, './foo.js', { importAttributes: {} })
+  t.assert.equal(gotWithEmpty.url, childURL)
+
+  // Re-adding with {} must noupsert (collide-and-pass) against the no-attributes entry,
+  // not create a second entry under a different key.
   state.addImport(parentURL, './foo.js', childURL, { importAttributes: {} })
-  const got = state.getImport(parentURL, './foo.js', { importAttributes: {} })
-  t.assert.equal(got.url, childURL)
+
+  // Verify the specifier map gained no second key (e.g. `./foo.js\0`).
+  const parentKey = state.relative(state.absolute(parentURL))
+  const specifiers = state.imports.get('*').get(parentKey)
+  const fooKeys = [...specifiers.keys()].filter((k) => k === './foo.js' || k.startsWith('./foo.js\0'))
+  t.assert.deepEqual(fooKeys, ['./foo.js'])
 })
 
 test('lockData is well-formed JSON with the expected shape', (t) => {
