@@ -34,6 +34,11 @@ function load(url, context, nextLoad) {
   }
 
   if (state && state.config.loadBundle) {
+    // node_modules scope only bundles node_modules sources; non-tracked files are read
+    // from disk through Node's default loader (state.getFile is never called for them).
+    if (!state.config.full && !url.includes('/node_modules/')) {
+      return nextLoad(url, context)
+    }
     const { source, format } = state.getFile(url)
     assert.equal(format, context.format)
     assert.ok(format === 'module' || format === 'commonjs')
@@ -76,13 +81,22 @@ function resolve(specifier, context, nextResolve) {
 
   const { parentURL, conditions } = context
 
-  // In load mode, the entry point must be served from the bundle without touching disk.
-  // Initialise state up front (using cwd, since findPackageJSON needs the entry file to exist).
-  if (!state && !parentURL && process.env.EXODUS_STASIS_BUNDLE === 'load') {
+  // In full-scope load mode, the entry point is served from the bundle without touching
+  // disk, so state must be initialised before nextResolve runs. node_modules scope reads
+  // non-nm sources (including the entry) from disk, so state is initialised later in load().
+  if (!state && !parentURL && process.env.EXODUS_STASIS_BUNDLE === 'load'
+      && process.env.EXODUS_STASIS_SCOPE !== 'node_modules') {
     initState(process.cwd())
   }
 
   if (state && state.config.loadBundle) {
+    // node_modules scope defers resolution of non-nm parents to Node. Relative imports
+    // between non-nm sources then resolve to local files, and bare specifiers resolve via
+    // the on-disk node_modules layout -- but the load() hook still serves the resulting
+    // node_modules target from the bundle, so package contents need not be on disk.
+    if (!state.config.full && !parentURL?.includes('/node_modules/')) {
+      return nextResolve(specifier)
+    }
     // Bare specifier with a parent is the regular ESM import: look up the recorded
     // import map. Otherwise we have either a pre-resolved file URL (CLI entries and
     // ESM-to-CJS translator require() targets both arrive that way) or a bare entry
