@@ -58,10 +58,10 @@ test('run with no path prints "Nothing to run"', (t) => {
   t.assert.match(r.stderr, /Nothing to run/)
 })
 
-test('run requires --lock', (t) => {
+test('run with no flags defaults --lock=none and hits the bundle-required constraint', (t) => {
   const r = run(['run', 'a.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--lock=\(none\|add\|replace\|frozen\) is required/)
+  t.assert.match(r.stderr, /--lock=none requires --bundle/)
 })
 
 test('run rejects an invalid --lock value', (t) => {
@@ -125,6 +125,98 @@ test('run --lock=add rejects a changed source file', withTmp((t, tmp) => {
   // change a tracked file: hashes must no longer match the committed lockfile
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
   const r = run(['run', '--lock=add', '--full', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
+}))
+
+test('run --lock=frozen --full rejects a changed source file', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
+  const r = run(['run', '--lock=frozen', '--full', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
+}))
+
+test('run --lock=frozen --full rejects a brand new entry not listed in the lockfile', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  writeFileSync(join(tmp, 'src', 'fresh.js'), "console.log('fresh')\n")
+  const r = run(['run', '--lock=frozen', '--full', 'src/fresh.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+}))
+
+test('run --lock=add rejects a changed package.json version', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const pkgPath = join(tmp, 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  pkg.version = '99.99.99'
+  writeFileSync(pkgPath, JSON.stringify(pkg, undefined, 2) + '\n')
+  const r = run(['run', '--lock=add', '--full', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+}))
+
+test('run --lock=frozen --bundle=load detects a tampered source in the bundle', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  // tamper with the bundle: swap hello.js source for an attacker-controlled payload
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.sources['src/hello.js'] = 'export const greet = (n) => `pwned, ${n}`\n'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  // remove on-disk sources so bundle=load is the only source of code
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const r = run(
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
+  t.assert.doesNotMatch(r.stdout, /pwned/, 'tampered payload must not be executed')
+}))
+
+test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  // seed the bundle with the original sources
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  // change disk: even though the lockfile is being replaced, --bundle=add pre-loads
+  // the bundle's sources and addFile must noupsert the on-disk bytes against them
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
+
+  const r = run(
+    ['run', '--lock=replace', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+}))
+
+test('run --lock=add --bundle=replace still enforces the lockfile when rebuilding the bundle', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  // change disk: lockfile is preserved (lock=add). bundle is being rebuilt (bundle=replace).
+  // The lockfile's hash for hello.js no longer matches disk -- addFile must reject this.
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
+
+  const r = run(
+    ['run', '--lock=add', '--full', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
 }))

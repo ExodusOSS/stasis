@@ -18,7 +18,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(none|add|replace|frozen) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
  stasis bundle create path/to/lockfile
  stasis bundle verify path/to/lockfile
  stasis advisories path/to/lockfile
@@ -42,7 +42,7 @@ if (command === 'run') {
   }
 
   const options = {
-    lock: { type: 'string' },
+    lock: { type: 'string', default: 'none' },
     bundle: { type: 'string', default: 'none' },
     'bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
@@ -51,7 +51,6 @@ if (command === 'run') {
 
   const { values } = parseArgs({ args: flags, options })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
-  if (!values.lock) usage('Error: --lock=(none|add|replace|frozen) is required')
   if (!['none', 'add', 'replace', 'frozen'].includes(values.lock)) usage('Error: invalid --lock value')
   const lock = values.lock
   const scope = values.full ? 'full' : 'node_modules'
