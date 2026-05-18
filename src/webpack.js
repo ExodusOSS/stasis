@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { resolvePluginState } from './state.js'
+import { State, resolvePluginState } from './state.js'
 
 export class StasisWebpack {
   #seen = new Set()
@@ -34,5 +34,14 @@ export class StasisWebpack {
         }
       })
     })
+
+    // The stasis preload owns its own write via beforeExit/exit hooks (src/loader.js).
+    // Standalone and sidecar States have no such hook, so the plugin writes them when
+    // the compiler is done -- otherwise sidecar bundles never reach disk.
+    if (this.#state !== State.preload) {
+      compiler.hooks.done.tap('Stasis', () => {
+        this.#state.write()
+      })
+    }
   }
 }

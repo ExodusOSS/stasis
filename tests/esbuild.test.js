@@ -1,3 +1,13 @@
+// End-to-end coverage for StasisEsbuild via the spawning helper.
+//
+// IMPORTANT: by default the helper constructs a preload State first (see
+// esbuild-run.helper.js) and mirrors the test's options onto it, so the plugin
+// resolves into the "reuse preload" path (rules 3 / 5). The expectations below
+// (lockfile written, bundle written, frozen mode rejects, etc.) are therefore
+// the UNIFIED-state behavior the plugin produces under the stasis loader. Tests
+// at the bottom of this file pass STASIS_TEST_PRELOAD=0 to exercise the
+// standalone / noop / hard-throw paths instead.
+
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -550,4 +560,40 @@ test('rule 7: plugin with lock=none + bundle=none and no preload is a no-op', wi
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore,
     'noop plugin must not touch the lockfile')
+}))
+
+// Mirrors webpack.test.js: end-to-end coverage that the plugin's onEnd writes its own
+// State for standalone and sidecar cases (item 1 from the b08876a review).
+
+test('plugin standalone with bundle writes the bundle via onEnd', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  const bundlePath = join(tmp, 'standalone.br')
+
+  const r = run(['src/entry.js'], {
+    cwd: tmp,
+    env: standalone(withOpts({ lock: 'ignore', bundle: 'add', bundleFile: bundlePath })),
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.ok(existsSync(bundlePath), 'plugin must write the bundle on done')
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
+}))
+
+test('sidecar bundle (rule 6) is emitted by the plugin alongside preload bundle', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const preloadBundle = join(tmp, 'preload.br')
+  const sidecarBundle = join(tmp, 'sidecar.br')
+
+  const r = run(['src/entry.js'], {
+    cwd: tmp,
+    env: {
+      STASIS_TEST_PRELOAD_OPTIONS: JSON.stringify({ lock: 'add', bundle: 'add', bundleFile: preloadBundle }),
+      STASIS_TEST_PLUGIN_OPTIONS: JSON.stringify({ lock: 'add', bundle: 'add', bundleFile: sidecarBundle }),
+    },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.ok(existsSync(preloadBundle), 'preload bundle must be written by loader hooks')
+  t.assert.ok(existsSync(sidecarBundle), 'sidecar bundle must be written by plugin onEnd hook')
+  t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')))
 }))

@@ -449,7 +449,7 @@ export class State {
 //     plugins be env-controlled off without throwing on the lock=none/bundle=none invariant).
 export function resolvePluginState(label, options, cwd) {
   validatePluginOptions(label, options)
-  const { lock, bundle, bundleFile } = options
+  const { scope, lock, bundle, bundleFile, debug } = options
   const ambient = preload
 
   if (!ambient) {
@@ -469,6 +469,15 @@ export function resolvePluginState(label, options, cwd) {
   if (lock !== undefined && lock !== pc.lock) {
     throw new Error(`${label}: lock='${lock}' conflicts with active preload lock='${pc.lock}'`)
   }
+  // scope/debug must agree with the preload on every preload-coupled path -- reuse
+  // adopts preload's config wholesale, and sidecar copies it field by field. Catch a
+  // disagreement here rather than silently overriding the user's value.
+  if (scope !== undefined && scope !== pc.scope) {
+    throw new Error(`${label}: scope='${scope}' conflicts with active preload scope='${pc.scope}'`)
+  }
+  if (debug !== undefined && debug !== pc.debug) {
+    throw new Error(`${label}: debug=${debug} conflicts with active preload debug=${pc.debug}`)
+  }
 
   if (pc.bundle) {
     // Preload has bundle on -- plugin can't disable, must match mode.
@@ -483,7 +492,8 @@ export function resolvePluginState(label, options, cwd) {
       )
     }
     if (bundleFile === undefined || bundleFile === pc.bundleFile) {
-      // Rule 5: same path reuses the preload.
+      // Rule 5: same path reuses the preload. assertOptionsMatchConfig also re-checks
+      // scope/lock/bundle/debug via Config getters and bundleFile equality.
       assertOptionsMatchConfig(pc, options)
       return { state: ambient, isNoop: false }
     }
@@ -506,8 +516,13 @@ export function resolvePluginState(label, options, cwd) {
     return { state: ambient, isNoop: false }
   }
   // Plugin wants its own bundle alongside preload's lockfile -- sidecar.
+  // bundleFile is required: the default path (FILE_CODE at root) would collide with
+  // whatever the preload might emit if it ever turned bundle on, and we want callers
+  // to be explicit about where the sidecar lives.
   if (!bundleFile) {
-    throw new Error(`${label}: bundle='${bundle}' alongside a preload without bundle requires bundleFile`)
+    throw new Error(
+      `${label}: bundle='${bundle}' alongside a preload without bundle requires an explicit bundleFile`
+    )
   }
   const sidecar = new State(cwd, {
     parent: ambient,

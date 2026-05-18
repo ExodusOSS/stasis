@@ -4,7 +4,7 @@ import { extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
-import { resolvePluginState } from './state.js'
+import { State, resolvePluginState } from './state.js'
 
 export class StasisEsbuild {
   #seen = new Set()
@@ -19,8 +19,16 @@ export class StasisEsbuild {
     return 'stasis'
   }
 
-  setup = ({ onResolve, onLoad, resolve }) => {
+  setup = ({ onResolve, onLoad, onEnd, resolve }) => {
     if (!this.#state) return  // noop plugin
+
+    // The stasis preload owns its own write via beforeExit/exit hooks (src/loader.js).
+    // Standalone and sidecar States have no such hook, so the plugin writes them when
+    // the build finishes -- otherwise sidecar bundles never reach disk.
+    if (this.#state !== State.preload) {
+      onEnd(() => { this.#state.write() })
+    }
+
     onResolve({ filter: /$/, namespace: 'file' }, async ({ path: specifier, ...args }) => {
       // Recurse with a synthetic namespace so esbuild's default resolver runs without re-entering us
       const res = await resolve(specifier, { ...args, namespace: 'stasis' })
