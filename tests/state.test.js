@@ -1,7 +1,6 @@
 import { test } from 'node:test'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { brotliDecompressSync } from 'node:zlib'
 
 import { State } from '../src/state.js'
 
@@ -178,10 +177,10 @@ test('lockData is well-formed JSON with the expected shape', (t) => {
   t.assert.equal(parsed.sources['.'].name, 'stasis-test-root')
 })
 
-test('sourceData is brotli-compressed JSON in v1 format', (t) => {
-  const buf = state.sourceData
-  t.assert.ok(Buffer.isBuffer(buf))
-  const parsed = JSON.parse(brotliDecompressSync(buf))
+test('sourceData is JSON text in v1 format', (t) => {
+  const text = state.sourceData
+  t.assert.equal(typeof text, 'string')
+  const parsed = JSON.parse(text)
   t.assert.equal(parsed.version, 1)
   t.assert.deepEqual(parsed.config, { scope: 'full' })
   t.assert.ok(Array.isArray(parsed.entries))

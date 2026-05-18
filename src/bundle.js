@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { fileMapToObject, fileSetToObject, fromEntries, objectToMaps, sortPaths } from './util.js'
 
@@ -33,7 +32,9 @@ function inferModuleDir(path) {
   return { dir: path.slice(0, after) + name, rel: parts.slice(pkgLen).join('/'), name }
 }
 
-// Bundle (stasis.code.br / stasis.resources.br) on-disk version:
+// Bundle handles the JSON shape of stasis.code.br / stasis.resources.br;
+// callers (State) are responsible for the brotli wrapper around the JSON
+// text. On-disk version:
 //   v0 — legacy flat layout: top-level `sources` (or `resources`) keyed by
 //        project-relative path. No entries/modules metadata.
 //   v1 — current layout, mirrors stasis.lock.json: per-package buckets under
@@ -81,8 +82,8 @@ export class Bundle {
     return m
   }
 
-  static parseCode(buf) {
-    const json = JSON.parse(brotliDecompressSync(buf))
+  static parseCode(text) {
+    const json = JSON.parse(text)
     assert.ok(json.version === VERSION || json.version === LEGACY_VERSION)
     assert.ok(['node_modules', 'full'].includes(json.config?.scope))
     assert.ok(json.formats)
@@ -145,8 +146,8 @@ export class Bundle {
     })
   }
 
-  static parseResources(buf) {
-    const json = JSON.parse(brotliDecompressSync(buf))
+  static parseResources(text) {
+    const json = JSON.parse(text)
     assert.ok(json.version === VERSION || json.version === LEGACY_VERSION)
 
     const modules = new Map()
@@ -216,7 +217,7 @@ export class Bundle {
     const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
-    return brotliCompressSync(JSON.stringify(data, undefined, 2))
+    return JSON.stringify(data, undefined, 2)
   }
 
   serializeResources() {
@@ -224,6 +225,6 @@ export class Bundle {
     const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { sources })
     Object.assign(data, { modules })
-    return brotliCompressSync(JSON.stringify(data, undefined, 2))
+    return JSON.stringify(data, undefined, 2)
   }
 }
