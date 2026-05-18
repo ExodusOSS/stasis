@@ -79,12 +79,23 @@ export class Config {
     this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envDebugBool(this.#env.debug) : (debug ?? false)
 
+    this.#checkInvariants()
+  }
+
+  // Per-field validation + cross-field invariants. Constructor (options path) and
+  // loadConfig (disk path) both call this so the rules live in one place.
+  #checkInvariants() {
     assert.ok(VALID_SCOPE.has(this.#scope), `Invalid scope: ${this.#scope}`)
     assert.ok(VALID_LOCK.has(this.#lock), `Invalid lock: ${this.#lock}`)
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
     if (this.#bundleFile !== undefined) assert.equal(typeof this.#bundleFile, 'string', 'bundleFile must be a string')
 
+    // bundle=load needs a trust root for source bytes: frozen pins each file's sha512 in
+    // the lockfile and we cross-check it on load; otherwise the bundle is itself
+    // authoritative -- lock=none with no lockfile on disk, or lock=ignore with a lockfile
+    // deliberately bypassed.
+    // WARNING: lockfile attests only to source BYTES, not bundle metadata.
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
     }
@@ -102,28 +113,12 @@ export class Config {
       debug = this.#debug,
       ...rest
     } = JSON.parse(json)
-    assert.ok(VALID_SCOPE.has(scope))
-    assert.ok(VALID_LOCK.has(lock))
-    assert.ok(VALID_BUNDLE.has(bundle))
-    assert.ok([false, true].includes(debug))
     assert.equal(Object.keys(rest).length, 0)
     this.#scope = scope
     this.#lock = lock
     this.#bundle = bundle
     this.#debug = debug
-
-    // bundle=load needs a trust root for source bytes: frozen pins each file's sha512 in
-    // the lockfile and we cross-check it on load; otherwise the bundle is itself
-    // authoritative -- lock=none with no lockfile on disk, or lock=ignore with a lockfile
-    // deliberately bypassed.
-    // WARNING: lockfile attests only to source BYTES, not bundle metadata.
-    if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
-      throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
-    }
-
-    if (this.#lock === 'none' && this.#bundle === 'none') {
-      throw new RangeError('lock=none requires bundle=(add|replace|load|ignore)')
-    }
+    this.#checkInvariants()
 
     try {
       if (this.#env.scope) assert.equal(this.#scope, this.#env.scope)
