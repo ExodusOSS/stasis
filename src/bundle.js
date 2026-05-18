@@ -9,19 +9,21 @@ const LEGACY_VERSION = 0
 const normalize = ({ name, version, files }) =>
   ({ name, version, files: fromEntries(Object.entries(files)) })
 
-// Best-effort path → (module dir, module-relative path) for v0 regrouping.
-// Paths containing `node_modules/` are bucketed by the *last* node_modules
-// segment plus the next 1-2 segments (scoped pkg or plain pkg name) — same
-// last-wins convention package managers use to attribute a file to a package.
-// Everything else goes under "." (workspace root).
+// Best-effort path → { dir, rel, name } for v0 regrouping. Paths containing
+// `node_modules/` are bucketed by the *last* node_modules segment plus the next
+// 1-2 segments (scoped or plain pkg name) — the same last-wins convention
+// package managers use — and the same prefix is reported as the package `name`.
+// Everything else goes under "." with `name: null` (workspace root, not
+// inferable from path). Version cannot be inferred either way.
 function inferModuleDir(path) {
   const marker = 'node_modules/'
   const idx = path.lastIndexOf(marker)
-  if (idx === -1) return ['.', path]
+  if (idx === -1) return { dir: '.', rel: path, name: null }
   const after = idx + marker.length
   const parts = path.slice(after).split('/')
   const pkgLen = parts[0].startsWith('@') ? 2 : 1
-  return [path.slice(0, after) + parts.slice(0, pkgLen).join('/'), parts.slice(pkgLen).join('/')]
+  const name = parts.slice(0, pkgLen).join('/')
+  return { dir: path.slice(0, after) + name, rel: parts.slice(pkgLen).join('/'), name }
 }
 
 // Bundle (stasis.code.br / stasis.resources.br) on-disk version:
@@ -118,8 +120,8 @@ export class Bundle {
       // v0 legacy: flat sources at top level, regrouped by inferred module dir.
       assert.ok(json.sources)
       for (const [path, content] of Object.entries(json.sources)) {
-        const [dir, rel] = inferModuleDir(path)
-        if (!modules.has(dir)) modules.set(dir, { name: null, version: null, files: Object.create(null) })
+        const { dir, rel, name } = inferModuleDir(path)
+        if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         modules.get(dir).files[rel] = content
       }
     }
@@ -172,8 +174,8 @@ export class Bundle {
       // v0 legacy: flat resources at top level, regrouped by inferred module dir.
       assert.ok(json.resources)
       for (const [path, content] of Object.entries(json.resources)) {
-        const [dir, rel] = inferModuleDir(path)
-        if (!modules.has(dir)) modules.set(dir, { name: null, version: null, files: Object.create(null) })
+        const { dir, rel, name } = inferModuleDir(path)
+        if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         modules.get(dir).files[rel] = content
       }
     }

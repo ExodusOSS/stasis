@@ -130,8 +130,11 @@ export class State {
 
   // Cross-check bundle metadata (entries/modules) with what the lockfile already
   // loaded, or absorb it as the source of truth when no lockfile is present.
-  // v0 bundles carry a single synthetic "." entry with null name/version —
-  // those entries are skipped (no metadata to cross-check).
+  // v0 bundles infer `name` from path for node_modules buckets but carry no
+  // version; the workspace "." bucket has no inferable name. We skip entries
+  // we can't cross-check (null name with lockfile, or null version when
+  // populating state.modules — null versions would later collide with
+  // addFile's strict name/version equality check).
   #mergeBundleMetadata(bundle, { lockfileLoaded }) {
     if (lockfileLoaded) {
       if (bundle.entries.size > 0) {
@@ -142,11 +145,11 @@ export class State {
         )
       }
       for (const [dir, info] of bundle.modules) {
-        if (info.name === null) continue // v0 legacy: no metadata to check
+        if (info.name === null) continue // workspace bucket: no inferable name
         assert.ok(this.modules.has(dir), `bundle module ${dir} missing in lockfile`)
         const lockModule = this.modules.get(dir)
         assert.equal(info.name, lockModule.name)
-        assert.equal(info.version, lockModule.version)
+        if (info.version !== null) assert.equal(info.version, lockModule.version)
         for (const rel of Object.keys(info.files)) {
           assert.ok(Object.hasOwn(lockModule.files, rel), `bundle file ${dir}/${rel} missing in lockfile`)
         }
@@ -154,7 +157,7 @@ export class State {
     } else {
       if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
       for (const [dir, info] of bundle.modules) {
-        if (info.name === null) continue
+        if (info.name === null || info.version === null) continue // partial metadata
         if (this.modules.has(dir)) {
           // Code and resources bundles both populate `state.modules` when no lockfile
           // is loaded. They must agree on name/version for the same dir.

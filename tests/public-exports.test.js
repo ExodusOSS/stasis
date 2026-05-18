@@ -48,7 +48,10 @@ test('Bundle.serializeCode round-trip preserves entries, modules, formats, impor
 
   t.assert.deepEqual([...parsed.entries], ['src/a.js'])
   t.assert.equal(parsed.modules.get('.').name, 'x')
+  t.assert.equal(parsed.modules.get('.').version, '1.0.0')
   t.assert.equal(parsed.modules.get('.').files['src/a.js'], 'export const x = 1\n')
+  t.assert.equal(parsed.modules.get('node_modules/w').name, 'w')
+  t.assert.equal(parsed.modules.get('node_modules/w').version, '1.0.0')
   t.assert.equal(parsed.modules.get('node_modules/w').files['i.js'], 'export const y = 2\n')
   t.assert.equal(parsed.sources.get('src/a.js'), 'export const x = 1\n')
   t.assert.equal(parsed.sources.get('node_modules/w/i.js'), 'export const y = 2\n')
@@ -115,6 +118,15 @@ test('Bundle.parseCode regroups v0 flat sources by inferred module dir', (t) => 
   t.assert.equal(parsed.modules.get('node_modules/foo').files['lib/x.js'], 'foox')
   t.assert.equal(parsed.modules.get('node_modules/@scope/pkg').files['index.js'], 'scoped')
   t.assert.equal(parsed.modules.get('node_modules/foo/node_modules/bar').files['i.js'], 'nested')
+  // node_modules buckets carry the inferred package name; the workspace "."
+  // bucket has no inferable name. v0 records no version, so version stays null.
+  t.assert.equal(parsed.modules.get('.').name, null)
+  t.assert.equal(parsed.modules.get('node_modules/foo').name, 'foo')
+  t.assert.equal(parsed.modules.get('node_modules/@scope/pkg').name, '@scope/pkg')
+  t.assert.equal(parsed.modules.get('node_modules/foo/node_modules/bar').name, 'bar')
+  for (const dir of parsed.modules.keys()) {
+    t.assert.equal(parsed.modules.get(dir).version, null, `${dir} version`)
+  }
   // sources getter still presents a flat project-relative view
   t.assert.equal(parsed.sources.get('node_modules/foo/index.js'), 'foo')
   t.assert.equal(parsed.sources.get('node_modules/foo/node_modules/bar/i.js'), 'nested')
