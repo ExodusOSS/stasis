@@ -39,11 +39,11 @@ export class State {
   constructor(root, options = {}) {
     const { preload: isPreload = false, ...configOptions } = options
     this.config = new Config(configOptions)
-    if (isPreload) {
-      assert.ok(!preload, 'Only one preload Stasis instance is supported')
-      preload = this
-    }
-    liveStates.add(this)
+    // Check the preload-uniqueness invariant up front so two simultaneous preload attempts
+    // can't both pass through the constructor; the actual `preload = this` registration
+    // happens after construction succeeds so a throw in setup can't leave a half-built
+    // preload reference behind.
+    if (isPreload) assert.ok(!preload, 'Only one preload Stasis instance is supported')
     const potentialRoots = []
     let cursor = root
     while (cursor) {
@@ -137,6 +137,11 @@ export class State {
         }
       }
     }
+
+    // Register only after every fallible step succeeds, so a thrown error during config
+    // discovery / lockfile / bundle parsing leaves the static registry untouched.
+    if (isPreload) preload = this
+    liveStates.add(this)
   }
 
   // Cross-check bundle metadata (entries/modules) with what the lockfile already

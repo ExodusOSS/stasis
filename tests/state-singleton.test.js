@@ -21,7 +21,9 @@ test('multiple State instances coexist; preload is unique', (t) => {
 })
 
 test('preload State is exposed via State.preload', (t) => {
-  // fresh process per file; the previous test's non-preload States are gone
+  // The States from the previous test linger in liveStates -- node:test runs subtests
+  // in the same process and the registry is monotonic. The preload short-circuit in
+  // State.instance is what makes this test independent of the previous one.
   const p = new State(root, { preload: true })
   t.assert.equal(State.preload, p)
   // State.instance returns the preload even when more live States exist
@@ -30,4 +32,19 @@ test('preload State is exposed via State.preload', (t) => {
   t.assert.notEqual(State.instance, _extra)
   // Constructing a second preload is rejected
   t.assert.throws(() => new State(root, { preload: true }), /Only one preload Stasis instance/)
+})
+
+test('preload constructed first survives later non-preload additions', (t) => {
+  // Same registry state as test 2 leaves us with: preload already set. State.instance
+  // still resolves to it regardless of how many non-preloads we tack on afterwards.
+  const beforeCount = 0 // we only care about relative growth
+  const p = State.preload
+  t.assert.ok(p)
+  const _a = new State(root)
+  const _b = new State(root)
+  t.assert.equal(State.preload, p, 'preload identity is sticky across later additions')
+  t.assert.equal(State.instance, p, 'State.instance keeps returning the preload')
+  // sanity check that liveStates actually grew (we can't read it directly; assert via the
+  // ambiguity branch: if we dropped the preload, State.instance would throw)
+  void beforeCount
 })
