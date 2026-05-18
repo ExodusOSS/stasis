@@ -53,15 +53,7 @@ export function noupsert(map, key, value) {
 
 export const isPlainObject = (x) => x && [null, Object.prototype].includes(Object.getPrototypeOf(x))
 
-// Object.fromEntries itself is prototype-safe (it uses CreateDataPropertyOrThrow which
-// bypasses any __proto__ accessor), but later `result[key] = val` on the returned object
-// triggers the prototype setter when key === '__proto__'. Use this wrapper whenever the
-// produced object will be mutated via bracket assignment with potentially-untrusted keys.
-export const fromEntries = (entries) => {
-  const result = Object.create(null)
-  for (const [k, v] of entries) result[k] = v
-  return result
-}
+export const fromEntries = (entries) => Object.setPrototypeOf(Object.fromEntries(entries), null)
 
 export const fileSetToObject = (set) => [...set].sort((a, b) => sortPaths(a, b))
 

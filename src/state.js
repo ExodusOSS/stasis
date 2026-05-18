@@ -244,11 +244,7 @@ export class State {
     return this.formats.get(this.relative(this.absolute(url)))
   }
 
-  // Same parent+specifier can resolve to a different URL/format under different import
-  // attributes (e.g. `import x from './data.json' with { type: 'json' }` vs without), so
-  // the attributes participate in the lookup key. NUL is illegal in specifiers / paths,
-  // and JSON.stringify of the sorted entries is unambiguous regardless of attribute
-  // names or values (avoids `=`/`,` collisions in any naive delimiter encoding).
+  // Same parent+specifier might resolve to a different URL/format under different import attributes
   #importKey(specifier, importAttributes) {
     const entries = importAttributes ? Object.entries(importAttributes) : []
     if (entries.length === 0) return specifier

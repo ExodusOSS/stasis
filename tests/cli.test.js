@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +10,8 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'stasis.js')
 const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run')
 const nmFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm')
+const nmCjsFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm-cjs')
+const jsonAttrFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-json-attr')
 
 // strip any inherited stasis env vars so the CLI's env-conflict guard doesn't trip
 const {
@@ -512,19 +514,9 @@ test('run --lock=frozen --bundle=load works in node_modules scope with non-track
 // our own shortCircuit. This exercises that path with a CJS dep, which is the case most
 // at risk of a format mismatch (commonjs vs module) between our recorded value and Node's.
 test('run --lock=frozen --bundle=load roundtrips a CJS node_modules dep under node_modules scope', withTmp((t, tmp) => {
-  writeFileSync(join(tmp, 'package.json'),
-    JSON.stringify({ name: 'nm-cjs-fixture', version: '0.0.0', private: true, type: 'module' }) + '\n')
-  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'node_modules' }) + '\n')
-  mkdirSync(join(tmp, 'src'))
-  writeFileSync(join(tmp, 'src/entry.js'),
-    "import pkg from 'fake-cjs-nm'\nconsole.log(pkg.greet('world'))\n")
-  mkdirSync(join(tmp, 'node_modules/fake-cjs-nm'), { recursive: true })
-  writeFileSync(join(tmp, 'node_modules/fake-cjs-nm/package.json'),
-    JSON.stringify({ name: 'fake-cjs-nm', version: '1.0.0', main: 'index.js' }) + '\n')
-  writeFileSync(join(tmp, 'node_modules/fake-cjs-nm/index.js'),
-    "module.exports = { greet: (n) => `hello, ${n}` }\n")
-
+  cpSync(nmCjsFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
+
   const save = run(
     ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
@@ -543,14 +535,9 @@ test('run --lock=frozen --bundle=load roundtrips a CJS node_modules dep under no
 // Pins format='json' through bundle=load: a `with { type: 'json' }` import resolves to
 // format='json', which the load hook used to reject (only module/commonjs were allowed).
 test('run --lock=frozen --bundle=load roundtrips a JSON import with type:json attribute', withTmp((t, tmp) => {
-  writeFileSync(join(tmp, 'package.json'),
-    JSON.stringify({ name: 'json-attr-fixture', version: '0.0.0', private: true, type: 'module' }) + '\n')
-  mkdirSync(join(tmp, 'src'))
-  writeFileSync(join(tmp, 'src/entry.js'),
-    "import data from './data.json' with { type: 'json' }\nconsole.log(data.who)\n")
-  writeFileSync(join(tmp, 'src/data.json'), '{"who":"world"}\n')
-
+  cpSync(jsonAttrFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
+
   const save = run(
     ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
