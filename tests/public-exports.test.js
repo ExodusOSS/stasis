@@ -1,5 +1,4 @@
 import { test } from 'node:test'
-import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis/bundle'
 import { Lockfile } from '@exodus/stasis/lockfile'
@@ -43,8 +42,9 @@ test('Bundle.serializeCode round-trip preserves entries, modules, formats, impor
     imports: new Map([['*', new Map([['src/a.js', new Map([['./b.js', 'src/b.js']])]])]]),
   })
 
-  const buf = bundle.serializeCode()
-  const parsed = Bundle.parseCode(buf)
+  const text = bundle.serializeCode()
+  t.assert.equal(typeof text, 'string')
+  const parsed = Bundle.parseCode(text)
 
   t.assert.deepEqual([...parsed.entries], ['src/a.js'])
   t.assert.equal(parsed.modules.get('.').name, 'x')
@@ -66,21 +66,22 @@ test('Bundle.serializeResources round-trip', (t) => {
     ]),
   })
 
-  const buf = bundle.serializeResources()
-  const parsed = Bundle.parseResources(buf)
+  const text = bundle.serializeResources()
+  t.assert.equal(typeof text, 'string')
+  const parsed = Bundle.parseResources(text)
 
   t.assert.equal(parsed.modules.get('node_modules/foo').files['asset.bin'], Buffer.from('hello').toString('base64'))
   t.assert.equal(parsed.sources.get('node_modules/foo/asset.bin'), Buffer.from('hello').toString('base64'))
 })
 
 test('Bundle.parseCode exposes the parsed version (v0 stays at 0 in memory)', (t) => {
-  const v0 = brotliCompressSync(JSON.stringify({
+  const v0 = JSON.stringify({
     version: 0,
     config: { scope: 'full' },
     formats: {},
     imports: {},
     sources: { 'src/a.js': 'export const x = 1\n' },
-  }))
+  })
   const parsed = Bundle.parseCode(v0)
   t.assert.equal(parsed.version, 0)
   // Re-save promotes to v1; the in-memory v0 carries no entries/modules metadata,
@@ -88,7 +89,7 @@ test('Bundle.parseCode exposes the parsed version (v0 stays at 0 in memory)', (t
 })
 
 test('Bundle.parseCode regroups v0 flat sources by inferred module dir', (t) => {
-  const v0 = brotliCompressSync(JSON.stringify({
+  const v0 = JSON.stringify({
     version: 0,
     config: { scope: 'full' },
     formats: {},
@@ -101,7 +102,7 @@ test('Bundle.parseCode regroups v0 flat sources by inferred module dir', (t) => 
       'node_modules/@scope/pkg/index.js': 'scoped',
       'node_modules/foo/node_modules/bar/i.js': 'nested',
     },
-  }))
+  })
   const parsed = Bundle.parseCode(v0)
 
   t.assert.deepEqual([...parsed.modules.keys()].sort(), [
@@ -133,7 +134,7 @@ test('Bundle.parseCode regroups v0 flat sources by inferred module dir', (t) => 
 })
 
 test('Bundle.parseCode rejects a v1 full-scope bundle with empty entries', (t) => {
-  const buf = brotliCompressSync(JSON.stringify({
+  const text = JSON.stringify({
     version: 1,
     config: { scope: 'full' },
     entries: [],
@@ -141,6 +142,6 @@ test('Bundle.parseCode rejects a v1 full-scope bundle with empty entries', (t) =
     modules: {},
     formats: {},
     imports: {},
-  }))
-  t.assert.throws(() => Bundle.parseCode(buf), /at least one entry/)
+  })
+  t.assert.throws(() => Bundle.parseCode(text), /at least one entry/)
 })

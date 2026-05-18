@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve, relative, basename, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Config } from './config.js'
 import { Bundle } from './bundle.js'
@@ -107,7 +108,7 @@ export class State {
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
-          const bundle = Bundle.parseCode(sources)
+          const bundle = Bundle.parseCode(brotliDecompressSync(sources).toString('utf-8'))
           assert.equal(bundle.config.scope, this.config.scope)
           this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.sources = bundle.sources
@@ -116,7 +117,7 @@ export class State {
         }
 
         if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
-          const bundle = Bundle.parseResources(resources)
+          const bundle = Bundle.parseResources(brotliDecompressSync(resources).toString('utf-8'))
           // v0 resource bundles didn't record scope; only enforce on v1 where it's reliable.
           if (bundle.version === Bundle.VERSION) {
             assert.equal(bundle.config.scope, this.config.scope)
@@ -361,7 +362,7 @@ export class State {
     if (this.config.writeBundle) {
       const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
       mkdirSync(dirname(sourcesPath), { recursive: true })
-      writeFileSync(sourcesPath, this.sourceData)
+      writeFileSync(sourcesPath, brotliCompressSync(this.sourceData))
     }
   }
 }
