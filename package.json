@@ -12,8 +12,19 @@
     "./prune": "./src/prune.js"
   },
   "files": [
-    "src",
-    "bin"
+    "bin/stasis.js",
+    "src/apis/npm/index.js",
+    "src/apis/npm/semver.cjs",
+    "src/bundle.js",
+    "src/config.js",
+    "src/esbuild.js",
+    "src/loader.js",
+    "src/lockfile.js",
+    "src/prune.js",
+    "src/state.js",
+    "src/state.util.js",
+    "src/util.js",
+    "src/webpack.js"
   ],
   "engines": {
     "node": ">=24.14.0"
