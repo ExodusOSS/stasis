@@ -332,7 +332,7 @@ test('Config reads env vars at construction time', withEnv(
 test('Config rejects options that conflict with env', withEnv(
   { EXODUS_STASIS_LOCK: 'frozen' },
   (t) => {
-    t.assert.throws(() => new Config({ lock: 'add' }), /Plugin options can not override stasis env/)
+    t.assert.throws(() => new Config({ lock: 'add' }), /Config options can not override stasis env/)
   }
 ))
 
@@ -358,7 +358,7 @@ test('Config debug env "1" is true', withEnv(
 test('Config debug=true option conflicts with env debug=0', withEnv(
   { EXODUS_STASIS_DEBUG: '0' },
   (t) => {
-    t.assert.throws(() => new Config({ debug: true }), /Plugin options can not override stasis env/)
+    t.assert.throws(() => new Config({ debug: true }), /Config options can not override stasis env/)
   }
 ))
 

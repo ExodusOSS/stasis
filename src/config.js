@@ -70,7 +70,7 @@ export class Config {
         assert.equal(envDebugBool(this.#env.debug), debug)
       }
     } catch (cause) {
-      throw new Error('Plugin options can not override stasis env', { cause })
+      throw new Error('Config options can not override stasis env', { cause })
     }
 
     this.#scope = this.#env.scope || scope || 'full'
@@ -121,10 +121,10 @@ export class Config {
     this.#checkInvariants()
 
     try {
-      if (this.#env.scope) assert.equal(this.#scope, this.#env.scope)
-      if (this.#env.lock) assert.equal(this.#lock, this.#env.lock)
-      if (this.#env.bundle) assert.equal(this.#bundle, this.#env.bundle)
-      if (this.#env.debug) assert.equal(this.#debug, envDebugBool(this.#env.debug))
+      if (this.#env.scope !== undefined) assert.equal(this.#scope, this.#env.scope)
+      if (this.#env.lock !== undefined) assert.equal(this.#lock, this.#env.lock)
+      if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
+      if (this.#env.debug !== undefined) assert.equal(this.#debug, envDebugBool(this.#env.debug))
     } catch (cause) {
       throw new Error('Flags/env can not override stasis.config.json', { cause })
     }
