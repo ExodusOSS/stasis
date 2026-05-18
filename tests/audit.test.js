@@ -7,7 +7,7 @@ import { brotliCompressSync } from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { stripVTControlCharacters } from 'node:util'
 
-import { collectPackages, collectPackagesFromFile, flattenAdvisories, formatTable } from '../src/audit.js'
+import { audit, collectPackages, collectPackagesFromFile, flattenAdvisories, formatTable } from '../src/audit.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'bin', 'stasis.js')
@@ -60,7 +60,7 @@ const writeBundle = (dir, name = 'snapshot.br') => {
   return path
 }
 
-test('collectPackages reads name/version from a lockfile', withTmp((t, tmp) => {
+test('collectPackages reads name/version from a lockfile (node_modules only)', withTmp((t, tmp) => {
   const file = writeLock(tmp)
   const pkgs = collectPackagesFromFile(file)
   t.assert.deepEqual(
@@ -68,12 +68,11 @@ test('collectPackages reads name/version from a lockfile', withTmp((t, tmp) => {
     [
       { name: 'bar', version: '4.5.6' },
       { name: 'foo', version: '1.2.3' },
-      { name: 'top-pkg', version: '1.0.0' },
     ]
   )
 }))
 
-test('collectPackages reads name/version from a brotli bundle', withTmp((t, tmp) => {
+test('collectPackages reads name/version from a brotli bundle (node_modules only)', withTmp((t, tmp) => {
   const file = writeBundle(tmp)
   const pkgs = collectPackagesFromFile(file)
   t.assert.deepEqual(
@@ -81,9 +80,15 @@ test('collectPackages reads name/version from a brotli bundle', withTmp((t, tmp)
     [
       { name: 'baz', version: '0.0.1' },
       { name: 'foo', version: '2.0.0' },
-      { name: 'top-pkg', version: '9.9.9' },
     ]
   )
+}))
+
+test('collectPackages skips workspace (first-party) modules', withTmp((t, tmp) => {
+  const lock = writeLock(tmp)
+  const bundle = writeBundle(tmp)
+  const pkgs = collectPackages([lock, bundle])
+  t.assert.ok(!pkgs.some((p) => p.name === 'top-pkg'), 'workspace package must not be audited')
 }))
 
 test('collectPackages skips bundle modules without name/version (v0 legacy)', withTmp((t, tmp) => {
@@ -109,8 +114,6 @@ test('collectPackages deduplicates across files', withTmp((t, tmp) => {
     { name: 'baz', version: '0.0.1' },
     { name: 'foo', version: '1.2.3' },
     { name: 'foo', version: '2.0.0' },
-    { name: 'top-pkg', version: '1.0.0' },
-    { name: 'top-pkg', version: '9.9.9' },
   ])
 }))
 
@@ -118,7 +121,7 @@ test('collectPackages dedupes exact name+version duplicates', withTmp((t, tmp) =
   const a = writeLock(tmp, 'a.json')
   const b = writeLock(tmp, 'b.json')
   const pkgs = collectPackages([a, b])
-  t.assert.equal(pkgs.length, 3)
+  t.assert.equal(pkgs.length, 2)
 }))
 
 test('collectPackagesFromFile rejects unknown files', withTmp((t, tmp) => {
@@ -143,6 +146,23 @@ test('flattenAdvisories sorts by severity then package', (t) => {
     ['critical', 'foo', 't2'],
     ['low', 'foo', 't1'],
   ])
+})
+
+test('flattenAdvisories joins installed versions matching vulnerable_versions', (t) => {
+  const packages = [
+    { name: 'foo', version: '1.0.0' },
+    { name: 'foo', version: '3.0.0' },
+    { name: 'bar', version: '2.0.0' },
+  ]
+  const result = {
+    foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '<2' }],
+    bar: [{ severity: 'low', title: 'y', url: 'u', vulnerable_versions: '*' }],
+  }
+  const rows = flattenAdvisories(result, packages)
+  const foo = rows.find((r) => r.package === 'foo')
+  const bar = rows.find((r) => r.package === 'bar')
+  t.assert.equal(foo.installed, '1.0.0', 'only the affected installed version of foo is listed')
+  t.assert.equal(bar.installed, '2.0.0')
 })
 
 test('formatTable produces a boxed table with header and separator', (t) => {
@@ -191,3 +211,53 @@ test('audit rejects unknown file shape', withTmp((t, tmp) => {
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Unrecognised file/)
 }))
+
+const withFetch = (impl, fn) => async (t) => {
+  const original = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return impl({ url, opts })
+  }
+  try {
+    return await fn(t, calls)
+  } finally {
+    globalThis.fetch = original
+  }
+}
+
+test('audit() POSTs grouped versions to the npm bulk endpoint and joins rows', withFetch(
+  () => new Response(JSON.stringify({
+    foo: [{ id: 1, severity: 'high', title: 'bug', url: 'https://x', vulnerable_versions: '<2' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  async (t, calls) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const lock = writeLock(tmp)
+      const report = await audit([lock])
+      t.assert.equal(calls.length, 1)
+      t.assert.equal(calls[0].url, 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk')
+      t.assert.equal(calls[0].opts.method, 'POST')
+      const body = JSON.parse(calls[0].opts.body)
+      t.assert.deepEqual(body, { bar: ['4.5.6'], foo: ['1.2.3'] }, 'workspace top-pkg must not be sent')
+      t.assert.equal(report.rows.length, 1)
+      t.assert.equal(report.rows[0].severity, 'high')
+      t.assert.equal(report.rows[0].installed, '1.2.3')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+))
+
+test('audit() wraps non-2xx npm responses in a helpful error', withFetch(
+  () => new Response('boom', { status: 503, statusText: 'Service Unavailable' }),
+  async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const lock = writeLock(tmp)
+      await t.assert.rejects(() => audit([lock]), /npm advisories request failed: 503/)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+))

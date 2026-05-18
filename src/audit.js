@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { advisories } from './apis/npm/index.js'
+import semver from './apis/npm/semver.cjs'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 
@@ -18,9 +19,13 @@ function parseFile(file) {
   }
 }
 
+// Only audit installed dependencies; workspace/first-party packages live under
+// non-`node_modules` keys in .modules (Lockfile/Bundle merge sources in) and
+// shouldn't be sent to the public registry — they leak names and produce noise.
 export function collectPackagesFromFile(file) {
   const out = []
-  for (const { name, version } of parseFile(file).modules.values()) {
+  for (const [dir, { name, version }] of parseFile(file).modules) {
+    if (!dir.includes('node_modules')) continue
     if (name && version) out.push({ name, version })
   }
   return out
@@ -42,14 +47,25 @@ export function collectPackages(files) {
 
 const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4 }
 
-export function flattenAdvisories(result) {
+export function flattenAdvisories(result, packages = []) {
+  const installed = new Map()
+  for (const { name, version } of packages) {
+    if (!installed.has(name)) installed.set(name, [])
+    installed.get(name).push(version)
+  }
   const rows = []
   for (const [pkg, list] of Object.entries(result)) {
     if (!Array.isArray(list)) continue
+    const installedVersions = installed.get(pkg) ?? []
     for (const adv of list) {
+      const range = adv.vulnerable_versions ?? ''
+      const affected = range
+        ? installedVersions.filter((v) => semver.satisfies(v, range))
+        : installedVersions
       rows.push({
         package: pkg,
-        vulnerable: adv.vulnerable_versions ?? '',
+        installed: affected.join(', '),
+        vulnerable: range,
         severity: adv.severity ?? '',
         title: adv.title ?? '',
         url: adv.url ?? '',
@@ -87,7 +103,7 @@ export async function audit(files) {
     return { packages, advisories: {}, rows: [] }
   }
   const result = await advisories(packages)
-  const rows = flattenAdvisories(result)
+  const rows = flattenAdvisories(result, packages)
   return { packages, advisories: result, rows }
 }
 
@@ -97,5 +113,5 @@ export function printAuditReport({ packages, rows }, { out = process.stdout, err
     err.write('No advisories found\n')
     return
   }
-  out.write(formatTable(rows, ['severity', 'package', 'vulnerable', 'title', 'url']) + '\n')
+  out.write(formatTable(rows, ['severity', 'package', 'installed', 'vulnerable', 'title', 'url']) + '\n')
 }
