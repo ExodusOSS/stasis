@@ -124,10 +124,32 @@ test('collectPackages dedupes exact name+version duplicates', withTmp((t, tmp) =
   t.assert.equal(pkgs.length, 2)
 }))
 
-test('collectPackagesFromFile rejects unknown files', withTmp((t, tmp) => {
+test('collectPackagesFromFile rejects unknown JSON shape with a lockfile-specific error', withTmp((t, tmp) => {
   const file = join(tmp, 'junk.json')
   writeFileSync(file, JSON.stringify({ hello: 'world' }))
-  t.assert.throws(() => collectPackagesFromFile(file), /Unrecognised file/)
+  t.assert.throws(() => collectPackagesFromFile(file), /Failed to parse stasis lockfile/)
+}))
+
+test('collectPackagesFromFile rejects non-brotli non-JSON binary with a bundle-specific error', withTmp((t, tmp) => {
+  const file = join(tmp, 'junk.bin')
+  writeFileSync(file, Buffer.from([0xff, 0xfe, 0xfd, 0xfc]))
+  t.assert.throws(() => collectPackagesFromFile(file), /Failed to parse stasis bundle/)
+}))
+
+test('collectPackages does not collapse different packages at the same version', withTmp((t, tmp) => {
+  const file = join(tmp, 'lock.json')
+  writeFileSync(file, JSON.stringify({
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: {
+      'node_modules/a': { name: 'a', version: '1.0.0', files: { 'i.js': 'sha512-x' } },
+      'node_modules/b': { name: 'b', version: '1.0.0', files: { 'i.js': 'sha512-y' } },
+    },
+  }))
+  t.assert.deepEqual(collectPackages([file]), [
+    { name: 'a', version: '1.0.0' },
+    { name: 'b', version: '1.0.0' },
+  ])
 }))
 
 test('flattenAdvisories sorts by severity then package', (t) => {
@@ -209,7 +231,7 @@ test('audit rejects unknown file shape', withTmp((t, tmp) => {
   writeFileSync(file, JSON.stringify({ hello: 'world' }))
   const r = runCli(['audit', file])
   t.assert.notEqual(r.status, 0)
-  t.assert.match(r.stderr, /Unrecognised file/)
+  t.assert.match(r.stderr, /Failed to parse stasis lockfile/)
 }))
 
 const withFetch = (impl, fn) => async (t) => {
@@ -261,3 +283,29 @@ test('audit() wraps non-2xx npm responses in a helpful error', withFetch(
     }
   }
 ))
+
+test('audit() wraps network/abort errors with the cause preserved', withFetch(
+  () => { throw new Error('connection refused') },
+  async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const lock = writeLock(tmp)
+      await t.assert.rejects(() => audit([lock]), /npm advisories request failed: connection refused/)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+))
+
+test('flattenAdvisories drops advisories that match no installed version', (t) => {
+  const packages = [{ name: 'foo', version: '5.0.0' }]
+  const result = {
+    foo: [
+      { severity: 'high', title: 'old', url: 'u', vulnerable_versions: '<2' },
+      { severity: 'low', title: 'current', url: 'u', vulnerable_versions: '>=5' },
+    ],
+  }
+  const rows = flattenAdvisories(result, packages)
+  t.assert.equal(rows.length, 1)
+  t.assert.equal(rows[0].title, 'current')
+})

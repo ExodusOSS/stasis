@@ -7,7 +7,7 @@ const packageNameRegex = /^(@[\da-z-]+\/)?[\w-]+(\.[\w-]+)*$/u
 export async function advisories(list, { signal = AbortSignal.timeout(30_000) } = {}) {
   const groups = new Map()
   for (const { name, version } of list) {
-    assert(name && version && typeof name === 'string' && typeof version === 'string')
+    assert(typeof name === 'string' && typeof version === 'string')
     assert(packageNameRegex.test(name), `Unexpected package name: ${name}`)
     assert(semver.valid(version), `Invalid version: ${version}`)
     if (!groups.has(name)) groups.set(name, new Set())

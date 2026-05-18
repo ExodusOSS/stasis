@@ -8,14 +8,20 @@ import { Lockfile } from './lockfile.js'
 
 function parseFile(file) {
   const buf = readFileSync(file)
-  try {
-    return Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
-  } catch {
+  // Sniff: lockfiles are JSON text starting with `{`; bundles are brotli binary.
+  // Routing avoids reporting a Bundle assertion as a JSON-parse error (or vice
+  // versa) when the file is well-formed but invalid.
+  if (buf[0] === 0x7b /* '{' */) {
     try {
       return Lockfile.parse(buf.toString('utf8'))
     } catch (cause) {
-      throw new Error(`Unrecognised file (not a stasis lockfile or bundle): ${file}`, { cause })
+      throw new Error(`Failed to parse stasis lockfile: ${file}`, { cause })
     }
+  }
+  try {
+    return Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  } catch (cause) {
+    throw new Error(`Failed to parse stasis bundle: ${file}`, { cause })
   }
 }
 
@@ -42,10 +48,10 @@ export function collectPackages(files) {
       out.push({ name, version })
     }
   }
-  return out.sort((a, b) => (a.name === b.name ? (a.version < b.version ? -1 : 1) : a.name < b.name ? -1 : 1))
+  return out.sort((a, b) => a.name.localeCompare(b.name) || semver.compare(a.version, b.version))
 }
 
-const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4 }
+const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, none: 5 }
 
 export function flattenAdvisories(result, packages = []) {
   const installed = new Map()
@@ -62,6 +68,10 @@ export function flattenAdvisories(result, packages = []) {
       const affected = range
         ? installedVersions.filter((v) => semver.satisfies(v, range))
         : installedVersions
+      // npm occasionally returns advisories whose vulnerable range matches none
+      // of the versions we submitted; drop them so the table (and the CLI exit
+      // code) reflect only real hits.
+      if (installedVersions.length > 0 && affected.length === 0) continue
       rows.push({
         package: pkg,
         installed: affected.join(', '),
@@ -82,17 +92,20 @@ export function flattenAdvisories(result, packages = []) {
   return rows
 }
 
+// Newlines in npm advisory titles would otherwise break the box layout.
+const cell = (v) => String(v ?? '').replace(/\r?\n/gu, ' ')
+
 export function formatTable(rows, columns) {
   if (rows.length === 0) return ''
-  const widths = columns.map((c) => Math.max(c.length, ...rows.map((r) => String(r[c] ?? '').length)))
-  const pad = (s, w) => String(s).padEnd(w)
+  const widths = columns.map((c) => Math.max(c.length, ...rows.map((r) => cell(r[c]).length)))
+  const pad = (s, w) => s.padEnd(w)
   const line = (l, m, r, fill) => l + widths.map((w) => fill.repeat(w + 2)).join(m) + r
-  const row = (vals) => '│ ' + vals.map((v, i) => pad(v, widths[i])).join(' │ ') + ' │'
+  const row = (vals) => '│ ' + vals.map((v, i) => pad(cell(v), widths[i])).join(' │ ') + ' │'
   return [
     line('┌', '┬', '┐', '─'),
     row(columns),
     line('├', '┼', '┤', '─'),
-    ...rows.map((r) => row(columns.map((c) => r[c] ?? ''))),
+    ...rows.map((r) => row(columns.map((c) => r[c]))),
     line('└', '┴', '┘', '─'),
   ].join('\n')
 }
