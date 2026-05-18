@@ -2,13 +2,8 @@
   "name": "@exodus/stasis",
   "version": "1.0.0-alpha.0",
   "description": "A research project",
-  "main": "index.js",
   "type": "module",
   "exports": {
-    ".": {
-      "types": "./src/index.d.ts",
-      "default": "./src/index.js"
-    },
     "./esbuild": "./src/esbuild.js",
     "./webpack": "./src/webpack.js",
     "./loader": "./src/loader.js",
@@ -16,6 +11,21 @@
     "./lockfile": "./src/lockfile.js",
     "./prune": "./src/prune.js"
   },
+  "files": [
+    "bin/stasis.js",
+    "src/apis/npm/index.js",
+    "src/apis/npm/semver.cjs",
+    "src/bundle.js",
+    "src/config.js",
+    "src/esbuild.js",
+    "src/loader.js",
+    "src/lockfile.js",
+    "src/prune.js",
+    "src/state.js",
+    "src/state.util.js",
+    "src/util.js",
+    "src/webpack.js"
+  ],
   "engines": {
     "node": ">=24.14.0"
   },
