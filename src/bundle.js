@@ -9,6 +9,21 @@ const LEGACY_VERSION = 0
 const normalize = ({ name, version, files }) =>
   ({ name, version, files: fromEntries(Object.entries(files)) })
 
+// Best-effort path → (module dir, module-relative path) for v0 regrouping.
+// Paths containing `node_modules/` are bucketed by the *last* node_modules
+// segment plus the next 1-2 segments (scoped pkg or plain pkg name) — same
+// last-wins convention package managers use to attribute a file to a package.
+// Everything else goes under "." (workspace root).
+function inferModuleDir(path) {
+  const marker = 'node_modules/'
+  const idx = path.lastIndexOf(marker)
+  if (idx === -1) return ['.', path]
+  const after = idx + marker.length
+  const parts = path.slice(after).split('/')
+  const pkgLen = parts[0].startsWith('@') ? 2 : 1
+  return [path.slice(0, after) + parts.slice(0, pkgLen).join('/'), parts.slice(pkgLen).join('/')]
+}
+
 // Bundle (stasis.code.br / stasis.resources.br) on-disk version:
 //   v0 — legacy flat layout: top-level `sources` (or `resources`) keyed by
 //        project-relative path. No entries/modules metadata.
@@ -17,8 +32,9 @@ const normalize = ({ name, version, files }) =>
 //        plus `entries`. File payloads carry bytes (UTF-8 source strings or base64
 //        resource blobs) instead of SRI digests.
 // We load both v0 and v1; we always serialize v1. v0 is converted on load to
-// the same in-memory shape: a single synthetic "." bucket with null name/version
-// (carries no module metadata to cross-check).
+// the same in-memory shape — paths are regrouped by package dir via
+// `inferModuleDir` (best-effort, last-wins). name/version stay null since v0
+// records neither, which State uses as a marker to skip metadata cross-checks.
 export class Bundle {
   static VERSION = VERSION
 
@@ -99,9 +115,13 @@ export class Bundle {
         for (const rel of Object.keys(files)) assert.ok(!rel.startsWith('..'))
       }
     } else {
-      // v0 legacy: flat sources at top level, no entries/modules metadata.
+      // v0 legacy: flat sources at top level, regrouped by inferred module dir.
       assert.ok(json.sources)
-      modules.set('.', { name: null, version: null, files: fromEntries(Object.entries(json.sources)) })
+      for (const [path, content] of Object.entries(json.sources)) {
+        const [dir, rel] = inferModuleDir(path)
+        if (!modules.has(dir)) modules.set(dir, { name: null, version: null, files: Object.create(null) })
+        modules.get(dir).files[rel] = content
+      }
     }
 
     return new Bundle({
@@ -149,9 +169,13 @@ export class Bundle {
         for (const rel of Object.keys(files)) assert.ok(!rel.startsWith('..'))
       }
     } else {
-      // v0 legacy: flat resources at top level, no modules/config metadata.
+      // v0 legacy: flat resources at top level, regrouped by inferred module dir.
       assert.ok(json.resources)
-      modules.set('.', { name: null, version: null, files: fromEntries(Object.entries(json.resources)) })
+      for (const [path, content] of Object.entries(json.resources)) {
+        const [dir, rel] = inferModuleDir(path)
+        if (!modules.has(dir)) modules.set(dir, { name: null, version: null, files: Object.create(null) })
+        modules.get(dir).files[rel] = content
+      }
     }
 
     return new Bundle({ version: json.version, config, modules })

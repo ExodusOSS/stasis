@@ -84,6 +84,42 @@ test('Bundle.parseCode exposes the parsed version (v0 stays at 0 in memory)', (t
   // so a downstream caller (State.addFile) has to fill them before serializeCode.
 })
 
+test('Bundle.parseCode regroups v0 flat sources by inferred module dir', (t) => {
+  const v0 = brotliCompressSync(JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    formats: {},
+    imports: {},
+    sources: {
+      'src/a.js': 'a',
+      'src/lib/b.js': 'b',
+      'node_modules/foo/index.js': 'foo',
+      'node_modules/foo/lib/x.js': 'foox',
+      'node_modules/@scope/pkg/index.js': 'scoped',
+      'node_modules/foo/node_modules/bar/i.js': 'nested',
+    },
+  }))
+  const parsed = Bundle.parseCode(v0)
+
+  t.assert.deepEqual([...parsed.modules.keys()].sort(), [
+    '.',
+    'node_modules/@scope/pkg',
+    'node_modules/foo',
+    'node_modules/foo/node_modules/bar',
+  ])
+  // workspace bucket keeps the full project-relative path as rel
+  t.assert.equal(parsed.modules.get('.').files['src/a.js'], 'a')
+  t.assert.equal(parsed.modules.get('.').files['src/lib/b.js'], 'b')
+  // node_modules buckets keep package-relative paths
+  t.assert.equal(parsed.modules.get('node_modules/foo').files['index.js'], 'foo')
+  t.assert.equal(parsed.modules.get('node_modules/foo').files['lib/x.js'], 'foox')
+  t.assert.equal(parsed.modules.get('node_modules/@scope/pkg').files['index.js'], 'scoped')
+  t.assert.equal(parsed.modules.get('node_modules/foo/node_modules/bar').files['i.js'], 'nested')
+  // sources getter still presents a flat project-relative view
+  t.assert.equal(parsed.sources.get('node_modules/foo/index.js'), 'foo')
+  t.assert.equal(parsed.sources.get('node_modules/foo/node_modules/bar/i.js'), 'nested')
+})
+
 test('Bundle.parseCode rejects a v1 full-scope bundle with empty entries', (t) => {
   const buf = brotliCompressSync(JSON.stringify({
     version: 1,
