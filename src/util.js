@@ -47,12 +47,6 @@ export const objectToMaps = (obj) => new Map(
   Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
 
-// Split a POSIX-style path at its *last* node_modules/ segment into the
-// containing package's `dir`, the `rel` path inside the package, and the
-// package `name` (taking 2 segments for `@scope/pkg`, otherwise 1). Returns
-// null when the path has no node_modules segment, or when the node_modules
-// slice is malformed (trailing slash, empty segments, or no file segment
-// after the package dir).
 export function splitNodeModulesPath(path) {
   const marker = 'node_modules/'
   const idx = path.lastIndexOf(marker)

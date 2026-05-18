@@ -241,25 +241,13 @@ export class State {
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
 
-    // Sourcing name/version from package.json is complicated by sub-bucket
-    // markers — package.json files that only set `type` to override the
-    // ambient ESM/CJS mode for a sub-directory (e.g. `lib/package.json`
-    // containing just `{"type":"module"}`). findPackageJSON walks up from the
-    // file and lands on the *nearest* package.json, which may be a marker
-    // with no name/version.
-    //
-    // For files inside node_modules we know the package root by path
-    // structure, so we jump straight there and cross-check any nested
-    // package.json found by findPackageJSON doesn't declare a conflicting
-    // name/version. For files outside node_modules we walk up past markers
-    // until we find a package.json with both name and version; anything
-    // missing name/version must be a type-only marker.
+    // findPackageJSON may land on a `{"type":"module"}`-style sub-bucket
+    // marker that lacks name/version.
     const nmRoot = splitNodeModulesPath(file)?.dir
     let pkgAbsolute, name, version
     if (nmRoot) {
       pkgAbsolute = resolve(this.root, nmRoot, 'package.json')
-      const rootJson = readPackageJSON(pkgAbsolute)
-      ;({ name, version } = rootJson)
+      ;({ name, version } = readPackageJSON(pkgAbsolute))
       assert.ok(name, `Missing name in ${this.relative(pkgAbsolute)}`)
       assert.ok(version, `Missing version in ${this.relative(pkgAbsolute)}`)
       const nestedAbsolute = findPackageJSON(url)
@@ -276,7 +264,6 @@ export class State {
           ;({ name, version } = json)
           break
         }
-        // Marker: the only legal field is `type`.
         assert.deepStrictEqual(Object.keys(json), ['type'])
         let cursor = dirname(dirname(pkgAbsolute))
         let next = null

@@ -14,10 +14,6 @@ const LEGACY_VERSION = 0
 const normalize = ({ name, version, files }) =>
   ({ name, version, files: fromEntries(Object.entries(files)) })
 
-// Best-effort path → { dir, rel, name } for v0 regrouping. Paths with a valid
-// node_modules slice are bucketed by `splitNodeModulesPath`; malformed input
-// and workspace paths fall back to the workspace bucket under "." with
-// `name: null`. v0 records no version regardless.
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
 

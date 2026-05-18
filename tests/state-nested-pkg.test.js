@@ -11,7 +11,6 @@ test('addFile on a file under a nested sub-bucket package.json uses the package 
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'lib', 'util.js')).toString()
   state.addFile(url, { format: 'module' })
 
-  // Bucketed under the package root, not the nested `lib/` marker dir.
   const module = state.modules.get('node_modules/widget')
   t.assert.ok(module, 'package root entry must be present')
   t.assert.equal(module.name, 'widget')
