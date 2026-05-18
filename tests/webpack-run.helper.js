@@ -1,10 +1,10 @@
 // Test harness: runs a webpack build with the StasisWebpack plugin against the cwd
 // as the project root, then writes stasis state. Driven by tests/webpack.test.js
-// via spawnSync, so each test gets a fresh State singleton in its own process.
+// via spawnSync, so each test gets a fresh State per process.
 //
 // Usage: node tests/webpack-run.helper.js <entry>
-// If STASIS_TEST_PLUGIN_OPTIONS is set in env (JSON-encoded), pass them to the plugin
-// constructor and let it construct State. Otherwise pre-construct State via env vars.
+// STASIS_TEST_PLUGIN_OPTIONS (JSON) routes through the plugin's options.
+// STASIS_TEST_PRELOAD=0 disables the preload State (simulates "no stasis loader").
 
 import { resolve, join } from 'node:path'
 import { rm, mkdtemp } from 'node:fs/promises'
@@ -23,9 +23,18 @@ if (entries.length !== 1) {
 const pluginOptionsRaw = process.env.STASIS_TEST_PLUGIN_OPTIONS
 const pluginOptions = pluginOptionsRaw ? JSON.parse(pluginOptionsRaw) : undefined
 
-// Without explicit plugin options, pre-construct State so env vars drive Config.
-// With plugin options, defer to the plugin so its options drive Config.
-const _preState = pluginOptions === undefined ? new State(process.cwd()) : undefined
+// See esbuild-run.helper.js for the rationale -- by default we construct a preload State
+// so the plugin runs as it would under the stasis loader; STASIS_TEST_PRELOAD=0 opts the
+// test out so standalone/noop paths can be exercised.
+const KNOWN_OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'debug']
+const preloadOptions = { preload: true }
+if (pluginOptions) {
+  for (const k of KNOWN_OPTION_KEYS) {
+    if (pluginOptions[k] !== undefined) preloadOptions[k] = pluginOptions[k]
+  }
+}
+const preloadDisabled = process.env.STASIS_TEST_PRELOAD === '0'
+const _preload = preloadDisabled ? undefined : new State(process.cwd(), preloadOptions)
 
 const { StasisWebpack } = await import('../src/webpack.js')
 
@@ -48,4 +57,4 @@ try {
   await rm(dist, { recursive: true, force: true })
 }
 
-State.instance.write()
+if (State.preload) State.preload.write()

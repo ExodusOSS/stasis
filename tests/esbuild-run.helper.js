@@ -1,10 +1,10 @@
 // Test harness: runs an esbuild build with the StasisEsbuild plugin against the cwd as
 // the project root, then writes stasis state. Driven by tests/esbuild.test.js via
-// spawnSync, so each test gets a fresh State singleton in its own process.
+// spawnSync, so each test gets a fresh State per process.
 //
 // Usage: node tests/esbuild-run.helper.js <entry> [<entry>...]
-// If STASIS_TEST_PLUGIN_OPTIONS is set in env (JSON-encoded), pass them to the plugin
-// constructor and let it construct State. Otherwise pre-construct State via env vars.
+// STASIS_TEST_PLUGIN_OPTIONS (JSON) routes through the plugin's options.
+// STASIS_TEST_PRELOAD=0 disables the preload State (simulates "no stasis loader").
 
 import { resolve, join } from 'node:path'
 import { rm, mkdtemp } from 'node:fs/promises'
@@ -22,7 +22,19 @@ if (entries.length === 0) {
 const pluginOptionsRaw = process.env.STASIS_TEST_PLUGIN_OPTIONS
 const pluginOptions = pluginOptionsRaw ? JSON.parse(pluginOptionsRaw) : undefined
 
-const _preState = pluginOptions === undefined ? new State(process.cwd()) : undefined
+// By default the helper constructs a preload State so the plugin runs as it would under
+// the stasis loader. Plugin options (when present) are mirrored onto the preload so the
+// plugin's reuse path passes the assertOptionsMatchConfig check.
+// STASIS_TEST_PRELOAD=0 opts the test out of preload to exercise standalone/noop paths.
+const KNOWN_OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'debug']
+const preloadOptions = { preload: true }
+if (pluginOptions) {
+  for (const k of KNOWN_OPTION_KEYS) {
+    if (pluginOptions[k] !== undefined) preloadOptions[k] = pluginOptions[k]
+  }
+}
+const preloadDisabled = process.env.STASIS_TEST_PRELOAD === '0'
+const _preload = preloadDisabled ? undefined : new State(process.cwd(), preloadOptions)
 
 const { StasisEsbuild } = await import('../src/esbuild.js')
 
@@ -42,4 +54,8 @@ try {
   await rm(dist, { recursive: true, force: true })
 }
 
-State.instance.write()
+// Write whichever live State owns its respective output. With a preload that's the
+// preload (lockfile + same-path bundle); a sidecar plugin would have written its bundle
+// already through its own write() during exit hooks. For these tests there is no exit
+// hook installed, so we explicitly write the preload here.
+if (State.preload) State.preload.write()

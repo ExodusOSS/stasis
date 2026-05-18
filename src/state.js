@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
-import { Config } from './config.js'
+import { Config, validatePluginOptions, assertOptionsMatchConfig } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
@@ -31,19 +31,50 @@ export class State {
   imports = new Map()
   config
   root
+  #parent
 
-  // options.preload (boolean) -- mark this instance as the unique preload State, exposed via
-  // State.preload. Only one preload State may exist at a time. Non-preload States can be
-  // constructed freely (e.g. a bundler plugin that emits a sidecar bundle in a process that
-  // already has a preload-owned lockfile). All other keys forward to Config.
+  // Options:
+  //   preload (boolean) -- register as the unique preload State (exposed via State.preload).
+  //     Only one preload may exist at a time. The stasis loader is the only real caller.
+  //   parent (State)    -- run as a sidecar of this parent. Sidecar shares the parent's
+  //     hashes/entries/modules (so addFile updates the unified lockfile through them) but
+  //     manages its own sources/formats/imports/resources and emits its own bundle file.
+  //     write() on a sidecar skips the lockfile (parent owns it) and only writes its bundle.
+  //   All other keys forward to Config.
   constructor(root, options = {}) {
-    const { preload: isPreload = false, ...configOptions } = options
+    const { preload: isPreload = false, parent: parentState, ...configOptions } = options
     this.config = new Config(configOptions)
-    // Check the preload-uniqueness invariant up front so two simultaneous preload attempts
-    // can't both pass through the constructor; the actual `preload = this` registration
-    // happens after construction succeeds so a throw in setup can't leave a half-built
-    // preload reference behind.
     if (isPreload) assert.ok(!preload, 'Only one preload Stasis instance is supported')
+    assert.ok(!(isPreload && parentState), 'preload and parent are mutually exclusive')
+
+    if (parentState) {
+      // Sidecar mode: short-circuit the on-disk discovery path. Lockfile data is shared by
+      // reference with the parent; only the sidecar's bundleFile (if any) is parsed here.
+      this.#parent = parentState
+      this.root = parentState.root
+      this.hashes = parentState.hashes
+      this.entries = parentState.entries
+      this.modules = parentState.modules
+      assert.ok(this.config.bundleFile, 'sidecar State requires bundleFile')
+      assert.notEqual(this.config.bundleFile, parentState.config.bundleFile,
+        'sidecar bundleFile must differ from parent bundleFile')
+      if (this.config.writeBundle || this.config.loadBundle) {
+        const sourcesPath = this.config.bundleFile
+        const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+        if (sources && !this.config.replaceBundle) {
+          const bundle = Bundle.parseCode(brotliDecompressSync(sources).toString('utf-8'))
+          assert.equal(bundle.config.scope, this.config.scope)
+          // No #mergeBundleMetadata cross-check: parent's lockfile already governs hashes/
+          // modules. We just adopt the sidecar bundle's per-file payload.
+          this.sources = bundle.sources
+          this.formats = bundle.formats
+          this.imports = bundle.imports
+        }
+      }
+      liveStates.add(this)
+      return
+    }
+
     const potentialRoots = []
     let cursor = root
     while (cursor) {
@@ -381,7 +412,8 @@ export class State {
 
   write() {
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
-    if (this.config.writeLockfile) {
+    // Sidecars never write the lockfile -- the parent owns it. They only emit their bundle.
+    if (this.config.writeLockfile && !this.#parent) {
       writeFileSync(join(this.root, FILE_LOCK), this.lockData)
     }
     if (this.config.writeBundle) {
@@ -390,4 +422,100 @@ export class State {
       writeFileSync(sourcesPath, brotliCompressSync(this.sourceData))
     }
   }
+
+  get parent() {
+    return this.#parent
+  }
+}
+
+// Decides which State a bundler plugin (StasisWebpack / StasisEsbuild) should run against,
+// given its constructor options and the ambient preload (or lack thereof). Returns either
+// { state: null, isNoop: true } -- plugin should register no hooks and become inert -- or
+// { state, isNoop: false } -- plugin should drive the returned State.
+//
+// Rules:
+//  1. Plugin asking for any lockfile mode other than 'none' / 'ignore' requires a preload.
+//     Without one it's a hard throw -- the lockfile would otherwise only cover the bundled
+//     app and silently miss every dependency the bundler itself pulled in.
+//  2. With a preload, the plugin's lock mode must agree with the preload's.
+//  3. Lockfile is unified: when plugin and preload align we reuse the preload State so a
+//     single lockfile is written.
+//  4. Bundle may split: with a preload that already has bundle on, the plugin cannot disable
+//     bundle and the bundle mode must match. The plugin's bundleFile, however, may differ
+//     -- in which case we construct a sidecar State sharing the preload's lockfile data.
+//  5. Same bundleFile (or unspecified) reuses the preload State.
+//  6. Different bundleFile creates a sidecar.
+//  7. Plugin with lock='none' AND bundle='none' and no preload is a no-op (lets framework
+//     plugins be env-controlled off without throwing on the lock=none/bundle=none invariant).
+export function resolvePluginState(label, options, cwd) {
+  validatePluginOptions(label, options)
+  const { lock, bundle, bundleFile } = options
+  const ambient = preload
+
+  if (!ambient) {
+    if (lock === 'none' && bundle === 'none') return { state: null, isNoop: true }
+    const effectiveLock = lock ?? 'add'
+    if (effectiveLock !== 'none' && effectiveLock !== 'ignore') {
+      throw new Error(
+        `${label}: lockfile mode '${effectiveLock}' requires a stasis preload; ` +
+        `pass lock='none' or lock='ignore' to opt out, or run under the stasis loader`
+      )
+    }
+    return { state: new State(cwd, options), isNoop: false }
+  }
+
+  // Preload is active. Lockfile rules first.
+  const pc = ambient.config
+  if (lock !== undefined && lock !== pc.lock) {
+    throw new Error(`${label}: lock='${lock}' conflicts with active preload lock='${pc.lock}'`)
+  }
+
+  if (pc.bundle) {
+    // Preload has bundle on -- plugin can't disable, must match mode.
+    if (bundle === 'none' || bundle === 'ignore') {
+      throw new Error(
+        `${label}: bundle='${bundle}' conflicts with active preload bundle='${pc.bundleMode}'`
+      )
+    }
+    if (bundle !== undefined && bundle !== pc.bundleMode) {
+      throw new Error(
+        `${label}: bundle='${bundle}' conflicts with active preload bundle='${pc.bundleMode}'`
+      )
+    }
+    if (bundleFile === undefined || bundleFile === pc.bundleFile) {
+      // Rule 5: same path reuses the preload.
+      assertOptionsMatchConfig(pc, options)
+      return { state: ambient, isNoop: false }
+    }
+    // Rule 6: different path -- sidecar inherits preload's modes, overrides bundleFile.
+    const sidecar = new State(cwd, {
+      parent: ambient,
+      scope: pc.scope,
+      lock: pc.lock,
+      bundle: pc.bundleMode,
+      bundleFile,
+      debug: pc.debug,
+    })
+    return { state: sidecar, isNoop: false }
+  }
+
+  // Preload exists but has no bundle.
+  if (bundle === undefined || bundle === 'none' || bundle === 'ignore') {
+    // Plugin doesn't want a bundle either: just reuse preload for lockfile coverage.
+    assertOptionsMatchConfig(pc, options)
+    return { state: ambient, isNoop: false }
+  }
+  // Plugin wants its own bundle alongside preload's lockfile -- sidecar.
+  if (!bundleFile) {
+    throw new Error(`${label}: bundle='${bundle}' alongside a preload without bundle requires bundleFile`)
+  }
+  const sidecar = new State(cwd, {
+    parent: ambient,
+    scope: pc.scope,
+    lock: pc.lock,
+    bundle,
+    bundleFile,
+    debug: pc.debug,
+  })
+  return { state: sidecar, isNoop: false }
 }

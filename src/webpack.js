@@ -2,24 +2,19 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { State } from './state.js'
-import { assertOptionsMatchConfig, validatePluginOptions } from './config.js'
+import { resolvePluginState } from './state.js'
 
 export class StasisWebpack {
   #seen = new Set()
   #state
 
   constructor(options = {}) {
-    validatePluginOptions('StasisWebpack', options)
-    if (State.instance) {
-      assertOptionsMatchConfig(State.instance.config, options)
-      this.#state = State.instance
-    } else {
-      this.#state = new State(process.cwd(), options)
-    }
+    const { state } = resolvePluginState('StasisWebpack', options, process.cwd())
+    this.#state = state  // null when plugin should be inert
   }
 
   apply(compiler) {
+    if (!this.#state) return
     compiler.hooks.normalModuleFactory.tap('Stasis', (nmf) => {
       nmf.hooks.afterResolve.tap('Stasis', (data) => {
         assert.equal(data.resource, data.resourceResolveData.path)

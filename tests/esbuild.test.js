@@ -524,3 +524,30 @@ test('invalid plugin option value is rejected', withTmp((t, tmp) => {
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Invalid lock/)
 }))
+
+// Plugin↔preload coordination rules. STASIS_TEST_PRELOAD=0 disables the helper's
+// auto-preload so the plugin runs alone, exercising the standalone / noop / hard-throw
+// code paths.
+
+const standalone = (extra = {}) => ({ STASIS_TEST_PRELOAD: '0', ...extra })
+
+test('rule 1: plugin lockfile without preload is a hard throw', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+
+  const r = run(['src/entry.js'], { cwd: tmp, env: standalone(withOpts({ lock: 'add' })) })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /lockfile mode 'add' requires a stasis preload/)
+}))
+
+test('rule 7: plugin with lock=none + bundle=none and no preload is a no-op', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+
+  const r = run(['src/entry.js'], {
+    cwd: tmp,
+    env: standalone(withOpts({ lock: 'none', bundle: 'none' })),
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore,
+    'noop plugin must not touch the lockfile')
+}))

@@ -4,21 +4,15 @@ import { extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
-import { State } from './state.js'
-import { assertOptionsMatchConfig, validatePluginOptions } from './config.js'
+import { resolvePluginState } from './state.js'
 
 export class StasisEsbuild {
   #seen = new Set()
   #state
 
   constructor(options = {}) {
-    validatePluginOptions('StasisEsbuild', options)
-    if (State.instance) {
-      assertOptionsMatchConfig(State.instance.config, options)
-      this.#state = State.instance
-    } else {
-      this.#state = new State(process.cwd(), options)
-    }
+    const { state } = resolvePluginState('StasisEsbuild', options, process.cwd())
+    this.#state = state  // null when plugin should be inert
   }
 
   get name() {
@@ -26,6 +20,7 @@ export class StasisEsbuild {
   }
 
   setup = ({ onResolve, onLoad, resolve }) => {
+    if (!this.#state) return  // noop plugin
     onResolve({ filter: /$/, namespace: 'file' }, async ({ path: specifier, ...args }) => {
       // Recurse with a synthetic namespace so esbuild's default resolver runs without re-entering us
       const res = await resolve(specifier, { ...args, namespace: 'stasis' })
