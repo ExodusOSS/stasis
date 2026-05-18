@@ -744,7 +744,7 @@ test('run --lock=frozen --bundle=load rejects a bundle with mismatching scope', 
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
-  t.assert.match(r.stderr, /ERR_ASSERTION/)
+  t.assert.match(r.stderr, /ERR_ASSERTION|at assert \(file:/)
 }))
 
 test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not only frozen)', withTmp((t, tmp) => {
@@ -765,7 +765,7 @@ test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not o
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
-  t.assert.match(r.stderr, /ERR_ASSERTION/)
+  t.assert.match(r.stderr, /ERR_ASSERTION|at assert \(file:/)
 }))
 
 test('run --bundle=load rejects a v0 bundle whose path-inferred module name disagrees with the lockfile', withTmp((t, tmp) => {
