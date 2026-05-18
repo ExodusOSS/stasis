@@ -13,6 +13,7 @@ import {
   sortPaths,
   fileSetToObject,
   fileMapToObject,
+  fromEntries,
   objectToMaps,
   noupsert,
 } from './util.js'
@@ -106,7 +107,13 @@ export class State {
           assert.equal(!!json.sources, full)
           assert.ok(json.modules)
 
-          this.modules = new Map(Object.entries(json.modules))
+          // Rebuild module.files with a null prototype so subsequent `files[rel] = …`
+          // assignments can't poison Object.prototype via a forged '__proto__' key.
+          const normalize = ({ name, version, files }) =>
+            ({ name, version, files: fromEntries(Object.entries(files)) })
+          this.modules = new Map(
+            Object.entries(json.modules).map(([dir, info]) => [dir, normalize(info)])
+          )
           for (const [dir] of this.modules) assert.ok(dir.includes('node_modules'))
           if (full && this.config.full) {
             assert.ok(Array.isArray(json.entries))
@@ -114,7 +121,7 @@ export class State {
             assert.ok(json.sources)
             for (const [dir, info] of Object.entries(json.sources)) {
               assert.ok(!dir.includes('node_modules'))
-              this.modules.set(dir, info)
+              this.modules.set(dir, normalize(info))
             }
           }
 
@@ -237,32 +244,36 @@ export class State {
     return this.formats.get(this.relative(this.absolute(url)))
   }
 
-  addImport(parentURL, specifier, url, { conditions = '*', format } = {}) {
-    if (conditions !== '*') {
-      assert.ok(Array.isArray(conditions))
-      conditions = conditions.join(', ')
-    }
+  // Different conditions / import attributes can yield different URLs/formats for the same parent+specifier
+  #conditionsKey(conditions, importAttributes) {
+    const cond = conditions === '*' ? '*' : conditions.join(', ')
+    assert.ok(!cond.includes('(') && !cond.includes(')'), 'conditions must not contain "(" or ")"')
+    const attrs = importAttributes ? Object.entries(importAttributes) : []
+    if (attrs.length === 0) return cond
+    const sorted = Object.fromEntries(attrs.sort(([a], [b]) => (a < b ? -1 : 1)))
+    return `${cond} (with: ${JSON.stringify(sorted)})`
+  }
 
+  addImport(parentURL, specifier, url, { conditions = '*', format, importAttributes } = {}) {
+    if (conditions !== '*') assert.ok(Array.isArray(conditions))
     assert.ok(parentURL, 'addImport requires a parent (entries go through addFile)')
     const parent = this.relative(this.absolute(parentURL))
     const file = this.relative(this.absolute(url))
+    const key = this.#conditionsKey(conditions, importAttributes)
 
-    if (!this.imports.has(conditions)) this.imports.set(conditions, new Map())
-    const imports = this.imports.get(conditions)
+    if (!this.imports.has(key)) this.imports.set(key, new Map())
+    const imports = this.imports.get(key)
     if (!imports.has(parent)) imports.set(parent, new Map())
     const specifiers = imports.get(parent)
     noupsert(specifiers, specifier, file)
     if (format) noupsert(this.formats, file, format)
   }
 
-  getImport(parentURL, specifier, { conditions = '*' } = {}) {
-    if (conditions !== '*') {
-      assert.ok(Array.isArray(conditions))
-      conditions = conditions.join(', ')
-    }
-
+  getImport(parentURL, specifier, { conditions = '*', importAttributes } = {}) {
+    if (conditions !== '*') assert.ok(Array.isArray(conditions))
     const parent = this.relative(this.absolute(parentURL))
-    const file = this.imports.get(conditions)?.get(parent)?.get(specifier)
+    const key = this.#conditionsKey(conditions, importAttributes)
+    const file = this.imports.get(key)?.get(parent)?.get(specifier)
     assert.ok(file)
     const url = pathToFileURL(resolve(this.root, file)).toString()
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
@@ -276,7 +287,7 @@ export class State {
     const sources = []
     for (const [dir, { name, version, files }] of this.modules) {
       const type = dir.includes('node_modules') ? modules : sources
-      const sorted = Object.fromEntries(Object.entries(files).sort((a, b) => sortPaths(a[0], b[0])))
+      const sorted = fromEntries(Object.entries(files).sort((a, b) => sortPaths(a[0], b[0])))
       type.push([dir, { name, version, files: sorted }])
     }
 
@@ -284,8 +295,8 @@ export class State {
     sources.sort((a, b) => sortPaths(a[0], b[0]))
 
     const store = { version, config }
-    if (this.config.full) Object.assign(store, { entries, sources: Object.fromEntries(sources) })
-    Object.assign(store, { modules: Object.fromEntries(modules) })
+    if (this.config.full) Object.assign(store, { entries, sources: fromEntries(sources) })
+    Object.assign(store, { modules: fromEntries(modules) })
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 

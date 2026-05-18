@@ -53,9 +53,11 @@ export function noupsert(map, key, value) {
 
 export const isPlainObject = (x) => x && [null, Object.prototype].includes(Object.getPrototypeOf(x))
 
+export const fromEntries = (entries) => Object.setPrototypeOf(Object.fromEntries(entries), null)
+
 export const fileSetToObject = (set) => [...set].sort((a, b) => sortPaths(a, b))
 
-export const fileMapToObject = (map) => Object.fromEntries(
+export const fileMapToObject = (map) => fromEntries(
   [...map]
     .sort((a, b) => sortPaths(a[0], b[0]))
     .map(([k, v]) => [k, v instanceof Map ? fileMapToObject(v) : v])

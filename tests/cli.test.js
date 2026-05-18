@@ -10,6 +10,8 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'stasis.js')
 const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run')
 const nmFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm')
+const nmCjsFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm-cjs')
+const jsonAttrFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-json-attr')
 
 // strip any inherited stasis env vars so the CLI's env-conflict guard doesn't trip
 const {
@@ -505,6 +507,53 @@ test('run --lock=frozen --bundle=load works in node_modules scope with non-track
   t.assert.equal(load.stdout, 'hello, world\n')
   t.assert.match(load.stderr, /scope: 'node_modules'/)
   t.assert.match(load.stderr, /bundle: 'load'/)
+}))
+
+// Regression: in node_modules scope, the resolve hook delegates non-nm parents to Node's
+// default resolver, so the load hook receives `context.format` set by Node rather than by
+// our own shortCircuit. This exercises that path with a CJS dep, which is the case most
+// at risk of a format mismatch (commonjs vs module) between our recorded value and Node's.
+test('run --lock=frozen --bundle=load roundtrips a CJS node_modules dep under node_modules scope', withTmp((t, tmp) => {
+  cpSync(nmCjsFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'hello, world\n')
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+// Pins format='json' through bundle=load: a `with { type: 'json' }` import resolves to
+// format='json', which the load hook used to reject (only module/commonjs were allowed).
+test('run --lock=frozen --bundle=load roundtrips a JSON import with type:json attribute', withTmp((t, tmp) => {
+  cpSync(jsonAttrFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'world\n')
+
+  // Remove the json so the bundle is the only source.
+  rmSync(join(tmp, 'src/data.json'))
+
+  const load = run(
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'world\n')
 }))
 
 test('run --lock=frozen --bundle=load reads non-node_modules sources from disk in node_modules scope', withTmp((t, tmp) => {

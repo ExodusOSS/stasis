@@ -40,8 +40,15 @@ function load(url, context, nextLoad) {
       return nextLoad(url, context)
     }
     const { source, format } = state.getFile(url)
-    assert.equal(format, context.format)
-    assert.ok(format === 'module' || format === 'commonjs')
+    // context.format may be null when the resolve chain didn't set it (e.g. node_modules
+    // scope, where non-nm parents go through nextResolve and Node's default doesn't
+    // populate format for the load hook). Only cross-check when the chain provided one.
+    // TODO: format here is sourced from the bundle's `formats` map, which the lockfile
+    // does not currently cover; a tampered bundle can flip module<->commonjs for a
+    // hash-valid file. Derive format from extension + module.type (recorded in the
+    // lockfile) and reject the bundle's claim when it disagrees.
+    if (context.format != null) assert.equal(format, context.format)
+    assert.ok(['module', 'commonjs', 'json'].includes(format))
     return { source, format, shortCircuit: true }
   }
 
@@ -79,7 +86,7 @@ function resolve(specifier, context, nextResolve) {
     assert.deepStrictEqual(context.importAttributes, expectedAttrs)
   }
 
-  const { parentURL, conditions } = context
+  const { parentURL, conditions, importAttributes } = context
 
   // In full-scope load mode, the entry point is served from the bundle without touching
   // disk, so state must be initialised before nextResolve runs. node_modules scope reads
@@ -103,7 +110,7 @@ function resolve(specifier, context, nextResolve) {
     // specifier we anchor to cwd -- either way, skip nextResolve so the entry file
     // doesn't need to exist on disk.
     if (parentURL && !specifier.startsWith('file:')) {
-      const { url, format } = state.getImport(parentURL, specifier, { conditions })
+      const { url, format } = state.getImport(parentURL, specifier, { conditions, importAttributes })
       return { url, format, importAttributes: undefined, shortCircuit: true }
     }
     const url = specifier.startsWith('file:')
@@ -117,7 +124,7 @@ function resolve(specifier, context, nextResolve) {
 
   assert.equal(res.importAttributes, undefined) // unsupported yet
   if (parentURL) assert.ok(state)
-  if (state) state.addImport(parentURL, specifier, url, { conditions, format })
+  if (state) state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
   return res
 }
 

@@ -1,0 +1,25 @@
+{
+  "version": 0,
+  "config": { "scope": "full" },
+  "entries": ["src/entry.js"],
+  "sources": {
+    ".": {
+      "name": "stasis-load-proto-fixture",
+      "version": "0.0.0",
+      "files": {
+        "src/entry.js": "sha512-abc",
+        "__proto__": "sha512-evil-src"
+      }
+    }
+  },
+  "modules": {
+    "node_modules/widget": {
+      "name": "widget",
+      "version": "1.2.3",
+      "files": {
+        "index.js": "sha512-abc",
+        "__proto__": "sha512-evil-mod"
+      }
+    }
+  }
+}

@@ -33,6 +33,11 @@ export class Config {
     this.#bundle = bundle
     this.#debug = debug
 
+    // bundle=load needs a trust root for source bytes: frozen pins each file's sha512 in
+    // the lockfile and we cross-check it on load; otherwise the bundle is itself
+    // authoritative -- lock=none with no lockfile on disk, or lock=ignore with a lockfile
+    // deliberately bypassed.
+    // WARNING: lockfile attests only to source BYTES, not bundle metadata.
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
     }
