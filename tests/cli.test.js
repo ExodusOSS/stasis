@@ -768,6 +768,44 @@ test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not o
   t.assert.match(r.stderr, /ERR_ASSERTION/)
 }))
 
+test('run --bundle=load rejects a v0 bundle whose path-inferred module name disagrees with the lockfile', withTmp((t, tmp) => {
+  // The v0 bundle's name comes from the path (`node_modules/fake-esm-pkg` →
+  // `fake-esm-pkg`); cross-check against the lockfile must fail if the
+  // lockfile attests a different name for that dir (e.g. an aliased install).
+  cpSync(nmFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Tamper the lockfile: same dir, different declared name.
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  lock.modules['node_modules/fake-esm-pkg'].name = 'aliased-name'
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  // Downgrade the bundle to v0 flat shape so the loader hits the path-inference path.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  const flatSources = {}
+  for (const dir of Object.keys(decoded.modules)) {
+    for (const [rel, src] of Object.entries(decoded.modules[dir].files)) {
+      flatSources[`${dir}/${rel}`] = src
+    }
+  }
+  const v0 = { version: 0, config: decoded.config, formats: decoded.formats, imports: decoded.imports, sources: flatSources }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(v0)))
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /ERR_ASSERTION/)
+}))
+
 test('run --bundle=load accepts a v0 legacy bundle (flat sources, no entries/modules)', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')

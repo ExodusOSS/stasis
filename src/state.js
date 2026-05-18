@@ -132,9 +132,14 @@ export class State {
   // loaded, or absorb it as the source of truth when no lockfile is present.
   // v0 bundles infer `name` from path for node_modules buckets but carry no
   // version; the workspace "." bucket has no inferable name. We skip entries
-  // we can't cross-check (null name with lockfile, or null version when
-  // populating state.modules — null versions would later collide with
-  // addFile's strict name/version equality check).
+  // we can't cross-check (no name with lockfile, or no version when populating
+  // state.modules — addFile later asserts strict name+version equality against
+  // disk's package.json, which would clash with a null we stashed earlier).
+  // Note: the path-inferred name for v0 will disagree with the lockfile when a
+  // dep is installed under an alias (`foo: npm:bar` writes `node_modules/foo`
+  // with `name: "bar"` in package.json); the strict equality below will fail
+  // in that case, which is the right call — the v0 bundle has no way to
+  // attest the real package identity, so we refuse to silently mismatch.
   #mergeBundleMetadata(bundle, { lockfileLoaded }) {
     if (lockfileLoaded) {
       if (bundle.entries.size > 0) {
@@ -145,11 +150,11 @@ export class State {
         )
       }
       for (const [dir, info] of bundle.modules) {
-        if (info.name === null) continue // workspace bucket: no inferable name
+        if (!info.name) continue // workspace bucket or fallback: no inferable name
         assert.ok(this.modules.has(dir), `bundle module ${dir} missing in lockfile`)
         const lockModule = this.modules.get(dir)
         assert.equal(info.name, lockModule.name)
-        if (info.version !== null) assert.equal(info.version, lockModule.version)
+        if (info.version) assert.equal(info.version, lockModule.version)
         for (const rel of Object.keys(info.files)) {
           assert.ok(Object.hasOwn(lockModule.files, rel), `bundle file ${dir}/${rel} missing in lockfile`)
         }
@@ -157,7 +162,7 @@ export class State {
     } else {
       if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
       for (const [dir, info] of bundle.modules) {
-        if (info.name === null || info.version === null) continue // partial metadata
+        if (!info.name || !info.version) continue // partial metadata
         if (this.modules.has(dir)) {
           // Code and resources bundles both populate `state.modules` when no lockfile
           // is loaded. They must agree on name/version for the same dir.

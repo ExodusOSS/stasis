@@ -13,8 +13,10 @@ const normalize = ({ name, version, files }) =>
 // `node_modules/` are bucketed by the *last* node_modules segment plus the next
 // 1-2 segments (scoped or plain pkg name) — the same last-wins convention
 // package managers use — and the same prefix is reported as the package `name`.
-// Everything else goes under "." with `name: null` (workspace root, not
-// inferable from path). Version cannot be inferred either way.
+// Malformed input (trailing slash, double slash, bare `@scope` with no pkg
+// suffix, no file segment after the pkg dir) falls back to the workspace
+// bucket. Workspace paths and fall-backs land under "." with `name: null`.
+// Version cannot be inferred either way.
 function inferModuleDir(path) {
   const marker = 'node_modules/'
   const idx = path.lastIndexOf(marker)
@@ -22,6 +24,11 @@ function inferModuleDir(path) {
   const after = idx + marker.length
   const parts = path.slice(after).split('/')
   const pkgLen = parts[0].startsWith('@') ? 2 : 1
+  // Need enough segments for pkg dir + at least one file segment, and each
+  // pkg-name segment must be non-empty.
+  if (parts.length <= pkgLen || parts.slice(0, pkgLen).some((p) => !p)) {
+    return { dir: '.', rel: path, name: null }
+  }
   const name = parts.slice(0, pkgLen).join('/')
   return { dir: path.slice(0, after) + name, rel: parts.slice(pkgLen).join('/'), name }
 }
@@ -120,7 +127,9 @@ export class Bundle {
       // v0 legacy: flat sources at top level, regrouped by inferred module dir.
       assert.ok(json.sources)
       for (const [path, content] of Object.entries(json.sources)) {
+        assert.ok(!path.startsWith('..'))
         const { dir, rel, name } = inferModuleDir(path)
+        assert.ok(!dir.startsWith('..') && !rel.startsWith('..'))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         modules.get(dir).files[rel] = content
       }
@@ -174,7 +183,9 @@ export class Bundle {
       // v0 legacy: flat resources at top level, regrouped by inferred module dir.
       assert.ok(json.resources)
       for (const [path, content] of Object.entries(json.resources)) {
+        assert.ok(!path.startsWith('..'))
         const { dir, rel, name } = inferModuleDir(path)
+        assert.ok(!dir.startsWith('..') && !rel.startsWith('..'))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         modules.get(dir).files[rel] = content
       }
