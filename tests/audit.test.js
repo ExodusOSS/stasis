@@ -43,15 +43,18 @@ const writeLock = (dir, name = 'stasis.lock.json', extra = {}) => {
 const writeBundle = (dir, name = 'snapshot.br') => {
   const path = join(dir, name)
   const bundle = {
-    version: 0,
+    version: 1,
     config: { scope: 'full' },
+    entries: ['src/entry.js'],
+    sources: {
+      '.': { name: 'top-pkg', version: '9.9.9', files: { 'src/entry.js': 'export const x = 1\n' } },
+    },
+    modules: {
+      'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': 'export const f = 1\n' } },
+      'node_modules/baz': { name: 'baz', version: '0.0.1', files: { 'index.js': 'export const b = 1\n' } },
+    },
     formats: { 'node_modules/foo/index.js': 'module' },
     imports: {},
-    sources: {
-      'src/entry.js': "export const x = 1\n",
-      'node_modules/foo/package.json': JSON.stringify({ name: 'foo', version: '2.0.0' }),
-      'node_modules/baz/package.json': JSON.stringify({ name: 'baz', version: '0.0.1' }),
-    },
   }
   writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(bundle))))
   return path
@@ -78,8 +81,22 @@ test('collectPackages reads name/version from a brotli bundle', withTmp((t, tmp)
     [
       { name: 'baz', version: '0.0.1' },
       { name: 'foo', version: '2.0.0' },
+      { name: 'top-pkg', version: '9.9.9' },
     ]
   )
+}))
+
+test('collectPackages skips bundle modules without name/version (v0 legacy)', withTmp((t, tmp) => {
+  const path = join(tmp, 'legacy.br')
+  const legacy = {
+    version: 0,
+    config: { scope: 'full' },
+    formats: {},
+    imports: {},
+    sources: { 'node_modules/foo/index.js': 'x' },
+  }
+  writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(legacy))))
+  t.assert.deepEqual(collectPackagesFromFile(path), [])
 }))
 
 test('collectPackages deduplicates across files', withTmp((t, tmp) => {
@@ -93,6 +110,7 @@ test('collectPackages deduplicates across files', withTmp((t, tmp) => {
     { name: 'foo', version: '1.2.3' },
     { name: 'foo', version: '2.0.0' },
     { name: 'top-pkg', version: '1.0.0' },
+    { name: 'top-pkg', version: '9.9.9' },
   ])
 }))
 

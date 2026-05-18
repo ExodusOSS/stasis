@@ -1,40 +1,29 @@
 import { readFileSync } from 'node:fs'
+import { brotliDecompressSync } from 'node:zlib'
 
 import { advisories } from './apis/npm/index.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 
-const isPackageJsonPath = (p) => p === 'package.json' || p.endsWith('/package.json')
-
-function extractFromLockfile(lockfile) {
-  const out = []
-  for (const { name, version } of lockfile.modules.values()) {
-    if (name && version) out.push({ name, version })
-  }
-  return out
-}
-
-function extractFromBundle(bundle) {
-  const out = []
-  for (const [path, source] of bundle.sources) {
-    if (!isPackageJsonPath(path)) continue
-    const { name, version } = JSON.parse(source)
-    if (name && version) out.push({ name, version })
-  }
-  return out
-}
-
-export function collectPackagesFromFile(file) {
+function parseFile(file) {
   const buf = readFileSync(file)
   try {
-    return extractFromBundle(Bundle.parseCode(buf))
+    return Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
   } catch {
     try {
-      return extractFromLockfile(Lockfile.parse(buf.toString('utf8')))
+      return Lockfile.parse(buf.toString('utf8'))
     } catch (cause) {
       throw new Error(`Unrecognised file (not a stasis lockfile or bundle): ${file}`, { cause })
     }
   }
+}
+
+export function collectPackagesFromFile(file) {
+  const out = []
+  for (const { name, version } of parseFile(file).modules.values()) {
+    if (name && version) out.push({ name, version })
+  }
+  return out
 }
 
 export function collectPackages(files) {
