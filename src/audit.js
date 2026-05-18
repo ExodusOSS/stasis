@@ -1,30 +1,22 @@
-import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { brotliDecompressSync } from 'node:zlib'
 
 import { advisories } from './apis/npm/index.js'
+import { Bundle } from './bundle.js'
+import { Lockfile } from './lockfile.js'
 
 const isPackageJsonPath = (p) => p === 'package.json' || p.endsWith('/package.json')
 
-function extractFromLockfile(json) {
-  assert.equal(json.version, 0, 'unsupported stasis.lock.json version')
+function extractFromLockfile(lockfile) {
   const out = []
-  for (const section of [json.sources, json.modules]) {
-    if (!section) continue
-    assert.equal(typeof section, 'object')
-    for (const entry of Object.values(section)) {
-      const { name, version } = entry
-      if (name && version) out.push({ name, version })
-    }
+  for (const { name, version } of lockfile.modules.values()) {
+    if (name && version) out.push({ name, version })
   }
   return out
 }
 
-function extractFromBundle(json) {
-  assert.equal(json.version, 0, 'unsupported stasis bundle version')
+function extractFromBundle(bundle) {
   const out = []
-  if (!json.sources) return out
-  for (const [path, source] of Object.entries(json.sources)) {
+  for (const [path, source] of bundle.sources) {
     if (!isPackageJsonPath(path)) continue
     const { name, version } = JSON.parse(source)
     if (name && version) out.push({ name, version })
@@ -32,25 +24,17 @@ function extractFromBundle(json) {
   return out
 }
 
-function isLockfileShape(json) {
-  return Boolean(json && (json.modules || (json.sources && Object.values(json.sources).every((v) => v && typeof v === 'object' && 'name' in v))))
-}
-
-function isBundleShape(json) {
-  return Boolean(json && (json.formats || json.imports))
-}
-
 export function collectPackagesFromFile(file) {
   const buf = readFileSync(file)
-  let json
   try {
-    json = JSON.parse(brotliDecompressSync(buf).toString('utf8'))
+    return extractFromBundle(Bundle.parseCode(buf))
   } catch {
-    json = JSON.parse(buf.toString('utf8'))
+    try {
+      return extractFromLockfile(Lockfile.parse(buf.toString('utf8')))
+    } catch (cause) {
+      throw new Error(`Unrecognised file (not a stasis lockfile or bundle): ${file}`, { cause })
+    }
   }
-  if (isBundleShape(json)) return extractFromBundle(json)
-  if (isLockfileShape(json)) return extractFromLockfile(json)
-  throw new Error(`Unrecognised file (not a stasis lockfile or bundle): ${file}`)
 }
 
 export function collectPackages(files) {
