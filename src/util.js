@@ -35,11 +35,11 @@ export const isPlainObject = (x) => x && [null, Object.prototype].includes(Objec
 
 export const fromEntries = (entries) => Object.setPrototypeOf(Object.fromEntries(entries), null)
 
-export const fileSetToObject = (set) => [...set].sort((a, b) => sortPaths(a, b))
+export const fileSetToObject = (set) => [...set].toSorted((a, b) => sortPaths(a, b))
 
 export const fileMapToObject = (map) => fromEntries(
   [...map]
-    .sort((a, b) => sortPaths(a[0], b[0]))
+    .toSorted((a, b) => sortPaths(a[0], b[0]))
     .map(([k, v]) => [k, v instanceof Map ? fileMapToObject(v) : v])
 )
 

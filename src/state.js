@@ -35,51 +35,51 @@ export class State {
     assert.ok(!instance, 'Only a single Stasis instance is supported')
     instance = this
     const potentialRoots = []
-    let dir = root
-    while (dir) {
-      if (existsSync(join(dir, 'package.json'))) {
-        potentialRoots.push(dir)
+    let cursor = root
+    while (cursor) {
+      if (existsSync(join(cursor, 'package.json'))) {
+        potentialRoots.push(cursor)
       } else if (
-        existsSync(join(dir, FILE_CONFIG)) ||
-        existsSync(join(dir, FILE_LOCK)) ||
-        existsSync(join(dir, FILE_CODE)) ||
-        existsSync(join(dir, FILE_RESOURCES))) {
+        existsSync(join(cursor, FILE_CONFIG)) ||
+        existsSync(join(cursor, FILE_LOCK)) ||
+        existsSync(join(cursor, FILE_CODE)) ||
+        existsSync(join(cursor, FILE_RESOURCES))) {
         throw new Error('Unexpected stasis config without package.json')
       }
 
-      if (dir === process.env.PROJECT_CWD) break // e.g. yarn sets this
-      if (existsSync(join(dir, '.git'))) break // don't go higher than the repo root
-      if (existsSync(join(dir, 'pnpm-workspace.yaml'))) break // pnpm workspace root
-      const parent = dirname(dir)
-      if (!parent || parent === dir) break
-      dir = parent
+      if (cursor === process.env.PROJECT_CWD) break // e.g. yarn sets this
+      if (existsSync(join(cursor, '.git'))) break // don't go higher than the repo root
+      if (existsSync(join(cursor, 'pnpm-workspace.yaml'))) break // pnpm workspace root
+      const parent = dirname(cursor)
+      if (!parent || parent === cursor) break
+      cursor = parent
     }
 
     // default root is top-level package.json, to opt-in to per-dir create stasis.config.json
     this.root = potentialRoots.at(-1)
 
     let loaded = false
-    for (const dir of potentialRoots) {
-      const config = readFileSyncMaybe(dir, FILE_CONFIG, 'utf-8')
-      const lock = readFileSyncMaybe(dir, FILE_LOCK, 'utf-8')
-      const sourcesPath = this.config.bundleFile || join(dir, FILE_CODE)
+    for (const rootDir of potentialRoots) {
+      const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8')
+      const lock = readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
+      const sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
       const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
-      const resources = readFileSyncMaybe(dir, FILE_RESOURCES)
+      const resources = readFileSyncMaybe(rootDir, FILE_RESOURCES)
       if (config !== null || lock !== null || sources !== null || resources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
         loaded = true
-        this.root = dir
+        this.root = rootDir
 
         if (config) this.config.loadConfig(config)
 
         if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
-          throw new Error(`Unexpected ${join(dir, FILE_LOCK)} with config.lock = 'none'`)
+          throw new Error(`Unexpected ${join(rootDir, FILE_LOCK)} with config.lock = 'none'`)
         }
         if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
           throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
         }
         if (resources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
-          throw new Error(`Unexpected ${join(dir, FILE_RESOURCES)} with config.bundle = 'none'`)
+          throw new Error(`Unexpected ${join(rootDir, FILE_RESOURCES)} with config.bundle = 'none'`)
         }
 
         if (sources && !lock && this.config.useLockfile && !this.config.replaceLockfile) {
@@ -145,8 +145,8 @@ export class State {
     if (lockfileLoaded) {
       if (bundle.entries.size > 0) {
         assert.deepStrictEqual(
-          [...bundle.entries].sort(),
-          [...this.entries].sort(),
+          [...bundle.entries].toSorted(),
+          [...this.entries].toSorted(),
           'bundle/lockfile entries mismatch'
         )
       }
@@ -279,7 +279,7 @@ export class State {
     assert.ok(!cond.includes('(') && !cond.includes(')'), 'conditions must not contain "(" or ")"')
     const attrs = importAttributes ? Object.entries(importAttributes) : []
     if (attrs.length === 0) return cond
-    const sorted = Object.fromEntries(attrs.sort(([a], [b]) => (a < b ? -1 : 1)))
+    const sorted = Object.fromEntries(attrs.toSorted(([a], [b]) => (a < b ? -1 : 1)))
     return `${cond} (with: ${JSON.stringify(sorted)})`
   }
 

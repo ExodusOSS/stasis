@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "import",
+    "node",
+    "promise",
+    "unicorn"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "rules": {
+    "curly": ["error", "multi-line"],
+    "eqeqeq": ["error", "smart"],
+    "no-undef": "error",
+    "node/handle-callback-err": "error",
+    "node/no-path-concat": "error",
+    "unicorn/consistent-function-scoping": "off"
+  },
+  "env": {
+    "builtin": true,
+    "node": true
+  },
+  "ignorePatterns": [
+    "tests/fixtures/"
+  ]
+}

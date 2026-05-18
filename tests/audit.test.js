@@ -64,7 +64,7 @@ test('collectPackages reads name/version from a lockfile (node_modules only)', w
   const file = writeLock(tmp)
   const pkgs = collectPackagesFromFile(file)
   t.assert.deepEqual(
-    pkgs.sort((a, b) => (a.name < b.name ? -1 : 1)),
+    pkgs.toSorted((a, b) => (a.name < b.name ? -1 : 1)),
     [
       { name: 'bar', version: '4.5.6' },
       { name: 'foo', version: '1.2.3' },
@@ -76,7 +76,7 @@ test('collectPackages reads name/version from a brotli bundle (node_modules only
   const file = writeBundle(tmp)
   const pkgs = collectPackagesFromFile(file)
   t.assert.deepEqual(
-    pkgs.sort((a, b) => (a.name < b.name ? -1 : 1)),
+    pkgs.toSorted((a, b) => (a.name < b.name ? -1 : 1)),
     [
       { name: 'baz', version: '0.0.1' },
       { name: 'foo', version: '2.0.0' },
