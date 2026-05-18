@@ -117,6 +117,10 @@ export class State {
 
         if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
           const bundle = Bundle.parseResources(resources)
+          // v0 resource bundles didn't record scope; only enforce on v1 where it's reliable.
+          if (bundle.version === Bundle.VERSION) {
+            assert.equal(bundle.config.scope, this.config.scope)
+          }
           this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.resources = bundle.resources
         }
@@ -126,8 +130,8 @@ export class State {
 
   // Cross-check bundle metadata (entries/modules) with what the lockfile already
   // loaded, or absorb it as the source of truth when no lockfile is present.
-  // For pre-0 bundles modules carry a single synthetic "." entry with null
-  // name/version — those entries are skipped (no metadata to cross-check).
+  // v0 bundles carry a single synthetic "." entry with null name/version —
+  // those entries are skipped (no metadata to cross-check).
   #mergeBundleMetadata(bundle, { lockfileLoaded }) {
     if (lockfileLoaded) {
       if (bundle.entries.size > 0) {
@@ -138,7 +142,7 @@ export class State {
         )
       }
       for (const [dir, info] of bundle.modules) {
-        if (info.name === null) continue // pre-0: no metadata to check
+        if (info.name === null) continue // v0 legacy: no metadata to check
         assert.ok(this.modules.has(dir), `bundle module ${dir} missing in lockfile`)
         const lockModule = this.modules.get(dir)
         assert.equal(info.name, lockModule.name)
@@ -151,7 +155,13 @@ export class State {
       if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
       for (const [dir, info] of bundle.modules) {
         if (info.name === null) continue
-        if (!this.modules.has(dir)) {
+        if (this.modules.has(dir)) {
+          // Code and resources bundles both populate `state.modules` when no lockfile
+          // is loaded. They must agree on name/version for the same dir.
+          const existing = this.modules.get(dir)
+          assert.equal(info.name, existing.name, `bundle ${dir} name mismatch`)
+          assert.equal(info.version, existing.version, `bundle ${dir} version mismatch`)
+        } else {
           this.modules.set(dir, { name: info.name, version: info.version, files: Object.create(null) })
         }
       }
@@ -159,7 +169,9 @@ export class State {
   }
 
   assertEntry(url) {
-    // Skipped silently when no entries info is available (pre-0 bundle + lock=none/ignore).
+    // Skipped silently when no entries info is available (v0 bundle + lock=none/ignore).
+    // v1 bundles in full scope are required to declare at least one entry at parse time,
+    // so this fallback only ever triggers for the legacy path.
     if (this.entries.size === 0) return
     const file = this.relative(this.absolute(url))
     assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)

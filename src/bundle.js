@@ -22,6 +22,10 @@ const normalize = ({ name, version, files }) =>
 export class Bundle {
   static VERSION = VERSION
 
+  // The on-disk version this instance represents. Defaults to VERSION; parse*
+  // sets it to whatever the file declared (LEGACY_VERSION for v0 input).
+  // Serialization always writes the current VERSION regardless — loading v0 and
+  // re-saving promotes the bundle to v1.
   version = VERSION
   config
   entries
@@ -29,8 +33,10 @@ export class Bundle {
   formats
   imports
 
-  constructor({ config = { scope: 'full' }, entries, modules, formats, imports } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, version = VERSION } = {}) {
+    assert.ok([LEGACY_VERSION, VERSION].includes(version))
     assert.ok(['node_modules', 'full'].includes(config.scope))
+    this.version = version
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
@@ -78,6 +84,10 @@ export class Bundle {
       }
       if (full) {
         assert.ok(Array.isArray(json.entries))
+        // Empty entries in v1 + full would let `state.assertEntry` skip its check
+        // (it short-circuits on entries.size === 0 for v0+no-lockfile compatibility).
+        // Forbid the shape at parse time so tampered bundles can't exploit that path.
+        assert.ok(json.entries.length > 0, 'v1 bundle with scope=full must have at least one entry')
         assert.ok(json.sources && typeof json.sources === 'object')
         entries = new Set(json.entries)
         for (const [dir, info] of Object.entries(json.sources)) {
@@ -100,6 +110,7 @@ export class Bundle {
     }
 
     return new Bundle({
+      version: json.version,
       config: json.config,
       entries,
       modules,
@@ -148,7 +159,7 @@ export class Bundle {
       modules.set('.', { name: null, version: null, files: fromEntries(Object.entries(json.resources)) })
     }
 
-    return new Bundle({ config, modules })
+    return new Bundle({ version: json.version, config, modules })
   }
 
   #groupedFromModules() {
@@ -170,7 +181,7 @@ export class Bundle {
     const { modules, sources } = this.#groupedFromModules()
     const formats = fileMapToObject(this.formats)
     const imports = fileMapToObject(this.imports)
-    const data = { version: this.version, config: this.config }
+    const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
     return brotliCompressSync(JSON.stringify(data, undefined, 2))
@@ -178,7 +189,7 @@ export class Bundle {
 
   serializeResources() {
     const { modules, sources } = this.#groupedFromModules()
-    const data = { version: this.version, config: this.config }
+    const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { sources })
     Object.assign(data, { modules })
     return brotliCompressSync(JSON.stringify(data, undefined, 2))

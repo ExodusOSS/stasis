@@ -855,3 +855,27 @@ test('run --bundle=load rejects an entry not listed in the bundle entries', with
   t.assert.notEqual(load.status, 0)
   t.assert.match(load.stderr, /ERR_ASSERTION|Unknown entry/)
 }))
+
+test('parseCode rejects a v1 full-scope bundle with empty entries', withTmp((t, tmp) => {
+  // A tampered bundle with entries=[] would otherwise let assertEntry skip (it
+  // short-circuits on empty for v0+no-lockfile compat). Reject at parse time.
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.entries = []
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const load = run(
+    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /at least one entry|ERR_ASSERTION/)
+}))

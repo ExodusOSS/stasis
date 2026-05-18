@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis/bundle'
 import { Lockfile } from '@exodus/stasis/lockfile'
@@ -67,4 +68,31 @@ test('Bundle.serializeResources round-trip', (t) => {
 
   t.assert.equal(parsed.modules.get('node_modules/foo').files['asset.bin'], Buffer.from('hello').toString('base64'))
   t.assert.equal(parsed.resources.get('node_modules/foo/asset.bin'), Buffer.from('hello').toString('base64'))
+})
+
+test('Bundle.parseCode exposes the parsed version (v0 stays at 0 in memory)', (t) => {
+  const v0 = brotliCompressSync(JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    formats: {},
+    imports: {},
+    sources: { 'src/a.js': 'export const x = 1\n' },
+  }))
+  const parsed = Bundle.parseCode(v0)
+  t.assert.equal(parsed.version, 0)
+  // Re-save promotes to v1; the in-memory v0 carries no entries/modules metadata,
+  // so a downstream caller (State.addFile) has to fill them before serializeCode.
+})
+
+test('Bundle.parseCode rejects a v1 full-scope bundle with empty entries', (t) => {
+  const buf = brotliCompressSync(JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { '.': { name: 'x', version: '1.0', files: {} } },
+    modules: {},
+    formats: {},
+    imports: {},
+  }))
+  t.assert.throws(() => Bundle.parseCode(buf), /at least one entry/)
 })
