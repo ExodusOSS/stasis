@@ -86,6 +86,7 @@ export class State {
         }
 
         if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
+        let lockfileLoaded = false
         if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
           const lockfile = Lockfile.parse(lock)
           if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
@@ -102,11 +103,13 @@ export class State {
               noupsert(this.hashes, join(dir, name), hash)
             }
           }
+          lockfileLoaded = true
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
           const bundle = Bundle.parseCode(sources)
           assert.equal(bundle.config.scope, this.config.scope)
+          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.sources = bundle.sources
           this.formats = bundle.formats
           this.imports = bundle.imports
@@ -114,10 +117,52 @@ export class State {
 
         if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
           const bundle = Bundle.parseResources(resources)
+          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.resources = bundle.resources
         }
       }
     }
+  }
+
+  // Cross-check bundle metadata (entries/modules) with what the lockfile already
+  // loaded, or absorb it as the source of truth when no lockfile is present.
+  // For pre-0 bundles modules carry a single synthetic "." entry with null
+  // name/version — those entries are skipped (no metadata to cross-check).
+  #mergeBundleMetadata(bundle, { lockfileLoaded }) {
+    if (lockfileLoaded) {
+      if (bundle.entries.size > 0) {
+        assert.deepStrictEqual(
+          [...bundle.entries].sort(),
+          [...this.entries].sort(),
+          'bundle/lockfile entries mismatch'
+        )
+      }
+      for (const [dir, info] of bundle.modules) {
+        if (info.name === null) continue // pre-0: no metadata to check
+        assert.ok(this.modules.has(dir), `bundle module ${dir} missing in lockfile`)
+        const lockModule = this.modules.get(dir)
+        assert.equal(info.name, lockModule.name)
+        assert.equal(info.version, lockModule.version)
+        for (const rel of Object.keys(info.files)) {
+          assert.ok(Object.hasOwn(lockModule.files, rel), `bundle file ${dir}/${rel} missing in lockfile`)
+        }
+      }
+    } else {
+      if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
+      for (const [dir, info] of bundle.modules) {
+        if (info.name === null) continue
+        if (!this.modules.has(dir)) {
+          this.modules.set(dir, { name: info.name, version: info.version, files: Object.create(null) })
+        }
+      }
+    }
+  }
+
+  assertEntry(url) {
+    // Skipped silently when no entries info is available (pre-0 bundle + lock=none/ignore).
+    if (this.entries.size === 0) return
+    const file = this.relative(this.absolute(url))
+    assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)
   }
 
   static get instance() {
@@ -251,13 +296,41 @@ export class State {
     }).serialize()
   }
 
+  // Pair each module's recorded file list with the corresponding content from
+  // perFile (state.sources for code, state.resources for resources), dropping
+  // modules with no content. Bundle.serialize* then groups them into sources/
+  // modules buckets and writes the lockfile-shaped output.
+  #bundleModules(perFile) {
+    const modules = new Map()
+    for (const [dir, info] of this.modules) {
+      const files = {}
+      for (const rel of Object.keys(info.files)) {
+        const file = dir === '.' ? rel : `${dir}/${rel}`
+        const content = perFile.get(file)
+        if (content !== undefined) files[rel] = content
+      }
+      if (Object.keys(files).length > 0) {
+        modules.set(dir, { name: info.name, version: info.version, files })
+      }
+    }
+    return modules
+  }
+
   get sourceData() {
     return new Bundle({
       config: this.config.values,
-      sources: this.sources,
+      entries: this.entries,
+      modules: this.#bundleModules(this.sources),
       formats: this.formats,
       imports: this.imports,
     }).serializeCode()
+  }
+
+  get resourceData() {
+    return new Bundle({
+      config: this.config.values,
+      modules: this.#bundleModules(this.resources),
+    }).serializeResources()
   }
 
   write() {

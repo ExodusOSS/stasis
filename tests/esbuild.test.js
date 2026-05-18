@@ -178,8 +178,9 @@ test('bundle=add --full writes a bundle whose sources match disk', withTmp((t, t
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
   t.assert.equal(decoded.version, 0)
   t.assert.deepEqual(decoded.config, { scope: 'full' })
-  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
-  t.assert.equal(decoded.sources['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
+  t.assert.deepEqual(decoded.entries, ['src/entry.js'])
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
   // esbuild plugin does not infer module/commonjs format; addFile records nothing for it
   t.assert.equal(decoded.formats['src/entry.js'], undefined)
 }))
@@ -201,7 +202,7 @@ test('bundle=load --full rejects a tampered source in the bundle', withTmp((t, t
 
   // tamper: swap hello.js source for an attacker payload
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  decoded.sources['src/hello.js'] = 'export const greet = (n) => `pwned, ${n}`\n'
+  decoded.sources['.'].files['src/hello.js'] = 'export const greet = (n) => `pwned, ${n}`\n'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   // re-running with bundle=add (which pre-loads the bundle) must catch the disk/bundle disagreement
@@ -235,7 +236,7 @@ test('bundle=replace rewrites a bundle that had stale orphan entries', withTmp((
 
   // forge a stale orphan into the existing bundle
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  decoded.sources['src/orphan.js'] = 'export const x = 0\n'
+  decoded.sources['.'].files['src/orphan.js'] = 'export const x = 0\n'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run(['src/entry.js'], {
@@ -249,7 +250,7 @@ test('bundle=replace rewrites a bundle that had stale orphan entries', withTmp((
   })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const after = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(after.sources['src/orphan.js'], undefined)
+  t.assert.equal(after.sources['.'].files['src/orphan.js'], undefined)
 }))
 
 test('node_modules scope records package files and skips src/', withTmp((t, tmp) => {
@@ -344,8 +345,8 @@ test('bundle=add --full captures a .json import in the bundle', withTmp((t, tmp)
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.sources['src/data.json'], readFileSync(join(tmp, 'src/data.json'), 'utf-8'))
-  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/data.json'], readFileSync(join(tmp, 'src/data.json'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
 }))
 
 test('config scope conflict with env is reported', withTmp((t, tmp) => {

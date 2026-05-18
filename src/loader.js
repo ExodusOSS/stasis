@@ -116,6 +116,7 @@ function resolve(specifier, context, nextResolve) {
     const url = specifier.startsWith('file:')
       ? specifier
       : pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
+    if (!parentURL && state.config.full) state.assertEntry(url)
     return { url, format: state.getFormat(url), importAttributes: undefined, shortCircuit: true }
   }
 

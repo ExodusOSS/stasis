@@ -81,22 +81,48 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
 {
   "version": 0,
   "config": { "scope": "full" },
+  "entries": ["src/index.js"],
+  "sources": {
+    ".": {
+      "name": "@exodus/stasis",
+      "version": "1.0.0-alpha.0",
+      "files": { "src/index.js": "export const x = 1\n" }
+    }
+  },
+  "modules": {
+    "node_modules/@exodus/bytes": {
+      "name": "@exodus/bytes",
+      "version": "1.15.0",
+      "files": { "index.js": "..." }
+    }
+  },
   "formats": { "src/index.js": "module" },
   "imports": {
     "*": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } },
     "node, import": { "node_modules/foo/index.js": { "./impl.js": "node_modules/foo/impl.js" } }
-  },
-  "sources": { "src/index.js": "export const x = 1\n" }
+  }
 }
 ```
 
+- `entries`/`sources`/`modules` mirror the lockfile shape, with `files`
+  recording UTF-8 source bytes instead of SRI digests. `entries` and
+  `sources` are present only when `scope = full`; `modules` is always
+  present.
 - `formats`: project-relative path → Node loader format (`module`,
   `commonjs`, …). May be missing per file.
 - `imports`: conditions → parent file → specifier → resolved
   project-relative path. The conditions key is either `"*"` or a
   comma-joined list (e.g. `"node, import"`).
-- `sources`: project-relative path → UTF-8 source. Hashes must match
-  `stasis.lock.json`; verified on every read.
+- When a `stasis.lock.json` is loaded alongside, the bundle's `entries`,
+  module/source dirs, `name`/`version`, and per-module file lists must
+  match. Each loaded source is hash-verified against the lockfile.
+- In `bundle = load` mode with `scope = full`, entry-point resolutions
+  are checked against `entries`.
+
+A legacy "pre-0" shape — flat top-level `sources` keyed by project-
+relative path with no `entries`/`modules` — is still accepted on load
+(loses cross-check of module metadata; lockfile-driven integrity checks
+still apply).
 
 ## `stasis.resources.br`
 
@@ -105,9 +131,19 @@ Brotli-compressed JSON. Same write/read gating as `stasis.code.br`.
 ```json
 {
   "version": 0,
-  "resources": { "node_modules/foo/asset.bin": "<base64 bytes>" }
+  "config": { "scope": "full" },
+  "sources": {
+    ".": { "name": "...", "version": "...", "files": { "asset.bin": "<base64>" } }
+  },
+  "modules": {
+    "node_modules/foo": { "name": "foo", "version": "...", "files": { "asset.bin": "<base64>" } }
+  }
 }
 ```
+
+Same structural rules as `stasis.code.br` minus `entries`/`formats`/
+`imports`. Resource bytes are stored base64-encoded. The legacy "pre-0"
+shape with a flat top-level `resources` map is still accepted on load.
 
 ## Discovery
 
