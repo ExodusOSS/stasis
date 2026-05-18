@@ -1,19 +1,98 @@
 import assert from 'node:assert/strict'
 
-const {
-  EXODUS_STASIS_SCOPE: envScope,
-  EXODUS_STASIS_LOCK: envLock,
-  EXODUS_STASIS_BUNDLE: envBundle,
-  EXODUS_STASIS_BUNDLE_FILE: envBundleFile,
-  EXODUS_STASIS_DEBUG: envDebug,
-} = process.env
+const VALID_SCOPE = new Set(['node_modules', 'full'])
+const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])
+const VALID_BUNDLE = new Set(['none', 'ignore', 'add', 'replace', 'load'])
+
+const envDebugBool = (value) => Boolean(value && value !== '0')
+
+const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'debug']
+
+// Plugins accept the same options as Config but want to validate without constructing one,
+// since constructing State has side effects. Mirror Config's per-field validation.
+export function validatePluginOptions(label, options) {
+  const rest = { ...options }
+  for (const key of OPTION_KEYS) delete rest[key]
+  assert.equal(Object.keys(rest).length, 0, `Unknown ${label} options: ${Object.keys(rest).join(', ')}`)
+  const { scope, lock, bundle, bundleFile, debug } = options
+  if (scope !== undefined) assert.ok(VALID_SCOPE.has(scope), `Invalid scope: ${scope}`)
+  if (lock !== undefined) assert.ok(VALID_LOCK.has(lock), `Invalid lock: ${lock}`)
+  if (bundle !== undefined) assert.ok(VALID_BUNDLE.has(bundle), `Invalid bundle: ${bundle}`)
+  if (bundleFile !== undefined) assert.equal(typeof bundleFile, 'string', 'bundleFile must be a string')
+  if (debug !== undefined) assert.equal(typeof debug, 'boolean', 'debug must be a boolean')
+}
+
+// When a plugin runs against a State that already exists (preload path), the active Config
+// is authoritative. Any options the plugin was given must agree with it.
+export function assertOptionsMatchConfig(config, options) {
+  const { scope, lock, bundle, bundleFile, debug } = options
+  try {
+    if (scope !== undefined) assert.equal(config.scope, scope)
+    if (lock !== undefined) assert.equal(config.lock, lock)
+    if (bundle !== undefined) assert.equal(config.bundleMode, bundle)
+    if (bundleFile !== undefined) assert.equal(config.bundleFile, bundleFile)
+    if (debug !== undefined) assert.equal(config.debug, debug)
+  } catch (cause) {
+    throw new Error('Plugin options conflict with active stasis state', { cause })
+  }
+}
 
 export class Config {
-  #scope = envScope || 'full'
-  #lock = envLock || 'add'
-  #bundle = envBundle || 'none'
-  #bundleFile = envBundleFile || undefined
-  #debug = Boolean(envDebug && envDebug !== '0')
+  #env
+  #scope
+  #lock
+  #bundle
+  #bundleFile
+  #debug
+
+  // Options match the CLI flags (lock/bundle/bundleFile/scope/debug). Env vars take effect at
+  // construction time; if both env and an option are set they must agree.
+  constructor(options = {}) {
+    const { scope, lock, bundle, bundleFile, debug, ...rest } = options
+    assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
+
+    this.#env = {
+      scope: process.env.EXODUS_STASIS_SCOPE || undefined,
+      lock: process.env.EXODUS_STASIS_LOCK || undefined,
+      bundle: process.env.EXODUS_STASIS_BUNDLE || undefined,
+      bundleFile: process.env.EXODUS_STASIS_BUNDLE_FILE || undefined,
+      debug: process.env.EXODUS_STASIS_DEBUG || undefined,
+    }
+
+    try {
+      if (this.#env.scope !== undefined && scope !== undefined) assert.equal(this.#env.scope, scope)
+      if (this.#env.lock !== undefined && lock !== undefined) assert.equal(this.#env.lock, lock)
+      if (this.#env.bundle !== undefined && bundle !== undefined) assert.equal(this.#env.bundle, bundle)
+      if (this.#env.bundleFile !== undefined && bundleFile !== undefined) {
+        assert.equal(this.#env.bundleFile, bundleFile)
+      }
+      if (this.#env.debug !== undefined && debug !== undefined) {
+        assert.equal(envDebugBool(this.#env.debug), debug)
+      }
+    } catch (cause) {
+      throw new Error('Plugin options can not override stasis env', { cause })
+    }
+
+    this.#scope = this.#env.scope || scope || 'full'
+    this.#lock = this.#env.lock || lock || 'add'
+    this.#bundle = this.#env.bundle || bundle || 'none'
+    this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
+    this.#debug = this.#env.debug !== undefined ? envDebugBool(this.#env.debug) : (debug ?? false)
+
+    assert.ok(VALID_SCOPE.has(this.#scope), `Invalid scope: ${this.#scope}`)
+    assert.ok(VALID_LOCK.has(this.#lock), `Invalid lock: ${this.#lock}`)
+    assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
+    assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
+    if (this.#bundleFile !== undefined) assert.equal(typeof this.#bundleFile, 'string', 'bundleFile must be a string')
+
+    if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
+      throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
+    }
+
+    if (this.#lock === 'none' && this.#bundle === 'none') {
+      throw new RangeError('lock=none requires bundle=(add|replace|load|ignore)')
+    }
+  }
 
   loadConfig(json) {
     const {
@@ -23,9 +102,9 @@ export class Config {
       debug = this.#debug,
       ...rest
     } = JSON.parse(json)
-    assert.ok(['node_modules', 'full'].includes(scope))
-    assert.ok(['none', 'ignore', 'add', 'replace', 'frozen'].includes(lock))
-    assert.ok(['none', 'ignore', 'add', 'replace', 'load'].includes(bundle))
+    assert.ok(VALID_SCOPE.has(scope))
+    assert.ok(VALID_LOCK.has(lock))
+    assert.ok(VALID_BUNDLE.has(bundle))
     assert.ok([false, true].includes(debug))
     assert.equal(Object.keys(rest).length, 0)
     this.#scope = scope
@@ -47,10 +126,10 @@ export class Config {
     }
 
     try {
-      if (envScope) assert.equal(this.#scope, envScope)
-      if (envLock) assert.equal(this.#lock, envLock)
-      if (envBundle) assert.equal(this.#bundle, envBundle)
-      if (envDebug) assert.equal(this.#debug, Boolean(envDebug && envDebug !== '0'))
+      if (this.#env.scope) assert.equal(this.#scope, this.#env.scope)
+      if (this.#env.lock) assert.equal(this.#lock, this.#env.lock)
+      if (this.#env.bundle) assert.equal(this.#bundle, this.#env.bundle)
+      if (this.#env.debug) assert.equal(this.#debug, envDebugBool(this.#env.debug))
     } catch (cause) {
       throw new Error('Flags/env can not override stasis.config.json', { cause })
     }
@@ -70,6 +149,10 @@ export class Config {
 
   get bundle() {
     return this.#bundle !== 'none' && this.#bundle !== 'ignore'
+  }
+
+  get bundleMode() {
+    return this.#bundle
   }
 
   get ignoreBundle() {

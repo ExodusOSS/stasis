@@ -28,12 +28,13 @@ export class State {
   formats = new Map()
   modules = new Map()
   imports = new Map()
-  config = new Config()
+  config
   root
 
-  constructor(root) {
+  constructor(root, options = {}) {
     assert.ok(!instance, 'Only a single Stasis instance is supported')
     instance = this
+    this.config = new Config(options)
     const potentialRoots = []
     let cursor = root
     while (cursor) {
