@@ -5,7 +5,7 @@ import { Lockfile } from '@exodus/stasis/lockfile'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
-  t.assert.equal(Bundle.VERSION, 0)
+  t.assert.equal(Bundle.VERSION, 1)
 })
 
 test('@exodus/stasis/lockfile exports Lockfile class', (t) => {

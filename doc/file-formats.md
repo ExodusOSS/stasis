@@ -9,9 +9,9 @@ Stasis writes up to four files at the project root, next to `package.json`:
 | `stasis.code.br` | Bundled text sources | Brotli-compressed JSON |
 | `stasis.resources.br` | Bundled binary resources | Brotli-compressed JSON |
 
-All three stasis-generated files carry an integer `version` field (currently
-`0`). Paths are POSIX-style and relative to the directory holding the
-lockfile; none may start with `..`.
+All three stasis-generated files carry an integer `version` field. Lockfiles
+and bundles are independently versioned. Paths are POSIX-style and relative
+to the directory holding the lockfile; none may start with `..`.
 
 ## `stasis.config.json`
 
@@ -79,7 +79,7 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
 
 ```json
 {
-  "version": 0,
+  "version": 1,
   "config": { "scope": "full" },
   "entries": ["src/index.js"],
   "sources": {
@@ -106,8 +106,8 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
 
 - `entries`/`sources`/`modules` mirror the lockfile shape, with `files`
   recording UTF-8 source bytes instead of SRI digests. `entries` and
-  `sources` are present only when `scope = full`; `modules` is always
-  present.
+  `sources` are present only when `scope = full`; `modules` may be
+  omitted (treated as empty).
 - `formats`: project-relative path → Node loader format (`module`,
   `commonjs`, …). May be missing per file.
 - `imports`: conditions → parent file → specifier → resolved
@@ -119,10 +119,10 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
 - In `bundle = load` mode with `scope = full`, entry-point resolutions
   are checked against `entries`.
 
-A legacy "pre-0" shape — flat top-level `sources` keyed by project-
+A legacy `version: 0` shape — flat top-level `sources` keyed by project-
 relative path with no `entries`/`modules` — is still accepted on load
 (loses cross-check of module metadata; lockfile-driven integrity checks
-still apply).
+still apply). The bundle is always written as `version: 1`.
 
 ## `stasis.resources.br`
 
@@ -130,7 +130,7 @@ Brotli-compressed JSON. Same write/read gating as `stasis.code.br`.
 
 ```json
 {
-  "version": 0,
+  "version": 1,
   "config": { "scope": "full" },
   "sources": {
     ".": { "name": "...", "version": "...", "files": { "asset.bin": "<base64>" } }
@@ -142,8 +142,9 @@ Brotli-compressed JSON. Same write/read gating as `stasis.code.br`.
 ```
 
 Same structural rules as `stasis.code.br` minus `entries`/`formats`/
-`imports`. Resource bytes are stored base64-encoded. The legacy "pre-0"
-shape with a flat top-level `resources` map is still accepted on load.
+`imports`. Resource bytes are stored base64-encoded. A legacy `version: 0`
+shape with a flat top-level `resources` map is still accepted on load;
+writes are always `version: 1`.
 
 ## Discovery
 

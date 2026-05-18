@@ -361,7 +361,7 @@ test('run --bundle=add --bundle-file writes the bundle at the chosen path/filena
   t.assert.ok(!existsSync(join(runFixture, 'stasis.code.br')), 'bundle should not pollute the fixture')
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.version, 0)
+  t.assert.equal(decoded.version, 1)
   t.assert.deepEqual(decoded.config, { scope: 'full' })
   t.assert.deepEqual(decoded.entries, ['src/entry.js'])
   t.assert.equal(decoded.sources['.'].name, 'stasis-cli-run')
@@ -416,7 +416,7 @@ test('run --lock=frozen --bundle=add writes the bundle without rewriting the loc
   t.assert.equal(readFileSync(lockPath, 'utf-8'), before, 'lock=frozen must not rewrite the lockfile')
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.version, 0)
+  t.assert.equal(decoded.version, 1)
   t.assert.deepEqual(decoded.config, { scope: 'full' })
   t.assert.deepEqual(decoded.entries, ['src/entry.js'])
   t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
@@ -768,10 +768,10 @@ test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not o
   t.assert.match(r.stderr, /ERR_ASSERTION/)
 }))
 
-test('run --bundle=load accepts a pre-0 bundle (flat sources, no entries/modules)', withTmp((t, tmp) => {
+test('run --bundle=load accepts a v0 legacy bundle (flat sources, no entries/modules)', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
-  // Build a fresh new-format bundle, then downgrade it to the pre-0 shape on disk
+  // Build a fresh v1 bundle, then downgrade it to the v0 legacy shape on disk
   const save = run(
     ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
@@ -785,8 +785,8 @@ test('run --bundle=load accepts a pre-0 bundle (flat sources, no entries/modules
       flatSources[dir === '.' ? rel : `${dir}/${rel}`] = src
     }
   }
-  const pre0 = { version: 0, config: decoded.config, formats: decoded.formats, imports: decoded.imports, sources: flatSources }
-  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(pre0)))
+  const v0 = { version: 0, config: decoded.config, formats: decoded.formats, imports: decoded.imports, sources: flatSources }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(v0)))
 
   const load = run(
     ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],

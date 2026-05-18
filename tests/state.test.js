@@ -178,11 +178,11 @@ test('lockData is well-formed JSON with the expected shape', (t) => {
   t.assert.equal(parsed.sources['.'].name, 'stasis-test-root')
 })
 
-test('sourceData is brotli-compressed JSON in the new format', (t) => {
+test('sourceData is brotli-compressed JSON in v1 format', (t) => {
   const buf = state.sourceData
   t.assert.ok(Buffer.isBuffer(buf))
   const parsed = JSON.parse(brotliDecompressSync(buf))
-  t.assert.equal(parsed.version, 0)
+  t.assert.equal(parsed.version, 1)
   t.assert.deepEqual(parsed.config, { scope: 'full' })
   t.assert.ok(Array.isArray(parsed.entries))
   t.assert.ok(parsed.entries.includes('src/foo.js'))

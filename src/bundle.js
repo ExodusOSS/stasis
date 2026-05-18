@@ -3,19 +3,22 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { fileMapToObject, fileSetToObject, fromEntries, objectToMaps, sortPaths } from './util.js'
 
-const VERSION = 0
+const VERSION = 1
+const LEGACY_VERSION = 0
 
 const normalize = ({ name, version, files }) =>
   ({ name, version, files: fromEntries(Object.entries(files)) })
 
-// The current bundle format mirrors the lockfile shape (entries/sources/modules
-// with name+version+files), recording source bytes (or base64 for resources)
-// instead of integrity hashes. The "pre-0" format predates this change: a flat
-// top-level sources/resources map keyed by project-relative path, with no
-// entries/modules metadata. We convert pre-0 to the new in-memory shape on load
-// (synthetic "." bucket with null name/version, since pre-0 carries no module
-// metadata). Both shapes share the same on-disk version (0); the format is
-// detected by presence of the `modules` key.
+// Bundle (stasis.code.br / stasis.resources.br) on-disk version:
+//   v0 — legacy flat layout: top-level `sources` (or `resources`) keyed by
+//        project-relative path. No entries/modules metadata.
+//   v1 — current layout, mirrors stasis.lock.json: per-package buckets under
+//        `sources` (workspace) and `modules` (node_modules) with name+version+files,
+//        plus `entries`. File payloads carry bytes (UTF-8 source strings or base64
+//        resource blobs) instead of SRI digests.
+// We load both v0 and v1; we always serialize v1. v0 is converted on load to
+// the same in-memory shape: a single synthetic "." bucket with null name/version
+// (carries no module metadata to cross-check).
 export class Bundle {
   static VERSION = VERSION
 
@@ -54,23 +57,24 @@ export class Bundle {
 
   static parseCode(buf) {
     const json = JSON.parse(brotliDecompressSync(buf))
-    assert.equal(json.version, VERSION)
+    assert.ok(json.version === VERSION || json.version === LEGACY_VERSION)
     assert.ok(['node_modules', 'full'].includes(json.config?.scope))
     assert.ok(json.formats)
     assert.ok(json.imports)
 
-    const full = json.config.scope === 'full'
-    const isNewFormat = 'modules' in json
     const modules = new Map()
     let entries = new Set()
 
-    if (isNewFormat) {
-      assert.ok(json.modules && typeof json.modules === 'object')
-      for (const [dir, info] of Object.entries(json.modules)) {
-        assert.ok(dir.includes('node_modules'))
-        assert.ok(!dir.startsWith('..'))
-        assert.ok(info?.name && info.version && info.files)
-        modules.set(dir, normalize(info))
+    if (json.version === VERSION) {
+      const full = json.config.scope === 'full'
+      if (json.modules !== undefined) {
+        assert.ok(typeof json.modules === 'object' && json.modules !== null)
+        for (const [dir, info] of Object.entries(json.modules)) {
+          assert.ok(dir.includes('node_modules'))
+          assert.ok(!dir.startsWith('..'))
+          assert.ok(info?.name && info.version && info.files)
+          modules.set(dir, normalize(info))
+        }
       }
       if (full) {
         assert.ok(Array.isArray(json.entries))
@@ -90,7 +94,7 @@ export class Bundle {
         for (const rel of Object.keys(files)) assert.ok(!rel.startsWith('..'))
       }
     } else {
-      // pre-0 format: flat sources at top level, no entries/modules metadata.
+      // v0 legacy: flat sources at top level, no entries/modules metadata.
       assert.ok(json.sources)
       modules.set('.', { name: null, version: null, files: fromEntries(Object.entries(json.sources)) })
     }
@@ -106,25 +110,26 @@ export class Bundle {
 
   static parseResources(buf) {
     const json = JSON.parse(brotliDecompressSync(buf))
-    assert.equal(json.version, VERSION)
+    assert.ok(json.version === VERSION || json.version === LEGACY_VERSION)
 
-    const isNewFormat = 'modules' in json
     const modules = new Map()
     let config = { scope: 'full' }
 
-    if (isNewFormat) {
+    if (json.version === VERSION) {
       assert.ok(['node_modules', 'full'].includes(json.config?.scope))
       config = json.config
       const full = config.scope === 'full'
-      assert.ok(json.modules && typeof json.modules === 'object')
-      for (const [dir, info] of Object.entries(json.modules)) {
-        assert.ok(dir.includes('node_modules'))
-        assert.ok(!dir.startsWith('..'))
-        assert.ok(info?.name && info.version && info.files)
-        modules.set(dir, normalize(info))
+      if (json.modules !== undefined) {
+        assert.ok(typeof json.modules === 'object' && json.modules !== null)
+        for (const [dir, info] of Object.entries(json.modules)) {
+          assert.ok(dir.includes('node_modules'))
+          assert.ok(!dir.startsWith('..'))
+          assert.ok(info?.name && info.version && info.files)
+          modules.set(dir, normalize(info))
+        }
       }
       if (full && json.sources !== undefined) {
-        assert.ok(json.sources && typeof json.sources === 'object')
+        assert.ok(typeof json.sources === 'object' && json.sources !== null)
         for (const [dir, info] of Object.entries(json.sources)) {
           assert.ok(!dir.includes('node_modules'))
           assert.ok(!dir.startsWith('..'))
@@ -138,7 +143,7 @@ export class Bundle {
         for (const rel of Object.keys(files)) assert.ok(!rel.startsWith('..'))
       }
     } else {
-      // pre-0 format: flat resources at top level, no modules/config metadata.
+      // v0 legacy: flat resources at top level, no modules/config metadata.
       assert.ok(json.resources)
       modules.set('.', { name: null, version: null, files: fromEntries(Object.entries(json.resources)) })
     }

@@ -176,7 +176,7 @@ test('bundle=add --full writes a bundle whose sources match disk', withTmp((t, t
   t.assert.ok(existsSync(bundlePath))
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.version, 0)
+  t.assert.equal(decoded.version, 1)
   t.assert.deepEqual(decoded.config, { scope: 'full' })
   t.assert.deepEqual(decoded.entries, ['src/entry.js'])
   t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
