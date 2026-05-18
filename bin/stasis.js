@@ -22,6 +22,7 @@ function usage(prefix = '') {
  stasis bundle create path/to/lockfile
  stasis bundle verify path/to/lockfile
  stasis advisories path/to/lockfile
+ stasis prune [path/to/project]
 `.trim())
   process.exit(1)
 }
@@ -73,6 +74,12 @@ if (command === 'run') {
   process.exitCode = code
 } else if (command === 'bundle') {
   usage('bundle command is not implemented yet')
+} else if (command === 'prune') {
+  if (argv.length > 1) usage('Error: prune takes at most one path argument')
+  const root = argv[0] ? resolve(argv[0]) : process.cwd()
+  const { prune } = await import('../src/prune.js')
+  const { removed, validated } = prune({ root })
+  console.warn(`[stasis] prune: validated ${validated.length} file(s), removed ${removed.length} file(s)`)
 } else {
   usage()
 }

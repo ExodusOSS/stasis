@@ -13,7 +13,8 @@
     "./webpack": "./src/webpack.js",
     "./loader": "./src/loader.js",
     "./bundle": "./src/bundle.js",
-    "./lockfile": "./src/lockfile.js"
+    "./lockfile": "./src/lockfile.js",
+    "./prune": "./src/prune.js"
   },
   "engines": {
     "node": ">=24.14.0"
