@@ -105,7 +105,7 @@ test('Bundle.parseCode regroups v0 flat sources by inferred module dir', (t) => 
   })
   const parsed = Bundle.parseCode(v0)
 
-  t.assert.deepEqual([...parsed.modules.keys()].sort(), [
+  t.assert.deepEqual([...parsed.modules.keys()].toSorted(), [
     '.',
     'node_modules/@scope/pkg',
     'node_modules/foo',

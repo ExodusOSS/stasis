@@ -14,8 +14,8 @@ export async function advisories(list, { signal = AbortSignal.timeout(30_000) } 
     groups.get(name).add(version)
   }
 
-  const entries = [...groups].map(([k, v]) => [k, [...v].sort((a, b) => semver.compare(a, b))])
-  const body = Object.fromEntries(entries.sort((a, b) => a[0] < b[0] ? -1 : 1))
+  const entries = [...groups].map(([k, v]) => [k, [...v].toSorted((a, b) => semver.compare(a, b))])
+  const body = Object.fromEntries(entries.toSorted((a, b) => a[0] < b[0] ? -1 : 1))
 
   let res
   try {

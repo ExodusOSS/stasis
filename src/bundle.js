@@ -198,7 +198,7 @@ export class Bundle {
     const sourceEntries = []
     for (const [dir, { name, version, files }] of this.modules) {
       if (Object.keys(files).length === 0) continue
-      const sorted = fromEntries(Object.entries(files).sort((a, b) => sortPaths(a[0], b[0])))
+      const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
       const target = dir.includes('node_modules') ? moduleEntries : sourceEntries
       target.push([dir, { name, version, files: sorted }])
     }

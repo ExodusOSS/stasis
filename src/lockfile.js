@@ -62,7 +62,7 @@ export class Lockfile {
     const sources = []
     for (const [dir, { name, version, files }] of this.modules) {
       const type = dir.includes('node_modules') ? modules : sources
-      const sorted = fromEntries(Object.entries(files).sort((a, b) => sortPaths(a[0], b[0])))
+      const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
       type.push([dir, { name, version, files: sorted }])
     }
     modules.sort((a, b) => sortPaths(a[0], b[0]))

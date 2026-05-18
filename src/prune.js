@@ -155,7 +155,7 @@ export function prune({ root = process.cwd() } = {}) {
     touchedDirs.add(dirname(full))
   }
 
-  const sortedDirs = [...touchedDirs].sort((a, b) => b.length - a.length)
+  const sortedDirs = [...touchedDirs].toSorted((a, b) => b.length - a.length)
   for (const d of sortedDirs) pruneEmptyDirs(d, nodeModules)
 
   return { removed, validated, kept }

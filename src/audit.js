@@ -62,7 +62,7 @@ export function collectPackages(files) {
       out.push({ name, version })
     }
   }
-  return out.sort((a, b) => a.name.localeCompare(b.name) || semver.compare(a.version, b.version))
+  return out.toSorted((a, b) => a.name.localeCompare(b.name) || semver.compare(a.version, b.version))
 }
 
 const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, none: 5 }
