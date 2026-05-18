@@ -265,16 +265,11 @@ export class State {
           break
         }
         assert.deepStrictEqual(Object.keys(json), ['type'])
-        let cursor = dirname(dirname(pkgAbsolute))
-        let next = null
-        while (!relative(this.root, cursor).startsWith('..')) {
-          const candidate = join(cursor, 'package.json')
-          if (existsSync(candidate)) { next = candidate; break }
-          const parent = dirname(cursor)
-          if (parent === cursor) break
-          cursor = parent
-        }
-        assert.ok(next, `No package.json with name+version found for ${file}`)
+        const next = findPackageJSON('..', pathToFileURL(pkgAbsolute).toString())
+        assert.ok(
+          next && !relative(this.root, next).startsWith('..'),
+          `No package.json with name+version found for ${file}`
+        )
         pkgAbsolute = next
       }
     }
