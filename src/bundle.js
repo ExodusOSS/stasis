@@ -1,6 +1,4 @@
-import assert from 'node:assert/strict'
-
-import { fileMapToObject, fileSetToObject, fromEntries, objectToMaps, sortPaths } from './util.js'
+import { assert, fileMapToObject, fileSetToObject, fromEntries, objectToMaps, sortPaths } from './util.js'
 
 const VERSION = 1
 const LEGACY_VERSION = 0
@@ -60,8 +58,8 @@ export class Bundle {
   imports
 
   constructor({ config = { scope: 'full' }, entries, modules, formats, imports, version = VERSION } = {}) {
-    assert.ok([LEGACY_VERSION, VERSION].includes(version))
-    assert.ok(['node_modules', 'full'].includes(config.scope))
+    assert([LEGACY_VERSION, VERSION].includes(version))
+    assert(['node_modules', 'full'].includes(config.scope))
     this.version = version
     this.config = config
     this.entries = entries ?? new Set()
@@ -84,10 +82,10 @@ export class Bundle {
 
   static parseCode(text) {
     const json = JSON.parse(text)
-    assert.ok(json.version === VERSION || json.version === LEGACY_VERSION)
-    assert.ok(['node_modules', 'full'].includes(json.config?.scope))
-    assert.ok(json.formats)
-    assert.ok(json.imports)
+    assert(json.version === VERSION || json.version === LEGACY_VERSION)
+    assert(['node_modules', 'full'].includes(json.config?.scope))
+    assert(json.formats)
+    assert(json.imports)
 
     const modules = new Map()
     let entries = new Set()
@@ -95,42 +93,42 @@ export class Bundle {
     if (json.version === VERSION) {
       const full = json.config.scope === 'full'
       if (json.modules !== undefined) {
-        assert.ok(typeof json.modules === 'object' && json.modules !== null)
+        assert(typeof json.modules === 'object' && json.modules !== null)
         for (const [dir, info] of Object.entries(json.modules)) {
-          assert.ok(dir.includes('node_modules'))
-          assert.ok(!dir.startsWith('..'))
-          assert.ok(info?.name && info.version && info.files)
+          assert(dir.includes('node_modules'))
+          assert(!dir.startsWith('..'))
+          assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
       }
       if (full) {
-        assert.ok(Array.isArray(json.entries))
+        assert(Array.isArray(json.entries))
         // Empty entries in v1 + full would let `state.assertEntry` skip its check
         // (it short-circuits on entries.size === 0 for v0+no-lockfile compatibility).
         // Forbid the shape at parse time so tampered bundles can't exploit that path.
-        assert.ok(json.entries.length > 0, 'v1 bundle with scope=full must have at least one entry')
-        assert.ok(json.sources && typeof json.sources === 'object')
+        assert(json.entries.length > 0, 'v1 bundle with scope=full must have at least one entry')
+        assert(json.sources && typeof json.sources === 'object')
         entries = new Set(json.entries)
         for (const [dir, info] of Object.entries(json.sources)) {
-          assert.ok(!dir.includes('node_modules'))
-          assert.ok(!dir.startsWith('..'))
-          assert.ok(info?.name && info.version && info.files)
+          assert(!dir.includes('node_modules'))
+          assert(!dir.startsWith('..'))
+          assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
       } else {
-        assert.equal(json.entries, undefined)
-        assert.equal(json.sources, undefined)
+        assert(json.entries === undefined)
+        assert(json.sources === undefined)
       }
       for (const [, { files }] of modules) {
-        for (const rel of Object.keys(files)) assert.ok(!rel.startsWith('..'))
+        for (const rel of Object.keys(files)) assert(!rel.startsWith('..'))
       }
     } else {
       // v0 legacy: flat sources at top level, regrouped by inferred module dir.
-      assert.ok(json.sources)
+      assert(json.sources)
       for (const [path, content] of Object.entries(json.sources)) {
-        assert.ok(!path.startsWith('..'))
+        assert(!path.startsWith('..'))
         const { dir, rel, name } = inferModuleDir(path)
-        assert.ok(!dir.startsWith('..') && !rel.startsWith('..'))
+        assert(!dir.startsWith('..') && !rel.startsWith('..'))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         modules.get(dir).files[rel] = content
       }
@@ -148,45 +146,45 @@ export class Bundle {
 
   static parseResources(text) {
     const json = JSON.parse(text)
-    assert.ok(json.version === VERSION || json.version === LEGACY_VERSION)
+    assert(json.version === VERSION || json.version === LEGACY_VERSION)
 
     const modules = new Map()
     let config = { scope: 'full' }
 
     if (json.version === VERSION) {
-      assert.ok(['node_modules', 'full'].includes(json.config?.scope))
+      assert(['node_modules', 'full'].includes(json.config?.scope))
       config = json.config
       const full = config.scope === 'full'
       if (json.modules !== undefined) {
-        assert.ok(typeof json.modules === 'object' && json.modules !== null)
+        assert(typeof json.modules === 'object' && json.modules !== null)
         for (const [dir, info] of Object.entries(json.modules)) {
-          assert.ok(dir.includes('node_modules'))
-          assert.ok(!dir.startsWith('..'))
-          assert.ok(info?.name && info.version && info.files)
+          assert(dir.includes('node_modules'))
+          assert(!dir.startsWith('..'))
+          assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
       }
       if (full && json.sources !== undefined) {
-        assert.ok(typeof json.sources === 'object' && json.sources !== null)
+        assert(typeof json.sources === 'object' && json.sources !== null)
         for (const [dir, info] of Object.entries(json.sources)) {
-          assert.ok(!dir.includes('node_modules'))
-          assert.ok(!dir.startsWith('..'))
-          assert.ok(info?.name && info.version && info.files)
+          assert(!dir.includes('node_modules'))
+          assert(!dir.startsWith('..'))
+          assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
       } else if (!full) {
-        assert.equal(json.sources, undefined)
+        assert(json.sources === undefined)
       }
       for (const [, { files }] of modules) {
-        for (const rel of Object.keys(files)) assert.ok(!rel.startsWith('..'))
+        for (const rel of Object.keys(files)) assert(!rel.startsWith('..'))
       }
     } else {
       // v0 legacy: flat resources at top level, regrouped by inferred module dir.
-      assert.ok(json.resources)
+      assert(json.resources)
       for (const [path, content] of Object.entries(json.resources)) {
-        assert.ok(!path.startsWith('..'))
+        assert(!path.startsWith('..'))
         const { dir, rel, name } = inferModuleDir(path)
-        assert.ok(!dir.startsWith('..') && !rel.startsWith('..'))
+        assert(!dir.startsWith('..') && !rel.startsWith('..'))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         modules.get(dir).files[rel] = content
       }

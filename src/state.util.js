@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { hash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
+
+assert.equal(sep, '/', 'Not tested on Windows')
 
 export const sha512integrity = (x) => `sha512-${hash('sha512', x, 'base64')}`
 

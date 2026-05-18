@@ -1,7 +1,8 @@
-import assert from 'node:assert/strict'
-import { sep } from 'node:path'
+const sep = '/'
 
-assert.equal(sep, '/', 'Not tested on Windows')
+export function assert(condition, msg) {
+  if (!condition) throw new Error(msg)
+}
 
 export function sortPaths(a, b) {
   const [al, bl] = [a.split(sep), b.split(sep)]

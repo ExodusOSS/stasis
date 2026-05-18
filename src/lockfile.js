@@ -1,6 +1,4 @@
-import assert from 'node:assert/strict'
-
-import { fileSetToObject, fromEntries, sortPaths } from './util.js'
+import { assert, fileSetToObject, fromEntries, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -16,7 +14,7 @@ export class Lockfile {
   modules
 
   constructor({ config = { scope: 'full' }, entries, modules } = {}) {
-    assert.ok(['node_modules', 'full'].includes(config.scope))
+    assert(['node_modules', 'full'].includes(config.scope))
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
@@ -24,34 +22,34 @@ export class Lockfile {
 
   static parse(text) {
     const json = JSON.parse(text)
-    assert.equal(json.version, VERSION)
-    assert.ok(['node_modules', 'full'].includes(json.config?.scope))
+    assert(json.version === VERSION)
+    assert(['node_modules', 'full'].includes(json.config?.scope))
 
     const full = json.config.scope === 'full'
-    assert.equal(!!json.entries, full)
-    assert.equal(!!json.sources, full)
-    assert.ok(json.modules)
+    assert(!!json.entries === full)
+    assert(!!json.sources === full)
+    assert(json.modules)
 
     const modules = new Map(
       Object.entries(json.modules).map(([dir, info]) => [dir, normalize(info)])
     )
-    for (const [dir] of modules) assert.ok(dir.includes('node_modules'))
+    for (const [dir] of modules) assert(dir.includes('node_modules'))
 
     let entries = new Set()
     if (full) {
-      assert.ok(Array.isArray(json.entries))
+      assert(Array.isArray(json.entries))
       entries = new Set(json.entries)
       for (const [dir, info] of Object.entries(json.sources)) {
-        assert.ok(!dir.includes('node_modules'))
+        assert(!dir.includes('node_modules'))
         modules.set(dir, normalize(info))
       }
     }
 
     for (const [dir, { files }] of modules) {
-      assert.ok(!dir.startsWith('..'))
-      assert.ok(files)
+      assert(!dir.startsWith('..'))
+      assert(files)
       for (const name of Object.keys(files)) {
-        assert.ok(!name.startsWith('..'))
+        assert(!name.startsWith('..'))
       }
     }
 
