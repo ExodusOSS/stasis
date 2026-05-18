@@ -133,7 +133,28 @@ test('collectPackagesFromFile rejects unknown JSON shape with a lockfile-specifi
 test('collectPackagesFromFile rejects non-brotli non-JSON binary with a bundle-specific error', withTmp((t, tmp) => {
   const file = join(tmp, 'junk.bin')
   writeFileSync(file, Buffer.from([0xff, 0xfe, 0xfd, 0xfc]))
-  t.assert.throws(() => collectPackagesFromFile(file), /Failed to parse stasis bundle/)
+  t.assert.throws(() => collectPackagesFromFile(file), /Failed to read .* as a stasis bundle/)
+}))
+
+test('collectPackagesFromFile reports a clean error when the input is missing', (t) => {
+  const file = join(tmpdir(), 'definitely-does-not-exist-stasis.lock.json')
+  t.assert.throws(() => collectPackagesFromFile(file), /File not found:/)
+})
+
+test('collectPackagesFromFile accepts a resource bundle', withTmp((t, tmp) => {
+  const file = join(tmp, 'resources.br')
+  const json = {
+    version: 1,
+    config: { scope: 'full' },
+    sources: {
+      '.': { name: 'top', version: '1.0.0', files: { 'a.bin': 'AAA=' } },
+    },
+    modules: {
+      'node_modules/lib': { name: 'lib', version: '3.2.1', files: { 'b.bin': 'BBB=' } },
+    },
+  }
+  writeFileSync(file, brotliCompressSync(Buffer.from(JSON.stringify(json))))
+  t.assert.deepEqual(collectPackagesFromFile(file), [{ name: 'lib', version: '3.2.1' }])
 }))
 
 test('collectPackages does not collapse different packages at the same version', withTmp((t, tmp) => {

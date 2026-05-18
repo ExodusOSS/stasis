@@ -7,10 +7,16 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 
 function parseFile(file) {
-  const buf = readFileSync(file)
-  // Sniff: lockfiles are JSON text starting with `{`; bundles are brotli binary.
-  // Routing avoids reporting a Bundle assertion as a JSON-parse error (or vice
-  // versa) when the file is well-formed but invalid.
+  let buf
+  try {
+    buf = readFileSync(file)
+  } catch (cause) {
+    if (cause.code === 'ENOENT') throw new Error(`File not found: ${file}`)
+    throw new Error(`Failed to read ${file}: ${cause.message}`, { cause })
+  }
+  // Lockfiles are JSON text starting with `{`; code/resource bundles are
+  // brotli-compressed JSON. Sniff to route to the right parser so its
+  // diagnostic surfaces on failure.
   if (buf[0] === 0x7b /* '{' */) {
     try {
       return Lockfile.parse(buf.toString('utf8'))
@@ -18,8 +24,17 @@ function parseFile(file) {
       throw new Error(`Failed to parse stasis lockfile: ${file}`, { cause })
     }
   }
+  let text
   try {
-    return Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+    text = brotliDecompressSync(buf).toString('utf8')
+  } catch (cause) {
+    throw new Error(`Failed to read ${file} as a stasis bundle (not brotli)`, { cause })
+  }
+  // Code bundles carry `formats`/`imports`; resource bundles don't. Route on shape.
+  const json = JSON.parse(text)
+  const isCode = json.formats !== undefined
+  try {
+    return isCode ? Bundle.parseCode(text) : Bundle.parseResources(text)
   } catch (cause) {
     throw new Error(`Failed to parse stasis bundle: ${file}`, { cause })
   }
