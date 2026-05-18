@@ -16,6 +16,28 @@ const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
 const FILE_RESOURCES = 'stasis.resources.br'
 
+// For a project-relative path under node_modules, return the package root dir
+// (the segment directly under the *last* node_modules/ — scoped names take two
+// segments). Returns null when the path isn't under node_modules or the
+// node_modules slice is malformed (trailing slash, empty segment, no file
+// segment after the pkg dir).
+function nodeModulesPackageRoot(file) {
+  const marker = 'node_modules/'
+  const idx = file.lastIndexOf(marker)
+  if (idx === -1) return null
+  const after = idx + marker.length
+  const parts = file.slice(after).split('/')
+  const pkgLen = parts[0].startsWith('@') ? 2 : 1
+  if (parts.length <= pkgLen || parts.slice(0, pkgLen).some((p) => !p)) return null
+  return file.slice(0, after) + parts.slice(0, pkgLen).join('/')
+}
+
+function readPackageJSON(pkgAbsolute) {
+  const buf = readFileSync(pkgAbsolute)
+  assert.ok(isUtf8(buf))
+  return JSON.parse(buf.toString())
+}
+
 // TODO: stricter format validation
 
 let preload
@@ -234,15 +256,60 @@ export class State {
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
 
-    const pkgAbsolute = findPackageJSON(url)
+    // Sourcing name/version from package.json is complicated by sub-bucket
+    // markers — package.json files that only set `type` to override the
+    // ambient ESM/CJS mode for a sub-directory (e.g. `lib/package.json`
+    // containing just `{"type":"module"}`). findPackageJSON walks up from the
+    // file and lands on the *nearest* package.json, which may be a marker
+    // with no name/version.
+    //
+    // For files inside node_modules we know the package root by path
+    // structure, so we jump straight there and cross-check any nested
+    // package.json found by findPackageJSON doesn't declare a conflicting
+    // name/version. For files outside node_modules we walk up past markers
+    // until we find a package.json with both name and version; anything
+    // missing name/version must be a type-only marker.
+    const nmRoot = nodeModulesPackageRoot(file)
+    let pkgAbsolute, name, version
+    if (nmRoot) {
+      pkgAbsolute = resolve(this.root, nmRoot, 'package.json')
+      const rootJson = readPackageJSON(pkgAbsolute)
+      ;({ name, version } = rootJson)
+      assert.ok(name, `Missing name in ${this.relative(pkgAbsolute)}`)
+      assert.ok(version, `Missing version in ${this.relative(pkgAbsolute)}`)
+      const nestedAbsolute = findPackageJSON(url)
+      if (nestedAbsolute !== pkgAbsolute) {
+        const nested = readPackageJSON(nestedAbsolute)
+        if (nested.name !== undefined) assert.equal(nested.name, name)
+        if (nested.version !== undefined) assert.equal(nested.version, version)
+      }
+    } else {
+      pkgAbsolute = findPackageJSON(url)
+      while (true) {
+        const json = readPackageJSON(pkgAbsolute)
+        if (json.name !== undefined && json.version !== undefined) {
+          ;({ name, version } = json)
+          break
+        }
+        // Marker: the only legal field is `type`.
+        assert.deepStrictEqual(Object.keys(json), ['type'])
+        let cursor = dirname(dirname(pkgAbsolute))
+        let next = null
+        while (!relative(this.root, cursor).startsWith('..')) {
+          const candidate = join(cursor, 'package.json')
+          if (existsSync(candidate)) { next = candidate; break }
+          const parent = dirname(cursor)
+          if (parent === cursor) break
+          cursor = parent
+        }
+        assert.ok(next, `No package.json with name+version found for ${file}`)
+        pkgAbsolute = next
+      }
+    }
     const pkg = this.relative(pkgAbsolute)
     assert.ok(pkg === 'package.json' || pkg.endsWith('/package.json'))
     assert.equal(basename(pkg), 'package.json')
     const dir = dirname(pkg)
-    const jsonbuf = readFileSync(pkgAbsolute)
-    assert.ok(isUtf8(jsonbuf))
-    const json = jsonbuf.toString()
-    const { name, version } = JSON.parse(json)
     if (!this.modules.has(dir)) this.modules.set(dir, { name, version, files: Object.create(null) })
     const module = this.modules.get(dir)
     assert.equal(module.name, name)
