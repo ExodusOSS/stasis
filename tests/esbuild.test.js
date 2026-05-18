@@ -597,3 +597,54 @@ test('sidecar bundle (rule 6) is emitted by the plugin alongside preload bundle'
   t.assert.ok(existsSync(sidecarBundle), 'sidecar bundle must be written by plugin onEnd hook')
   t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')))
 }))
+
+test('failed build does not write the bundle (no clobber)', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  // Force esbuild to fail by importing a missing module. onEnd still fires, but the
+  // plugin's guard against result.errors keeps state.write() from clobbering.
+  writeFileSync(
+    join(tmp, 'src', 'entry.js'),
+    "import './does-not-exist.js'\nimport { greet } from './hello.js'\nconsole.log(greet('world'))\n"
+  )
+  const bundlePath = join(tmp, 'standalone.br')
+
+  const r = run(['src/entry.js'], {
+    cwd: tmp,
+    env: standalone(withOpts({ lock: 'ignore', bundle: 'add', bundleFile: bundlePath })),
+  })
+  t.assert.notEqual(r.status, 0, `expected build failure; stderr=${r.stderr}`)
+  t.assert.equal(existsSync(bundlePath), false, 'failed build must not write the bundle')
+}))
+
+test("esbuild plugin accepts non-JS/JSON extensions via 'default' loader", withTmp((t, tmp) => {
+  // Add a .css file imported from entry. Pre-fix the plugin asserted the loader was
+  // in a hardcoded allowlist and crashed; now unknown extensions fall through to
+  // esbuild's 'default' loader so the build proceeds.
+  cpSync(fullFixture, tmp, { recursive: true })
+  writeFileSync(join(tmp, 'src', 'styles.css'), '.x { color: red }\n')
+  writeFileSync(
+    join(tmp, 'src', 'entry.js'),
+    "import './styles.css'\nimport { greet } from './hello.js'\nconsole.log(greet('world'))\n"
+  )
+  // Reset the lockfile so lock=add records the new entry shape from scratch.
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const r = run(['src/entry.js'], { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.sources['.'].files['src/styles.css'], 'css file recorded in lockfile')
+}))
+
+test("esbuild plugin accepts import attributes (with { type: 'json' })", withTmp((t, tmp) => {
+  // jsonFixture imports a .json file without `with`; here we use the `with` syntax
+  // explicitly. Pre-fix the plugin asserted attrs was empty and crashed.
+  cpSync(jsonFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeFileSync(
+    join(tmp, 'src', 'entry.js'),
+    "import data from './data.json' with { type: 'json' }\nconsole.log(data)\n"
+  )
+
+  const r = run(['src/entry.js'], { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+}))

@@ -456,8 +456,11 @@ export function resolvePluginState(label, options, cwd) {
     if (lock === 'none' && bundle === 'none') return { state: null, isNoop: true }
     const effectiveLock = lock ?? 'add'
     if (effectiveLock !== 'none' && effectiveLock !== 'ignore') {
+      const phrasing = lock === undefined
+        ? "the default lockfile mode ('add')"
+        : `lockfile mode '${lock}'`
       throw new Error(
-        `${label}: lockfile mode '${effectiveLock}' requires a stasis preload; ` +
+        `${label}: ${phrasing} requires a stasis preload; ` +
         `pass lock='none' or lock='ignore' to opt out, or run under the stasis loader`
       )
     }
@@ -512,7 +515,11 @@ export function resolvePluginState(label, options, cwd) {
   // Preload exists but has no bundle.
   if (bundle === undefined || bundle === 'none' || bundle === 'ignore') {
     // Plugin doesn't want a bundle either: just reuse preload for lockfile coverage.
-    assertOptionsMatchConfig(pc, options)
+    // bundle='ignore' here legitimately disagrees with preload's bundleMode ('none'),
+    // both mean "no bundle written by the plugin", so skip the bundle field in the
+    // cross-check rather than letting assertOptionsMatchConfig flag the difference.
+    const { bundle: _b, ...rest } = options
+    assertOptionsMatchConfig(pc, rest)
     return { state: ambient, isNoop: false }
   }
   // Plugin wants its own bundle alongside preload's lockfile -- sidecar.

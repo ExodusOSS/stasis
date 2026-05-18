@@ -545,3 +545,22 @@ test('sidecar bundle (rule 6) is emitted by the plugin alongside preload bundle'
   // Lockfile is unified, owned by preload.
   t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')))
 }))
+
+test('failed build does not write the bundle (no clobber)', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  // Force webpack to fail by pointing entry.js at a missing module. The plugin's
+  // done hook still fires (webpack always emits 'done', even with errors), but our
+  // guard against stats.hasErrors() must keep state.write() from clobbering.
+  writeFileSync(
+    join(tmp, 'src', 'entry.js'),
+    "require('./does-not-exist')\nrequire('./hello').greet('world')\n"
+  )
+  const bundlePath = join(tmp, 'standalone.br')
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: standalone(withOpts({ lock: 'ignore', bundle: 'add', bundleFile: bundlePath })),
+  })
+  t.assert.notEqual(r.status, 0, `expected build failure; stderr=${r.stderr}`)
+  t.assert.equal(existsSync(bundlePath), false, 'failed build must not write the bundle')
+}))

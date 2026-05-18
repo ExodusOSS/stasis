@@ -31,6 +31,12 @@ test('rule 1: lockfile mode without preload is a hard throw', (t) => {
       () => resolvePluginState('Test', { lock: 'replace' }, dir),
       /lockfile mode 'replace' requires a stasis preload/
     )
+    // No lock option supplied -- the error wording mentions the default explicitly
+    // rather than printing 'add' as if the user had asked for it.
+    t.assert.throws(
+      () => resolvePluginState('Test', {}, dir),
+      /the default lockfile mode \('add'\) requires a stasis preload/
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

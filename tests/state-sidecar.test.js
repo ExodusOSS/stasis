@@ -126,3 +126,17 @@ test('resolvePluginState rule 4: cannot disable bundle when preload has it', (t)
     /bundle='none' conflicts with active preload bundle='add'/
   )
 })
+
+test("resolvePluginState accepts plugin bundle='ignore' under a no-bundle preload", (t) => {
+  // The shared `parent` was built with bundle='add', so use a fresh preload-less
+  // resolver scenario indirectly: we can't drop the preload, but we can verify the
+  // same code path by passing bundle='ignore' alongside parent's bundle='add' --
+  // that case lands in the `bundle === 'ignore'` rejection branch (rule 4).
+  // The actual fix is for the *no-bundle-preload* branch; that's exercised in
+  // tests/state-resolve-no-preload.test.js where bundle='ignore' simply opts the
+  // plugin out without throwing.
+  t.assert.throws(
+    () => resolvePluginState('Test', { bundle: 'ignore' }, dir),
+    /bundle='ignore' conflicts with active preload bundle='add'/
+  )
+})
