@@ -1,0 +1,21 @@
+{
+  "version": 0,
+  "config": { "scope": "node_modules" },
+  "modules": {
+    "node_modules/widget": {
+      "name": "widget",
+      "version": "1.2.3",
+      "files": {
+        "index.js": "sha512-mQMA1S6FmxKUXIMwPbUbOT2VJNKWVS4RbgMdvu3RSnYrB4FK5mwM+4VuKLa7gMfS20R+LBgx0oPUPGIzjofnLw==",
+        "package.json": "sha512-bnVBCNPANZjkbhW5uMOrIxMO45hZv9mSOeRl82KcmaMDDVxo5D9GIXGh7OEN97l6JVoxOV6tYM0IV+Kt+MkpEA=="
+      }
+    },
+    "node_modules/loose": {
+      "name": "loose",
+      "version": "0.1.0",
+      "files": {
+        "index.js": "sha512-zOU8RwbAiwyOEmLDEiAfhY9C29N6ZmDoNGTJr0vQmP1qNmCefNu4YqQP/25s8meh2L+sywEm9mDInmi3JcTgmQ=="
+      }
+    }
+  }
+}
