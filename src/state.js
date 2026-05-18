@@ -8,7 +8,7 @@ import { findPackageJSON } from 'node:module'
 import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
-import { sha512integrity, readFileSyncMaybe, noupsert } from './util.js'
+import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
