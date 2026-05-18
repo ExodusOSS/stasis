@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { basename, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import assert from 'node:assert/strict'
+import pkg from '../package.json' with { type: 'json' }
 
 const argv = [...process.argv]
 assert(['node', 'node.exe'].includes(basename(argv.shift())))
@@ -35,7 +36,10 @@ function setEnv(name, value) {
 
 const command = argv.shift()
 
-if (command === 'run') {
+if (command === '-v' || command === '--version') {
+  console.log(`v${pkg.version}`)
+  process.exit(0)
+} else if (command === 'run') {
   const flags = []
   const valueFlags = new Set(['--bundle', '--bundle-file', '--lock'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
