@@ -244,41 +244,34 @@ export class State {
     return this.formats.get(this.relative(this.absolute(url)))
   }
 
-  // Same parent+specifier might resolve to a different URL/format under different import attributes
-  #importKey(specifier, importAttributes) {
-    const entries = importAttributes ? Object.entries(importAttributes) : []
-    if (entries.length === 0) return specifier
-    return `${specifier}\0${JSON.stringify(entries.sort(([a], [b]) => (a < b ? -1 : 1)))}`
+  // Different conditions / import attributes can yield different URLs/formats for the same parent+specifier
+  #conditionsKey(conditions, importAttributes) {
+    const cond = conditions === '*' ? '*' : conditions.join(', ')
+    const attrs = importAttributes ? Object.entries(importAttributes) : []
+    if (attrs.length === 0) return cond
+    return `${cond}\0${JSON.stringify(attrs.sort(([a], [b]) => (a < b ? -1 : 1)))}`
   }
 
   addImport(parentURL, specifier, url, { conditions = '*', format, importAttributes } = {}) {
-    if (conditions !== '*') {
-      assert.ok(Array.isArray(conditions))
-      conditions = conditions.join(', ')
-    }
-
+    if (conditions !== '*') assert.ok(Array.isArray(conditions))
     assert.ok(parentURL, 'addImport requires a parent (entries go through addFile)')
     const parent = this.relative(this.absolute(parentURL))
     const file = this.relative(this.absolute(url))
-    const key = this.#importKey(specifier, importAttributes)
+    const key = this.#conditionsKey(conditions, importAttributes)
 
-    if (!this.imports.has(conditions)) this.imports.set(conditions, new Map())
-    const imports = this.imports.get(conditions)
+    if (!this.imports.has(key)) this.imports.set(key, new Map())
+    const imports = this.imports.get(key)
     if (!imports.has(parent)) imports.set(parent, new Map())
     const specifiers = imports.get(parent)
-    noupsert(specifiers, key, file)
+    noupsert(specifiers, specifier, file)
     if (format) noupsert(this.formats, file, format)
   }
 
   getImport(parentURL, specifier, { conditions = '*', importAttributes } = {}) {
-    if (conditions !== '*') {
-      assert.ok(Array.isArray(conditions))
-      conditions = conditions.join(', ')
-    }
-
+    if (conditions !== '*') assert.ok(Array.isArray(conditions))
     const parent = this.relative(this.absolute(parentURL))
-    const key = this.#importKey(specifier, importAttributes)
-    const file = this.imports.get(conditions)?.get(parent)?.get(key)
+    const key = this.#conditionsKey(conditions, importAttributes)
+    const file = this.imports.get(key)?.get(parent)?.get(specifier)
     assert.ok(file)
     const url = pathToFileURL(resolve(this.root, file)).toString()
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers

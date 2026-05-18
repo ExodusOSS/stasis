@@ -141,19 +141,16 @@ test('addImport: empty {} importAttributes is equivalent to undefined', (t) => {
 
   // The earlier "addImport / getImport roundtrip" test already added (parent, './foo.js',
   // child) with no importAttributes. Reading back with {} must find that same entry --
-  // not a separate `${specifier}\0` keyed entry.
+  // not a separate `*\0` keyed conditions bucket.
   const gotWithEmpty = state.getImport(parentURL, './foo.js', { importAttributes: {} })
   t.assert.equal(gotWithEmpty.url, childURL)
 
   // Re-adding with {} must noupsert (collide-and-pass) against the no-attributes entry,
-  // not create a second entry under a different key.
+  // not create a second conditions bucket under a different key.
   state.addImport(parentURL, './foo.js', childURL, { importAttributes: {} })
 
-  // Verify the specifier map gained no second key (e.g. `./foo.js\0`).
-  const parentKey = state.relative(state.absolute(parentURL))
-  const specifiers = state.imports.get('*').get(parentKey)
-  const fooKeys = [...specifiers.keys()].filter((k) => k === './foo.js' || k.startsWith('./foo.js\0'))
-  t.assert.deepEqual(fooKeys, ['./foo.js'])
+  // The empty-attrs encoding bug would have produced a `*\0[]` bucket. Verify it didn't.
+  t.assert.ok(!state.imports.has('*\0[]'), 'empty {} must not create a separate conditions bucket')
 })
 
 test('lockData is well-formed JSON with the expected shape', (t) => {
