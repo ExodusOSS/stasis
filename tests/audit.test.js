@@ -7,7 +7,7 @@ import { brotliCompressSync } from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { stripVTControlCharacters } from 'node:util'
 
-import { audit, collectPackages, collectPackagesFromFile, flattenAdvisories, formatTable } from '../src/audit.js'
+import { audit, collectPackages, collectPackagesFromFile, flattenAdvisories, formatTable, printAuditReport } from '../src/audit.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'bin', 'stasis.js')
@@ -141,6 +141,12 @@ test('collectPackagesFromFile reports a clean error when the input is missing', 
   t.assert.throws(() => collectPackagesFromFile(file), /File not found:/)
 })
 
+test('collectPackagesFromFile wraps brotli-valid but JSON-corrupt bundles', withTmp((t, tmp) => {
+  const file = join(tmp, 'corrupt.br')
+  writeFileSync(file, brotliCompressSync(Buffer.from('not valid json {')))
+  t.assert.throws(() => collectPackagesFromFile(file), /Failed to parse stasis bundle/)
+}))
+
 test('collectPackagesFromFile accepts a resource bundle', withTmp((t, tmp) => {
   const file = join(tmp, 'resources.br')
   const json = {
@@ -206,6 +212,13 @@ test('flattenAdvisories joins installed versions matching vulnerable_versions', 
   const bar = rows.find((r) => r.package === 'bar')
   t.assert.equal(foo.installed, '1.0.0', 'only the affected installed version of foo is listed')
   t.assert.equal(bar.installed, '2.0.0')
+})
+
+test('printAuditReport hints when nothing was scanned', (t) => {
+  const lines = []
+  const err = { write: (s) => lines.push(s) }
+  printAuditReport({ packages: [], rows: [] }, { out: { write: () => {} }, err })
+  t.assert.equal(lines.join(''), 'Scanned 0 packages\nNo node_modules entries found in the input files\n')
 })
 
 test('formatTable produces a boxed table with header and separator', (t) => {

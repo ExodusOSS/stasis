@@ -11,7 +11,7 @@ function parseFile(file) {
   try {
     buf = readFileSync(file)
   } catch (cause) {
-    if (cause.code === 'ENOENT') throw new Error(`File not found: ${file}`)
+    if (cause.code === 'ENOENT') throw new Error(`File not found: ${file}`, { cause })
     throw new Error(`Failed to read ${file}: ${cause.message}`, { cause })
   }
   // Lockfiles are JSON text starting with `{`; code/resource bundles are
@@ -31,9 +31,8 @@ function parseFile(file) {
     throw new Error(`Failed to read ${file} as a stasis bundle (not brotli)`, { cause })
   }
   // Code bundles carry `formats`/`imports`; resource bundles don't. Route on shape.
-  const json = JSON.parse(text)
-  const isCode = json.formats !== undefined
   try {
+    const isCode = JSON.parse(text).formats !== undefined
     return isCode ? Bundle.parseCode(text) : Bundle.parseResources(text)
   } catch (cause) {
     throw new Error(`Failed to parse stasis bundle: ${file}`, { cause })
@@ -107,8 +106,9 @@ export function flattenAdvisories(result, packages = []) {
   return rows
 }
 
-// Newlines in npm advisory titles would otherwise break the box layout.
-const cell = (v) => String(v ?? '').replace(/\r?\n/gu, ' ')
+// Line breaks in npm advisory titles would otherwise break the box layout.
+// Covers LF, bare CR (and CRLF), and U+2028 / U+2029 line/paragraph separators.
+const cell = (v) => String(v ?? '').replace(/[\r\n\u2028\u2029]+/gu, ' ')
 
 export function formatTable(rows, columns) {
   if (rows.length === 0) return ''
@@ -137,6 +137,10 @@ export async function audit(files) {
 
 export function printAuditReport({ packages, rows }, { out = process.stdout, err = process.stderr } = {}) {
   err.write(`Scanned ${packages.length} package${packages.length === 1 ? '' : 's'}\n`)
+  if (packages.length === 0) {
+    err.write('No node_modules entries found in the input files\n')
+    return
+  }
   if (rows.length === 0) {
     err.write('No advisories found\n')
     return
