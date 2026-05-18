@@ -145,3 +145,51 @@ test('Bundle.parseCode rejects a v1 full-scope bundle with empty entries', (t) =
   })
   t.assert.throws(() => Bundle.parseCode(text), /at least one entry/)
 })
+
+test('Lockfile.parse rejects a node_modules module missing name', (t) => {
+  const text = JSON.stringify({
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
+  })
+  t.assert.throws(() => Lockfile.parse(text))
+})
+
+test('Lockfile.parse rejects a node_modules module missing version', (t) => {
+  const text = JSON.stringify({
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', files: { 'i.js': 'sha512-x' } } },
+  })
+  t.assert.throws(() => Lockfile.parse(text))
+})
+
+test('Lockfile.serialize rejects a node_modules module missing name/version', (t) => {
+  const lock = new Lockfile({
+    config: { scope: 'node_modules' },
+    modules: new Map([
+      ['node_modules/w', { name: null, version: null, files: { 'i.js': 'sha512-x' } }],
+    ]),
+  })
+  t.assert.throws(() => lock.serialize())
+})
+
+test('Bundle.serializeCode rejects a node_modules module missing name/version', (t) => {
+  const bundle = new Bundle({
+    config: { scope: 'node_modules' },
+    modules: new Map([
+      ['node_modules/w', { name: null, version: null, files: { 'i.js': 'x' } }],
+    ]),
+  })
+  t.assert.throws(() => bundle.serializeCode())
+})
+
+test('Bundle.serializeResources rejects a node_modules module missing name/version', (t) => {
+  const bundle = new Bundle({
+    config: { scope: 'node_modules' },
+    modules: new Map([
+      ['node_modules/w', { name: null, version: null, files: { 'a.bin': 'eA==' } }],
+    ]),
+  })
+  t.assert.throws(() => bundle.serializeResources())
+})

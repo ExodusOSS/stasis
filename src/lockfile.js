@@ -30,10 +30,12 @@ export class Lockfile {
     assert(!!json.sources === full)
     assert(json.modules)
 
-    const modules = new Map(
-      Object.entries(json.modules).map(([dir, info]) => [dir, normalize(info)])
-    )
-    for (const [dir] of modules) assert(dir.includes('node_modules'))
+    const modules = new Map()
+    for (const [dir, info] of Object.entries(json.modules)) {
+      assert(dir.includes('node_modules'))
+      assert(info?.name && info.version && info.files)
+      modules.set(dir, normalize(info))
+    }
 
     let entries = new Set()
     if (full) {
@@ -61,7 +63,9 @@ export class Lockfile {
     const modules = []
     const sources = []
     for (const [dir, { name, version, files }] of this.modules) {
-      const type = dir.includes('node_modules') ? modules : sources
+      const inNodeModules = dir.includes('node_modules')
+      if (inNodeModules) assert(name && version && files)
+      const type = inNodeModules ? modules : sources
       const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
       type.push([dir, { name, version, files: sorted }])
     }
