@@ -86,6 +86,7 @@ export class State {
         }
 
         if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
+        let lockfileLoaded = false
         if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
           const lockfile = Lockfile.parse(lock)
           if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
@@ -102,11 +103,13 @@ export class State {
               noupsert(this.hashes, join(dir, name), hash)
             }
           }
+          lockfileLoaded = true
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
           const bundle = Bundle.parseCode(sources)
           assert.equal(bundle.config.scope, this.config.scope)
+          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.sources = bundle.sources
           this.formats = bundle.formats
           this.imports = bundle.imports
@@ -114,10 +117,72 @@ export class State {
 
         if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
           const bundle = Bundle.parseResources(resources)
-          this.resources = bundle.resources
+          // v0 resource bundles didn't record scope; only enforce on v1 where it's reliable.
+          if (bundle.version === Bundle.VERSION) {
+            assert.equal(bundle.config.scope, this.config.scope)
+          }
+          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
+          this.resources = bundle.sources
         }
       }
     }
+  }
+
+  // Cross-check bundle metadata (entries/modules) with what the lockfile already
+  // loaded, or absorb it as the source of truth when no lockfile is present.
+  // v0 bundles infer `name` from path for node_modules buckets but carry no
+  // version; the workspace "." bucket has no inferable name. We skip entries
+  // we can't cross-check (no name with lockfile, or no version when populating
+  // state.modules — addFile later asserts strict name+version equality against
+  // disk's package.json, which would clash with a null we stashed earlier).
+  // Note: the path-inferred name for v0 will disagree with the lockfile when a
+  // dep is installed under an alias (`foo: npm:bar` writes `node_modules/foo`
+  // with `name: "bar"` in package.json); the strict equality below will fail
+  // in that case, which is the right call — the v0 bundle has no way to
+  // attest the real package identity, so we refuse to silently mismatch.
+  #mergeBundleMetadata(bundle, { lockfileLoaded }) {
+    if (lockfileLoaded) {
+      if (bundle.entries.size > 0) {
+        assert.deepStrictEqual(
+          [...bundle.entries].sort(),
+          [...this.entries].sort(),
+          'bundle/lockfile entries mismatch'
+        )
+      }
+      for (const [dir, info] of bundle.modules) {
+        if (!info.name) continue // workspace bucket or fallback: no inferable name
+        assert.ok(this.modules.has(dir), `bundle module ${dir} missing in lockfile`)
+        const lockModule = this.modules.get(dir)
+        assert.equal(info.name, lockModule.name)
+        if (info.version) assert.equal(info.version, lockModule.version)
+        for (const rel of Object.keys(info.files)) {
+          assert.ok(Object.hasOwn(lockModule.files, rel), `bundle file ${dir}/${rel} missing in lockfile`)
+        }
+      }
+    } else {
+      if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
+      for (const [dir, info] of bundle.modules) {
+        if (!info.name || !info.version) continue // partial metadata
+        if (this.modules.has(dir)) {
+          // Code and resources bundles both populate `state.modules` when no lockfile
+          // is loaded. They must agree on name/version for the same dir.
+          const existing = this.modules.get(dir)
+          assert.equal(info.name, existing.name, `bundle ${dir} name mismatch`)
+          assert.equal(info.version, existing.version, `bundle ${dir} version mismatch`)
+        } else {
+          this.modules.set(dir, { name: info.name, version: info.version, files: Object.create(null) })
+        }
+      }
+    }
+  }
+
+  assertEntry(url) {
+    // Skipped silently when no entries info is available (v0 bundle + lock=none/ignore).
+    // v1 bundles in full scope are required to declare at least one entry at parse time,
+    // so this fallback only ever triggers for the legacy path.
+    if (this.entries.size === 0) return
+    const file = this.relative(this.absolute(url))
+    assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)
   }
 
   static get instance() {
@@ -251,13 +316,41 @@ export class State {
     }).serialize()
   }
 
+  // Pair each module's recorded file list with the corresponding content from
+  // perFile (state.sources for code, state.resources for resources), dropping
+  // modules with no content. Bundle.serialize* then groups them into sources/
+  // modules buckets and writes the lockfile-shaped output.
+  #bundleModules(perFile) {
+    const modules = new Map()
+    for (const [dir, info] of this.modules) {
+      const files = {}
+      for (const rel of Object.keys(info.files)) {
+        const file = dir === '.' ? rel : `${dir}/${rel}`
+        const content = perFile.get(file)
+        if (content !== undefined) files[rel] = content
+      }
+      if (Object.keys(files).length > 0) {
+        modules.set(dir, { name: info.name, version: info.version, files })
+      }
+    }
+    return modules
+  }
+
   get sourceData() {
     return new Bundle({
       config: this.config.values,
-      sources: this.sources,
+      entries: this.entries,
+      modules: this.#bundleModules(this.sources),
       formats: this.formats,
       imports: this.imports,
     }).serializeCode()
+  }
+
+  get resourceData() {
+    return new Bundle({
+      config: this.config.values,
+      modules: this.#bundleModules(this.resources),
+    }).serializeResources()
   }
 
   write() {

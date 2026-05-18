@@ -9,9 +9,9 @@ Stasis writes up to four files at the project root, next to `package.json`:
 | `stasis.code.br` | Bundled text sources | Brotli-compressed JSON |
 | `stasis.resources.br` | Bundled binary resources | Brotli-compressed JSON |
 
-All three stasis-generated files carry an integer `version` field (currently
-`0`). Paths are POSIX-style and relative to the directory holding the
-lockfile; none may start with `..`.
+All three stasis-generated files carry an integer `version` field. Lockfiles
+and bundles are independently versioned. Paths are POSIX-style and relative
+to the directory holding the lockfile; none may start with `..`.
 
 ## `stasis.config.json`
 
@@ -79,24 +79,50 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
 
 ```json
 {
-  "version": 0,
+  "version": 1,
   "config": { "scope": "full" },
+  "entries": ["src/index.js"],
+  "sources": {
+    ".": {
+      "name": "@exodus/stasis",
+      "version": "1.0.0-alpha.0",
+      "files": { "src/index.js": "export const x = 1\n" }
+    }
+  },
+  "modules": {
+    "node_modules/@exodus/bytes": {
+      "name": "@exodus/bytes",
+      "version": "1.15.0",
+      "files": { "index.js": "..." }
+    }
+  },
   "formats": { "src/index.js": "module" },
   "imports": {
     "*": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } },
     "node, import": { "node_modules/foo/index.js": { "./impl.js": "node_modules/foo/impl.js" } }
-  },
-  "sources": { "src/index.js": "export const x = 1\n" }
+  }
 }
 ```
 
+- `entries`/`sources`/`modules` mirror the lockfile shape, with `files`
+  recording UTF-8 source bytes instead of SRI digests. `entries` and
+  `sources` are present only when `scope = full`; `modules` may be
+  omitted (treated as empty).
 - `formats`: project-relative path → Node loader format (`module`,
   `commonjs`, …). May be missing per file.
 - `imports`: conditions → parent file → specifier → resolved
   project-relative path. The conditions key is either `"*"` or a
   comma-joined list (e.g. `"node, import"`).
-- `sources`: project-relative path → UTF-8 source. Hashes must match
-  `stasis.lock.json`; verified on every read.
+- When a `stasis.lock.json` is loaded alongside, the bundle's `entries`,
+  module/source dirs, `name`/`version`, and per-module file lists must
+  match. Each loaded source is hash-verified against the lockfile.
+- In `bundle = load` mode with `scope = full`, entry-point resolutions
+  are checked against `entries`.
+
+A legacy `version: 0` shape — flat top-level `sources` keyed by project-
+relative path with no `entries`/`modules` — is still accepted on load
+(loses cross-check of module metadata; lockfile-driven integrity checks
+still apply). The bundle is always written as `version: 1`.
 
 ## `stasis.resources.br`
 
@@ -104,10 +130,21 @@ Brotli-compressed JSON. Same write/read gating as `stasis.code.br`.
 
 ```json
 {
-  "version": 0,
-  "resources": { "node_modules/foo/asset.bin": "<base64 bytes>" }
+  "version": 1,
+  "config": { "scope": "full" },
+  "sources": {
+    ".": { "name": "...", "version": "...", "files": { "asset.bin": "<base64>" } }
+  },
+  "modules": {
+    "node_modules/foo": { "name": "foo", "version": "...", "files": { "asset.bin": "<base64>" } }
+  }
 }
 ```
+
+Same structural rules as `stasis.code.br` minus `entries`/`formats`/
+`imports`. Resource bytes are stored base64-encoded. A legacy `version: 0`
+shape with a flat top-level `resources` map is still accepted on load;
+writes are always `version: 1`.
 
 ## Discovery
 

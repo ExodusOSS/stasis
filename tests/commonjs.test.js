@@ -66,8 +66,8 @@ test('run --bundle=add records commonjs format for CJS files', withTmp((t, tmp) 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
   t.assert.equal(decoded.formats['src/entry.cjs'], 'commonjs')
   t.assert.equal(decoded.formats['src/hello.cjs'], 'commonjs')
-  t.assert.equal(decoded.sources['src/entry.cjs'], readFileSync(join(fixture, 'src/entry.cjs'), 'utf-8'))
-  t.assert.equal(decoded.sources['src/hello.cjs'], readFileSync(join(fixture, 'src/hello.cjs'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/entry.cjs'], readFileSync(join(fixture, 'src/entry.cjs'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/hello.cjs'], readFileSync(join(fixture, 'src/hello.cjs'), 'utf-8'))
 }))
 
 test('run --bundle=load executes a CJS program from a saved bundle', withTmp((t, tmp) => {

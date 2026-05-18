@@ -174,7 +174,7 @@ test('run --lock=frozen --bundle=load detects a tampered source in the bundle', 
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   // tamper with the bundle: swap hello.js source for an attacker-controlled payload
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  decoded.sources['src/hello.js'] = 'export const greet = (n) => `pwned, ${n}`\n'
+  decoded.sources['.'].files['src/hello.js'] = 'export const greet = (n) => `pwned, ${n}`\n'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
   // remove on-disk sources so bundle=load is the only source of code
   rmSync(join(tmp, 'src'), { recursive: true })
@@ -307,7 +307,7 @@ test('run --bundle=replace rewrites the bundle from scratch when a source file c
   const afterBundle = readFileSync(bundlePath)
   t.assert.notEqual(afterBundle.toString('base64'), beforeBundle.toString('base64'))
   const decoded = JSON.parse(brotliDecompressSync(afterBundle))
-  t.assert.equal(decoded.sources['src/hello.js'], 'export const greet = (n) => `bonjour, ${n}`\n')
+  t.assert.equal(decoded.sources['.'].files['src/hello.js'], 'export const greet = (n) => `bonjour, ${n}`\n')
 }))
 
 test('run --bundle=replace ignores stale sources in the existing bundle', withTmp((t, tmp) => {
@@ -320,7 +320,7 @@ test('run --bundle=replace ignores stale sources in the existing bundle', withTm
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   // forge a stale entry by re-saving a tampered bundle
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  decoded.sources['src/orphan.js'] = 'export const x = 0\n'
+  decoded.sources['.'].files['src/orphan.js'] = 'export const x = 0\n'
   decoded.formats['src/orphan.js'] = 'module'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
@@ -330,7 +330,7 @@ test('run --bundle=replace ignores stale sources in the existing bundle', withTm
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const after = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(after.sources['src/orphan.js'], undefined, 'orphan source must be dropped')
+  t.assert.equal(after.sources['.'].files['src/orphan.js'], undefined, 'orphan source must be dropped')
 }))
 
 test('run --lock=frozen fails when scope conflicts with the committed lockfile', (t) => {
@@ -361,10 +361,12 @@ test('run --bundle=add --bundle-file writes the bundle at the chosen path/filena
   t.assert.ok(!existsSync(join(runFixture, 'stasis.code.br')), 'bundle should not pollute the fixture')
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.version, 0)
+  t.assert.equal(decoded.version, 1)
   t.assert.deepEqual(decoded.config, { scope: 'full' })
-  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
-  t.assert.equal(decoded.sources['src/hello.js'], readFileSync(join(runFixture, 'src/hello.js'), 'utf-8'))
+  t.assert.deepEqual(decoded.entries, ['src/entry.js'])
+  t.assert.equal(decoded.sources['.'].name, 'stasis-cli-run')
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(runFixture, 'src/hello.js'), 'utf-8'))
   t.assert.equal(decoded.formats['src/entry.js'], 'module')
   t.assert.equal(decoded.formats['src/hello.js'], 'module')
 }))
@@ -414,10 +416,11 @@ test('run --lock=frozen --bundle=add writes the bundle without rewriting the loc
   t.assert.equal(readFileSync(lockPath, 'utf-8'), before, 'lock=frozen must not rewrite the lockfile')
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.version, 0)
+  t.assert.equal(decoded.version, 1)
   t.assert.deepEqual(decoded.config, { scope: 'full' })
-  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
-  t.assert.equal(decoded.sources['src/hello.js'], readFileSync(join(runFixture, 'src/hello.js'), 'utf-8'))
+  t.assert.deepEqual(decoded.entries, ['src/entry.js'])
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(runFixture, 'src/hello.js'), 'utf-8'))
   t.assert.equal(decoded.formats['src/entry.js'], 'module')
   t.assert.equal(decoded.formats['src/hello.js'], 'module')
 }))
@@ -617,8 +620,9 @@ test('run --lock=none --bundle=add writes the bundle without touching the lockfi
   t.assert.ok(!existsSync(lockPath), 'lockfile must not be created')
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.sources['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
-  t.assert.equal(decoded.sources['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
+  t.assert.deepEqual(decoded.entries, ['src/entry.js'])
+  t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
 }))
 
 test('run --lock=none --bundle=load runs from a bundle with no lockfile on disk', withTmp((t, tmp) => {
@@ -762,4 +766,154 @@ test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not o
   )
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION/)
+}))
+
+test('run --bundle=load rejects a v0 bundle whose path-inferred module name disagrees with the lockfile', withTmp((t, tmp) => {
+  // The v0 bundle's name comes from the path (`node_modules/fake-esm-pkg` →
+  // `fake-esm-pkg`); cross-check against the lockfile must fail if the
+  // lockfile attests a different name for that dir (e.g. an aliased install).
+  cpSync(nmFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Tamper the lockfile: same dir, different declared name.
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  lock.modules['node_modules/fake-esm-pkg'].name = 'aliased-name'
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  // Downgrade the bundle to v0 flat shape so the loader hits the path-inference path.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  const flatSources = {}
+  for (const dir of Object.keys(decoded.modules)) {
+    for (const [rel, src] of Object.entries(decoded.modules[dir].files)) {
+      flatSources[`${dir}/${rel}`] = src
+    }
+  }
+  const v0 = { version: 0, config: decoded.config, formats: decoded.formats, imports: decoded.imports, sources: flatSources }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(v0)))
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /ERR_ASSERTION/)
+}))
+
+test('run --bundle=load accepts a v0 legacy bundle (flat sources, no entries/modules)', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  // Build a fresh v1 bundle, then downgrade it to the v0 legacy shape on disk
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  const flatSources = {}
+  for (const dir of Object.keys(decoded.sources)) {
+    for (const [rel, src] of Object.entries(decoded.sources[dir].files)) {
+      flatSources[dir === '.' ? rel : `${dir}/${rel}`] = src
+    }
+  }
+  const v0 = { version: 0, config: decoded.config, formats: decoded.formats, imports: decoded.imports, sources: flatSources }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(v0)))
+
+  const load = run(
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+test('run --bundle=load rejects a bundle whose entries disagree with the lockfile', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.entries = ['src/hello.js'] // disagrees with lockfile entry "src/entry.js"
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION|entries mismatch/)
+}))
+
+test('run --bundle=load rejects a bundle whose module name disagrees with the lockfile', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.sources['.'].name = 'someone-else'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+}))
+
+test('run --bundle=load rejects an entry not listed in the bundle entries', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const load = run(
+    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/hello.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /ERR_ASSERTION|Unknown entry/)
+}))
+
+test('parseCode rejects a v1 full-scope bundle with empty entries', withTmp((t, tmp) => {
+  // A tampered bundle with entries=[] would otherwise let assertEntry skip (it
+  // short-circuits on empty for v0+no-lockfile compat). Reject at parse time.
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.entries = []
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const load = run(
+    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /at least one entry|ERR_ASSERTION/)
 }))
