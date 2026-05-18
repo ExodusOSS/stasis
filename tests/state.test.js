@@ -119,6 +119,17 @@ test('addImport keys by importAttributes: same specifier with vs without {type:j
   t.assert.equal(state.getImport(parentURL, './ambiguous').url, jsURL)
 })
 
+test('addImport rejects condition strings containing "(" or ")"', (t) => {
+  // The conditions-level key suffixes attributes as ` (with: {...})`, so a condition
+  // that itself contained parens could collide with the suffix in pathological cases.
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  const childURL = pathToFileURL(fileAbs).toString()
+  t.assert.throws(
+    () => state.addImport(parentURL, './x', childURL, { conditions: ['weird(cond)'] }),
+    /conditions must not contain/
+  )
+})
+
 test('addImport: attribute keys are unambiguous across delimiter-containing values', (t) => {
   const parentURL = pathToFileURL(fileAbs2).toString()
   // The naive `${k}=${v}` join would collide on these two attribute objects:
@@ -149,8 +160,8 @@ test('addImport: empty {} importAttributes is equivalent to undefined', (t) => {
   // not create a second conditions bucket under a different key.
   state.addImport(parentURL, './foo.js', childURL, { importAttributes: {} })
 
-  // The empty-attrs encoding bug would have produced a `*\0[]` bucket. Verify it didn't.
-  t.assert.ok(!state.imports.has('*\0[]'), 'empty {} must not create a separate conditions bucket')
+  // The empty-attrs encoding bug would have produced a `* (with: {})` bucket. Verify it didn't.
+  t.assert.ok(!state.imports.has('* (with: {})'), 'empty {} must not create a separate conditions bucket')
 })
 
 test('lockData is well-formed JSON with the expected shape', (t) => {

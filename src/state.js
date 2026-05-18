@@ -247,9 +247,11 @@ export class State {
   // Different conditions / import attributes can yield different URLs/formats for the same parent+specifier
   #conditionsKey(conditions, importAttributes) {
     const cond = conditions === '*' ? '*' : conditions.join(', ')
+    assert.ok(!cond.includes('(') && !cond.includes(')'), 'conditions must not contain "(" or ")"')
     const attrs = importAttributes ? Object.entries(importAttributes) : []
     if (attrs.length === 0) return cond
-    return `${cond}\0${JSON.stringify(attrs.sort(([a], [b]) => (a < b ? -1 : 1)))}`
+    const sorted = Object.fromEntries(attrs.sort(([a], [b]) => (a < b ? -1 : 1)))
+    return `${cond} (with: ${JSON.stringify(sorted)})`
   }
 
   addImport(parentURL, specifier, url, { conditions = '*', format, importAttributes } = {}) {
