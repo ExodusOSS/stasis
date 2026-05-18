@@ -10,27 +10,12 @@ import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
+import { splitNodeModulesPath } from './util.js'
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
 const FILE_RESOURCES = 'stasis.resources.br'
-
-// For a project-relative path under node_modules, return the package root dir
-// (the segment directly under the *last* node_modules/ — scoped names take two
-// segments). Returns null when the path isn't under node_modules or the
-// node_modules slice is malformed (trailing slash, empty segment, no file
-// segment after the pkg dir).
-function nodeModulesPackageRoot(file) {
-  const marker = 'node_modules/'
-  const idx = file.lastIndexOf(marker)
-  if (idx === -1) return null
-  const after = idx + marker.length
-  const parts = file.slice(after).split('/')
-  const pkgLen = parts[0].startsWith('@') ? 2 : 1
-  if (parts.length <= pkgLen || parts.slice(0, pkgLen).some((p) => !p)) return null
-  return file.slice(0, after) + parts.slice(0, pkgLen).join('/')
-}
 
 function readPackageJSON(pkgAbsolute) {
   const buf = readFileSync(pkgAbsolute)
@@ -269,7 +254,7 @@ export class State {
     // name/version. For files outside node_modules we walk up past markers
     // until we find a package.json with both name and version; anything
     // missing name/version must be a type-only marker.
-    const nmRoot = nodeModulesPackageRoot(file)
+    const nmRoot = splitNodeModulesPath(file)?.dir
     let pkgAbsolute, name, version
     if (nmRoot) {
       pkgAbsolute = resolve(this.root, nmRoot, 'package.json')
