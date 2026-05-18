@@ -12,7 +12,7 @@ let state
 let saved = false
 
 function initState(root) {
-  state = new State(root)
+  state = new State(root, { preload: true })
 
   const save = () => {
     if (saved) return

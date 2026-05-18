@@ -18,7 +18,8 @@ const FILE_RESOURCES = 'stasis.resources.br'
 
 // TODO: stricter format validation
 
-let instance
+let preload
+const liveStates = new Set()
 
 export class State {
   hashes = new Map()
@@ -31,10 +32,18 @@ export class State {
   config
   root
 
+  // options.preload (boolean) -- mark this instance as the unique preload State, exposed via
+  // State.preload. Only one preload State may exist at a time. Non-preload States can be
+  // constructed freely (e.g. a bundler plugin that emits a sidecar bundle in a process that
+  // already has a preload-owned lockfile). All other keys forward to Config.
   constructor(root, options = {}) {
-    assert.ok(!instance, 'Only a single Stasis instance is supported')
-    instance = this
-    this.config = new Config(options)
+    const { preload: isPreload = false, ...configOptions } = options
+    this.config = new Config(configOptions)
+    if (isPreload) {
+      assert.ok(!preload, 'Only one preload Stasis instance is supported')
+      preload = this
+    }
+    liveStates.add(this)
     const potentialRoots = []
     let cursor = root
     while (cursor) {
@@ -187,8 +196,18 @@ export class State {
     assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)
   }
 
+  static get preload() {
+    return preload
+  }
+
+  // Back-compat accessor: returns the preload State if one exists, else the sole live State.
+  // Throws when several non-preload States coexist -- callers in that situation must reach
+  // for State.preload (or hold their own reference). Returns undefined when no State is live.
   static get instance() {
-    return instance
+    if (preload) return preload
+    if (liveStates.size === 0) return undefined
+    if (liveStates.size > 1) throw new Error('Multiple Stasis instances; use State.preload')
+    return [...liveStates][0]
   }
 
   absolute(url) {
