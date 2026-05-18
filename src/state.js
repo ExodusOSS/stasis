@@ -2,23 +2,13 @@ import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve, relative, basename, dirname } from 'node:path'
-import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 
 import { Config } from './config.js'
-import {
-  sha512integrity,
-  readFileSyncMaybe,
-  sortPaths,
-  fileSetToObject,
-  fileMapToObject,
-  fromEntries,
-  objectToMaps,
-  noupsert,
-} from './util.js'
-
-const version = 0
+import { Bundle } from './bundle.js'
+import { Lockfile } from './lockfile.js'
+import { sha512integrity, readFileSyncMaybe, noupsert } from './util.js'
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
@@ -97,61 +87,34 @@ export class State {
 
         if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
         if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
-          const json = JSON.parse(lock)
-          assert.equal(json.version, version)
-          assert.ok(['node_modules', 'full'].includes(json.config?.scope))
-          if (this.config.frozen) assert.equal(json.config.scope, this.config.scope)
+          const lockfile = Lockfile.parse(lock)
+          if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
 
-          const full = json.config.scope === 'full'
-          assert.equal(!!json.entries, full)
-          assert.equal(!!json.sources, full)
-          assert.ok(json.modules)
-
-          // Rebuild module.files with a null prototype so subsequent `files[rel] = …`
-          // assignments can't poison Object.prototype via a forged '__proto__' key.
-          const normalize = ({ name, version, files }) =>
-            ({ name, version, files: fromEntries(Object.entries(files)) })
-          this.modules = new Map(
-            Object.entries(json.modules).map(([dir, info]) => [dir, normalize(info)])
-          )
-          for (const [dir] of this.modules) assert.ok(dir.includes('node_modules'))
-          if (full && this.config.full) {
-            assert.ok(Array.isArray(json.entries))
-            this.entries = new Set(json.entries)
-            assert.ok(json.sources)
-            for (const [dir, info] of Object.entries(json.sources)) {
-              assert.ok(!dir.includes('node_modules'))
-              this.modules.set(dir, normalize(info))
-            }
+          const includeSources = lockfile.config.scope === 'full' && this.config.full
+          for (const [dir, info] of lockfile.modules) {
+            if (!dir.includes('node_modules') && !includeSources) continue
+            this.modules.set(dir, info)
           }
+          if (includeSources) this.entries = lockfile.entries
 
           for (const [dir, { files }] of this.modules) {
-            assert.ok(!dir.startsWith('..'))
-            assert.ok(files)
             for (const [name, hash] of Object.entries(files)) {
-              assert.ok(!name.startsWith('..'))
               noupsert(this.hashes, join(dir, name), hash)
             }
           }
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
-          const json = JSON.parse(brotliDecompressSync(sources))
-          assert.equal(json.version, version)
-          assert.equal(json.config?.scope, this.config.scope)
-          assert.ok(json.sources)
-          assert.ok(json.formats)
-          assert.ok(json.imports)
-          this.sources = new Map(Object.entries(json.sources))
-          this.formats = new Map(Object.entries(json.formats))
-          this.imports = objectToMaps(json.imports)
+          const bundle = Bundle.parseCode(sources)
+          assert.equal(bundle.config.scope, this.config.scope)
+          this.sources = bundle.sources
+          this.formats = bundle.formats
+          this.imports = bundle.imports
         }
 
         if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
-          const json = JSON.parse(brotliDecompressSync(resources))
-          assert.equal(json.version, version)
-          assert.ok(json.resources)
-          this.resources = new Map(Object.entries(json.resources))
+          const bundle = Bundle.parseResources(resources)
+          this.resources = bundle.resources
         }
       }
     }
@@ -281,31 +244,20 @@ export class State {
   }
 
   get lockData() {
-    const config = this.config.values
-    const entries = fileSetToObject(this.entries)
-    const modules = []
-    const sources = []
-    for (const [dir, { name, version, files }] of this.modules) {
-      const type = dir.includes('node_modules') ? modules : sources
-      const sorted = fromEntries(Object.entries(files).sort((a, b) => sortPaths(a[0], b[0])))
-      type.push([dir, { name, version, files: sorted }])
-    }
-
-    modules.sort((a, b) => sortPaths(a[0], b[0]))
-    sources.sort((a, b) => sortPaths(a[0], b[0]))
-
-    const store = { version, config }
-    if (this.config.full) Object.assign(store, { entries, sources: fromEntries(sources) })
-    Object.assign(store, { modules: fromEntries(modules) })
-    return JSON.stringify(store, undefined, 2) + '\n'
+    return new Lockfile({
+      config: this.config.values,
+      entries: this.entries,
+      modules: this.modules,
+    }).serialize()
   }
 
   get sourceData() {
-    const config = this.config.values
-    const sources = fileMapToObject(this.sources)
-    const formats = fileMapToObject(this.formats)
-    const imports = fileMapToObject(this.imports)
-    return brotliCompressSync(JSON.stringify({ version, config, formats, imports, sources }, undefined, 2))
+    return new Bundle({
+      config: this.config.values,
+      sources: this.sources,
+      formats: this.formats,
+      imports: this.imports,
+    }).serializeCode()
   }
 
   write() {

@@ -11,7 +11,9 @@
     },
     "./esbuild": "./src/esbuild.js",
     "./webpack": "./src/webpack.js",
-    "./loader": "./src/loader.js"
+    "./loader": "./src/loader.js",
+    "./bundle": "./src/bundle.js",
+    "./lockfile": "./src/lockfile.js"
   },
   "engines": {
     "node": ">=24.14.0"
