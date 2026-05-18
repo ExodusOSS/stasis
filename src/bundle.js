@@ -45,13 +45,8 @@ export class Bundle {
   }
 
   // Flat project-relative view of file contents collected from this.modules.
-  // For code bundles the values are UTF-8 source strings; for resource bundles
-  // they are base64. Bundle does not disambiguate — the caller picks the getter
-  // that matches the bundle's role.
-  get sources() { return this.#flatFiles() }
-  get resources() { return this.#flatFiles() }
-
-  #flatFiles() {
+  // Values are UTF-8 source strings for code bundles, base64 for resource bundles.
+  get sources() {
     const m = new Map()
     for (const [dir, { files }] of this.modules) {
       for (const [rel, content] of Object.entries(files)) {

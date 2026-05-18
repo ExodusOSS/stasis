@@ -122,7 +122,7 @@ export class State {
             assert.equal(bundle.config.scope, this.config.scope)
           }
           this.#mergeBundleMetadata(bundle, { lockfileLoaded })
-          this.resources = bundle.resources
+          this.resources = bundle.sources
         }
       }
     }

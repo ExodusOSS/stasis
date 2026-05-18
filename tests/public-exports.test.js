@@ -67,7 +67,7 @@ test('Bundle.serializeResources round-trip', (t) => {
   const parsed = Bundle.parseResources(buf)
 
   t.assert.equal(parsed.modules.get('node_modules/foo').files['asset.bin'], Buffer.from('hello').toString('base64'))
-  t.assert.equal(parsed.resources.get('node_modules/foo/asset.bin'), Buffer.from('hello').toString('base64'))
+  t.assert.equal(parsed.sources.get('node_modules/foo/asset.bin'), Buffer.from('hello').toString('base64'))
 })
 
 test('Bundle.parseCode exposes the parsed version (v0 stays at 0 in memory)', (t) => {
