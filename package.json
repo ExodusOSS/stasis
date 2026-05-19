@@ -30,7 +30,7 @@
     "node": ">=24.14.0"
   },
   "bin": {
-    "stasis": "./bin/stasis.js"
+    "stasis": "bin/stasis.js"
   },
   "scripts": {
     "lint": "oxlint",
