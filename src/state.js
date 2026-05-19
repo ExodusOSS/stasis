@@ -264,7 +264,7 @@ export class State {
           ;({ name, version } = json)
           break
         }
-        assert.deepStrictEqual(Object.keys(json), ['type'])
+        assert.ok(Object.keys(json).every((k) => k === 'type'))
         const next = findPackageJSON('..', pathToFileURL(pkgAbsolute))
         assert.ok(
           next && !relative(this.root, next).startsWith('..'),

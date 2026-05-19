@@ -38,6 +38,18 @@ test('addFile walks past a workspace type-only marker to find the project packag
   t.assert.ok(module.files['sub/foo.cjs'])
 })
 
+test('addFile walks past an empty workspace package.json to find the project package.json', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'empty', 'foo.cjs')).toString()
+  state.addFile(url, { format: 'commonjs' })
+
+  const module = state.modules.get('.')
+  t.assert.ok(module)
+  t.assert.equal(module.name, 'stasis-state-nested-pkg-fixture')
+  t.assert.equal(module.version, '0.0.0')
+  t.assert.ok(module.files['empty/foo.cjs'])
+})
+
 test('addFile rejects a workspace package.json missing version but with non-type keys', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'partial', 'file.js')).toString()
