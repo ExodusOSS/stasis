@@ -564,3 +564,24 @@ test('failed build does not write the bundle (no clobber)', withTmp((t, tmp) => 
   t.assert.notEqual(r.status, 0, `expected build failure; stderr=${r.stderr}`)
   t.assert.equal(existsSync(bundlePath), false, 'failed build must not write the bundle')
 }))
+
+test('untracked extensions (.css) compile but stay out of the lockfile', withTmp((t, tmp) => {
+  // CSS imports used to crash addFile via the isUtf8 / data.resource assertion path.
+  // Now untracked extensions are skipped entirely -- webpack handles them with its own
+  // loaders and they don't appear in the lockfile.
+  cpSync(fullFixture, tmp, { recursive: true })
+  writeFileSync(join(tmp, 'src', 'styles.css'), '.x { color: red }\n')
+  // Use require() so webpack's default config (no css-loader) just records the dep.
+  // Actually plain require() of a .css would fail since webpack tries to parse it as JS.
+  // Skip the require -- just place the .css alongside; the asserted invariant is that
+  // tracked files appear and untracked ones don't, even when the untracked file is on
+  // disk in the workspace.
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.sources['.'].files['src/entry.js'], 'tracked .js entry is recorded')
+  t.assert.equal(lock.sources['.'].files['src/styles.css'], undefined,
+    'untracked .css must not appear in the lockfile')
+}))

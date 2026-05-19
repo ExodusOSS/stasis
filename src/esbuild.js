@@ -4,7 +4,7 @@ import { extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
-import { State, resolvePluginState } from './state.js'
+import { State, isTrackedPath, resolvePluginState } from './state.js'
 
 export class StasisEsbuild {
   #seen = new Set()
@@ -42,7 +42,8 @@ export class StasisEsbuild {
       assert.equal(res.suffix, '')
 
       const isEntry = !args.importer
-      if (res.namespace === 'file' && !res.external) {
+      const tracked = isTrackedPath(res.path)
+      if (res.namespace === 'file' && !res.external && tracked) {
         if (!isEntry) {
           const parentURL = pathToFileURL(args.importer).toString()
           const url = pathToFileURL(res.path).toString()
@@ -50,12 +51,14 @@ export class StasisEsbuild {
         }
       }
 
-      return { ...res, pluginData: { ...res.pluginData, isEntry } }
+      return { ...res, pluginData: { ...res.pluginData, isEntry, tracked } }
     })
 
     onLoad({ filter: /$/, namespace: 'file' }, async ({ path, pluginData, with: attrs }) => {
-      // Accept any standard JS import attribute that doesn't change the loaded bytes; we
-      // currently only encounter `type` (e.g. `with { type: 'json' }`). Reject anything
+      // Untracked extensions (.css, .wasm, asset modules, ...) fall through to esbuild's
+      // default load handling -- the lockfile/bundle don't attest to them.
+      if (!pluginData?.tracked) return undefined
+      // Accept the `type` import attribute (e.g. `with { type: 'json' }`); reject anything
       // else loudly since saving import-attribute state to the lockfile isn't designed yet.
       for (const k of Object.keys(attrs)) {
         assert.equal(k, 'type', `unsupported import attribute: ${k}`)
@@ -70,12 +73,9 @@ export class StasisEsbuild {
 
       if (isBinary) return { contents: source, loader: 'binary' }
 
-      // Map common extensions to known esbuild loaders; fall back to 'default' so esbuild
-      // can pick based on its own extension config rather than crash. .cjs/.mjs get the
-      // js loader via the leading-letter strip; everything unknown -> 'default'.
-      const ext = extname(path).replace(/^\.[cm]?/, '')
-      const KNOWN = new Set(['js', 'ts', 'jsx', 'tsx', 'json', 'css', 'text'])
-      const loader = KNOWN.has(ext) ? ext : 'default'
+      // .cjs/.mjs strip to 'js' via the leading-letter peel; the other tracked extensions
+      // map 1:1 to esbuild's loader names.
+      const loader = extname(path).replace(/^\.[cm]?/, '')
       return { contents: source, loader }
     })
   }

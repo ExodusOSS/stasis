@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { State, resolvePluginState } from './state.js'
+import { State, isTrackedPath, resolvePluginState } from './state.js'
 
 export class StasisWebpack {
   #seen = new Set()
@@ -23,6 +23,10 @@ export class StasisWebpack {
         // be a synthetic resource (data:, null-loader). We track the resolved file only.
         const filePath = data.resourceResolveData?.path
         if (!filePath || !path.isAbsolute(filePath) || !existsSync(filePath)) return
+        // Untracked extensions (.css, .png, .wasm, asset modules, ...) don't go in the
+        // lockfile -- the loader can't load them as JS anyway and bundle=load has no path
+        // to round-trip them. Webpack handles them with its own loaders / asset modules.
+        if (!isTrackedPath(filePath)) return
         const url = pathToFileURL(filePath).toString()
         const issuer = data.resourceResolveData.context?.issuer
         const isEntry = !issuer
@@ -34,8 +38,8 @@ export class StasisWebpack {
 
         if (!this.#seen.has(filePath)) {
           this.#seen.add(filePath)
-          // Sniff binary content so non-UTF8 assets (.png, .wasm, etc.) route through
-          // state.resources instead of failing addFile's isUtf8 assertion.
+          // Tracked extensions are text formats; read + sniff in case a JSON-with-BOM or
+          // similar edge case slipped past the extension filter.
           const source = readFileSync(filePath)
           const binary = !isUtf8(source)
           this.#state.addFile(url, { source, isEntry, isBinary: binary })

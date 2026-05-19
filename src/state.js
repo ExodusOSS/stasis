@@ -16,6 +16,20 @@ const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
 const FILE_RESOURCES = 'stasis.resources.br'
 
+// Extensions whose semantics the lockfile + Node loader can actually reason about.
+// Plugins filter to this set before calling addFile/addImport so untracked types
+// (.css, .wasm, .txt, asset modules, ...) stay out of the lockfile -- the loader
+// has no path to serve them anyway (load() asserts the format is module/commonjs/json),
+// and bundle=load would have no chance to round-trip them.
+export const TRACKED_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json'])
+
+// Returns true when the path's extension is one stasis knows how to attest to.
+export function isTrackedPath(filePath) {
+  const m = /\.([^./\\]+)$/.exec(filePath)
+  if (!m) return false
+  return TRACKED_EXTENSIONS.has(m[1].toLowerCase())
+}
+
 // TODO: stricter format validation
 
 let preload
