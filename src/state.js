@@ -277,6 +277,7 @@ export class State {
     assert.ok(pkg === 'package.json' || pkg.endsWith('/package.json'))
     assert.equal(basename(pkg), 'package.json')
     const dir = dirname(pkg)
+    if (nmRoot) assert.equal(dir, nmRoot)
     if (!this.modules.has(dir)) this.modules.set(dir, { name, version, files: Object.create(null) })
     const module = this.modules.get(dir)
     assert.equal(module.name, name)
