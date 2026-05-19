@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve, relative, basename, dirname } from 'node:path'
+import { join, resolve, relative, basename, dirname, extname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
@@ -241,25 +241,36 @@ export class State {
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
 
+    const closestPkgAbsolute = findPackageJSON(url)
+    const closestPkg = readPackageJSON(closestPkgAbsolute)
+
+    const closestType = closestPkg.type ?? 'commonjs'
+    assert.ok(closestType === 'module' || closestType === 'commonjs')
+    const extToFormat = { __proto__: null, '.json': 'json', '.mjs': 'module', '.cjs': 'commonjs', '.js': closestType }
+    const inferredFormat = extToFormat[extname(file)]
+    if (inferredFormat !== undefined) {
+      if (format != null) assert.equal(format, inferredFormat)
+      else format = inferredFormat
+    }
+
     // findPackageJSON may land on a `{"type":"module"}`-style sub-bucket
     // marker that lacks name/version.
     const nmRoot = splitNodeModulesPath(file)?.dir
     let pkgAbsolute, name, version
     if (nmRoot) {
       pkgAbsolute = resolve(this.root, nmRoot, 'package.json')
-      ;({ name, version } = readPackageJSON(pkgAbsolute))
+      const rootPkg = pkgAbsolute === closestPkgAbsolute ? closestPkg : readPackageJSON(pkgAbsolute)
+      ;({ name, version } = rootPkg)
       assert.ok(name, `Missing name in ${this.relative(pkgAbsolute)}`)
       assert.ok(version, `Missing version in ${this.relative(pkgAbsolute)}`)
-      const nestedAbsolute = findPackageJSON(url)
-      if (nestedAbsolute !== pkgAbsolute) {
-        const nested = readPackageJSON(nestedAbsolute)
-        if (nested.name !== undefined) assert.equal(nested.name, name)
-        if (nested.version !== undefined) assert.equal(nested.version, version)
+      if (closestPkgAbsolute !== pkgAbsolute) {
+        if (closestPkg.name !== undefined) assert.equal(closestPkg.name, name)
+        if (closestPkg.version !== undefined) assert.equal(closestPkg.version, version)
       }
     } else {
-      pkgAbsolute = findPackageJSON(url)
+      pkgAbsolute = closestPkgAbsolute
+      let json = closestPkg
       while (true) {
-        const json = readPackageJSON(pkgAbsolute)
         if (json.name !== undefined && json.version !== undefined) {
           ;({ name, version } = json)
           break
@@ -271,6 +282,7 @@ export class State {
           `No package.json with name+version found for ${file}`
         )
         pkgAbsolute = next
+        json = readPackageJSON(pkgAbsolute)
       }
     }
     const pkg = this.relative(pkgAbsolute)

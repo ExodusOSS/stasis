@@ -55,3 +55,46 @@ test('addFile rejects a workspace package.json missing version but with non-type
   const url = pathToFileURL(join(root, 'partial', 'file.js')).toString()
   t.assert.throws(() => state.addFile(url, { format: 'module' }))
 })
+
+test('addFile infers .js format from the closest package.json type when format is omitted', (t) => {
+  const state = new State(root)
+  // Project root package.json declares "type": "module"; src/foo.js has no nearer pkg.json.
+  const url = pathToFileURL(join(root, 'node_modules', 'widget', 'lib', 'util.js')).toString()
+  state.addFile(url)
+  t.assert.equal(state.formats.get('node_modules/widget/lib/util.js'), 'module')
+})
+
+test('addFile defaults .js format to commonjs when the closest package.json omits type', (t) => {
+  const state = new State(root)
+  // node_modules/widget/package.json has no `type` field, so its .js files
+  // default to commonjs even though the project root is type=module.
+  const url = pathToFileURL(join(root, 'node_modules', 'widget', 'index.js')).toString()
+  state.addFile(url)
+  t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'commonjs')
+})
+
+test('addFile rejects an explicit format that disagrees with the inferred one', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'foo.cjs')).toString()
+  t.assert.throws(() => state.addFile(url, { format: 'module' }))
+})
+
+test('addFile infers json for .json files regardless of closest type', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'data.json')).toString()
+  state.addFile(url, { isBinary: false })
+  t.assert.equal(state.formats.get('sub/data.json'), 'json')
+})
+
+test('addFile infers module for .mjs regardless of closest type', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'script.mjs')).toString()
+  state.addFile(url)
+  t.assert.equal(state.formats.get('sub/script.mjs'), 'module')
+})
+
+test('addFile rejects a package.json type other than module/commonjs', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'invalid-type', 'file.js')).toString()
+  t.assert.throws(() => state.addFile(url))
+})
