@@ -265,7 +265,7 @@ export class State {
           break
         }
         assert.deepStrictEqual(Object.keys(json), ['type'])
-        const next = findPackageJSON('..', pathToFileURL(pkgAbsolute).toString())
+        const next = findPackageJSON('..', pathToFileURL(pkgAbsolute))
         assert.ok(
           next && !relative(this.root, next).startsWith('..'),
           `No package.json with name+version found for ${file}`
