@@ -46,3 +46,15 @@ export const fileMapToObject = (map) => fromEntries(
 export const objectToMaps = (obj) => new Map(
   Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
+
+export function splitNodeModulesPath(path) {
+  const marker = 'node_modules/'
+  const idx = path.lastIndexOf(marker)
+  if (idx === -1) return null
+  const after = idx + marker.length
+  const parts = path.slice(after).split('/')
+  const pkgLen = parts[0].startsWith('@') ? 2 : 1
+  if (parts.length <= pkgLen || parts.slice(0, pkgLen).some((p) => !p)) return null
+  const name = parts.slice(0, pkgLen).join('/')
+  return { dir: path.slice(0, after) + name, rel: parts.slice(pkgLen).join('/'), name }
+}

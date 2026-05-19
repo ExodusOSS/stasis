@@ -10,11 +10,18 @@ import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
+import { splitNodeModulesPath } from './util.js'
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
 const FILE_RESOURCES = 'stasis.resources.br'
+
+function readPackageJSON(pkgAbsolute) {
+  const buf = readFileSync(pkgAbsolute)
+  assert.ok(isUtf8(buf))
+  return JSON.parse(buf.toString())
+}
 
 // TODO: stricter format validation
 
@@ -234,15 +241,43 @@ export class State {
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
 
-    const pkgAbsolute = findPackageJSON(url)
+    // findPackageJSON may land on a `{"type":"module"}`-style sub-bucket
+    // marker that lacks name/version.
+    const nmRoot = splitNodeModulesPath(file)?.dir
+    let pkgAbsolute, name, version
+    if (nmRoot) {
+      pkgAbsolute = resolve(this.root, nmRoot, 'package.json')
+      ;({ name, version } = readPackageJSON(pkgAbsolute))
+      assert.ok(name, `Missing name in ${this.relative(pkgAbsolute)}`)
+      assert.ok(version, `Missing version in ${this.relative(pkgAbsolute)}`)
+      const nestedAbsolute = findPackageJSON(url)
+      if (nestedAbsolute !== pkgAbsolute) {
+        const nested = readPackageJSON(nestedAbsolute)
+        if (nested.name !== undefined) assert.equal(nested.name, name)
+        if (nested.version !== undefined) assert.equal(nested.version, version)
+      }
+    } else {
+      pkgAbsolute = findPackageJSON(url)
+      while (true) {
+        const json = readPackageJSON(pkgAbsolute)
+        if (json.name !== undefined && json.version !== undefined) {
+          ;({ name, version } = json)
+          break
+        }
+        assert.ok(Object.keys(json).every((k) => k === 'type'))
+        const next = findPackageJSON('..', pathToFileURL(pkgAbsolute))
+        assert.ok(
+          next && !relative(this.root, next).startsWith('..'),
+          `No package.json with name+version found for ${file}`
+        )
+        pkgAbsolute = next
+      }
+    }
     const pkg = this.relative(pkgAbsolute)
     assert.ok(pkg === 'package.json' || pkg.endsWith('/package.json'))
     assert.equal(basename(pkg), 'package.json')
     const dir = dirname(pkg)
-    const jsonbuf = readFileSync(pkgAbsolute)
-    assert.ok(isUtf8(jsonbuf))
-    const json = jsonbuf.toString()
-    const { name, version } = JSON.parse(json)
+    if (nmRoot) assert.equal(dir, nmRoot)
     if (!this.modules.has(dir)) this.modules.set(dir, { name, version, files: Object.create(null) })
     const module = this.modules.get(dir)
     assert.equal(module.name, name)

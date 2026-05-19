@@ -1,4 +1,12 @@
-import { assert, fileMapToObject, fileSetToObject, fromEntries, objectToMaps, sortPaths } from './util.js'
+import {
+  assert,
+  fileMapToObject,
+  fileSetToObject,
+  fromEntries,
+  objectToMaps,
+  sortPaths,
+  splitNodeModulesPath,
+} from './util.js'
 
 const VERSION = 1
 const LEGACY_VERSION = 0
@@ -6,29 +14,8 @@ const LEGACY_VERSION = 0
 const normalize = ({ name, version, files }) =>
   ({ name, version, files: fromEntries(Object.entries(files)) })
 
-// Best-effort path → { dir, rel, name } for v0 regrouping. Paths containing
-// `node_modules/` are bucketed by the *last* node_modules segment plus the next
-// 1-2 segments (scoped or plain pkg name) — the same last-wins convention
-// package managers use — and the same prefix is reported as the package `name`.
-// Malformed input (trailing slash, double slash, bare `@scope` with no pkg
-// suffix, no file segment after the pkg dir) falls back to the workspace
-// bucket. Workspace paths and fall-backs land under "." with `name: null`.
-// Version cannot be inferred either way.
-function inferModuleDir(path) {
-  const marker = 'node_modules/'
-  const idx = path.lastIndexOf(marker)
-  if (idx === -1) return { dir: '.', rel: path, name: null }
-  const after = idx + marker.length
-  const parts = path.slice(after).split('/')
-  const pkgLen = parts[0].startsWith('@') ? 2 : 1
-  // Need enough segments for pkg dir + at least one file segment, and each
-  // pkg-name segment must be non-empty.
-  if (parts.length <= pkgLen || parts.slice(0, pkgLen).some((p) => !p)) {
-    return { dir: '.', rel: path, name: null }
-  }
-  const name = parts.slice(0, pkgLen).join('/')
-  return { dir: path.slice(0, after) + name, rel: parts.slice(pkgLen).join('/'), name }
-}
+const inferModuleDir = (path) =>
+  splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
 
 // Bundle handles the JSON shape of stasis.code.br / stasis.resources.br;
 // callers (State) are responsible for the brotli wrapper around the JSON
