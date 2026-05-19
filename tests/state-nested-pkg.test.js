@@ -58,10 +58,50 @@ test('addFile rejects a workspace package.json missing version but with non-type
 
 test('addFile infers .js format from the closest package.json type when format is omitted', (t) => {
   const state = new State(root)
-  // Project root package.json declares "type": "module"; src/foo.js has no nearer pkg.json.
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'lib', 'util.js')).toString()
   state.addFile(url)
   t.assert.equal(state.formats.get('node_modules/widget/lib/util.js'), 'module')
+})
+
+test('addFile infers module for a .js file directly under the project root (type=module)', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'root-file.js')).toString()
+  state.addFile(url)
+  t.assert.equal(state.formats.get('root-file.js'), 'module')
+})
+
+test('addFile infers json for a .json file under a type=module package.json', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'root-data.json')).toString()
+  state.addFile(url)
+  t.assert.equal(state.formats.get('root-data.json'), 'json')
+})
+
+test('addFile infers commonjs for a .cjs file under a type=module package.json', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'node_modules', 'widget', 'lib', 'legacy.cjs')).toString()
+  state.addFile(url)
+  t.assert.equal(state.formats.get('node_modules/widget/lib/legacy.cjs'), 'commonjs')
+})
+
+test('addFile rejects an explicit format=commonjs for a .mjs file', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'script.mjs')).toString()
+  t.assert.throws(() => state.addFile(url, { format: 'commonjs' }))
+})
+
+test('addFile leaves format untouched for an unmapped extension', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'asset.bin')).toString()
+  state.addFile(url, { isBinary: true })
+  t.assert.equal(state.formats.get('sub/asset.bin'), undefined)
+})
+
+test('addFile preserves a caller-provided format for an unmapped extension', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'asset.bin')).toString()
+  state.addFile(url, { isBinary: true, format: 'wasm' })
+  t.assert.equal(state.formats.get('sub/asset.bin'), 'wasm')
 })
 
 test('addFile defaults .js format to commonjs when the closest package.json omits type', (t) => {
