@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" aria-label="Stasis" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="a" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1f9cff"/>
+      <stop offset="60%" stop-color="#8c5bfe"/>
+      <stop offset="100%" stop-color="#b85bfe"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" fill="rgba(150,150,150,0.09)" rx="28" ry="28"/>
+  <circle cx="64" cy="64" r="28.16" fill="url(#a)"/>
+</svg>
