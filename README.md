@@ -1,6 +1,4 @@
-<img src="./logo.svg" alt="Stasis" width="128" height="128" align="right" />
-
-# `@exodus/stasis`
+# <img src="./logo.svg" alt="" width="32" height="32" valign="middle" /> `@exodus/stasis`
 
 Analyzeable source code bundles with resolutions + per-file lockfiles
 
