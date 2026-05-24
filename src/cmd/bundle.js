@@ -68,7 +68,22 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const normalized = normalizeEntries(entries, cwd)
 
   const sources = await collectSolidityFilesFromDisk(baseDir, normalized, remappings)
-  const { resolutions } = buildSolidityTree(sources, { remappings })
+  const { resolutions, missing } = buildSolidityTree(sources, { remappings })
+
+  // Bundles must be self-contained. Refuse to write one when an entry
+  // can't be loaded from disk, or when any in-bundle file has an import
+  // we couldn't resolve — otherwise downstream consumers would silently
+  // operate on a partial set of sources.
+  const issues = []
+  for (const entry of normalized) {
+    if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
+  }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved import: ${spec} from ${from}`)
+  }
+  if (issues.length > 0) {
+    throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+  }
 
   // Slot every loaded .sol file under the workspace bucket "." that Bundle
   // expects. Solidity files have no package identity, so we tag the bucket

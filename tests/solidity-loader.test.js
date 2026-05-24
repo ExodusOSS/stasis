@@ -146,14 +146,23 @@ test('collectSolidityFilesFromDisk warns and skips when a resolved file is missi
   t.assert.ok(warnings.some((w) => w.includes('Missing import') && w.includes('lib/oz/X.sol')))
 })
 
-test('buildSolidityTree returns sources + resolutions only (no exports)', async (t) => {
+test('buildSolidityTree returns sources, resolutions, and a missing-imports list (no exports)', async (t) => {
   const baseDir = join(fixtures, 'basic')
   const sources = await collectSolidityFilesFromDisk(baseDir, ['src/A.sol'], [])
   const tree = buildSolidityTree(sources, { remappings: [] })
-  t.assert.deepEqual(Object.keys(tree).toSorted(), ['resolutions', 'sources'])
+  t.assert.deepEqual(Object.keys(tree).toSorted(), ['missing', 'resolutions', 'sources'])
   t.assert.equal(tree.sources.get('src/A.sol'), sources.get('src/A.sol'))
   t.assert.equal(tree.resolutions.get('src/A.sol').get('./B.sol'), 'src/B.sol')
   t.assert.equal(tree.resolutions.get('src/B.sol').size, 0)
+  t.assert.deepEqual(tree.missing, [])
+})
+
+test('buildSolidityTree records unresolved imports in `missing`', async (t) => {
+  const baseDir = join(fixtures, 'missing')
+  const sources = await collectSolidityFilesFromDisk(baseDir, ['src/A.sol'], [])
+  const { warnings, result: tree } = captureWarnings(() => buildSolidityTree(sources, { remappings: [] }))
+  t.assert.deepEqual(tree.missing, [{ spec: '@missing/Nope.sol', from: 'src/A.sol' }])
+  t.assert.ok(warnings.some((w) => w.includes('Missing import') && w.includes('@missing/Nope.sol')))
 })
 
 test('buildSolidityTree warns and produces an empty resolution for a missing import', async (t) => {

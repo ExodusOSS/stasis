@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -139,6 +139,31 @@ test('buildSolidityBundle rejects entries that escape baseDir', async (t) => {
   )
 })
 
+test('buildSolidityBundle throws on an unresolved import (spec has no remapping or relative match)', async (t) => {
+  await t.assert.rejects(
+    () => buildSolidityBundle({ cwd: join(fixtures, 'missing'), entries: ['src/A.sol'] }),
+    /Solidity bundle has unresolved imports[\s\S]*@missing\/Nope\.sol/u,
+  )
+})
+
+test('buildSolidityBundle throws when a remapped target is missing on disk', async (t) => {
+  await t.assert.rejects(
+    () => buildSolidityBundle({
+      cwd: join(fixtures, 'missing-on-disk'),
+      entries: ['src/A.sol'],
+      mappingFile: 'remappings.txt',
+    }),
+    /Solidity bundle has unresolved imports[\s\S]*@oz\/X\.sol/u,
+  )
+})
+
+test('buildSolidityBundle throws when an entry file is missing on disk', async (t) => {
+  await t.assert.rejects(
+    () => buildSolidityBundle({ cwd: join(fixtures, 'basic'), entries: ['src/DoesNotExist.sol'] }),
+    /Missing entry: src\/DoesNotExist\.sol/,
+  )
+})
+
 test('outermostDir returns the longest common parent directory, relative to cwd', (t) => {
   const cwd = '/cwd'
   t.assert.equal(outermostDir(['src/A.sol', 'src/B.sol'], cwd), 'src')
@@ -182,6 +207,15 @@ test('bundleCommand creates intermediate directories for the output path', withT
   t.assert.ok(text.includes('"src/A.sol"'))
 }))
 
+test('bundleCommand does not write the output file when bundling fails on unresolved imports', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await t.assert.rejects(
+    () => bundleCommand({ cwd: join(fixtures, 'missing'), entries: ['src/A.sol'], output: outPath }),
+    /Solidity bundle has unresolved imports/,
+  )
+  t.assert.ok(!existsSync(outPath), 'no output should be written when bundling fails')
+}))
+
 // CLI integration
 
 test('CLI: bundle with no files prints usage', (t) => {
@@ -195,6 +229,15 @@ test('CLI: bundle rejects a non-.sol arg', (t) => {
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /only accepts \.sol files/)
 })
+
+test('CLI: bundle exits non-zero and writes no output when there are unresolved imports', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/A.sol'], { cwd: join(fixtures, 'missing') })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Solidity bundle has unresolved imports/)
+  t.assert.match(r.stderr, /@missing\/Nope\.sol/)
+  t.assert.ok(!existsSync(outPath), 'output file must not be written when bundling fails')
+}))
 
 test('CLI: bundle writes a brotli-compressed Bundle to stdout when no -o is given', (t) => {
   // Capture stdout as binary; spawnSync's encoding option here is 'buffer'.

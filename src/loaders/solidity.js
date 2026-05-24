@@ -73,15 +73,18 @@ export function resolveSolImport(specifier, fromFile, remappings) {
   return null
 }
 
-// Build the { sources, resolutions } pair from a Map of already-loaded
-// Solidity sources (any key format — relative paths for disk-loaded
-// projects, `${address}/${cname}` for etherscan, etc.) plus optional
-// remappings. Imports that resolve via remappings/relative paths win; as a
-// fallback we also accept an import specifier that matches a stored key
-// verbatim (etherscan bundles imports like `@openzeppelin/contracts/.../
-// IERC20.sol` which is itself a stored cname).
+// Build the { sources, resolutions, missing } triple from a Map of
+// already-loaded Solidity sources (any key format — relative paths for
+// disk-loaded projects, `${address}/${cname}` for etherscan, etc.) plus
+// optional remappings. Imports that resolve via remappings/relative paths
+// win; as a fallback we also accept an import specifier that matches a
+// stored key verbatim (etherscan bundles imports like
+// `@openzeppelin/contracts/.../IERC20.sol` which is itself a stored
+// cname). `missing` lists every (spec, from) pair that could not be
+// resolved or that resolved to a file that wasn't loaded into `sources`.
 export function buildSolidityTree(sources, { remappings = [] } = {}) {
   const resolutions = new Map()
+  const missing = []
   for (const [path, content] of sources) {
     const specMap = new Map()
     for (const spec of extractSolImports(content)) {
@@ -92,12 +95,16 @@ export function buildSolidityTree(sources, { remappings = [] } = {}) {
       // keys in the source map. If the remap/relative resolution didn't
       // hit but the bundle has the specifier itself as a key, use it.
       if (!resolved && sources.has(spec)) resolved = spec
-      if (resolved) specMap.set(spec, resolved)
-      else console.warn(`[loader.solidity] Missing import: ${spec} from ${path}`)
+      if (resolved) {
+        specMap.set(spec, resolved)
+      } else {
+        console.warn(`[loader.solidity] Missing import: ${spec} from ${path}`)
+        missing.push({ spec, from: path })
+      }
     }
     resolutions.set(path, specMap)
   }
-  return { sources, resolutions }
+  return { sources, resolutions, missing }
 }
 
 // Walk the filesystem starting from `entries`, following relative/remapped
