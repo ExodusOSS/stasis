@@ -51,7 +51,7 @@ test('buildSolidityBundle produces a Bundle with sources, formats, imports, entr
   t.assert.deepEqual(bundle.config, { scope: 'full' })
   t.assert.deepEqual([...bundle.entries], ['src/A.sol'])
 
-  // Single workspace bucket holds every loaded .sol file
+  // No package.json anywhere in the basic fixture → fallback bucket "."
   t.assert.deepEqual([...bundle.modules.keys()], ['.'])
   const workspace = bundle.modules.get('.')
   t.assert.equal(workspace.name, 'solidity-bundle')
@@ -66,9 +66,9 @@ test('buildSolidityBundle produces a Bundle with sources, formats, imports, entr
   t.assert.equal(bundle.formats.get('src/A.sol'), 'solidity')
   t.assert.equal(bundle.formats.get('src/B.sol'), 'solidity')
 
-  // Imports live under the "*" wildcard condition key
-  t.assert.deepEqual([...bundle.imports.keys()], ['*'])
-  t.assert.equal(bundle.imports.get('*').get('src/A.sol').get('./B.sol'), 'src/B.sol')
+  // Imports live under the "solidity" condition key (not the JS-bundle "*")
+  t.assert.deepEqual([...bundle.imports.keys()], ['solidity'])
+  t.assert.equal(bundle.imports.get('solidity').get('src/A.sol').get('./B.sol'), 'src/B.sol')
 })
 
 test('buildSolidityBundle reads remappings from a remappings.txt mapping file', async (t) => {
@@ -85,8 +85,59 @@ test('buildSolidityBundle reads remappings from a remappings.txt mapping file', 
   // mapping file itself must NOT appear in the bundle's files
   t.assert.ok(!Object.hasOwn(bundle.modules.get('.').files, 'remappings.txt'))
   t.assert.equal(
-    bundle.imports.get('*').get('src/A.sol').get('@openzeppelin/contracts/utils/Math.sol'),
+    bundle.imports.get('solidity').get('src/A.sol').get('@openzeppelin/contracts/utils/Math.sol'),
     'lib/openzeppelin-contracts/contracts/utils/Math.sol',
+  )
+})
+
+test('buildSolidityBundle places node_modules files in per-package modules buckets with name+version from package.json', async (t) => {
+  const cwd = join(fixtures, 'with-node-modules')
+  const bundle = await buildSolidityBundle({
+    cwd,
+    entries: ['src/A.sol'],
+    mappingFile: 'remappings.txt',
+  })
+  t.assert.deepEqual(
+    [...bundle.modules.keys()].toSorted(),
+    ['.', 'node_modules/@oz/contracts', 'node_modules/foo'],
+  )
+
+  // Workspace bucket: name+version from the project's own package.json.
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'my-app')
+  t.assert.equal(workspace.version, '0.1.0')
+  t.assert.deepEqual(Object.keys(workspace.files), ['src/A.sol'])
+
+  // Unscoped node_modules package.
+  const foo = bundle.modules.get('node_modules/foo')
+  t.assert.equal(foo.name, 'foo')
+  t.assert.equal(foo.version, '1.2.3')
+  t.assert.deepEqual(Object.keys(foo.files), ['X.sol'])
+
+  // Scoped node_modules package; rel path preserves the deep subdir.
+  const oz = bundle.modules.get('node_modules/@oz/contracts')
+  t.assert.equal(oz.name, '@oz/contracts')
+  t.assert.equal(oz.version, '5.0.0')
+  t.assert.deepEqual(Object.keys(oz.files), ['utils/Math.sol'])
+
+  // Resolutions still use the full project-relative paths, regardless
+  // of which bucket the target ended up in.
+  const resolutions = bundle.imports.get('solidity').get('src/A.sol')
+  t.assert.equal(resolutions.get('foo/X.sol'), 'node_modules/foo/X.sol')
+  t.assert.equal(
+    resolutions.get('@oz/contracts/utils/Math.sol'),
+    'node_modules/@oz/contracts/utils/Math.sol',
+  )
+})
+
+test('buildSolidityBundle throws when a node_modules file has no resolvable package.json', async (t) => {
+  await t.assert.rejects(
+    () => buildSolidityBundle({
+      cwd: join(fixtures, 'nm-no-pkg'),
+      entries: ['src/A.sol'],
+      mappingFile: 'remappings.txt',
+    }),
+    /No package\.json with name\+version found for node_modules\/foo\/X\.sol/,
   )
 })
 
@@ -197,7 +248,7 @@ test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips th
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['src/A.sol', 'src/B.sol'],
   )
-  t.assert.equal(parsed.imports.get('*').get('src/A.sol').get('./B.sol'), 'src/B.sol')
+  t.assert.equal(parsed.imports.get('solidity').get('src/A.sol').get('./B.sol'), 'src/B.sol')
 }))
 
 test('bundleCommand creates intermediate directories for the output path', withTmp(async (t, tmp) => {

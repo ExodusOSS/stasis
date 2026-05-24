@@ -1,21 +1,45 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, posix, relative, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
+import { splitNodeModulesPath } from '../util.js'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
   readRemappingsFile,
 } from '../loaders/solidity.js'
 
-// Placeholder package identity for synthetic Solidity bundles. The Bundle
-// workspace bucket requires a name+version but Solidity projects do not
-// necessarily have a package.json — attest the bundle as
-// `solidity-bundle@0.0.0` so Bundle's parseCode invariants hold.
-const SOLIDITY_NAME = 'solidity-bundle'
-const SOLIDITY_VERSION = '0.0.0'
+// Fallback package identity for the workspace bucket when no package.json
+// with a name+version can be found by walking up from any of the bundled
+// files. Bundle.parseCode requires every workspace/module bucket to have
+// both fields, so we have to attest something.
+const SOLIDITY_WORKSPACE_NAME = 'solidity-bundle'
+const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
+
+// Walk up from the file's directory looking for the nearest package.json
+// with both `name` and `version`. Returns { pkgDir, name, version }
+// (pkgDir relative to `baseDir`, "." for the project root) or null when no
+// such package.json exists at or above the file.
+function findPackageMetadata(baseDir, fileRelPath) {
+  let dir = dirname(fileRelPath)
+  while (true) {
+    const pkgPath = join(baseDir, dir, 'package.json')
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+        if (pkg.name && pkg.version) {
+          return { pkgDir: dir, name: pkg.name, version: pkg.version }
+        }
+      } catch { /* malformed — keep walking */ }
+    }
+    if (dir === '.' || dir === '/' || dir === '') return null
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
 
 function normalizeEntries(entries, cwd) {
   const baseDir = resolve(cwd)
@@ -85,25 +109,54 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  // Slot every loaded .sol file under the workspace bucket "." that Bundle
-  // expects. Solidity files have no package identity, so we tag the bucket
-  // with a synthetic name+version that satisfies parseCode.
-  const files = Object.create(null)
-  for (const [path, content] of sources) files[path] = content
+  // Partition every loaded .sol file into a per-package bucket. The
+  // bucket is the directory holding the nearest package.json with a
+  // name+version. node_modules files land in `node_modules/<pkg>` buckets
+  // (or deeper, when a nested package.json claims the file); workspace
+  // files land in their nearest workspace package.json's dir, or in the
+  // fallback "." bucket with placeholder metadata when no package.json
+  // could be found.
+  const modules = new Map()
+  const ensureBucket = (dir, name, version) => {
+    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
+    return modules.get(dir)
+  }
+
+  for (const [path, content] of sources) {
+    const meta = findPackageMetadata(baseDir, path)
+    const inNodeModules = splitNodeModulesPath(path) !== null
+    if (meta) {
+      // A file inside node_modules whose nearest package.json is the
+      // workspace root would silently land in the workspace bucket and
+      // hide the misconfigured dependency — refuse instead.
+      if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
+        throw new Error(`No package.json with name+version found for ${path}`)
+      }
+      const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
+      ensureBucket(meta.pkgDir, meta.name, meta.version).files[rel] = content
+    } else {
+      // Files under node_modules without any discoverable package.json
+      // would otherwise leak into the workspace bucket; that's a project
+      // misconfiguration, surface it loudly.
+      if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
+      ensureBucket('.', SOLIDITY_WORKSPACE_NAME, SOLIDITY_WORKSPACE_VERSION).files[path] = content
+    }
+  }
 
   const formats = new Map()
   for (const path of sources.keys()) formats.set(path, SOLIDITY_FORMAT)
 
-  // Solidity imports do not depend on Node conditions; collapse everything
-  // under the wildcard "*" condition key.
+  // Solidity imports don't depend on Node conditions; key them under a
+  // dedicated "solidity" bucket rather than the wildcard "*" used for
+  // JS code bundles.
   const importsForKey = new Map()
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
-  const imports = new Map([['*', importsForKey]])
+  const imports = new Map([['solidity', importsForKey]])
 
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(normalized),
-    modules: new Map([['.', { name: SOLIDITY_NAME, version: SOLIDITY_VERSION, files }]]),
+    modules,
     formats,
     imports,
   })

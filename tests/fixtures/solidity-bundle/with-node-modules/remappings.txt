@@ -1,0 +1,2 @@
+@oz/contracts/=node_modules/@oz/contracts/
+foo/=node_modules/foo/
