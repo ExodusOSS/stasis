@@ -9,10 +9,12 @@
     "./loader": "./src/loader.js",
     "./bundle": "./src/bundle.js",
     "./lockfile": "./src/lockfile.js",
-    "./prune": "./src/prune.js"
+    "./prune": "./src/prune.js",
+    "./logo.svg": "./logo.svg"
   },
   "files": [
     "bin/stasis.js",
+    "logo.svg",
     "src/apis/npm/index.js",
     "src/apis/npm/semver.cjs",
     "src/bundle.js",
