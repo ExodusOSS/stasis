@@ -20,8 +20,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
- stasis bundle create path/to/lockfile
- stasis bundle verify path/to/lockfile
+ stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=path/to/out.json] path/to/file.sol ...
  stasis prune [path/to/project]
  stasis audit path/to/file ...
 `.trim())
@@ -77,7 +76,30 @@ if (command === '-v' || command === '--version') {
   const [code] = await once(child, 'close')
   process.exitCode = code
 } else if (command === 'bundle') {
-  usage('bundle command is not implemented yet')
+  const flags = []
+  const valueFlags = new Set(['--mapping', '--output', '-o'])
+  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
+    flags.push(argv.shift())
+  }
+  const options = {
+    mapping: { type: 'string' },
+    output: { type: 'string', short: 'o' },
+  }
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
+  if (argv.length === 0) usage('Nothing to bundle: no .sol file given')
+  if (!argv.every((f) => f.endsWith('.sol'))) usage('Error: bundle only accepts .sol files')
+  const { bundleCommand } = await import('../src/cmd/bundle.js')
+  await bundleCommand({
+    cwd: process.cwd(),
+    entries: argv,
+    mappingFile: values.mapping,
+    output: values.output,
+  })
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')
   const root = argv[0] ? resolve(argv[0]) : process.cwd()

@@ -1,0 +1,2 @@
+foundry.toml
+src/A.sol
