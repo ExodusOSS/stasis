@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, posix, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, posix, relative, resolve } from 'node:path'
 import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
@@ -17,12 +17,15 @@ const SOLIDITY_NAME = 'solidity-bundle'
 const SOLIDITY_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
 
-function normaliseEntries(entries, cwd) {
+function normalizeEntries(entries, cwd) {
   const baseDir = resolve(cwd)
   return entries.map((e) => {
     const abs = resolve(cwd, e)
     const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
-    if (rel.startsWith('..')) throw new Error(`Entry escapes baseDir: ${e}`)
+    // On Windows, `path.relative()` returns an absolute path when `abs` is on
+    // a different drive than `baseDir` — that wouldn't start with `..` but
+    // still escapes, so reject both forms.
+    if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Entry escapes baseDir: ${e}`)
     return rel.replace(/^\.\//u, '')
   })
 }
@@ -62,9 +65,9 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 
   const baseDir = resolve(cwd)
   const remappings = mappingFile ? await readRemappingsFile(resolve(cwd, mappingFile)) : []
-  const normalised = normaliseEntries(entries, cwd)
+  const normalized = normalizeEntries(entries, cwd)
 
-  const sources = await collectSolidityFilesFromDisk(baseDir, normalised, remappings)
+  const sources = await collectSolidityFilesFromDisk(baseDir, normalized, remappings)
   const { resolutions } = buildSolidityTree(sources, { remappings })
 
   // Slot every loaded .sol file under the workspace bucket "." that Bundle
@@ -84,7 +87,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 
   return new Bundle({
     config: { scope: 'full' },
-    entries: new Set(normalised),
+    entries: new Set(normalized),
     modules: new Map([['.', { name: SOLIDITY_NAME, version: SOLIDITY_VERSION, files }]]),
     formats,
     imports,

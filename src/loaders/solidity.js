@@ -6,7 +6,7 @@
 // but is itself not included in `sources`.
 
 import { readFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 const SOL_IMPORT_RE = /import\s[^"']*["']([^"']+)["']/gu
 
@@ -51,7 +51,9 @@ export function resolveSolImport(specifier, fromFile, remappings) {
     return result.replace(/^\.\//u, '')
   }
 
-  // Relative import
+  // Relative import. `..` segments that would traverse above the project
+  // root return null instead of silently clamping to root — clamping would
+  // change the import target into something the source never asked for.
   if (specifier.startsWith('.')) {
     const fromDir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/')) : ''
     const parts = [...(fromDir ? fromDir.split('/') : []), ...specifier.split('/')]
@@ -59,7 +61,8 @@ export function resolveSolImport(specifier, fromFile, remappings) {
     for (const part of parts) {
       if (part === '.' || part === '') continue
       if (part === '..') {
-        if (resolved.length > 0) resolved.pop()
+        if (resolved.length === 0) return null
+        resolved.pop()
       } else {
         resolved.push(part)
       }
@@ -119,11 +122,26 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings)
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))
     if (toLoad.length === 0) return
+    // A resolved path that doesn't exist on disk is treated like an
+    // unresolved import: warn and skip rather than aborting the entire
+    // walk. Other read errors (EACCES, EIO, …) still propagate.
     const reads = await Promise.all(
-      toLoad.map(async (relPath) => [relPath, await readFile(join(baseDir, relPath), 'utf8')])
+      toLoad.map(async (relPath) => {
+        try {
+          return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
+        } catch (err) {
+          if (err.code === 'ENOENT') {
+            console.warn(`[loader.solidity] Missing import: ${relPath}`)
+            return null
+          }
+          throw err
+        }
+      })
     )
     const next = []
-    for (const [relPath, content] of reads) {
+    for (const entry of reads) {
+      if (!entry) continue
+      const [relPath, content] = entry
       sources.set(relPath, content)
       for (const spec of extractSolImports(content)) {
         let resolved = resolveSolImport(spec, relPath, remappings)
@@ -150,6 +168,17 @@ export async function readRemappingsFile(mappingFile) {
   return parseRemappings(content)
 }
 
+// Reject absolute paths and `..`-escaping paths in a `.sol.txt` listing so
+// a malicious or sloppy listing can't trick the loader into reading
+// arbitrary files outside the listing's own directory.
+function assertWithinBase(baseDir, candidate, label) {
+  if (isAbsolute(candidate)) throw new Error(`${label} must not be absolute: ${candidate}`)
+  const rel = relative(baseDir, resolve(baseDir, candidate)).split(/[\\/]/u).join('/')
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`${label} escapes baseDir: ${candidate}`)
+  }
+}
+
 // High-level: takes an optional .sol.txt listing file. The first line may
 // be a `*.toml` or `remappings.txt` mapping file (resolved relative to the
 // listing); the remaining lines are `*.sol` files. Mirrors the DeepView
@@ -162,7 +191,9 @@ export async function loadSolidity(solTxtFile) {
 
   let remappings = []
   if (lines[0].endsWith('.toml') || lines[0].endsWith('remappings.txt')) {
-    remappings = await readRemappingsFile(join(baseDir, lines.shift()))
+    const mapping = lines.shift()
+    assertWithinBase(baseDir, mapping, 'Mapping path')
+    remappings = await readRemappingsFile(join(baseDir, mapping))
   }
 
   if (!lines.every((line) => line.endsWith('.sol'))) {
@@ -170,6 +201,7 @@ export async function loadSolidity(solTxtFile) {
   }
 
   const entries = lines.map((l) => l.replace(/^\.\//u, ''))
+  for (const e of entries) assertWithinBase(baseDir, e, 'Entry path')
   const sources = await collectSolidityFilesFromDisk(baseDir, entries, remappings)
   return buildSolidityTree(sources, { remappings })
 }

@@ -90,6 +90,13 @@ test('resolveSolImport returns null for non-relative, non-remapped imports', (t)
   t.assert.equal(resolveSolImport('@unknown/Foo.sol', 'src/A.sol', []), null)
 })
 
+test('resolveSolImport returns null when relative traversal escapes the root', (t) => {
+  // Going above the project root must not silently clamp to root — that
+  // would change the import target into a different file altogether.
+  t.assert.equal(resolveSolImport('../X.sol', 'A.sol', []), null)
+  t.assert.equal(resolveSolImport('../../X.sol', 'src/A.sol', []), null)
+})
+
 test('collectSolidityFilesFromDisk walks imports starting from entries', async (t) => {
   const baseDir = join(fixtures, 'basic')
   const sources = await collectSolidityFilesFromDisk(baseDir, ['src/A.sol'], [])
@@ -125,6 +132,18 @@ test('collectSolidityFilesFromDisk warns and skips a missing import', async (t) 
   )
   t.assert.deepEqual([...sources.keys()], ['src/A.sol'])
   t.assert.ok(warnings.some((w) => w.includes('Missing import') && w.includes('@missing/Nope.sol')))
+})
+
+test('collectSolidityFilesFromDisk warns and skips when a resolved file is missing on disk', async (t) => {
+  // A.sol imports @oz/X.sol; the remapping resolves to lib/oz/X.sol but
+  // that file doesn't exist. The walk must warn and continue, not crash.
+  const baseDir = join(fixtures, 'missing-on-disk')
+  const remappings = await readRemappingsFile(join(baseDir, 'remappings.txt'))
+  const { result: sources, warnings } = await captureWarningsAsync(() =>
+    collectSolidityFilesFromDisk(baseDir, ['src/A.sol'], remappings),
+  )
+  t.assert.deepEqual([...sources.keys()], ['src/A.sol'])
+  t.assert.ok(warnings.some((w) => w.includes('Missing import') && w.includes('lib/oz/X.sol')))
 })
 
 test('buildSolidityTree returns sources + resolutions only (no exports)', async (t) => {
@@ -182,5 +201,19 @@ test('loadSolidity rejects a listing with non-.sol lines', async (t) => {
   await t.assert.rejects(
     () => loadSolidity(join(fixtures, 'listing-nonsol/list.sol.txt')),
     /must only contain \.sol files/,
+  )
+})
+
+test('loadSolidity rejects an entry path that escapes the listing dir', async (t) => {
+  await t.assert.rejects(
+    () => loadSolidity(join(fixtures, 'listing-escape/list.sol.txt')),
+    /Entry path escapes baseDir/,
+  )
+})
+
+test('loadSolidity rejects an absolute entry path in the listing', async (t) => {
+  await t.assert.rejects(
+    () => loadSolidity(join(fixtures, 'listing-absolute/list.sol.txt')),
+    /Entry path must not be absolute/,
   )
 })
