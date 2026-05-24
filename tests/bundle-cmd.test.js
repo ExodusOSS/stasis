@@ -140,7 +140,7 @@ test('buildSolidityBundle rejects entries that escape baseDir', async (t) => {
 })
 
 test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
-  const outPath = join(tmp, 'out.br')
+  const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
   const buf = readFileSync(outPath)
   // First byte of plain JSON is '{' (0x7b); brotli output must not start with that.
@@ -156,7 +156,7 @@ test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips th
 }))
 
 test('bundleCommand creates intermediate directories for the output path', withTmp(async (t, tmp) => {
-  const outPath = join(tmp, 'nested', 'deeper', 'out.br')
+  const outPath = join(tmp, 'nested', 'deeper', 'out.stasis.code.br')
   await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
   const text = brotliDecompressSync(readFileSync(outPath)).toString('utf8')
   t.assert.ok(text.includes('"src/A.sol"'))
@@ -193,7 +193,7 @@ test('CLI: bundle writes a brotli-compressed Bundle to stdout when no -o is give
 })
 
 test('CLI: bundle -o writes a brotli-compressed Bundle to the given path', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.br')
+  const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'src/A.sol'], { cwd: join(fixtures, 'basic') })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const buf = readFileSync(outPath)
@@ -203,7 +203,7 @@ test('CLI: bundle -o writes a brotli-compressed Bundle to the given path', withT
 }))
 
 test('CLI: bundle --mapping=remappings.txt resolves @-prefixed imports', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.br')
+  const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(
     ['bundle', '--mapping=remappings.txt', '-o', outPath, 'src/A.sol'],
     { cwd: join(fixtures, 'with-remappings-txt') },
@@ -218,7 +218,7 @@ test('CLI: bundle --mapping=remappings.txt resolves @-prefixed imports', withTmp
 }))
 
 test('CLI: bundle --mapping=foundry.toml resolves @-prefixed imports', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.br')
+  const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(
     ['bundle', '--mapping=foundry.toml', '-o', outPath, 'src/A.sol'],
     { cwd: join(fixtures, 'with-foundry-toml') },
@@ -233,7 +233,7 @@ test('CLI: bundle --mapping=foundry.toml resolves @-prefixed imports', withTmp((
 }))
 
 test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.br')
+  const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(
     ['bundle', '-o', outPath, 'src/A.sol', 'src/B.sol'],
     { cwd: join(fixtures, 'shared') },
