@@ -70,19 +70,18 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   })
 }
 
-// Run the bundle CLI command end-to-end. When `output` is provided, writes
-// the serialised bundle to that path (brotli-compressed when the path ends
-// in `.br`, plain JSON otherwise). When omitted, writes JSON to stdout.
+// Run the bundle CLI command end-to-end. Always produces a brotli-compressed
+// stasis bundle (matching the on-disk format of `stasis.code.br`). When
+// `output` is provided, writes to that path; otherwise writes to stdout.
 export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output } = {}) {
   const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
-  const text = bundle.serializeCode()
+  const data = brotliCompressSync(bundle.serializeCode())
   if (output) {
     const outAbs = resolve(cwd, output)
     mkdirSync(dirname(outAbs), { recursive: true })
-    const data = output.endsWith('.br') ? brotliCompressSync(text) : text
     writeFileSync(outAbs, data)
   } else {
-    process.stdout.write(text)
+    process.stdout.write(data)
   }
   return bundle
 }

@@ -139,10 +139,13 @@ test('buildSolidityBundle rejects entries that escape baseDir', async (t) => {
   )
 })
 
-test('bundleCommand writes JSON to a non-.br output path that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
-  const outPath = join(tmp, 'out.json')
+test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.br')
   await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
-  const text = readFileSync(outPath, 'utf8')
+  const buf = readFileSync(outPath)
+  // First byte of plain JSON is '{' (0x7b); brotli output must not start with that.
+  t.assert.notEqual(buf[0], 0x7b)
+  const text = brotliDecompressSync(buf).toString('utf8')
   const parsed = Bundle.parseCode(text)
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
   t.assert.deepEqual(
@@ -152,21 +155,11 @@ test('bundleCommand writes JSON to a non-.br output path that round-trips throug
   t.assert.equal(parsed.imports.get('*').get('src/A.sol').get('./B.sol'), 'src/B.sol')
 }))
 
-test('bundleCommand writes brotli-compressed JSON when the output path ends in .br', withTmp(async (t, tmp) => {
-  const outPath = join(tmp, 'out.br')
-  await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
-  const buf = readFileSync(outPath)
-  // First byte of plain JSON is '{' (0x7b); brotli output must not start with that.
-  t.assert.notEqual(buf[0], 0x7b)
-  const text = brotliDecompressSync(buf).toString('utf8')
-  const parsed = Bundle.parseCode(text)
-  t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
-}))
-
 test('bundleCommand creates intermediate directories for the output path', withTmp(async (t, tmp) => {
-  const outPath = join(tmp, 'nested', 'deeper', 'out.json')
+  const outPath = join(tmp, 'nested', 'deeper', 'out.br')
   await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
-  t.assert.ok(readFileSync(outPath, 'utf8').includes('"src/A.sol"'))
+  const text = brotliDecompressSync(readFileSync(outPath)).toString('utf8')
+  t.assert.ok(text.includes('"src/A.sol"'))
 }))
 
 // CLI integration
@@ -183,10 +176,15 @@ test('CLI: bundle rejects a non-.sol arg', (t) => {
   t.assert.match(r.stderr, /only accepts \.sol files/)
 })
 
-test('CLI: bundle writes JSON to stdout when no -o is given', (t) => {
-  const r = runCli(['bundle', 'src/A.sol'], { cwd: join(fixtures, 'basic') })
-  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(r.stdout)
+test('CLI: bundle writes a brotli-compressed Bundle to stdout when no -o is given', (t) => {
+  // Capture stdout as binary; spawnSync's encoding option here is 'buffer'.
+  const r = spawnSync(process.execPath, [cli, 'bundle', 'src/A.sol'], {
+    cwd: join(fixtures, 'basic'),
+    env: cleanEnv,
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr.toString('utf8')}`)
+  t.assert.notEqual(r.stdout[0], 0x7b, 'stdout must be brotli, not JSON')
+  const parsed = Bundle.parseCode(brotliDecompressSync(r.stdout).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -194,22 +192,24 @@ test('CLI: bundle writes JSON to stdout when no -o is given', (t) => {
   )
 })
 
-test('CLI: bundle -o writes JSON to a file', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.json')
+test('CLI: bundle -o writes a brotli-compressed Bundle to the given path', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.br')
   const r = runCli(['bundle', '-o', outPath, 'src/A.sol'], { cwd: join(fixtures, 'basic') })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(readFileSync(outPath, 'utf8'))
+  const buf = readFileSync(outPath)
+  t.assert.notEqual(buf[0], 0x7b)
+  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
 }))
 
 test('CLI: bundle --mapping=remappings.txt resolves @-prefixed imports', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.json')
+  const outPath = join(tmp, 'out.br')
   const r = runCli(
     ['bundle', '--mapping=remappings.txt', '-o', outPath, 'src/A.sol'],
     { cwd: join(fixtures, 'with-remappings-txt') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(readFileSync(outPath, 'utf8'))
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['lib/openzeppelin-contracts/contracts/utils/Math.sol', 'src/A.sol'],
@@ -218,13 +218,13 @@ test('CLI: bundle --mapping=remappings.txt resolves @-prefixed imports', withTmp
 }))
 
 test('CLI: bundle --mapping=foundry.toml resolves @-prefixed imports', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.json')
+  const outPath = join(tmp, 'out.br')
   const r = runCli(
     ['bundle', '--mapping=foundry.toml', '-o', outPath, 'src/A.sol'],
     { cwd: join(fixtures, 'with-foundry-toml') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(readFileSync(outPath, 'utf8'))
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['lib/openzeppelin-contracts/contracts/utils/Math.sol', 'src/A.sol'],
@@ -233,26 +233,16 @@ test('CLI: bundle --mapping=foundry.toml resolves @-prefixed imports', withTmp((
 }))
 
 test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.json')
+  const outPath = join(tmp, 'out.br')
   const r = runCli(
     ['bundle', '-o', outPath, 'src/A.sol', 'src/B.sol'],
     { cwd: join(fixtures, 'shared') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(readFileSync(outPath, 'utf8'))
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries].toSorted(), ['src/A.sol', 'src/B.sol'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['src/A.sol', 'src/B.sol', 'src/Shared.sol'],
   )
-}))
-
-test('CLI: bundle -o with a .br extension produces a brotli-compressed Bundle', withTmp((t, tmp) => {
-  const outPath = join(tmp, 'out.br')
-  const r = runCli(['bundle', '-o', outPath, 'src/A.sol'], { cwd: join(fixtures, 'basic') })
-  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const buf = readFileSync(outPath)
-  t.assert.notEqual(buf[0], 0x7b, 'brotli output must not start with "{"')
-  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
-  t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
 }))

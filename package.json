@@ -10,8 +10,6 @@
     "./bundle": "./src/bundle.js",
     "./lockfile": "./src/lockfile.js",
     "./prune": "./src/prune.js",
-    "./loaders/solidity": "./src/loaders/solidity.js",
-    "./cmd/bundle": "./src/cmd/bundle.js",
     "./logo.svg": "./logo.svg"
   },
   "files": [
