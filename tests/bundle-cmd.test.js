@@ -373,6 +373,18 @@ test('CLI: bundle summary shows "." as outermost dir when files share no common 
   t.assert.match(r.stderr, /\[stasis\] Bundled 2 files from \. to /)
 }))
 
+test('CLI: bundle summary counts files across workspace AND node_modules buckets', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(
+    ['bundle', '--mapping=remappings.txt', '-o', outPath, 'src/A.sol'],
+    { cwd: join(fixtures, 'with-node-modules') },
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  // 3 files total: src/A.sol + node_modules/foo/X.sol + node_modules/@oz/contracts/utils/Math.sol
+  // Outermost shared parent is the project root ".".
+  t.assert.match(r.stderr, /\[stasis\] Bundled 3 files from \. to /)
+}))
+
 test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(

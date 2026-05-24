@@ -177,7 +177,10 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   } else {
     process.stdout.write(data)
   }
-  const files = Object.keys(bundle.modules.get('.').files)
+  // Bundle.sources flattens every per-package bucket into project-relative
+  // paths, so the summary reflects every file we wrote — workspace and
+  // node_modules alike — not just the workspace bucket.
+  const files = [...bundle.sources.keys()]
   const fromDir = outermostDir(files, resolve(cwd))
   const dest = output ?? '<stdout>'
   console.warn(`[stasis] Bundled ${files.length} files from ${fromDir} to ${dest}`)
