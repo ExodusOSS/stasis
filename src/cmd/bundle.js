@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, relative, resolve } from 'node:path'
+import { dirname, posix, relative, resolve } from 'node:path'
 import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
@@ -25,6 +25,27 @@ function normaliseEntries(entries, cwd) {
     if (rel.startsWith('..')) throw new Error(`Entry escapes baseDir: ${e}`)
     return rel.replace(/^\.\//u, '')
   })
+}
+
+// Deepest directory that is a parent of every file in `paths`, expressed
+// relative to `cwd`. `paths` may be POSIX-relative-to-cwd; entries that
+// escape cwd (e.g. `../deps/X.sol` via remapping) push the result above
+// cwd, in which case the returned path starts with `..`. Returns "." when
+// the outermost directory IS cwd itself.
+export function outermostDir(paths, cwd) {
+  if (paths.length === 0) return '.'
+  const cwdAbs = posix.resolve(cwd.replaceAll(/\\/gu, '/'))
+  const absDirs = paths.map((p) => posix.dirname(posix.resolve(cwdAbs, p)))
+  const partsList = absDirs.map((d) => d.split('/'))
+  const common = []
+  for (let i = 0; i < partsList[0].length; i++) {
+    const c = partsList[0][i]
+    if (!partsList.every((parts) => parts[i] === c)) break
+    common.push(c)
+  }
+  const absCommon = common.join('/') || '/'
+  const rel = posix.relative(cwdAbs, absCommon)
+  return rel === '' ? '.' : rel
 }
 
 // Build a stasis Bundle (in-memory) from a list of entry .sol files and
@@ -73,6 +94,8 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
 // stasis bundle (matching the on-disk format of `stasis.code.br`). When
 // `output` is provided, writes to that path; otherwise writes to stdout.
+// Prints a one-line `[stasis] Bundled <n> files from <dir> to <dest>` summary
+// to stderr so it doesn't interleave with the binary output on stdout.
 export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output } = {}) {
   const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
   const data = brotliCompressSync(bundle.serializeCode())
@@ -83,5 +106,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   } else {
     process.stdout.write(data)
   }
+  const files = Object.keys(bundle.modules.get('.').files)
+  const fromDir = outermostDir(files, resolve(cwd))
+  const dest = output ?? '<stdout>'
+  console.warn(`[stasis] Bundled ${files.length} files from ${fromDir} to ${dest}`)
   return bundle
 }

@@ -8,7 +8,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '../src/bundle.js'
-import { buildSolidityBundle, bundleCommand } from '../src/cmd/bundle.js'
+import { buildSolidityBundle, bundleCommand, outermostDir } from '../src/cmd/bundle.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'bin', 'stasis.js')
@@ -139,6 +139,26 @@ test('buildSolidityBundle rejects entries that escape baseDir', async (t) => {
   )
 })
 
+test('outermostDir returns the longest common parent directory, relative to cwd', (t) => {
+  const cwd = '/cwd'
+  t.assert.equal(outermostDir(['src/A.sol', 'src/B.sol'], cwd), 'src')
+  t.assert.equal(outermostDir(['src/a/A.sol', 'src/a/b/B.sol'], cwd), 'src/a')
+  t.assert.equal(outermostDir(['src/A.sol', 'lib/B.sol'], cwd), '.')
+  t.assert.equal(outermostDir(['A.sol', 'B.sol'], cwd), '.')
+  t.assert.equal(outermostDir(['src/A.sol'], cwd), 'src')
+  t.assert.equal(outermostDir([], cwd), '.')
+})
+
+test('outermostDir handles paths that escape cwd (e.g. via a remapping with ../)', (t) => {
+  // src/A.sol stays inside cwd; ../deps/B.sol goes one level above cwd.
+  // Their common ancestor is one level above cwd → ".." relative to cwd.
+  t.assert.equal(outermostDir(['src/A.sol', '../deps/B.sol'], '/cwd'), '..')
+  // Two files both above cwd at distinct grandparents → fall back to '/'.
+  t.assert.equal(outermostDir(['../../A.sol', '../../B.sol'], '/cwd/sub'), '../..')
+  // Single file above cwd: outermost is that file's directory.
+  t.assert.equal(outermostDir(['../deps/B.sol'], '/cwd'), '../deps')
+})
+
 test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
@@ -230,6 +250,33 @@ test('CLI: bundle --mapping=foundry.toml resolves @-prefixed imports', withTmp((
     ['lib/openzeppelin-contracts/contracts/utils/Math.sol', 'src/A.sol'],
   )
   t.assert.ok(!Object.hasOwn(parsed.modules.get('.').files, 'foundry.toml'))
+}))
+
+test('CLI: bundle prints a summary line to stderr with the file count, outermost dir, and destination', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/A.sol'], { cwd: join(fixtures, 'basic') })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
+}))
+
+test('CLI: bundle summary falls back to <stdout> when no -o is given', (t) => {
+  const r = spawnSync(process.execPath, [cli, 'bundle', 'src/A.sol'], {
+    cwd: join(fixtures, 'basic'),
+    env: cleanEnv,
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr.toString('utf8')}`)
+  t.assert.match(r.stderr.toString('utf8'), /\[stasis\] Bundled 2 files from src to <stdout>/)
+})
+
+test('CLI: bundle summary shows "." as outermost dir when files share no common parent', withTmp((t, tmp) => {
+  // with-remappings-txt has files under both src/ and lib/, so the common parent is "."
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(
+    ['bundle', '--mapping=remappings.txt', '-o', outPath, 'src/A.sol'],
+    { cwd: join(fixtures, 'with-remappings-txt') },
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /\[stasis\] Bundled 2 files from \. to /)
 }))
 
 test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
