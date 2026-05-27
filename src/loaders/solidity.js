@@ -78,8 +78,7 @@ export function resolveSolImport(specifier, fromFile, { remappings = [], baseDir
     if (parts.length < 3) return null
     if (parts.slice(2).includes('..')) return null
     try {
-      const anchor = join(resolve(baseDir), fromFile)
-      const abs = createRequire(anchor).resolve(specifier)
+      const abs = createRequire(resolve(baseDir, fromFile)).resolve(specifier)
       const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
       if (!rel.startsWith('..') && !isAbsolute(rel)) return rel
     } catch { /* package missing, exports map blocks the subpath, … */ }
