@@ -5,8 +5,8 @@
 // file (foundry.toml or remappings.txt) is read to extract `remappings`,
 // but is itself not included in `sources`.
 
-import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 const SOL_IMPORT_RE = /import\s[^"']*["']([^"']+)["']/gu
@@ -74,39 +74,35 @@ export function resolveSolImport(specifier, fromFile, remappings) {
   return null
 }
 
-// Node-style resolution for a bare `@scope/pkg/sub/path.sol` specifier:
-// walk up from `baseDir` looking for `<dir>/node_modules/<pkg>/package.json`
-// (matching Node's CJS resolution algorithm). Returns the file path
-// relative to `baseDir` (POSIX-style), or null when no such package is
-// found, when the subpath contains `..`, or when the package was found
-// outside `baseDir` (a parent monorepo's node_modules) and bundling it
-// would require an out-of-tree path the Bundle layer would reject.
+// Node-style resolution for a bare `@scope/pkg/sub/path.sol` specifier.
+// Defers to Node's own CJS resolver (createRequire(...).resolve(...)),
+// anchored at `baseDir`, so it walks up node_modules and respects any
+// package.json `exports` map the same way `node` does. Returns the file
+// path relative to `baseDir` (POSIX-style), or null when:
+//   - the specifier isn't a scoped subpath (`@scope/pkg/.../file.ext`),
+//   - the subpath contains `..` (path-traversal guard — Node's resolver
+//     would normalize the result outside the package dir),
+//   - Node's resolver throws (package missing, exports map blocks the
+//     subpath, …),
+//   - the resolved file lives outside `baseDir` (the Bundle layer can't
+//     store paths that start with `..`).
 export function resolveNodeModulesSpec(baseDir, specifier) {
   if (!specifier.startsWith('@')) return null
   const parts = specifier.split('/')
   if (parts.length < 3) return null // `@scope/pkg` alone has no file to load
-  const pkgName = parts.slice(0, 2).join('/')
-  const subParts = parts.slice(2)
-  // Path-traversal guard: a `..` in the subpath could escape the package
-  // directory (or even baseDir) once we hand the joined path to readFile.
-  if (subParts.includes('..')) return null
-  const subPath = subParts.join('/')
-  let dir = resolve(baseDir)
-  while (true) {
-    const pkgDir = join(dir, 'node_modules', pkgName)
-    if (existsSync(join(pkgDir, 'package.json'))) {
-      const abs = join(pkgDir, subPath)
-      const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
-      // The Bundle workspace bucket rejects file paths that start with
-      // `..`, so a package resolved at a parent's node_modules can't
-      // round-trip through the bundle even though Node could load it.
-      if (rel.startsWith('..') || isAbsolute(rel)) return null
-      return rel
-    }
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
+  if (parts.slice(2).includes('..')) return null
+  // createRequire needs an anchor *path*; the file does not have to exist
+  // — only its directory is consulted for the module-lookup walk.
+  const anchor = join(resolve(baseDir), 'noop.js')
+  let abs
+  try {
+    abs = createRequire(anchor).resolve(specifier)
+  } catch {
+    return null
   }
+  const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
+  if (rel.startsWith('..') || isAbsolute(rel)) return null
+  return rel
 }
 
 // Build the { sources, resolutions, missing } triple from a Map of
