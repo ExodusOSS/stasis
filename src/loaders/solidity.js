@@ -75,9 +75,10 @@ export function resolveSolImport(specifier, fromFile, remappings) {
 }
 
 // Node-style resolution for a bare `@scope/pkg/sub/path.sol` specifier.
-// Defers to Node's own CJS resolver (createRequire(...).resolve(...)),
-// anchored at `baseDir`, so it walks up node_modules and respects any
-// package.json `exports` map the same way `node` does. Returns the file
+// Defers to Node's own CJS resolver (createRequire(...).resolve(...))
+// anchored at the *importing* file, so the walk-up sees nested
+// node_modules (a file under `node_modules/foo/` finds its deps in
+// `foo/node_modules/` first, just like Node would). Returns the file
 // path relative to `baseDir` (POSIX-style), or null when:
 //   - the specifier isn't a scoped subpath (`@scope/pkg/.../file.ext`),
 //   - the subpath contains `..` (path-traversal guard — Node's resolver
@@ -86,14 +87,15 @@ export function resolveSolImport(specifier, fromFile, remappings) {
 //     subpath, …),
 //   - the resolved file lives outside `baseDir` (the Bundle layer can't
 //     store paths that start with `..`).
-export function resolveNodeModulesSpec(baseDir, specifier) {
+export function resolveNodeModulesSpec(baseDir, fromFile, specifier) {
   if (!specifier.startsWith('@')) return null
   const parts = specifier.split('/')
   if (parts.length < 3) return null // `@scope/pkg` alone has no file to load
   if (parts.slice(2).includes('..')) return null
-  // createRequire needs an anchor *path*; the file does not have to exist
-  // — only its directory is consulted for the module-lookup walk.
-  const anchor = join(resolve(baseDir), 'noop.js')
+  // Anchor createRequire at the importing source's absolute path. The
+  // anchor file does not need to exist — only its directory drives the
+  // module-lookup walk.
+  const anchor = join(resolve(baseDir), fromFile)
   let abs
   try {
     abs = createRequire(anchor).resolve(specifier)
@@ -122,9 +124,9 @@ export function buildSolidityTree(sources, { remappings = [], baseDir } = {}) {
     for (const spec of extractSolImports(content)) {
       let resolved = resolveSolImport(spec, path, remappings)
       // Node-style node_modules fallback for `@scope/pkg/...` specifiers
-      // when remappings/relative resolution didn't hit. Requires baseDir
-      // since we have to walk disk to find the package.
-      if (!resolved && baseDir) resolved = resolveNodeModulesSpec(baseDir, spec)
+      // when remappings/relative resolution didn't hit. Anchored at the
+      // importing source so nested node_modules resolve correctly.
+      if (!resolved && baseDir) resolved = resolveNodeModulesSpec(baseDir, path, spec)
       if (resolved && !sources.has(resolved)) resolved = null
       // Verbatim fallback: many Solidity ecosystems (etherscan bundles,
       // hardhat flat layouts) ship `@openzeppelin/...` imports as literal
@@ -188,7 +190,7 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings)
       sources.set(relPath, content)
       for (const spec of extractSolImports(content)) {
         let resolved = resolveSolImport(spec, relPath, remappings)
-        if (!resolved) resolved = resolveNodeModulesSpec(baseDir, spec)
+        if (!resolved) resolved = resolveNodeModulesSpec(baseDir, relPath, spec)
         if (!resolved && knownEntries.has(spec)) resolved = spec
         if (resolved) {
           if (!sources.has(resolved)) next.push(resolved)

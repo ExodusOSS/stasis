@@ -147,6 +147,25 @@ test('buildSolidityBundle resolves @-scoped imports via node_modules with no map
   )
 })
 
+test('buildSolidityBundle resolves nested node_modules from the importing source (Node-style walk)', async (t) => {
+  // src/A.sol imports @dep/x/Y.sol → resolves to node_modules/@dep/x/Y.sol.
+  // Y.sol then imports @inner/z/Z.sol — resolution anchored at Y.sol must
+  // find the nested node_modules/@dep/x/node_modules/@inner/z/Z.sol, not
+  // walk back to a sibling at node_modules/@inner/z (which doesn't exist).
+  const cwd = join(fixtures, 'nm-nested')
+  const bundle = await buildSolidityBundle({ cwd, entries: ['src/A.sol'] })
+  t.assert.deepEqual(
+    [...bundle.modules.keys()].toSorted(),
+    ['.', 'node_modules/@dep/x', 'node_modules/@dep/x/node_modules/@inner/z'],
+  )
+  t.assert.equal(bundle.modules.get('node_modules/@dep/x/node_modules/@inner/z').name, '@inner/z')
+  t.assert.equal(bundle.modules.get('node_modules/@dep/x/node_modules/@inner/z').version, '2.0.0')
+  t.assert.equal(
+    bundle.imports.get('solidity').get('node_modules/@dep/x/Y.sol').get('@inner/z/Z.sol'),
+    'node_modules/@dep/x/node_modules/@inner/z/Z.sol',
+  )
+})
+
 test('buildSolidityBundle throws when a node_modules file has no resolvable package.json', async (t) => {
   await t.assert.rejects(
     () => buildSolidityBundle({

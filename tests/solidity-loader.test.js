@@ -97,29 +97,33 @@ test('resolveSolImport returns null for non-relative, non-remapped imports (no d
 test('resolveNodeModulesSpec finds a scoped package at baseDir/node_modules and returns the subpath', (t) => {
   const baseDir = join(fixtures, 'nm-fallback')
   t.assert.equal(
-    resolveNodeModulesSpec(baseDir, '@oz/contracts/utils/Math.sol'),
+    resolveNodeModulesSpec(baseDir, 'src/A.sol', '@oz/contracts/utils/Math.sol'),
     'node_modules/@oz/contracts/utils/Math.sol',
   )
 })
 
 test('resolveNodeModulesSpec returns null for unscoped specifiers (only `@scope/pkg/...` is supported)', (t) => {
-  t.assert.equal(resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'foo/X.sol'), null)
-  t.assert.equal(resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'X.sol'), null)
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', 'foo/X.sol'), null)
+  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', 'X.sol'), null)
 })
 
 test('resolveNodeModulesSpec returns null for `@scope/pkg` with no file subpath', (t) => {
-  t.assert.equal(resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), '@oz/contracts'), null)
+  t.assert.equal(
+    resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'src/A.sol', '@oz/contracts'),
+    null,
+  )
 })
 
 test('resolveNodeModulesSpec rejects `..` in the subpath (path-traversal guard)', (t) => {
   const baseDir = join(fixtures, 'nm-fallback')
-  t.assert.equal(resolveNodeModulesSpec(baseDir, '@oz/contracts/../../etc/passwd'), null)
-  t.assert.equal(resolveNodeModulesSpec(baseDir, '@oz/contracts/utils/../Math.sol'), null)
+  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', '@oz/contracts/../../etc/passwd'), null)
+  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', '@oz/contracts/utils/../Math.sol'), null)
 })
 
 test('resolveNodeModulesSpec returns null when the package is not installed under baseDir', (t) => {
   t.assert.equal(
-    resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), '@absent/nope/X.sol'),
+    resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'src/A.sol', '@absent/nope/X.sol'),
     null,
   )
 })
