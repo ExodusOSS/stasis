@@ -11,6 +11,7 @@ import {
   parseRemappings,
   parseRemappingsFromToml,
   readRemappingsFile,
+  resolveNodeModulesSpec,
   resolveSolImport,
 } from '../src/loaders/solidity.js'
 
@@ -86,8 +87,41 @@ test('resolveSolImport picks the longest remapping prefix', (t) => {
   t.assert.equal(resolveSolImport('@oz/other.sol', 'src/A.sol', remappings), 'lib/oz/other.sol')
 })
 
-test('resolveSolImport returns null for non-relative, non-remapped imports', (t) => {
+test('resolveSolImport returns null for non-relative, non-remapped imports (no disk lookup)', (t) => {
+  // The pure resolver doesn't know about disk; the caller layers a
+  // resolveNodeModulesSpec fallback on top when baseDir is available.
   t.assert.equal(resolveSolImport('@unknown/Foo.sol', 'src/A.sol', []), null)
+  t.assert.equal(resolveSolImport('foo/X.sol', 'src/A.sol', []), null)
+})
+
+test('resolveNodeModulesSpec finds a scoped package at baseDir/node_modules and returns the subpath', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(
+    resolveNodeModulesSpec(baseDir, '@oz/contracts/utils/Math.sol'),
+    'node_modules/@oz/contracts/utils/Math.sol',
+  )
+})
+
+test('resolveNodeModulesSpec returns null for unscoped specifiers (only `@scope/pkg/...` is supported)', (t) => {
+  t.assert.equal(resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'foo/X.sol'), null)
+  t.assert.equal(resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'X.sol'), null)
+})
+
+test('resolveNodeModulesSpec returns null for `@scope/pkg` with no file subpath', (t) => {
+  t.assert.equal(resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), '@oz/contracts'), null)
+})
+
+test('resolveNodeModulesSpec rejects `..` in the subpath (path-traversal guard)', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveNodeModulesSpec(baseDir, '@oz/contracts/../../etc/passwd'), null)
+  t.assert.equal(resolveNodeModulesSpec(baseDir, '@oz/contracts/utils/../Math.sol'), null)
+})
+
+test('resolveNodeModulesSpec returns null when the package is not installed under baseDir', (t) => {
+  t.assert.equal(
+    resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), '@absent/nope/X.sol'),
+    null,
+  )
 })
 
 test('resolveSolImport returns null when relative traversal escapes the root', (t) => {

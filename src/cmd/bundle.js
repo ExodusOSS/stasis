@@ -92,7 +92,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const normalized = normalizeEntries(entries, cwd)
 
   const sources = await collectSolidityFilesFromDisk(baseDir, normalized, remappings)
-  const { resolutions, missing } = buildSolidityTree(sources, { remappings })
+  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir })
 
   // Bundles must be self-contained. Refuse to write one when an entry
   // can't be loaded from disk, or when any in-bundle file has an import

@@ -130,6 +130,23 @@ test('buildSolidityBundle places node_modules files in per-package modules bucke
   )
 })
 
+test('buildSolidityBundle resolves @-scoped imports via node_modules with no mapping file', async (t) => {
+  // No --mapping passed: @oz/contracts/utils/Math.sol must fall back to
+  // node_modules/@oz/contracts/utils/Math.sol on disk.
+  const cwd = join(fixtures, 'nm-fallback')
+  const bundle = await buildSolidityBundle({ cwd, entries: ['src/A.sol'] })
+  t.assert.deepEqual(
+    [...bundle.modules.keys()].toSorted(),
+    ['.', 'node_modules/@oz/contracts'],
+  )
+  t.assert.equal(bundle.modules.get('node_modules/@oz/contracts').name, '@oz/contracts')
+  t.assert.equal(bundle.modules.get('node_modules/@oz/contracts').version, '5.0.0')
+  t.assert.equal(
+    bundle.imports.get('solidity').get('src/A.sol').get('@oz/contracts/utils/Math.sol'),
+    'node_modules/@oz/contracts/utils/Math.sol',
+  )
+})
+
 test('buildSolidityBundle throws when a node_modules file has no resolvable package.json', async (t) => {
   await t.assert.rejects(
     () => buildSolidityBundle({

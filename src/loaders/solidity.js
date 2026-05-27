@@ -5,6 +5,7 @@
 // file (foundry.toml or remappings.txt) is read to extract `remappings`,
 // but is itself not included in `sources`.
 
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
@@ -73,6 +74,41 @@ export function resolveSolImport(specifier, fromFile, remappings) {
   return null
 }
 
+// Node-style resolution for a bare `@scope/pkg/sub/path.sol` specifier:
+// walk up from `baseDir` looking for `<dir>/node_modules/<pkg>/package.json`
+// (matching Node's CJS resolution algorithm). Returns the file path
+// relative to `baseDir` (POSIX-style), or null when no such package is
+// found, when the subpath contains `..`, or when the package was found
+// outside `baseDir` (a parent monorepo's node_modules) and bundling it
+// would require an out-of-tree path the Bundle layer would reject.
+export function resolveNodeModulesSpec(baseDir, specifier) {
+  if (!specifier.startsWith('@')) return null
+  const parts = specifier.split('/')
+  if (parts.length < 3) return null // `@scope/pkg` alone has no file to load
+  const pkgName = parts.slice(0, 2).join('/')
+  const subParts = parts.slice(2)
+  // Path-traversal guard: a `..` in the subpath could escape the package
+  // directory (or even baseDir) once we hand the joined path to readFile.
+  if (subParts.includes('..')) return null
+  const subPath = subParts.join('/')
+  let dir = resolve(baseDir)
+  while (true) {
+    const pkgDir = join(dir, 'node_modules', pkgName)
+    if (existsSync(join(pkgDir, 'package.json'))) {
+      const abs = join(pkgDir, subPath)
+      const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
+      // The Bundle workspace bucket rejects file paths that start with
+      // `..`, so a package resolved at a parent's node_modules can't
+      // round-trip through the bundle even though Node could load it.
+      if (rel.startsWith('..') || isAbsolute(rel)) return null
+      return rel
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
 // Build the { sources, resolutions, missing } triple from a Map of
 // already-loaded Solidity sources (any key format — relative paths for
 // disk-loaded projects, `${address}/${cname}` for etherscan, etc.) plus
@@ -82,13 +118,17 @@ export function resolveSolImport(specifier, fromFile, remappings) {
 // `@openzeppelin/contracts/.../IERC20.sol` which is itself a stored
 // cname). `missing` lists every (spec, from) pair that could not be
 // resolved or that resolved to a file that wasn't loaded into `sources`.
-export function buildSolidityTree(sources, { remappings = [] } = {}) {
+export function buildSolidityTree(sources, { remappings = [], baseDir } = {}) {
   const resolutions = new Map()
   const missing = []
   for (const [path, content] of sources) {
     const specMap = new Map()
     for (const spec of extractSolImports(content)) {
       let resolved = resolveSolImport(spec, path, remappings)
+      // Node-style node_modules fallback for `@scope/pkg/...` specifiers
+      // when remappings/relative resolution didn't hit. Requires baseDir
+      // since we have to walk disk to find the package.
+      if (!resolved && baseDir) resolved = resolveNodeModulesSpec(baseDir, spec)
       if (resolved && !sources.has(resolved)) resolved = null
       // Verbatim fallback: many Solidity ecosystems (etherscan bundles,
       // hardhat flat layouts) ship `@openzeppelin/...` imports as literal
@@ -152,6 +192,7 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings)
       sources.set(relPath, content)
       for (const spec of extractSolImports(content)) {
         let resolved = resolveSolImport(spec, relPath, remappings)
+        if (!resolved) resolved = resolveNodeModulesSpec(baseDir, spec)
         if (!resolved && knownEntries.has(spec)) resolved = spec
         if (resolved) {
           if (!sources.has(resolved)) next.push(resolved)
