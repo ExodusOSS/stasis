@@ -11,7 +11,6 @@ import {
   parseRemappings,
   parseRemappingsFromToml,
   readRemappingsFile,
-  resolveNodeModulesSpec,
   resolveSolImport,
 } from '../src/loaders/solidity.js'
 
@@ -71,8 +70,8 @@ test('parseRemappingsFromToml returns [] when no remappings key present', (t) =>
 })
 
 test('resolveSolImport resolves relative imports against the source file', (t) => {
-  t.assert.equal(resolveSolImport('./B.sol', 'src/A.sol', []), 'src/B.sol')
-  t.assert.equal(resolveSolImport('../lib/C.sol', 'src/sub/A.sol', []), 'src/lib/C.sol')
+  t.assert.equal(resolveSolImport('./B.sol', 'src/A.sol'), 'src/B.sol')
+  t.assert.equal(resolveSolImport('../lib/C.sol', 'src/sub/A.sol'), 'src/lib/C.sol')
 })
 
 test('resolveSolImport picks the longest remapping prefix', (t) => {
@@ -81,58 +80,74 @@ test('resolveSolImport picks the longest remapping prefix', (t) => {
     { prefix: '@oz/contracts/', target: 'lib/oz-c/' },
   ]
   t.assert.equal(
-    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', remappings),
+    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', { remappings }),
     'lib/oz-c/utils/Math.sol',
   )
-  t.assert.equal(resolveSolImport('@oz/other.sol', 'src/A.sol', remappings), 'lib/oz/other.sol')
-})
-
-test('resolveSolImport returns null for non-relative, non-remapped imports (no disk lookup)', (t) => {
-  // The pure resolver doesn't know about disk; the caller layers a
-  // resolveNodeModulesSpec fallback on top when baseDir is available.
-  t.assert.equal(resolveSolImport('@unknown/Foo.sol', 'src/A.sol', []), null)
-  t.assert.equal(resolveSolImport('foo/X.sol', 'src/A.sol', []), null)
-})
-
-test('resolveNodeModulesSpec finds a scoped package at baseDir/node_modules and returns the subpath', (t) => {
-  const baseDir = join(fixtures, 'nm-fallback')
   t.assert.equal(
-    resolveNodeModulesSpec(baseDir, 'src/A.sol', '@oz/contracts/utils/Math.sol'),
-    'node_modules/@oz/contracts/utils/Math.sol',
+    resolveSolImport('@oz/other.sol', 'src/A.sol', { remappings }),
+    'lib/oz/other.sol',
   )
 })
 
-test('resolveNodeModulesSpec returns null for unscoped specifiers (only `@scope/pkg/...` is supported)', (t) => {
-  const baseDir = join(fixtures, 'nm-fallback')
-  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', 'foo/X.sol'), null)
-  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', 'X.sol'), null)
-})
-
-test('resolveNodeModulesSpec returns null for `@scope/pkg` with no file subpath', (t) => {
-  t.assert.equal(
-    resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'src/A.sol', '@oz/contracts'),
-    null,
-  )
-})
-
-test('resolveNodeModulesSpec rejects `..` in the subpath (path-traversal guard)', (t) => {
-  const baseDir = join(fixtures, 'nm-fallback')
-  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', '@oz/contracts/../../etc/passwd'), null)
-  t.assert.equal(resolveNodeModulesSpec(baseDir, 'src/A.sol', '@oz/contracts/utils/../Math.sol'), null)
-})
-
-test('resolveNodeModulesSpec returns null when the package is not installed under baseDir', (t) => {
-  t.assert.equal(
-    resolveNodeModulesSpec(join(fixtures, 'nm-fallback'), 'src/A.sol', '@absent/nope/X.sol'),
-    null,
-  )
+test('resolveSolImport returns null for non-relative, non-remapped imports without baseDir', (t) => {
+  // Without baseDir the Node-style strategy is disabled, so anything
+  // not covered by remappings or relative paths is null.
+  t.assert.equal(resolveSolImport('@unknown/Foo.sol', 'src/A.sol'), null)
+  t.assert.equal(resolveSolImport('foo/X.sol', 'src/A.sol'), null)
 })
 
 test('resolveSolImport returns null when relative traversal escapes the root', (t) => {
   // Going above the project root must not silently clamp to root — that
   // would change the import target into a different file altogether.
-  t.assert.equal(resolveSolImport('../X.sol', 'A.sol', []), null)
-  t.assert.equal(resolveSolImport('../../X.sol', 'src/A.sol', []), null)
+  t.assert.equal(resolveSolImport('../X.sol', 'A.sol'), null)
+  t.assert.equal(resolveSolImport('../../X.sol', 'src/A.sol'), null)
+})
+
+test('resolveSolImport uses Node-style resolution for @-scoped imports when baseDir is given', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', { baseDir }),
+    'node_modules/@oz/contracts/utils/Math.sol',
+  )
+})
+
+test('resolveSolImport does not invoke Node-style resolution for unscoped specifiers', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveSolImport('foo/X.sol', 'src/A.sol', { baseDir }), null)
+  t.assert.equal(resolveSolImport('X.sol', 'src/A.sol', { baseDir }), null)
+})
+
+test('resolveSolImport returns null for `@scope/pkg` with no file subpath', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveSolImport('@oz/contracts', 'src/A.sol', { baseDir }), null)
+})
+
+test('resolveSolImport rejects `..` in a node-resolved subpath (path-traversal guard)', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/../../etc/passwd', 'src/A.sol', { baseDir }),
+    null,
+  )
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/utils/../Math.sol', 'src/A.sol', { baseDir }),
+    null,
+  )
+})
+
+test('resolveSolImport returns null when the node-resolved package is not installed', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveSolImport('@absent/nope/X.sol', 'src/A.sol', { baseDir }), null)
+})
+
+test('resolveSolImport prefers a matching remapping over the Node-style fallback', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', {
+      baseDir,
+      remappings: [{ prefix: '@oz/', target: 'lib/oz/' }],
+    }),
+    'lib/oz/contracts/utils/Math.sol',
+  )
 })
 
 test('collectSolidityFilesFromDisk walks imports starting from entries', async (t) => {
