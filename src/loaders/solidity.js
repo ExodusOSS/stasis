@@ -6,6 +6,7 @@
 // but is itself not included in `sources`.
 
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 const SOL_IMPORT_RE = /import\s[^"']*["']([^"']+)["']/gu
@@ -28,16 +29,16 @@ export function parseRemappings(content) {
   }).filter(Boolean)
 }
 
-// Returns a candidate resolved path, or null if the specifier doesn't match
-// any remapping and isn't a relative import. The caller is responsible for
-// checking whether the resolved path actually exists in `sources` (the
-// etherscan bundle's cnames are exact-match keys — `@openzeppelin/…` lives
-// alongside `contracts/Foo.sol` — so a non-relative, non-remapped specifier
-// may still be a hit when matched verbatim against the bundle). Logging
-// "Missing import" also lives at the callsite because only the callsite
-// knows whether that verbatim fallback matched.
-export function resolveSolImport(specifier, fromFile, remappings) {
-  // Try remappings (longest prefix match)
+// Resolve a Solidity import specifier to a baseDir-relative POSIX path,
+// trying three strategies in order:
+//   1. user remappings (longest prefix wins)
+//   2. relative path (`./...` or `../...`); traversal above the project
+//      root returns null instead of clamping
+//   3. Node's CJS resolver via createRequire, anchored at the importing
+//      source — only when `baseDir` is provided and the specifier looks
+//      like a scoped npm package (`@scope/pkg/sub/path`)
+// Returns null when no strategy resolves the import.
+export function resolveSolImport(specifier, fromFile, { remappings = [], baseDir } = {}) {
   let best = null
   for (const { prefix, target } of remappings) {
     if (specifier.startsWith(prefix) && (!best || prefix.length > best.prefix.length)) {
@@ -47,13 +48,9 @@ export function resolveSolImport(specifier, fromFile, remappings) {
   if (best) {
     const target = best.target.replace(/\/$/u, '')
     const remaining = specifier.slice(best.prefix.length).replace(/^\//u, '')
-    const result = remaining ? `${target}/${remaining}` : target
-    return result.replace(/^\.\//u, '')
+    return (remaining ? `${target}/${remaining}` : target).replace(/^\.\//u, '')
   }
 
-  // Relative import. `..` segments that would traverse above the project
-  // root return null instead of silently clamping to root — clamping would
-  // change the import target into something the source never asked for.
   if (specifier.startsWith('.')) {
     const fromDir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/')) : ''
     const parts = [...(fromDir ? fromDir.split('/') : []), ...specifier.split('/')]
@@ -70,30 +67,41 @@ export function resolveSolImport(specifier, fromFile, remappings) {
     return resolved.join('/')
   }
 
+  // Node-style `@scope/pkg/sub/path`. createRequire is anchored at the
+  // importing source so nested node_modules resolve like Node would
+  // (a file under `node_modules/foo/` finds its deps in
+  // `foo/node_modules/` before walking up). `..` segments in the
+  // subpath are rejected so a crafted specifier can't escape the
+  // resolved package via require.resolve's own path normalization.
+  if (baseDir && specifier.startsWith('@')) {
+    const parts = specifier.split('/')
+    if (parts.length < 3) return null
+    if (parts.slice(2).includes('..')) return null
+    try {
+      const abs = createRequire(resolve(baseDir, fromFile)).resolve(specifier)
+      const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
+      if (!rel.startsWith('..') && !isAbsolute(rel)) return rel
+    } catch { /* package missing, exports map blocks the subpath, … */ }
+  }
+
   return null
 }
 
 // Build the { sources, resolutions, missing } triple from a Map of
-// already-loaded Solidity sources (any key format — relative paths for
-// disk-loaded projects, `${address}/${cname}` for etherscan, etc.) plus
-// optional remappings. Imports that resolve via remappings/relative paths
-// win; as a fallback we also accept an import specifier that matches a
-// stored key verbatim (etherscan bundles imports like
-// `@openzeppelin/contracts/.../IERC20.sol` which is itself a stored
-// cname). `missing` lists every (spec, from) pair that could not be
-// resolved or that resolved to a file that wasn't loaded into `sources`.
-export function buildSolidityTree(sources, { remappings = [] } = {}) {
+// already-loaded Solidity sources plus optional remappings. Imports that
+// resolve via remappings/relative/Node win; as a final fallback an
+// import specifier that matches a stored key verbatim (etherscan
+// bundles, hardhat flat layouts) is accepted. `missing` lists every
+// (spec, from) pair that could not be resolved or that resolved to a
+// file not loaded into `sources`.
+export function buildSolidityTree(sources, { remappings = [], baseDir } = {}) {
   const resolutions = new Map()
   const missing = []
   for (const [path, content] of sources) {
     const specMap = new Map()
     for (const spec of extractSolImports(content)) {
-      let resolved = resolveSolImport(spec, path, remappings)
+      let resolved = resolveSolImport(spec, path, { remappings, baseDir })
       if (resolved && !sources.has(resolved)) resolved = null
-      // Verbatim fallback: many Solidity ecosystems (etherscan bundles,
-      // hardhat flat layouts) ship `@openzeppelin/...` imports as literal
-      // keys in the source map. If the remap/relative resolution didn't
-      // hit but the bundle has the specifier itself as a key, use it.
       if (!resolved && sources.has(spec)) resolved = spec
       if (resolved) {
         specMap.set(spec, resolved)
@@ -107,21 +115,12 @@ export function buildSolidityTree(sources, { remappings = [] } = {}) {
   return { sources, resolutions, missing }
 }
 
-// Walk the filesystem starting from `entries`, following relative/remapped
-// imports and reading each file exactly once. Returns a Map<relPath, content>
-// suitable for passing into buildSolidityTree. Files in the same wave are
-// read in parallel; subsequent waves depend on the imports discovered in
-// the previous one.
-//
-// Specifiers that exactly match one of the explicit entries (the file
-// list passed by the caller) are accepted as-is, even when they don't
-// match any remapping. Solidity projects routinely write
-// `import "src/A.sol"` and rely on solc's include-path / Foundry's
-// remap-from-root behavior; here we don't have a true include path,
-// but if the caller listed `src/A.sol` themselves we know the path is
-// intentional and resolves to that file. Mirrors the `sources.has(spec)`
-// fallback in `buildSolidityTree`, but applied during the walk so the
-// file actually gets loaded into `sources`.
+// Walk the filesystem starting from `entries`, following resolved
+// imports and reading each file exactly once. Files in the same wave
+// are read in parallel; the next wave depends on the imports
+// discovered in the previous one. Caller-listed entries are also
+// accepted as verbatim non-relative import targets (Foundry-style
+// `import "src/A.sol"`).
 export async function collectSolidityFilesFromDisk(baseDir, entries, remappings) {
   const sources = new Map()
   const knownEntries = new Set(entries)
@@ -129,9 +128,6 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings)
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))
     if (toLoad.length === 0) return
-    // A resolved path that doesn't exist on disk is treated like an
-    // unresolved import: warn and skip rather than aborting the entire
-    // walk. Other read errors (EACCES, EIO, …) still propagate.
     const reads = await Promise.all(
       toLoad.map(async (relPath) => {
         try {
@@ -151,7 +147,7 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings)
       const [relPath, content] = entry
       sources.set(relPath, content)
       for (const spec of extractSolImports(content)) {
-        let resolved = resolveSolImport(spec, relPath, remappings)
+        let resolved = resolveSolImport(spec, relPath, { remappings, baseDir })
         if (!resolved && knownEntries.has(spec)) resolved = spec
         if (resolved) {
           if (!sources.has(resolved)) next.push(resolved)
@@ -210,5 +206,5 @@ export async function loadSolidity(solTxtFile) {
   const entries = lines.map((l) => l.replace(/^\.\//u, ''))
   for (const e of entries) assertWithinBase(baseDir, e, 'Entry path')
   const sources = await collectSolidityFilesFromDisk(baseDir, entries, remappings)
-  return buildSolidityTree(sources, { remappings })
+  return buildSolidityTree(sources, { remappings, baseDir })
 }

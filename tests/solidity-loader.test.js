@@ -70,8 +70,8 @@ test('parseRemappingsFromToml returns [] when no remappings key present', (t) =>
 })
 
 test('resolveSolImport resolves relative imports against the source file', (t) => {
-  t.assert.equal(resolveSolImport('./B.sol', 'src/A.sol', []), 'src/B.sol')
-  t.assert.equal(resolveSolImport('../lib/C.sol', 'src/sub/A.sol', []), 'src/lib/C.sol')
+  t.assert.equal(resolveSolImport('./B.sol', 'src/A.sol'), 'src/B.sol')
+  t.assert.equal(resolveSolImport('../lib/C.sol', 'src/sub/A.sol'), 'src/lib/C.sol')
 })
 
 test('resolveSolImport picks the longest remapping prefix', (t) => {
@@ -80,21 +80,74 @@ test('resolveSolImport picks the longest remapping prefix', (t) => {
     { prefix: '@oz/contracts/', target: 'lib/oz-c/' },
   ]
   t.assert.equal(
-    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', remappings),
+    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', { remappings }),
     'lib/oz-c/utils/Math.sol',
   )
-  t.assert.equal(resolveSolImport('@oz/other.sol', 'src/A.sol', remappings), 'lib/oz/other.sol')
+  t.assert.equal(
+    resolveSolImport('@oz/other.sol', 'src/A.sol', { remappings }),
+    'lib/oz/other.sol',
+  )
 })
 
-test('resolveSolImport returns null for non-relative, non-remapped imports', (t) => {
-  t.assert.equal(resolveSolImport('@unknown/Foo.sol', 'src/A.sol', []), null)
+test('resolveSolImport returns null for non-relative, non-remapped imports without baseDir', (t) => {
+  // Without baseDir the Node-style strategy is disabled, so anything
+  // not covered by remappings or relative paths is null.
+  t.assert.equal(resolveSolImport('@unknown/Foo.sol', 'src/A.sol'), null)
+  t.assert.equal(resolveSolImport('foo/X.sol', 'src/A.sol'), null)
 })
 
 test('resolveSolImport returns null when relative traversal escapes the root', (t) => {
   // Going above the project root must not silently clamp to root — that
   // would change the import target into a different file altogether.
-  t.assert.equal(resolveSolImport('../X.sol', 'A.sol', []), null)
-  t.assert.equal(resolveSolImport('../../X.sol', 'src/A.sol', []), null)
+  t.assert.equal(resolveSolImport('../X.sol', 'A.sol'), null)
+  t.assert.equal(resolveSolImport('../../X.sol', 'src/A.sol'), null)
+})
+
+test('resolveSolImport uses Node-style resolution for @-scoped imports when baseDir is given', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', { baseDir }),
+    'node_modules/@oz/contracts/utils/Math.sol',
+  )
+})
+
+test('resolveSolImport does not invoke Node-style resolution for unscoped specifiers', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveSolImport('foo/X.sol', 'src/A.sol', { baseDir }), null)
+  t.assert.equal(resolveSolImport('X.sol', 'src/A.sol', { baseDir }), null)
+})
+
+test('resolveSolImport returns null for `@scope/pkg` with no file subpath', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveSolImport('@oz/contracts', 'src/A.sol', { baseDir }), null)
+})
+
+test('resolveSolImport rejects `..` in a node-resolved subpath (path-traversal guard)', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/../../etc/passwd', 'src/A.sol', { baseDir }),
+    null,
+  )
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/utils/../Math.sol', 'src/A.sol', { baseDir }),
+    null,
+  )
+})
+
+test('resolveSolImport returns null when the node-resolved package is not installed', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(resolveSolImport('@absent/nope/X.sol', 'src/A.sol', { baseDir }), null)
+})
+
+test('resolveSolImport prefers a matching remapping over the Node-style fallback', (t) => {
+  const baseDir = join(fixtures, 'nm-fallback')
+  t.assert.equal(
+    resolveSolImport('@oz/contracts/utils/Math.sol', 'src/A.sol', {
+      baseDir,
+      remappings: [{ prefix: '@oz/', target: 'lib/oz/' }],
+    }),
+    'lib/oz/contracts/utils/Math.sol',
+  )
 })
 
 test('collectSolidityFilesFromDisk walks imports starting from entries', async (t) => {
