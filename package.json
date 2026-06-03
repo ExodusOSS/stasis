@@ -17,6 +17,7 @@
     "logo.svg",
     "src/apis/npm/index.js",
     "src/apis/npm/semver.cjs",
+    "src/audit.js",
     "src/bundle.js",
     "src/cmd/bundle.js",
     "src/config.js",
