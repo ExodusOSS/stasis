@@ -5,6 +5,7 @@
 // file (foundry.toml or remappings.txt) is read to extract `remappings`,
 // but is itself not included in `sources`.
 
+import { statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -30,13 +31,18 @@ export function parseRemappings(content) {
 }
 
 // Resolve a Solidity import specifier to a baseDir-relative POSIX path,
-// trying three strategies in order:
+// trying four strategies in order:
 //   1. user remappings (longest prefix wins)
 //   2. relative path (`./...` or `../...`); traversal above the project
 //      root returns null instead of clamping
 //   3. Node's CJS resolver via createRequire, anchored at the importing
 //      source — only when `baseDir` is provided and the specifier looks
 //      like a scoped npm package (`@scope/pkg/sub/path`)
+//   4. project-relative fallback: when `baseDir` is provided and a file
+//      exists at `<baseDir>/<specifier>`, accept the specifier as-is.
+//      Equivalent to an implicit `<top>/=<top>/` remapping for any
+//      top-level directory in the project. Lets Foundry-style
+//      `import "src/Foo.sol"` work without an explicit remapping.
 // Returns null when no strategy resolves the import.
 export function resolveSolImport(specifier, fromFile, { remappings = [], baseDir } = {}) {
   let best = null
@@ -82,6 +88,21 @@ export function resolveSolImport(specifier, fromFile, { remappings = [], baseDir
       const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
       if (!rel.startsWith('..') && !isAbsolute(rel)) return rel
     } catch { /* package missing, exports map blocks the subpath, … */ }
+  }
+
+  // Project-relative fallback: when nothing else resolved, accept the
+  // spec as-is if a real file sits at `<baseDir>/<spec>`. statSync's
+  // isFile() guard keeps directories and other non-files from being
+  // queued for readFile (which would surface as EISDIR mid-walk). `./`
+  // and `../` specs are already routed through the relative branch
+  // above, so we only see bare specs here.
+  if (baseDir && !isAbsolute(specifier)) {
+    const rel = relative(baseDir, resolve(baseDir, specifier)).split(/[\\/]/u).join('/')
+    if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) {
+      try {
+        if (statSync(join(baseDir, rel)).isFile()) return rel
+      } catch { /* missing or not statable */ }
+    }
   }
 
   return null

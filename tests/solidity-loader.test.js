@@ -150,6 +150,41 @@ test('resolveSolImport prefers a matching remapping over the Node-style fallback
   )
 })
 
+test('resolveSolImport falls back to project-relative for non-relative specs that exist on disk', (t) => {
+  // Foundry-style `import "src/A.sol"` — no remapping, no `./`, no
+  // `@scope/`. The fallback accepts it because `src/A.sol` is a real
+  // file at the project root.
+  const baseDir = join(fixtures, 'non-relative-entry')
+  t.assert.equal(resolveSolImport('src/A.sol', 'src/B.sol', { baseDir }), 'src/A.sol')
+})
+
+test('resolveSolImport project-relative fallback returns null when the file is absent', (t) => {
+  const baseDir = join(fixtures, 'non-relative-entry')
+  t.assert.equal(resolveSolImport('src/DoesNotExist.sol', 'src/B.sol', { baseDir }), null)
+})
+
+test('resolveSolImport project-relative fallback rejects path traversal that escapes baseDir', (t) => {
+  const baseDir = join(fixtures, 'non-relative-entry')
+  t.assert.equal(resolveSolImport('foo/../../etc/passwd', 'src/B.sol', { baseDir }), null)
+})
+
+test('resolveSolImport project-relative fallback rejects absolute specifiers', (t) => {
+  const baseDir = join(fixtures, 'non-relative-entry')
+  t.assert.equal(resolveSolImport('/etc/passwd', 'src/B.sol', { baseDir }), null)
+})
+
+test('resolveSolImport project-relative fallback rejects directory matches', (t) => {
+  // `src/` is a directory in the fixture — fallback must not accept it
+  // (readFile would later fail with EISDIR mid-walk).
+  const baseDir = join(fixtures, 'non-relative-entry')
+  t.assert.equal(resolveSolImport('src', 'src/B.sol', { baseDir }), null)
+})
+
+test('resolveSolImport project-relative fallback is disabled without baseDir', (t) => {
+  // Pure-function callers (no fs context) must still get null for bare specs.
+  t.assert.equal(resolveSolImport('src/A.sol', 'src/B.sol'), null)
+})
+
 test('collectSolidityFilesFromDisk walks imports starting from entries', async (t) => {
   const baseDir = join(fixtures, 'basic')
   const sources = await collectSolidityFilesFromDisk(baseDir, ['src/A.sol'], [])
@@ -175,6 +210,15 @@ test('collectSolidityFilesFromDisk loads each shared file once', async (t) => {
 test('collectSolidityFilesFromDisk accepts a non-relative import matching a caller-listed entry', async (t) => {
   const baseDir = join(fixtures, 'non-relative-entry')
   const sources = await collectSolidityFilesFromDisk(baseDir, ['src/A.sol', 'src/B.sol'], [])
+  t.assert.deepEqual([...sources.keys()].toSorted(), ['src/A.sol', 'src/B.sol'])
+})
+
+test('collectSolidityFilesFromDisk walks project-relative imports even when the target is not a listed entry', async (t) => {
+  // B.sol imports `src/A.sol` (Foundry-style, no remapping). With only
+  // B.sol as a caller-listed entry, the walk must still pick up A.sol
+  // via the project-relative fallback in resolveSolImport.
+  const baseDir = join(fixtures, 'non-relative-entry')
+  const sources = await collectSolidityFilesFromDisk(baseDir, ['src/B.sol'], [])
   t.assert.deepEqual([...sources.keys()].toSorted(), ['src/A.sol', 'src/B.sol'])
 })
 

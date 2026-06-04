@@ -192,6 +192,24 @@ test('buildSolidityBundle reads remappings from a foundry.toml mapping file', as
   t.assert.ok(!Object.hasOwn(bundle.modules.get('.').files, 'foundry.toml'))
 })
 
+test('buildSolidityBundle resolves Foundry-style project-relative imports without a virtual src/= remapping', async (t) => {
+  // src/B.sol imports `src/A.sol` (no `./`, no remapping). The bundle
+  // must still pull in A.sol via the project-relative fallback —
+  // previously the user had to add a no-op `src/=src/` remapping to
+  // make this work.
+  const cwd = join(fixtures, 'non-relative-entry')
+  const bundle = await buildSolidityBundle({ cwd, entries: ['src/B.sol'] })
+  t.assert.deepEqual([...bundle.entries], ['src/B.sol'])
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['src/A.sol', 'src/B.sol'],
+  )
+  t.assert.equal(
+    bundle.imports.get('solidity').get('src/B.sol').get('src/A.sol'),
+    'src/A.sol',
+  )
+})
+
 test('buildSolidityBundle deduplicates files imported by multiple entries', async (t) => {
   const cwd = join(fixtures, 'shared')
   const bundle = await buildSolidityBundle({ cwd, entries: ['src/A.sol', 'src/B.sol'] })
