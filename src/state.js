@@ -264,8 +264,14 @@ export class State {
       assert.ok(name, `Missing name in ${this.relative(pkgAbsolute)}`)
       assert.ok(version, `Missing version in ${this.relative(pkgAbsolute)}`)
       if (closestPkgAbsolute !== pkgAbsolute) {
-        if (closestPkg.name !== undefined) assert.equal(closestPkg.name, name)
-        if (closestPkg.version !== undefined) assert.equal(closestPkg.version, version)
+        const message = `Inconsistent data between ${this.relative(closestPkgAbsolute)} and ${this.relative(pkgAbsolute)}`
+        if (closestPkg.name !== undefined && closestPkg.name !== name) {
+          // Allow fake module name subpaths: real module owns the prefix.
+          // Npm publish wouldn't accept this anyway, so it's not a conflict.
+          assert.ok(closestPkg.name.startsWith(`${name}/`), message)
+        }
+
+        if (closestPkg.version !== undefined) assert.equal(closestPkg.version, version, message)
       }
     } else {
       pkgAbsolute = closestPkgAbsolute
