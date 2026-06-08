@@ -58,21 +58,33 @@ const blocked = (label) => {
 // would make `new` fail with a confusing "is not a constructor" TypeError.
 const denyFn = (label) => function () { throw blocked(label) }
 
+// Promise-shaped version: returns a rejected promise instead of sync-throwing.
+// Used for node:fs/promises, node:dns/promises, and similar. Fire-and-forget
+// `void fsPromises.writeFile(...)` then surfaces as an unhandledRejection
+// (caught by the trap below) rather than crashing the script synchronously.
+const denyFnAsync = (label) => function () { return Promise.reject(blocked(label)) }
+
 // Replace every own function on `mod` (and, one level down, on `mod.promises`)
-// with a thrower. Functions are configurable on the builtins we target; fall
-// back to direct assignment on the off chance one isn't.
-const denyModuleSurface = (specifier, mod, prefix = specifier) => {
+// with a thrower. The factory picks denyFnAsync for promise-shaped surfaces
+// (/promises submodules) so fire-and-forget callers reject quietly through
+// the unhandledRejection trap below rather than crashing the script with a
+// synchronous throw. Functions are configurable on the builtins we target;
+// fall back to direct assignment on the off chance one isn't.
+const denyModuleSurface = (specifier, mod, opts = {}) => {
+  const { prefix = specifier, async: isAsync = specifier.endsWith('/promises') } = opts
+  const makeImpl = isAsync ? denyFnAsync : denyFn
   for (const key of Object.getOwnPropertyNames(mod)) {
     const value = mod[key]
     if (typeof value === 'function') {
       const label = `${prefix}.${key}()`
+      const impl = makeImpl(label)
       try {
-        mock.method(mod, key, denyFn(label))
+        mock.method(mod, key, impl)
       } catch {
-        try { mod[key] = denyFn(label) } catch { /* frozen: leave as-is */ }
+        try { mod[key] = impl } catch { /* frozen: leave as-is */ }
       }
     } else if (key === 'promises' && value && typeof value === 'object') {
-      denyModuleSurface(specifier, value, `${prefix}.promises`)
+      denyModuleSurface(specifier, value, { prefix: `${prefix}.promises`, async: true })
     }
   }
 }
@@ -132,22 +144,41 @@ for (const specifier of DENY_ALL) {
 
 // process method denials. process.exit / process.abort are deliberately left
 // alone -- if user code wants to terminate early, let it; that's not a side
-// effect we should hide. The rest mutate global process state or do real I/O:
+// effect we should hide. The rest mutate global process state, do real I/O,
+// or talk to a parent over IPC:
 //   - chdir affects fs resolution for everything that runs after
 //   - kill signals other processes
 //   - umask affects every future file create
 //   - dlopen loads a native addon (--permission also denies)
+//   - binding returns Node's internal C++ bindings (--permission also denies);
+//     we duplicate to match the "process.binding bypass" claim in the header
 //   - setUid/setGid/setEuid/setEgid/setgroups/initgroups change privileges
-//     (--permission also denies these). Duplicated here for attributable
-//     errors and defense in depth.
+//     (--permission also denies these). Duplicated for attributable errors
+//   - send / disconnect talk to the parent over IPC (when the process was
+//     forked with stdio:'ipc'); not blocked by --permission
+//   - setSourceMapsEnabled / loadEnvFile mutate global Node state and (in
+//     loadEnvFile's case) read+mutate process.env from a file
+//   - setUncaughtExceptionCaptureCallback replaces Node's exception
+//     handling, which would also disable our exitCode=13 cleanup
 const PROCESS_DENY = [
-  'chdir', 'kill', 'umask', 'dlopen',
+  'chdir', 'kill', 'umask', 'dlopen', 'binding',
   'setUid', 'setGid', 'setEuid', 'setEgid', 'setgroups', 'initgroups',
+  'send', 'disconnect',
+  'setSourceMapsEnabled', 'loadEnvFile',
+  'setUncaughtExceptionCaptureCallback',
 ]
 for (const name of PROCESS_DENY) {
   if (typeof process[name] === 'function') {
     mock.method(process, name, denyFn(`process.${name}()`))
   }
+}
+
+// process.report.writeReport(filename) writes a diagnostic JSON file to disk
+// (under --report-dir or cwd by default). Deny it so user code can't drop
+// reports into the project tree. process.report is an object, present on all
+// Node 12+ builds; the methods inside it are configurable.
+if (process.report && typeof process.report.writeReport === 'function') {
+  mock.method(process.report, 'writeReport', denyFn('process.report.writeReport()'))
 }
 
 // fs writers: --permission blocks them at the kernel level too, but we mock
@@ -178,7 +209,7 @@ for (const name of FS_WRITERS) {
     mock.method(fs, name, denyFn(`node:fs.${name}()`))
   }
   if (typeof fsPromises[name] === 'function') {
-    mock.method(fsPromises, name, denyFn(`node:fs/promises.${name}()`))
+    mock.method(fsPromises, name, denyFnAsync(`node:fs/promises.${name}()`))
   }
 }
 

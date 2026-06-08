@@ -103,3 +103,27 @@ test('run --mock with --bundle=load is rejected (mock is for capture, not replay
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /--mock is for capturing imports/)
 })
+
+test('run --mock writes a --bundle-file under a not-yet-existing directory outside cwd', withTmp(async (t, tmp) => {
+  // Regression: --allow-fs-write needs an *existing* path; granting just the
+  // bundle file's own path isn't enough when state.write()'s mkdirSync has
+  // to create the parent chain. bin/stasis.js walks up to the nearest
+  // existing ancestor.
+  cpSync(fixture, tmp, { recursive: true })
+  const outside = join(dirname(tmp), `stasis-mock-outside-${process.pid}`)
+  rmSync(outside, { recursive: true, force: true })
+  const bundlePath = join(outside, 'nested', 'dir', 'snap.br')
+  const sentinel = join(dirname(tmp), `mock-sentinel-${process.pid}.txt`)
+
+  const r = run(
+    ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, STASIS_MOCK_SENTINEL: sentinel } }
+  )
+  try {
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.ok(existsSync(bundlePath), 'bundle should be written under the freshly-created parent dirs')
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+    rmSync(sentinel, { force: true })
+  }
+}))

@@ -1,5 +1,6 @@
 import { greet } from './hello.js'
 import { writeFileSync } from 'node:fs'
+import { writeFile as writeFileAsync } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { spawnSync } from 'node:child_process'
@@ -27,6 +28,11 @@ log('chdir', () => process.chdir('/'))
 // rejection storm). Awaiting fetch would hang the script -- same semantics
 // as the never-resolving timer below.
 void fetch('http://stasis.invalid/beacon')
+
+// Fire-and-forget promise-style fs writer: this DOES produce a rejected
+// promise (denyFnAsync), so the unhandledRejection trap must swallow it.
+// Without the trap, this would crash the script before the bundle is written.
+void writeFileAsync(process.env.STASIS_MOCK_SENTINEL, 'pwned-async')
 
 console.log(greet('world'))
 

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { parseArgs } from 'node:util'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { basename, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import pkg from '../package.json' with { type: 'json' }
@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] [--mock] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=path/to/out.stasis.code.br] path/to/file.sol ...
  stasis prune [path/to/project]
  stasis audit path/to/file ...
@@ -92,7 +92,16 @@ if (command === '-v' || command === '--version') {
   const nodeArgs = []
   if (values.mock) {
     const writeAllow = [process.cwd()]
-    if (bundleFile && !bundleFile.startsWith(`${process.cwd()}/`)) writeAllow.push(bundleFile)
+    if (bundleFile && !bundleFile.startsWith(`${process.cwd()}/`)) {
+      // --allow-fs-write paths must already exist on disk; granting the bundle
+      // file's own path is not enough when state.write()'s mkdirSync has to
+      // create the parent chain. Walk up to the nearest existing ancestor and
+      // grant write there -- broader than ideal, but the user explicitly chose
+      // this location for their bundle.
+      let p = dirname(bundleFile)
+      while (!existsSync(p) && dirname(p) !== p) p = dirname(p)
+      writeAllow.push(p)
+    }
     nodeArgs.push('--permission', '--allow-fs-read=*')
     for (const p of writeAllow) nodeArgs.push(`--allow-fs-write=${p}`)
     // --permission without --allow-addons removes "node-addons" from resolution
