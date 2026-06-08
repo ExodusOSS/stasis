@@ -43,7 +43,7 @@ const withTmp = (fn) => (t) => {
   }
 }
 
-test('lock=add --full records the entry and its imports', withTmp((t, tmp) => {
+test('lock=add records the entry and its imports', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   rmSync(join(tmp, 'stasis.lock.json'))
 
@@ -58,7 +58,7 @@ test('lock=add --full records the entry and its imports', withTmp((t, tmp) => {
   t.assert.deepEqual(lock.modules, {})
 }))
 
-test('lock=add --full is idempotent against the committed lockfile', withTmp((t, tmp) => {
+test('lock=add is idempotent against the committed lockfile', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const before = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
 
@@ -69,7 +69,7 @@ test('lock=add --full is idempotent against the committed lockfile', withTmp((t,
   t.assert.equal(after, before)
 }))
 
-test('lock=frozen --full succeeds with the committed lockfile', withTmp((t, tmp) => {
+test('lock=frozen succeeds with the committed lockfile', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const before = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
 
@@ -78,7 +78,7 @@ test('lock=frozen --full succeeds with the committed lockfile', withTmp((t, tmp)
   t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), before, 'frozen must not rewrite lockfile')
 }))
 
-test('lock=frozen --full rejects a changed source file', withTmp((t, tmp) => {
+test('lock=frozen rejects a changed source file', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
 
@@ -87,7 +87,7 @@ test('lock=frozen --full rejects a changed source file', withTmp((t, tmp) => {
   t.assert.match(r.stderr, /Build failed|ERR_ASSERTION/)
 }))
 
-test('lock=add --full rejects a changed source file', withTmp((t, tmp) => {
+test('lock=add rejects a changed source file', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
 
@@ -96,7 +96,7 @@ test('lock=add --full rejects a changed source file', withTmp((t, tmp) => {
   t.assert.match(r.stderr, /Build failed|ERR_ASSERTION/)
 }))
 
-test('lock=frozen --full rejects a brand-new entry not listed in the lockfile', withTmp((t, tmp) => {
+test('lock=frozen rejects a brand-new entry not listed in the lockfile', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   writeFileSync(join(tmp, 'src', 'fresh.js'), "console.log('fresh')\n")
 
@@ -105,7 +105,7 @@ test('lock=frozen --full rejects a brand-new entry not listed in the lockfile', 
   t.assert.match(r.stderr, /Build failed|ERR_ASSERTION/)
 }))
 
-test('lock=add --full rejects a changed package.json version', withTmp((t, tmp) => {
+test('lock=add rejects a changed package.json version', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const pkgPath = join(tmp, 'package.json')
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
@@ -117,7 +117,7 @@ test('lock=add --full rejects a changed package.json version', withTmp((t, tmp) 
   t.assert.match(r.stderr, /Build failed|ERR_ASSERTION/)
 }))
 
-test('lock=replace --full rewrites the lockfile after a source change', withTmp((t, tmp) => {
+test('lock=replace rewrites the lockfile after a source change', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const lockPath = join(tmp, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
@@ -134,7 +134,7 @@ test('lock=replace --full rewrites the lockfile after a source change', withTmp(
   t.assert.deepEqual(after.entries, ['src/entry.js'])
 }))
 
-test('lock=replace --full drops stale entries from the previous lockfile', withTmp((t, tmp) => {
+test('lock=replace drops stale entries from the previous lockfile', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const lockPath = join(tmp, 'stasis.lock.json')
   const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
@@ -149,7 +149,7 @@ test('lock=replace --full drops stale entries from the previous lockfile', withT
   t.assert.ok(!after.entries.includes('src/stale.js'))
 }))
 
-test('lock=ignore --full tolerates the committed lockfile and does not touch it', withTmp((t, tmp) => {
+test('lock=ignore tolerates the committed lockfile and does not touch it', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const lockPath = join(tmp, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
@@ -159,7 +159,7 @@ test('lock=ignore --full tolerates the committed lockfile and does not touch it'
   t.assert.equal(readFileSync(lockPath, 'utf-8'), before, 'lock=ignore must not touch the lockfile')
 }))
 
-test('bundle=add --full writes a bundle whose sources match disk', withTmp((t, tmp) => {
+test('bundle=add writes a bundle whose sources match disk', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
 
@@ -184,7 +184,7 @@ test('bundle=add --full writes a bundle whose sources match disk', withTmp((t, t
   t.assert.equal(decoded.formats['src/entry.js'], 'module')
 }))
 
-test('bundle=load --full rejects a tampered source in the bundle', withTmp((t, tmp) => {
+test('bundle=load rejects a tampered source in the bundle', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
 
@@ -297,7 +297,7 @@ test('node_modules scope lock=frozen tolerates changes to non-tracked src/ files
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
 }))
 
-test('lock=add --full records a .json import alongside the entry', withTmp((t, tmp) => {
+test('lock=add records a .json import alongside the entry', withTmp((t, tmp) => {
   cpSync(jsonFixture, tmp, { recursive: true })
   rmSync(join(tmp, 'stasis.lock.json'))
 
@@ -310,7 +310,7 @@ test('lock=add --full records a .json import alongside the entry', withTmp((t, t
   t.assert.ok(lock.sources['.'].files['src/data.json'].startsWith('sha512-'))
 }))
 
-test('lock=frozen --full succeeds with a committed .json import', withTmp((t, tmp) => {
+test('lock=frozen succeeds with a committed .json import', withTmp((t, tmp) => {
   cpSync(jsonFixture, tmp, { recursive: true })
   const before = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
 
@@ -319,7 +319,7 @@ test('lock=frozen --full succeeds with a committed .json import', withTmp((t, tm
   t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), before)
 }))
 
-test('lock=frozen --full rejects a changed .json import', withTmp((t, tmp) => {
+test('lock=frozen rejects a changed .json import', withTmp((t, tmp) => {
   cpSync(jsonFixture, tmp, { recursive: true })
   writeFileSync(join(tmp, 'src', 'data.json'), '{ "who": "mars" }\n')
 
@@ -328,7 +328,7 @@ test('lock=frozen --full rejects a changed .json import', withTmp((t, tmp) => {
   t.assert.match(r.stderr, /Build failed|ERR_ASSERTION/)
 }))
 
-test('bundle=add --full captures a .json import in the bundle', withTmp((t, tmp) => {
+test('bundle=add captures a .json import in the bundle', withTmp((t, tmp) => {
   cpSync(jsonFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
 

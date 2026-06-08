@@ -54,7 +54,7 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   rmSync(sentinel, { force: true })
 
   const r = run(
-    ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
     {
       cwd: tmp,
       env: {
@@ -117,7 +117,7 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
 }))
 
 test('run --mock with --bundle=load is rejected (mock is for capture, not replay)', (t) => {
-  const r = run(['run', '--lock=frozen', '--full', '--bundle=load', '--bundle-file=/tmp/x.br', '--mock', 'a.js'])
+  const r = run(['run', '--lock=frozen', '--bundle=load', '--bundle-file=/tmp/x.br', '--mock', 'a.js'])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /--mock is for capturing imports/)
 })
@@ -127,7 +127,7 @@ test('run --mock refuses a --bundle-file whose ancestors do not exist', (t) => {
   // would effectively disable --permission for the whole filesystem. Refuse
   // instead and ask the user to pre-create a parent.
   const r = run([
-    'run', '--lock=frozen', '--full', '--bundle=add',
+    'run', '--lock=frozen', '--bundle=add',
     '--bundle-file=/zzz-no-such-toplevel-9999/foo.br', '--mock', 'a.js',
   ])
   t.assert.equal(r.status, 1)
@@ -146,7 +146,7 @@ test('run --mock writes a --bundle-file under a not-yet-existing directory outsi
   const sentinel = join(dirname(tmp), `mock-sentinel-${process.pid}.txt`)
 
   const r = run(
-    ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
     { cwd: tmp, env: { ...cleanEnv, STASIS_MOCK_SENTINEL: sentinel } }
   )
   try {

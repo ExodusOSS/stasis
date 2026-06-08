@@ -102,11 +102,11 @@ test('run rejects --lock=none without a bundle', (t) => {
   t.assert.match(r.stderr, /--lock=none requires --bundle/)
 })
 
-test('run --lock=add --full executes the entry and rewrites the lockfile idempotently', (t) => {
+test('run --lock=add executes the entry and rewrites the lockfile idempotently', (t) => {
   const lockPath = join(runFixture, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
 
-  const r = run(['run', '--lock=add', '--full', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: runFixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
   t.assert.match(r.stderr, /\[stasis\] Running stasis with config:/)
@@ -121,8 +121,8 @@ test('run --lock=add --full executes the entry and rewrites the lockfile idempot
   t.assert.ok(parsed.sources['.'].files['src/hello.js'].startsWith('sha512-'))
 })
 
-test('run --lock=frozen --full executes the entry using the committed lockfile', (t) => {
-  const r = run(['run', '--lock=frozen', '--full', 'src/entry.js'], { cwd: runFixture })
+test('run --lock=frozen executes the entry using the committed lockfile', (t) => {
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: runFixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
   t.assert.match(r.stderr, /lock: 'frozen'/)
@@ -132,23 +132,23 @@ test('run --lock=add rejects a changed source file', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   // change a tracked file: hashes must no longer match the committed lockfile
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
-  const r = run(['run', '--lock=add', '--full', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
 }))
 
-test('run --lock=frozen --full rejects a changed source file', withTmp((t, tmp) => {
+test('run --lock=frozen rejects a changed source file', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
-  const r = run(['run', '--lock=frozen', '--full', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
 }))
 
-test('run --lock=frozen --full rejects a brand new entry not listed in the lockfile', withTmp((t, tmp) => {
+test('run --lock=frozen rejects a brand new entry not listed in the lockfile', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   writeFileSync(join(tmp, 'src', 'fresh.js'), "console.log('fresh')\n")
-  const r = run(['run', '--lock=frozen', '--full', 'src/fresh.js'], { cwd: tmp })
+  const r = run(['run', '--lock=frozen', 'src/fresh.js'], { cwd: tmp })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION/)
 }))
@@ -159,7 +159,7 @@ test('run --lock=add rejects a changed package.json version', withTmp((t, tmp) =
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
   pkg.version = '99.99.99'
   writeFileSync(pkgPath, JSON.stringify(pkg, undefined, 2) + '\n')
-  const r = run(['run', '--lock=add', '--full', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION/)
 }))
@@ -168,7 +168,7 @@ test('run --lock=frozen --bundle=load detects a tampered source in the bundle', 
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -180,7 +180,7 @@ test('run --lock=frozen --bundle=load detects a tampered source in the bundle', 
   rmSync(join(tmp, 'src'), { recursive: true })
 
   const r = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
@@ -193,7 +193,7 @@ test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-l
   const bundlePath = join(tmp, 'snapshot.br')
   // seed the bundle with the original sources
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -202,7 +202,7 @@ test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-l
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
 
   const r = run(
-    ['run', '--lock=replace', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=replace', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
@@ -213,7 +213,7 @@ test('run --lock=add --bundle=replace still enforces the lockfile when rebuildin
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -222,20 +222,20 @@ test('run --lock=add --bundle=replace still enforces the lockfile when rebuildin
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
 
   const r = run(
-    ['run', '--lock=add', '--full', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
 }))
 
-test('run --lock=replace --full rewrites the lockfile from scratch when a source file changed', withTmp((t, tmp) => {
+test('run --lock=replace rewrites the lockfile from scratch when a source file changed', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const lockPath = join(tmp, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
 
-  const r = run(['run', '--lock=replace', '--full', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=replace', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'bonjour, world\n')
   t.assert.match(r.stderr, /lock: 'replace'/)
@@ -251,7 +251,7 @@ test('run --lock=replace --full rewrites the lockfile from scratch when a source
   t.assert.ok(afterHash.startsWith('sha512-'))
 }))
 
-test('run --lock=replace --full ignores stale entries from the previous lockfile', withTmp((t, tmp) => {
+test('run --lock=replace ignores stale entries from the previous lockfile', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const lockPath = join(tmp, 'stasis.lock.json')
   // forge a stale entry into the committed lockfile; replace mode must drop it
@@ -260,7 +260,7 @@ test('run --lock=replace --full ignores stale entries from the previous lockfile
   lock.entries.push('src/stale.js')
   writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
 
-  const r = run(['run', '--lock=replace', '--full', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=replace', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const after = JSON.parse(readFileSync(lockPath, 'utf-8'))
   t.assert.equal(after.sources['.'].files['src/stale.js'], undefined, 'stale file must be dropped')
@@ -272,14 +272,14 @@ test('run --bundle=add rejects a changed source file when bundle exists', withTm
   const bundlePath = join(tmp, 'snapshot.br')
   // create the bundle with the original content
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   // now change a source file -- re-running --bundle=add must refuse to overwrite
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
   const r = run(
-    ['run', '--lock=replace', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=replace', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
@@ -289,7 +289,7 @@ test('run --bundle=replace rewrites the bundle from scratch when a source file c
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -297,7 +297,7 @@ test('run --bundle=replace rewrites the bundle from scratch when a source file c
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
 
   const r = run(
-    ['run', '--lock=replace', '--full', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=replace', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -314,7 +314,7 @@ test('run --bundle=replace ignores stale sources in the existing bundle', withTm
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -325,7 +325,7 @@ test('run --bundle=replace ignores stale sources in the existing bundle', withTm
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run(
-    ['run', '--lock=replace', '--full', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=replace', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -334,15 +334,15 @@ test('run --bundle=replace ignores stale sources in the existing bundle', withTm
 }))
 
 test('run --lock=frozen fails when scope conflicts with the committed lockfile', (t) => {
-  // lockfile in the fixture was generated with scope=full; running without --full
+  // lockfile in the fixture was generated with scope=full; running with --dependencies
   // sets EXODUS_STASIS_SCOPE=node_modules, which can't override stasis.config.json
-  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--lock=frozen', '--dependencies', 'src/entry.js'], { cwd: runFixture })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Flags\/env can not override stasis\.config\.json/)
 })
 
 test('run --debug emits the debug warning on stderr', (t) => {
-  const r = run(['run', '--lock=add', '--full', '--debug', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--lock=add', '--debug', 'src/entry.js'], { cwd: runFixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stderr, /stasis debug mode active/)
 })
@@ -350,7 +350,7 @@ test('run --debug emits the debug warning on stderr', (t) => {
 test('run --bundle=add --bundle-file writes the bundle at the chosen path/filename', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -374,13 +374,13 @@ test('run --bundle=add --bundle-file writes the bundle at the chosen path/filena
 test('run --bundle=load --bundle-file round-trips through a save', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   const load = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -391,7 +391,7 @@ test('run --bundle=load --bundle-file round-trips through a save', withTmp((t, t
 
 test('run --bundle=load fails when --bundle-file does not exist', withTmp((t, tmp) => {
   const r = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${join(tmp, 'missing.br')}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${join(tmp, 'missing.br')}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.notEqual(r.status, 0)
@@ -403,7 +403,7 @@ test('run --lock=frozen --bundle=add writes the bundle without rewriting the loc
   const before = readFileSync(lockPath, 'utf-8')
 
   const r = run(
-    ['run', '--lock=frozen', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -428,13 +428,13 @@ test('run --lock=frozen --bundle=add writes the bundle without rewriting the loc
 test('run --lock=frozen --bundle=add round-trips through --bundle=load', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=frozen', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   const load = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -444,7 +444,7 @@ test('run --lock=frozen --bundle=add round-trips through --bundle=load', withTmp
 test('run --bundle=add creates intermediate directories for --bundle-file', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'nested', 'deeper', 'out.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: runFixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -456,7 +456,7 @@ test('run --bundle=load serves the entry from the bundle when its source is abse
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -465,7 +465,7 @@ test('run --bundle=load serves the entry from the bundle when its source is abse
   rmSync(join(tmp, 'src'), { recursive: true })
 
   const load = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -477,7 +477,7 @@ test('run --bundle=load serves the entry from the bundle when only the entry is 
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -486,7 +486,7 @@ test('run --bundle=load serves the entry from the bundle when only the entry is 
   rmSync(join(tmp, 'src', 'entry.js'))
 
   const load = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -496,14 +496,14 @@ test('run --bundle=load serves the entry from the bundle when only the entry is 
 test('run --lock=frozen --bundle=load works in node_modules scope with non-tracked sources', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: nmFixture }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   t.assert.equal(save.stdout, 'hello, world\n')
 
   const load = run(
-    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: nmFixture }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -521,14 +521,14 @@ test('run --lock=frozen --bundle=load roundtrips a CJS node_modules dep under no
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   t.assert.equal(save.stdout, 'hello, world\n')
 
   const load = run(
-    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -542,7 +542,7 @@ test('run --lock=frozen --bundle=load roundtrips a JSON import with type:json at
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -552,7 +552,7 @@ test('run --lock=frozen --bundle=load roundtrips a JSON import with type:json at
   rmSync(join(tmp, 'src/data.json'))
 
   const load = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -564,7 +564,7 @@ test('run --lock=frozen --bundle=load reads non-node_modules sources from disk i
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -574,7 +574,7 @@ test('run --lock=frozen --bundle=load reads non-node_modules sources from disk i
   writeFileSync(join(tmp, 'src/helper.js'), `export const who = 'from disk'\n`)
 
   const load = run(
-    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -586,7 +586,7 @@ test('run --lock=frozen --bundle=load fails in node_modules scope when a non-tra
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -596,7 +596,7 @@ test('run --lock=frozen --bundle=load fails in node_modules scope when a non-tra
   rmSync(join(tmp, 'src/helper.js'))
 
   const load = run(
-    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(load.status, 0)
@@ -610,7 +610,7 @@ test('run --lock=none --bundle=add writes the bundle without touching the lockfi
   rmSync(lockPath)
 
   const r = run(
-    ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -631,7 +631,7 @@ test('run --lock=none --bundle=load runs from a bundle with no lockfile on disk'
   rmSync(join(tmp, 'stasis.lock.json'))
 
   const save = run(
-    ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -640,7 +640,7 @@ test('run --lock=none --bundle=load runs from a bundle with no lockfile on disk'
   rmSync(join(tmp, 'src'), { recursive: true })
 
   const load = run(
-    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -651,13 +651,13 @@ test('run --lock=none --bundle=load runs from a bundle with no lockfile on disk'
 test('run --lock=none rejects an existing lockfile (footgun guard)', (t) => {
   // lock=none is the implicit default; the rejection forces the user to make an
   // explicit choice (add/replace/frozen/ignore) when a lockfile is present.
-  const r = run(['run', '--lock=none', '--bundle=add', '--bundle-file=/tmp/nope.br', '--full', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--lock=none', '--bundle=add', '--bundle-file=/tmp/nope.br', 'src/entry.js'], { cwd: runFixture })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Unexpected .*stasis\.lock\.json/)
 })
 
 test('run with no flags rejects an existing lockfile (default lock=none footgun guard)', (t) => {
-  const r = run(['run', '--bundle=add', '--bundle-file=/tmp/nope.br', '--full', 'src/entry.js'], { cwd: runFixture })
+  const r = run(['run', '--bundle=add', '--bundle-file=/tmp/nope.br', 'src/entry.js'], { cwd: runFixture })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Unexpected .*stasis\.lock\.json/)
 })
@@ -669,7 +669,7 @@ test('run --lock=ignore tolerates an existing lockfile and does not touch it', w
   const bundlePath = join(tmp, 'snapshot.br')
 
   const r = run(
-    ['run', '--lock=ignore', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=ignore', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -683,14 +683,14 @@ test('run --lock=ignore --bundle=load serves from bundle without lockfile intera
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   rmSync(join(tmp, 'src'), { recursive: true })
 
   const load = run(
-    ['run', '--lock=ignore', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=ignore', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -701,11 +701,11 @@ test('run --bundle=none rejects an existing bundle file', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'stasis.code.br')
   // Seed a bundle in the project root (default bundle path)
-  const save = run(['run', '--lock=add', '--full', '--bundle=add', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   t.assert.ok(existsSync(bundlePath))
 
-  const r = run(['run', '--lock=frozen', '--full', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Unexpected .*stasis\.code\.br/)
 }))
@@ -713,11 +713,11 @@ test('run --bundle=none rejects an existing bundle file', withTmp((t, tmp) => {
 test('run --bundle=ignore tolerates an existing bundle file and does not touch it', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'stasis.code.br')
-  const save = run(['run', '--lock=add', '--full', '--bundle=add', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   const bundleBefore = readFileSync(bundlePath)
 
-  const r = run(['run', '--lock=frozen', '--full', '--bundle=ignore', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=frozen', '--bundle=ignore', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
   t.assert.deepEqual(readFileSync(bundlePath), bundleBefore, 'bundle=ignore must not touch the bundle')
@@ -729,7 +729,7 @@ test('run --lock=frozen --bundle=load rejects a bundle with mismatching scope', 
 
   // create a bundle in full scope
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -740,7 +740,7 @@ test('run --lock=frozen --bundle=load rejects a bundle with mismatching scope', 
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
@@ -751,7 +751,7 @@ test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not o
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -761,7 +761,7 @@ test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not o
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
@@ -776,7 +776,7 @@ test('run --bundle=load rejects a v0 bundle whose path-inferred module name disa
   const bundlePath = join(tmp, 'snapshot.br')
 
   const save = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -799,7 +799,7 @@ test('run --bundle=load rejects a v0 bundle whose path-inferred module name disa
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(v0)))
 
   const load = run(
-    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(load.status, 0)
@@ -811,7 +811,7 @@ test('run --bundle=load accepts a v0 legacy bundle (flat sources, no entries/mod
   const bundlePath = join(tmp, 'snapshot.br')
   // Build a fresh v1 bundle, then downgrade it to the v0 legacy shape on disk
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -827,7 +827,7 @@ test('run --bundle=load accepts a v0 legacy bundle (flat sources, no entries/mod
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(v0)))
 
   const load = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -838,7 +838,7 @@ test('run --bundle=load rejects a bundle whose entries disagree with the lockfil
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -848,7 +848,7 @@ test('run --bundle=load rejects a bundle whose entries disagree with the lockfil
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
@@ -859,7 +859,7 @@ test('run --bundle=load rejects a bundle whose module name disagrees with the lo
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -869,7 +869,7 @@ test('run --bundle=load rejects a bundle whose module name disagrees with the lo
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run(
-    ['run', '--lock=frozen', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(r.status, 0)
@@ -880,14 +880,14 @@ test('run --bundle=load rejects an entry not listed in the bundle entries', with
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   rmSync(join(tmp, 'stasis.lock.json'))
 
   const load = run(
-    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/hello.js'],
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/hello.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(load.status, 0)
@@ -900,7 +900,7 @@ test('parseCode rejects a v1 full-scope bundle with empty entries', withTmp((t, 
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -911,7 +911,7 @@ test('parseCode rejects a v1 full-scope bundle with empty entries', withTmp((t, 
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const load = run(
-    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.notEqual(load.status, 0)

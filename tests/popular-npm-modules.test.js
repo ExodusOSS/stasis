@@ -160,7 +160,7 @@ before(async () => {
     await hardlinkCopy(fixture, gen)
     const bundlePath = join(gen, 'snap.br')
     const r = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=add', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: gen },
     )
     if (r.status !== 0) throw new Error(`Failed to generate shared artifacts: ${r.stderr}`)
@@ -186,7 +186,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     const bundlePath = join(tmp, 'snapshot.br')
 
     const save = await run(
-      ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=none', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -211,7 +211,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     t.assert.ok(formats.has('commonjs'), `bundle should include CJS-format files; got ${[...formats].join(', ')}`)
 
     const load = await run(
-      ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=none', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -223,7 +223,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     const bundlePath = join(tmp, 'snapshot.br')
 
     const save = await run(
-      ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=none', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -238,7 +238,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     )
 
     const load = await run(
-      ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=none', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -250,7 +250,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
 
   test('lock=add records sha512 + name/version for every popular package', withTmp(async (t, tmp) => {
     await freshCopy(tmp)
-    const r = await run(['run', '--lock=add', '--bundle=none', 'src/entry.js'], { cwd: tmp })
+    const r = await run(['run', '--lock=add', '--dependencies', '--bundle=none', 'src/entry.js'], { cwd: tmp })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
     t.assert.equal(r.stdout, expectedOutput)
 
@@ -270,7 +270,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
   test('lock=frozen passes against the committed lockfile and never rewrites it', withTmp(async (t, tmp) => {
     await freshCopy(tmp)
     await writeFile(join(tmp, 'stasis.lock.json'), lockText)
-    const r = await run(['run', '--lock=frozen', '--bundle=none', 'src/entry.js'], { cwd: tmp })
+    const r = await run(['run', '--lock=frozen', '--dependencies', '--bundle=none', 'src/entry.js'], { cwd: tmp })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
     t.assert.equal(r.stdout, expectedOutput)
     t.assert.equal(await readFile(join(tmp, 'stasis.lock.json'), 'utf-8'), lockText, 'frozen must not rewrite the lockfile')
@@ -286,7 +286,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     const victim = join(tmp, 'node_modules', 'lodash', 'lodash.js')
     await tamper(victim, `${await readFile(victim, 'utf-8')}\n// tampered\n`)
 
-    const r = await run(['run', '--lock=frozen', '--bundle=none', 'src/entry.js'], { cwd: tmp })
+    const r = await run(['run', '--lock=frozen', '--dependencies', '--bundle=none', 'src/entry.js'], { cwd: tmp })
     t.assert.notEqual(r.status, 0)
     t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
   }))
@@ -304,7 +304,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     await writeFile(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
     const r = await run(
-      ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=frozen', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.notEqual(r.status, 0)
@@ -316,7 +316,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     await freshCopy(tmp)
     const lockPath = join(tmp, 'stasis.lock.json')
     await writeFile(lockPath, lockText)
-    const r = await run(['run', '--lock=add', '--bundle=none', 'src/entry.js'], { cwd: tmp })
+    const r = await run(['run', '--lock=add', '--dependencies', '--bundle=none', 'src/entry.js'], { cwd: tmp })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
     t.assert.equal(await readFile(lockPath, 'utf-8'), lockText, 'lock=add against a matching lockfile must be a no-op')
   }))
@@ -332,7 +332,7 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     }
     await writeFile(lockPath, `${JSON.stringify(seeded, undefined, 2)}\n`)
 
-    const r = await run(['run', '--lock=replace', '--bundle=none', 'src/entry.js'], { cwd: tmp })
+    const r = await run(['run', '--lock=replace', '--dependencies', '--bundle=none', 'src/entry.js'], { cwd: tmp })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
     const after = parseLock(await readFile(lockPath, 'utf-8'))
     t.assert.equal(after.modules['node_modules/totally-stale-pkg'], undefined, 'stale module must be dropped')
@@ -390,7 +390,7 @@ describe('lock x bundle x mock matrix', { concurrency: true }, () => {
           if (seedLock) await writeFile(lockPath, lockText)
           if (seedBundle) await writeFile(bundlePath, bundleBuf)
 
-          const args = ['run', `--lock=${lock}`, `--bundle=${bundle}`]
+          const args = ['run', `--lock=${lock}`, '--dependencies', `--bundle=${bundle}`]
           if (bundle !== 'none') args.push(`--bundle-file=${bundlePath}`)
           if (mock) args.push('--mock')
           args.push('src/entry.js')
