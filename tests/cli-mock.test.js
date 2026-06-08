@@ -71,7 +71,9 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   t.assert.match(r.stdout, /http blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.match(r.stdout, /net blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.match(r.stdout, /ws blocked ERR_STASIS_MOCK_BLOCKED/)
-  t.assert.match(r.stdout, /fetch blocked .*stasis --mock/)
+  // process method denials (chdir is selected by the fixture; mock.js also
+  // covers kill/umask/dlopen/setUid/...).
+  t.assert.match(r.stdout, /chdir blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.doesNotMatch(r.stdout, /NOT BLOCKED/)
   // Sanity: user code ran up to the never-resolving timer await...
   t.assert.match(r.stdout, /hello, world/)

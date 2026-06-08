@@ -93,16 +93,31 @@ const denyModuleSurface = (specifier, mod, prefix = specifier) => {
 //      bypass, a misconfigured --allow flag, code that grabs primitives via
 //      process.binding before --permission's check fires, ...).
 const DENY_ALL = [
-  // Network
+  // Network surface (no --allow-net counterpart -- JS-mock is the only layer).
   'node:http', 'node:https', 'node:http2',
   'node:net', 'node:dgram', 'node:tls',
   'node:dns', 'node:dns/promises',
-  // Process / worker / debug -- duplicated with --permission
+  // Process / worker / debug. Already kernel-denied by --permission; we
+  // duplicate the deny here for attributable errors and defense in depth
+  // against a future --allow-* slip-up or a process.binding bypass.
   'node:child_process',
   'node:worker_threads',
   'node:cluster',
   'node:inspector',
   'node:inspector/promises',
+  // Other side-effect surfaces nothing else covers:
+  'node:repl',         // repl.start() opens an interactive stdin loop
+  'node:sqlite',       // DatabaseSync can open/create SQLite files (Node 22+)
+  'node:trace_events', // createTracing() can write trace files
+  'node:v8',           // writeHeapSnapshot bypasses node:fs (goes through V8);
+                       // setFlagsFromString mutates global V8 state. Serialize/
+                       // deserialize are blocked too -- if a package needs them
+                       // it can't run under --mock, which is consistent with
+                       // the "deny whole module" stance.
+  // node:wasi is *not* in this list: just require('node:wasi') emits an
+  // ExperimentalWarning to stderr on every --mock run, and --permission
+  // without --allow-wasi already denies WASI construction at the kernel
+  // level. The duplicate-deny isn't worth the warning noise.
 ]
 
 for (const specifier of DENY_ALL) {
@@ -113,6 +128,26 @@ for (const specifier of DENY_ALL) {
     continue // not present on this build
   }
   denyModuleSurface(specifier, mod)
+}
+
+// process method denials. process.exit / process.abort are deliberately left
+// alone -- if user code wants to terminate early, let it; that's not a side
+// effect we should hide. The rest mutate global process state or do real I/O:
+//   - chdir affects fs resolution for everything that runs after
+//   - kill signals other processes
+//   - umask affects every future file create
+//   - dlopen loads a native addon (--permission also denies)
+//   - setUid/setGid/setEuid/setEgid/setgroups/initgroups change privileges
+//     (--permission also denies these). Duplicated here for attributable
+//     errors and defense in depth.
+const PROCESS_DENY = [
+  'chdir', 'kill', 'umask', 'dlopen',
+  'setUid', 'setGid', 'setEuid', 'setEgid', 'setgroups', 'initgroups',
+]
+for (const name of PROCESS_DENY) {
+  if (typeof process[name] === 'function') {
+    mock.method(process, name, denyFn(`process.${name}()`))
+  }
 }
 
 // fs writers: --permission blocks them at the kernel level too, but we mock
@@ -159,12 +194,15 @@ syncBuiltinESMExports()
 // error instead of a confusing low-level socket failure.) These globals are
 // writable + configurable, so assign directly.
 //
-// fetch returns a *rejected* promise rather than throwing synchronously, to
-// honor its contract -- defensive `fetch(...).catch(...)` code then keeps
-// running and we capture more of the graph. WebSocket/EventSource throw from
-// their constructors (fail closed).
+// fetch returns a *forever-pending* promise rather than rejecting -- same
+// "silently ignored" semantics as the promise-style timers. An awaiter hangs,
+// fire-and-forget `void fetch(url)` quietly sits as a pending promise, and we
+// don't need an unhandledRejection trap (no rejection is produced). The event
+// loop is unaffected by a pending promise on its own, so the capture still
+// drains and the bundle gets written on beforeExit. WebSocket/EventSource
+// throw from their constructors so the synchronous shape is preserved.
 if (typeof globalThis.fetch === 'function') {
-  globalThis.fetch = () => Promise.reject(blocked('fetch()'))
+  globalThis.fetch = () => new Promise(() => {})
 }
 for (const name of ['WebSocket', 'EventSource']) {
   if (typeof globalThis[name] === 'function') {
@@ -174,9 +212,10 @@ for (const name of ['WebSocket', 'EventSource']) {
   }
 }
 
-// A denied fetch used fire-and-forget (e.g. an analytics beacon: `void
-// fetch(url)`) would otherwise surface as an unhandledRejection and tear the
-// process down before the loader writes the bundle on `beforeExit`. Swallow
+// Our promise-shaped mocks (fs/promises, dns/promises, ...) sync-throw, which
+// `await` converts into a rejection. A fire-and-forget caller (no .catch / no
+// try-catch) would otherwise surface as unhandledRejection and tear the
+// process down before the loader writes the bundle on beforeExit. Swallow
 // *only* our own denials; rethrow everything else so real bugs still crash.
 process.on('unhandledRejection', (reason) => {
   if (reason?.__stasisMock) return
