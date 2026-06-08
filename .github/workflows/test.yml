@@ -21,6 +21,17 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: pnpm
+          # Include every pnpm-lock.yaml in the cache key so fixture lockfiles
+          # invalidate the store cache too — otherwise tests/fixtures/*/pnpm-lock.yaml
+          # changes don't trigger a fresh store, and a stale cache could mask a
+          # dep update.
+          cache-dependency-path: '**/pnpm-lock.yaml'
           registry-url: 'https://registry.npmjs.org'
       - run: pnpm i --frozen-lockfile
+      # The popular-npm-modules fixture has its own (sub-)workspace with real
+      # npm deps; the headline test installs from it. Install here so the test
+      # doesn't pay the network cost (or fail under network outages) on every
+      # CI run — the test's before() hook only runs install as a local-dev
+      # fallback when node_modules is missing.
+      - run: pnpm -C tests/fixtures/popular-npm-modules i --frozen-lockfile
       - run: node --run test

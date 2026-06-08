@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
-import { splitNodeModulesPath } from '../util.js'
+import { brotliOptions, splitNodeModulesPath } from '../util.js'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -169,7 +169,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 // to stderr so it doesn't interleave with the binary output on stdout.
 export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output } = {}) {
   const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
-  const data = brotliCompressSync(bundle.serializeCode())
+  const data = brotliCompressSync(bundle.serializeCode(), brotliOptions())
   if (output) {
     const outAbs = resolve(cwd, output)
     mkdirSync(dirname(outAbs), { recursive: true })

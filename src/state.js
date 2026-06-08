@@ -10,7 +10,7 @@ import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
-import { splitNodeModulesPath } from './util.js'
+import { brotliOptions, splitNodeModulesPath } from './util.js'
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
@@ -440,7 +440,7 @@ export class State {
     if (this.config.writeBundle) {
       const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
       mkdirSync(dirname(sourcesPath), { recursive: true })
-      writeFileSync(sourcesPath, brotliCompressSync(this.sourceData))
+      writeFileSync(sourcesPath, brotliCompressSync(this.sourceData, brotliOptions()))
     }
   }
 }

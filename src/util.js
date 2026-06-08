@@ -1,3 +1,5 @@
+import { constants as zlibConstants } from 'node:zlib'
+
 const sep = '/'
 
 export function assert(condition, msg) {
@@ -57,4 +59,17 @@ export function splitNodeModulesPath(path) {
   if (parts.length <= pkgLen || parts.slice(0, pkgLen).some((p) => !p)) return null
   const name = parts.slice(0, pkgLen).join('/')
   return { dir: path.slice(0, after) + name, rel: parts.slice(pkgLen).join('/'), name }
+}
+
+// Brotli's default quality is 11 (max) and the encoder is superlinear in input
+// size, so on a multi-MB source bundle it dominates write time. Tests that
+// bundle real-world dependency trees can override this via the env var to keep
+// runs fast; the output is still a valid .br at any quality. Production code
+// pays the default cost in exchange for the best ratio.
+export function brotliOptions() {
+  const raw = process.env.EXODUS_STASIS_BROTLI_QUALITY
+  if (!raw) return undefined
+  const n = Number(raw)
+  assert(Number.isInteger(n) && n >= 0 && n <= 11, `EXODUS_STASIS_BROTLI_QUALITY must be an integer 0..11, got ${raw}`)
+  return { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: n } }
 }
