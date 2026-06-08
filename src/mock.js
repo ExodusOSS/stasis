@@ -118,3 +118,35 @@ process.on('unhandledRejection', (reason) => {
   if (reason?.__stasisMock) return
   throw reason
 })
+
+// Timers: silently ignored. Callback-style timers (setTimeout/setInterval/
+// setImmediate) become no-ops -- the callback never runs but the scheduling
+// call returns normally so user code keeps going. Promise-style timers
+// (node:timers/promises) resolve *immediately* with the value the caller
+// passed, so `await setTimeout(1000, x)` returns `x` without delay rather
+// than hanging forever. That keeps `await`-based control flow moving past
+// pacing/debounce code instead of deadlocking the capture.
+//
+// Stasis itself does not import node:timers anywhere, so unlike node:fs
+// the ESM wrapper for node:timers is not pre-materialized; the CJS exports
+// mutation below is picked up by the user's first ESM import lazily and
+// propagates to destructured `import { setTimeout } from 'node:timers'`.
+const noop = () => undefined
+for (const name of ['setTimeout', 'setInterval', 'setImmediate']) globalThis[name] = noop
+for (const name of ['clearTimeout', 'clearInterval', 'clearImmediate']) globalThis[name] = noop
+
+const timers = require('node:timers')
+for (const name of ['setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval', 'clearImmediate']) {
+  mock.method(timers, name, noop)
+}
+
+const timersPromises = require('node:timers/promises')
+mock.method(timersPromises, 'setTimeout', (_ms, value) => Promise.resolve(value))
+mock.method(timersPromises, 'setImmediate', (value) => Promise.resolve(value))
+// setInterval returns an async iterable that yields on each tick; we yield
+// nothing so `for await (const _ of setInterval(...))` exits immediately.
+mock.method(timersPromises, 'setInterval', () => ({
+  [Symbol.asyncIterator]() {
+    return { next: () => Promise.resolve({ done: true, value: undefined }) }
+  },
+}))

@@ -62,6 +62,10 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   t.assert.match(r.stdout, /net blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.match(r.stdout, /ws blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.match(r.stdout, /fetch blocked .*stasis --mock/)
+  // Timer layer: scheduling returns normally, callbacks never fire, the
+  // promise version resolves immediately so the capture doesn't hang.
+  t.assert.match(r.stdout, /timer await: awaited/)
+  t.assert.match(r.stdout, /timer callbacks fired: 0/)
   t.assert.doesNotMatch(r.stdout, /NOT BLOCKED/)
   t.assert.match(r.stdout, /hello, world/)
 

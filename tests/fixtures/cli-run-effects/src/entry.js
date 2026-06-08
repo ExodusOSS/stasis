@@ -3,6 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { spawnSync } from 'node:child_process'
+import { setTimeout as pTimeout } from 'node:timers/promises'
 
 // Every side-effecting call should be denied. fs writes and child_process are
 // blocked by --permission; the network builtins and fetch/WebSocket by the
@@ -27,4 +28,15 @@ catch (e) { console.log('fetch', 'blocked', e.message) }
 // swallow our own denial so the capture still completes and writes the bundle.
 void fetch('http://stasis.invalid/beacon')
 
+// Timer scheduling must succeed but the callback must never run; the promise
+// version must resolve immediately so awaiting code keeps moving.
+let fired = 0
+setTimeout(() => { fired++ }, 0)
+setInterval(() => { fired++ }, 1)
+setImmediate(() => { fired++ })
+const v = await pTimeout(100_000, 'awaited')   // would otherwise hang the capture
+console.log('timer await:', v)
+console.log('timer callbacks fired:', fired)
+
 console.log(greet('world'))
+
