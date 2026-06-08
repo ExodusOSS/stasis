@@ -1,14 +1,19 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
+import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
+import { scan } from '../scan.js'
+import { State } from '../state.js'
 import { brotliOptions, splitNodeModulesPath } from '../util.js'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
   readRemappingsFile,
 } from '../loaders/solidity.js'
+
+const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 
 // Fallback package identity for the workspace bucket when no package.json
 // with a name+version can be found by walking up from any of the bundled
@@ -162,14 +167,128 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   })
 }
 
+// Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs files
+// by statically scanning the require/import graph and reading reachable file
+// contents from disk -- no user code is ever loaded or executed. The bundle
+// shape matches what `src/loader.js` records at runtime, so the result loads
+// via `stasis run --bundle=load` interchangeably with a runtime-produced one.
+//
+// Refuses to write when any specifier is unresolved (dynamic require, missing
+// dep, conditional `exports` mismatch): a bundle with holes would silently
+// fall through to disk at load time, defeating the point of bundling.
+//
+// Scope and per-edge conditions come from the project's stasis.config.json
+// (or `EXODUS_STASIS_SCOPE`); pass `scope` explicitly to override.
+export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs file is required')
+  }
+  for (const e of entries) {
+    if (!JS_EXTS.has(extname(e))) throw new Error(`buildJsBundle: not a JS file: ${e}`)
+  }
+
+  const baseDir = resolve(cwd)
+  const absEntries = entries.map((e) => resolve(baseDir, e))
+
+  const scanner = scan(absEntries)
+  // Unresolved edges (dynamic specifiers, optional deps not installed) are NOT
+  // fatal: they match the runtime loader's behavior. Code like
+  // `try { require('supports-color') } catch {}` never has its `supports-color`
+  // edge recorded by the runtime bundle either, because Node's resolver throws
+  // before the resolve hook can record it. At load time, state.getImport will
+  // assert for these edges -- and the user's try/catch will catch the assertion
+  // exactly as it catches MODULE_NOT_FOUND in the non-bundled path. Warn so the
+  // user knows their bundle isn't fully self-contained for those edges, but
+  // don't refuse to produce it.
+  if (scanner.unresolved.length > 0) {
+    const summary = scanner.unresolved
+      .slice(0, 10)
+      .map((u) => `  ${u.kind} ${u.spec ?? '<dynamic>'} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
+      .join('\n')
+    const more = scanner.unresolved.length > 10 ? `\n  ... and ${scanner.unresolved.length - 10} more` : ''
+    console.warn(`[stasis] Bundle has ${scanner.unresolved.length} unresolved import(s); they will fall through at load time:\n${summary}${more}`)
+  }
+
+  // Use a non-preload State to materialise the bundle: addFile bucketizes by
+  // package.json + records hashes/sources/formats, and addImport replays the
+  // per-edge import map. State's serializeCode then emits the same v1 layout
+  // the runtime loader writes — see src/loader.js for the matching pair.
+  //
+  // bundle=replace skips reading any pre-existing stasis.code.br on disk;
+  // bundle=add would merge it, leaking stale formats/imports entries for
+  // files the new bundle doesn't carry. lock=ignore tolerates a pre-existing
+  // stasis.lock.json without loading or validating it (the bundle path
+  // doesn't consume one), and refusing to coexist with one (lock=none) would
+  // make `stasis bundle` brittle in any project that's also using `stasis run`.
+  const state = new State(baseDir, { bundle: 'replace', lock: 'ignore', ...(scope ? { scope } : {}) })
+  for (const [url, info] of scanner.files) {
+    const isEntry = scanner.entries.has(url)
+    state.addFile(url, { format: info.format, isEntry })
+  }
+  // Static bundles can't anticipate the full condition set Node will pass to
+  // its resolve hook at load time (Node adds runtime conditions like
+  // 'module-sync', 'node-addons' that aren't accept-list conditions). Store
+  // every edge under the wildcard '*' key; State.getImport falls back to it
+  // when the runtime-condition lookup misses.
+  for (const [, byParent] of scanner.imports) {
+    for (const [parentURL, specs] of byParent) {
+      for (const [spec, childURL] of specs) {
+        state.addImport(parentURL, spec, childURL, { conditions: '*' })
+      }
+    }
+  }
+  return state
+}
+
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
 // stasis bundle (matching the on-disk format of `stasis.code.br`). When
 // `output` is provided, writes to that path; otherwise writes to stdout.
 // Prints a one-line `[stasis] Bundled <n> files from <dir> to <dest>` summary
 // to stderr so it doesn't interleave with the binary output on stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output } = {}) {
-  const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
-  const data = brotliCompressSync(bundle.serializeCode(), brotliOptions())
+//
+// Dispatch by extension: all entries must be either .sol (Solidity) OR
+// .js/.cjs/.mjs (JS, via static scan). Mixing fails fast; --mapping is .sol only.
+//
+// For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
+// attests every file in the bundle. The static scan walks both branches of
+// conditional requires (e.g. debug/src/index.js' `if (browser) require('./browser')
+// else require('./node')`), so the runtime lockfile from `stasis run --lock=add`
+// won't attest the unused branch -- if the user wants `lock=frozen` against a
+// statically-built bundle, they need this companion lockfile.
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('bundleCommand: at least one entry file is required')
+  }
+  const isSol = entries.every((e) => e.endsWith('.sol'))
+  const isJs = entries.every((e) => JS_EXTS.has(extname(e)))
+  if (!isSol && !isJs) {
+    throw new Error('bundleCommand: entries must all be .sol or all be .js/.cjs/.mjs (no mixing)')
+  }
+  if (mappingFile && !isSol) {
+    throw new Error('bundleCommand: --mapping is only valid for .sol bundles')
+  }
+  if (scope !== undefined && !isJs) {
+    throw new Error('bundleCommand: --scope is only valid for JS bundles')
+  }
+  if (lockfile !== undefined && !isJs) {
+    throw new Error('bundleCommand: --lockfile is only valid for JS bundles')
+  }
+
+  let serialized
+  let files
+  let lockData
+  if (isSol) {
+    const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
+    serialized = bundle.serializeCode()
+    files = [...bundle.sources.keys()]
+  } else {
+    const state = await buildJsBundle({ cwd, entries, scope })
+    serialized = state.sourceData
+    files = [...state.sources.keys()]
+    if (lockfile) lockData = state.lockData
+  }
+
+  const data = brotliCompressSync(serialized, brotliOptions())
   if (output) {
     const outAbs = resolve(cwd, output)
     mkdirSync(dirname(outAbs), { recursive: true })
@@ -177,12 +296,12 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   } else {
     process.stdout.write(data)
   }
-  // Bundle.sources flattens every per-package bucket into project-relative
-  // paths, so the summary reflects every file we wrote — workspace and
-  // node_modules alike — not just the workspace bucket.
-  const files = [...bundle.sources.keys()]
+  if (lockData) {
+    const lockAbs = resolve(cwd, lockfile)
+    mkdirSync(dirname(lockAbs), { recursive: true })
+    writeFileSync(lockAbs, lockData)
+  }
   const fromDir = outermostDir(files, resolve(cwd))
   const dest = output ?? '<stdout>'
   console.warn(`[stasis] Bundled ${files.length} files from ${fromDir} to ${dest}`)
-  return bundle
 }

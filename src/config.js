@@ -39,6 +39,7 @@ export function assertOptionsMatchConfig(config, options) {
 
 export class Config {
   #env
+  #explicit
   #scope
   #lock
   #bundle
@@ -46,10 +47,16 @@ export class Config {
   #debug
 
   // Options match the CLI flags (lock/bundle/bundleFile/scope/debug). Env vars take effect at
-  // construction time; if both env and an option are set they must agree.
+  // construction time; if both env and an option are set they must agree. Likewise,
+  // any explicit constructor option is treated as authoritative: a later `loadConfig`
+  // call (which reads stasis.config.json) must agree with it -- the alternative
+  // (silently overwriting `--scope=full` with the file's `"scope":"node_modules"`)
+  // was a footgun the CLI couldn't detect, since the flag was happily accepted
+  // and then quietly ignored.
   constructor(options = {}) {
     const { scope, lock, bundle, bundleFile, debug, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
+    this.#explicit = { scope, lock, bundle, bundleFile, debug }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
@@ -125,6 +132,13 @@ export class Config {
       if (this.#env.lock !== undefined) assert.equal(this.#lock, this.#env.lock)
       if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
       if (this.#env.debug !== undefined) assert.equal(this.#debug, envDebugBool(this.#env.debug))
+      // Explicit constructor options are equally authoritative: an explicit
+      // `--scope=full` shouldn't be silently overridden by an on-disk
+      // `{"scope":"node_modules"}`. The asserts mirror the env block above.
+      if (this.#explicit.scope !== undefined) assert.equal(this.#scope, this.#explicit.scope)
+      if (this.#explicit.lock !== undefined) assert.equal(this.#lock, this.#explicit.lock)
+      if (this.#explicit.bundle !== undefined) assert.equal(this.#bundle, this.#explicit.bundle)
+      if (this.#explicit.debug !== undefined) assert.equal(this.#debug, this.#explicit.debug)
     } catch (cause) {
       throw new Error('Flags/env can not override stasis.config.json', { cause })
     }

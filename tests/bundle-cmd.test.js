@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -329,10 +329,28 @@ test('CLI: bundle with no files prints usage', (t) => {
   t.assert.match(r.stderr, /Nothing to bundle/)
 })
 
-test('CLI: bundle rejects a non-.sol arg', (t) => {
-  const r = runCli(['bundle', 'foo.js'])
+test('CLI: bundle rejects an arg with an unsupported extension', (t) => {
+  const r = runCli(['bundle', 'foo.txt'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /only accepts \.sol files/)
+  t.assert.match(r.stderr, /must all be \.sol or all be \.js\/\.cjs\/\.mjs/)
+})
+
+test('CLI: bundle rejects mixing .sol and .js entries', (t) => {
+  const r = runCli(['bundle', 'a.sol', 'b.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /must all be \.sol or all be \.js\/\.cjs\/\.mjs/)
+})
+
+test('CLI: bundle rejects --mapping when entries are JS', (t) => {
+  const r = runCli(['bundle', '--mapping=remappings.txt', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--mapping is only valid for \.sol bundles/)
+})
+
+test('CLI: bundle rejects --scope when entries are .sol', (t) => {
+  const r = runCli(['bundle', '--scope=full', 'a.sol'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--scope is only valid for JS bundles/)
 })
 
 test('CLI: bundle exits non-zero and writes no output when there are unresolved imports', withTmp((t, tmp) => {
@@ -452,4 +470,97 @@ test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['src/A.sol', 'src/B.sol', 'src/Shared.sol'],
   )
+}))
+
+// --- Regression: JS bundle correctness fixes ---
+
+const cjsFixture = join(here, 'fixtures', 'cli-run-cjs')
+
+// Regression: `stasis bundle` for JS used to construct State with bundle='add',
+// which made the State constructor MERGE any pre-existing stasis.code.br on
+// disk. The merged-in formats/imports entries leaked into the new bundle,
+// silently attributing the previous build's files and edges to the new one.
+// Fix: build with bundle='replace' to skip the on-disk merge entirely.
+test('CLI: bundle (JS) does not inherit stale formats/imports from a pre-existing stasis.code.br', withTmp((t, tmp) => {
+  // Set up a tiny scope=full fixture so we can build two distinct bundles in the
+  // same directory and observe the second's contents.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'stale-test', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  const srcDir = join(tmp, 'src')
+  mkdtempSync(srcDir + '_') // ensure mkdir helper works
+  rmSync(srcDir + '_', { recursive: true, force: true })
+  writeFileSync(join(tmp, 'seed.js'), "import './seedlib.js'\n")
+  writeFileSync(join(tmp, 'seedlib.js'), 'export const x = 1\n')
+  writeFileSync(join(tmp, 'entry.js'), 'export const y = 2\n')
+
+  // First bundle: writes stasis.code.br with seed.js + seedlib.js.
+  const bundlePath = join(tmp, 'stasis.code.br')
+  const r1 = runCli(['bundle', `--output=${bundlePath}`, 'seed.js'], { cwd: tmp })
+  t.assert.equal(r1.status, 0, `first bundle stderr: ${r1.stderr}`)
+
+  // Second bundle: same dir, different entry (entry.js, no seedlib dependency).
+  const r2 = runCli(['bundle', `--output=${bundlePath}`, 'entry.js'], { cwd: tmp })
+  t.assert.equal(r2.status, 0, `second bundle stderr: ${r2.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf-8'))
+  t.assert.deepEqual([...decoded.entries].toSorted(), ['entry.js'],
+    'second bundle must not carry the first bundle\'s entries')
+  // formats and imports must NOT mention seed.js / seedlib.js
+  t.assert.ok(!Object.keys(decoded.formats).includes('seed.js'),
+    `stale formats leaked: ${Object.keys(decoded.formats).join(', ')}`)
+  t.assert.ok(!Object.keys(decoded.formats).includes('seedlib.js'),
+    `stale formats leaked: ${Object.keys(decoded.formats).join(', ')}`)
+  for (const byParent of Object.values(decoded.imports)) {
+    t.assert.ok(!Object.keys(byParent).includes('seed.js'),
+      `stale imports leaked: ${Object.keys(byParent).join(', ')}`)
+  }
+}))
+
+// Regression: passing `--scope=full` to `stasis bundle` against a project
+// whose stasis.config.json said `{"scope":"node_modules"}` used to be SILENTLY
+// IGNORED. Config.loadConfig overwrote the constructor option but only
+// asserted env-vs-file conflicts. Fix: also assert constructor-option-vs-file
+// conflict (symmetric with the env check).
+test('CLI: bundle --scope conflicting with stasis.config.json errors instead of silently winning', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'scope-test', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'node_modules' }))
+  writeFileSync(join(tmp, 'entry.js'), 'console.log(1)\n')
+
+  const r = runCli(['bundle', '--scope=full', '--output=snap.br', 'entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0, 'should error on --scope vs config disagreement')
+  t.assert.match(r.stderr, /Flags\/env can not override stasis\.config\.json|node_modules.*full|full.*node_modules/,
+    `expected conflict error in stderr, got: ${r.stderr}`)
+}))
+
+// Regression: state.getImport used to `assert.ok(file)` on a missing edge,
+// producing `code: 'ERR_ASSERTION'`. Plain Node throws `ERR_MODULE_NOT_FOUND`
+// for the same failure. ESM dynamic-import callers commonly do
+//   try { await import(x) } catch (e) { if (e.code !== 'ERR_MODULE_NOT_FOUND') throw e }
+// and that guard would re-throw on the bundle's ERR_ASSERTION.
+test('CLI: bundle load surfaces ERR_MODULE_NOT_FOUND for dynamic import of a missing module', withTmp((t, tmp) => {
+  cpSync(cjsFixture, tmp, { recursive: true })
+  // Replace the entry with one that catches ERR_MODULE_NOT_FOUND specifically.
+  const entry = join(tmp, 'src', 'entry.cjs')
+  writeFileSync(entry,
+    "(async () => {\n" +
+    "  try { await import('not-installed') }\n" +
+    "  catch (e) { console.log(JSON.stringify({ code: e.code })) }\n" +
+    "})()\n",
+  )
+
+  const bundlePath = join(tmp, 'snap.br')
+  const build = runCli(['bundle', `--output=${bundlePath}`, 'src/entry.cjs'], { cwd: tmp })
+  t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
+
+  // cjsFixture ships a stasis.lock.json; use lock=ignore so `stasis run` tolerates it.
+  const load = runCli(
+    ['run', '--lock=ignore', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
+    { cwd: tmp },
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  const printed = JSON.parse(load.stdout.trim())
+  t.assert.equal(printed.code, 'ERR_MODULE_NOT_FOUND',
+    `expected ERR_MODULE_NOT_FOUND, got ${printed.code} -- the previous ERR_ASSERTION re-threw out of common guards`)
 }))
