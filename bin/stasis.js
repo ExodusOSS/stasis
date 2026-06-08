@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { parseArgs } from 'node:util'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { basename, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import pkg from '../package.json' with { type: 'json' }
@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] [--mock] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=path/to/out.stasis.code.br] path/to/file.sol ...
  stasis prune [path/to/project]
  stasis audit path/to/file ...
@@ -51,6 +51,7 @@ if (command === '-v' || command === '--version') {
     'bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
     full: { type: 'boolean' },
+    mock: { type: 'boolean' },
   }
 
   const { values } = parseArgs({ args: flags, options })
@@ -65,14 +66,62 @@ if (command === '-v' || command === '--version') {
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|ignore)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load requires --lock=(frozen|none|ignore)')
   if (lock === 'none' && bundle === 'none') usage('Error: --lock=none requires --bundle=(add|replace|load|ignore)')
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }) })
+  if (values.mock && bundle === 'load') usage('Error: --mock is for capturing imports while building a bundle; not compatible with --bundle=load')
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
-  const child = spawn('node', ['--import', import.meta.resolve('../src/loader.js'), ...argv], { stdio: 'inherit' })
+  setEnv('EXODUS_STASIS_MOCK', values.mock ? '1' : '')
+  // --mock: capture imports by running user code with side-effects denied,
+  // fail-closed. Node's permission system blocks fs writes, child processes,
+  // worker threads, native addons (no --allow-addons -- addons would bypass
+  // the whole model), and the inspector. Network and timers have no
+  // --allow-* counterparts, so src/mock.js neutralizes them in JS; loader.js
+  // imports mock.js dynamically after stasis's own destructured fs bindings
+  // are captured but before registerHooks runs, so the mock's
+  // syncBuiltinESMExports() refresh propagates to user-code ESM imports
+  // without touching stasis's snapshots. Reads stay open (--allow-fs-read=*)
+  // so node_modules resolution works; reads aren't a side effect. Writes are
+  // still scoped at the kernel level as defense in depth (the JS layer
+  // covers user code, --permission covers anything that bypasses JS, e.g.
+  // process.binding or a future leak).
+  // Node 24 dropped comma-separated --allow-fs-write; repeat the flag instead.
+  const nodeArgs = []
+  if (values.mock) {
+    const writeAllow = [process.cwd()]
+    if (bundleFile && !bundleFile.startsWith(`${process.cwd()}/`)) {
+      // --allow-fs-write paths must already exist on disk; granting the bundle
+      // file's own path is not enough when state.write()'s mkdirSync has to
+      // create the parent chain. Walk up to the nearest existing ancestor and
+      // grant write there -- broader than ideal, but the user explicitly chose
+      // this location for their bundle.
+      // (Note: the cwd check above uses '/' as a separator and is therefore
+      //  unix-only; that matches the rest of the project's path handling.)
+      let p = dirname(bundleFile)
+      while (!existsSync(p) && dirname(p) !== p) p = dirname(p)
+      // Refuse to grant write access to the filesystem root: it would
+      // effectively disable the --permission layer everywhere, and reaching
+      // it means none of the bundle path's ancestors exist -- the user
+      // almost certainly didn't intend this. Ask them to create a parent.
+      if (p === dirname(p)) {
+        usage(`Error: no existing parent directory for --bundle-file=${bundleFile}; create one first or choose a path under an existing directory`)
+      }
+      writeAllow.push(p)
+    }
+    nodeArgs.push('--permission', '--allow-fs-read=*')
+    for (const p of writeAllow) nodeArgs.push(`--allow-fs-write=${p}`)
+    // --permission without --allow-addons removes "node-addons" from resolution
+    // conditions, which would change how packages with conditional exports
+    // resolve and make the captured import map incompatible with a normal
+    // replay. Restore the condition so resolution matches a non-mock run; this
+    // doesn't allow native addons to actually load (--allow-addons still off).
+    nodeArgs.push('--conditions=node-addons')
+  }
+  nodeArgs.push('--import', import.meta.resolve('../src/loader.js'))
+  const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code] = await once(child, 'close')
   process.exitCode = code
 } else if (command === 'bundle') {

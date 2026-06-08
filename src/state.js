@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import * as fs from 'node:fs'
 import { join, resolve, relative, basename, dirname, extname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
@@ -11,6 +11,14 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
 import { brotliOptions, splitNodeModulesPath } from './util.js'
+
+// Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
+// the destructured `const` captures function values at this module's eval time, so
+// stasis keeps writing through the real fs even after --mock (loaded after us) calls
+// module.syncBuiltinESMExports() to refresh node:fs's ESM wrapper for user code.
+// Direct ESM destructured imports are live bindings and would re-resolve to the
+// mocked names when state.write() fires on beforeExit.
+const { existsSync, mkdirSync, readFileSync, writeFileSync } = fs
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'

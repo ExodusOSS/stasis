@@ -340,70 +340,91 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
 
 })
 
-// --- The full lock x bundle matrix on real packages. ---
+// --- The full lock x bundle x mock matrix on real packages. ---
 //
-// Every valid (lock, bundle) pair runs src/entry.js against a fresh fixture
-// copy, then we assert the run succeeded, produced the expected output, and
-// left the lockfile + bundle in the state the modes promise. Two pairs are
-// invalid by construction and excluded (CLI/Config reject them, covered in
-// cli.test.js): lock=none+bundle=none, and bundle=load with lock not in
-// {frozen,none,ignore}.
+// Every valid (lock, bundle, mock) triple runs src/entry.js against a fresh
+// fixture copy, then we assert the run succeeded, produced the expected
+// output, and left the lockfile + bundle in the state the modes promise.
+// Invalid combinations are excluded (covered for rejection by cli.test.js):
+//   - lock=none + bundle=none
+//   - bundle=load with lock not in {frozen, none, ignore}
+//   - --mock + bundle=load (the CLI rejects this: --mock is for capture, not
+//     replay)
+//
+// --mock asserts an extra invariant: under it the artifacts must be byte-
+// identical to the non-mock equivalent. The entry has no side effects (just
+// pure imports + assertions), so a correct --mock implementation produces
+// the same bytes -- if it didn't, the import map or formats would have
+// diverged silently.
 
 const LOCK_MODES = ['none', 'ignore', 'add', 'replace', 'frozen']
 const BUNDLE_MODES = ['none', 'ignore', 'add', 'replace', 'load']
+const MOCK_MODES = [false, true]
 
-const isValidCombo = (lock, bundle) => {
+const isValidCombo = (lock, bundle, mock) => {
   if (lock === 'none' && bundle === 'none') return false
   if (bundle === 'load' && !['frozen', 'none', 'ignore'].includes(lock)) return false
+  if (mock && bundle === 'load') return false
   return true
 }
 
-describe('lock x bundle matrix', { concurrency: true }, () => {
+describe('lock x bundle x mock matrix', { concurrency: true }, () => {
   for (const lock of LOCK_MODES) {
     for (const bundle of BUNDLE_MODES) {
-      if (!isValidCombo(lock, bundle)) continue
+      for (const mock of MOCK_MODES) {
+        if (!isValidCombo(lock, bundle, mock)) continue
 
-      test(`lock=${lock} bundle=${bundle}: runs and leaves the promised lock/bundle state`, withTmp(async (t, tmp) => {
-        await freshCopy(tmp)
-        const lockPath = join(tmp, 'stasis.lock.json')
-        const bundlePath = join(tmp, 'snap.br')
+        const name = `lock=${lock} bundle=${bundle}${mock ? ' mock' : ''}: runs and leaves the promised lock/bundle state`
+        test(name, withTmp(async (t, tmp) => {
+          await freshCopy(tmp)
+          const lockPath = join(tmp, 'stasis.lock.json')
+          const bundlePath = join(tmp, 'snap.br')
 
-        // Every mode except none runs against a committed lockfile: frozen/ignore
-        // require/tolerate it, add is idempotent against it, replace rewrites it —
-        // and when a bundle is also present, state refuses to "use sources"
-        // without a lockfile to attest them unless replacing. none must see none.
-        // load/ignore expect a bundle present; add/replace write their own.
-        const seedLock = lock !== 'none'
-        const seedBundle = bundle === 'load' || bundle === 'ignore'
-        if (seedLock) await writeFile(lockPath, lockText)
-        if (seedBundle) await writeFile(bundlePath, bundleBuf)
+          // Every mode except none runs against a committed lockfile: frozen/ignore
+          // require/tolerate it, add is idempotent against it, replace rewrites it —
+          // and when a bundle is also present, state refuses to "use sources"
+          // without a lockfile to attest them unless replacing. none must see none.
+          // load/ignore expect a bundle present; add/replace write their own.
+          const seedLock = lock !== 'none'
+          const seedBundle = bundle === 'load' || bundle === 'ignore'
+          if (seedLock) await writeFile(lockPath, lockText)
+          if (seedBundle) await writeFile(bundlePath, bundleBuf)
 
-        const args = ['run', `--lock=${lock}`, `--bundle=${bundle}`]
-        if (bundle !== 'none') args.push(`--bundle-file=${bundlePath}`)
-        args.push('src/entry.js')
+          const args = ['run', `--lock=${lock}`, `--bundle=${bundle}`]
+          if (bundle !== 'none') args.push(`--bundle-file=${bundlePath}`)
+          if (mock) args.push('--mock')
+          args.push('src/entry.js')
 
-        const r = await run(args, { cwd: tmp })
-        t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-        t.assert.equal(r.stdout, expectedOutput)
+          const r = await run(args, { cwd: tmp })
+          t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+          t.assert.equal(r.stdout, expectedOutput)
 
-        // Lockfile side effects.
-        if (lock === 'none') {
-          t.assert.ok(!existsSync(lockPath), 'lock=none must not create a lockfile')
-        } else if (lock === 'frozen' || lock === 'ignore') {
-          t.assert.equal(await readFile(lockPath, 'utf-8'), lockText, `lock=${lock} must not modify the lockfile`)
-        } else {
-          parseLock(await readFile(lockPath, 'utf-8')) // add/replace: a valid lockfile was written
-        }
+          // Lockfile side effects. --mock must NOT change what gets written:
+          // the lockfile produced under mock is byte-identical to the one we
+          // generated up front (lockText), because the entry has no side
+          // effects and --conditions=node-addons keeps resolution identical.
+          if (lock === 'none') {
+            t.assert.ok(!existsSync(lockPath), 'lock=none must not create a lockfile')
+          } else if (lock === 'frozen' || lock === 'ignore') {
+            t.assert.equal(await readFile(lockPath, 'utf-8'), lockText, `lock=${lock} must not modify the lockfile`)
+          } else if (mock) {
+            t.assert.equal(await readFile(lockPath, 'utf-8'), lockText, `lock=${lock} --mock must produce the same lockfile as without --mock`)
+          } else {
+            parseLock(await readFile(lockPath, 'utf-8')) // add/replace: a valid lockfile was written
+          }
 
-        // Bundle side effects.
-        if (bundle === 'none') {
-          t.assert.ok(!existsSync(join(tmp, 'stasis.code.br')), 'bundle=none must not write a bundle')
-        } else if (bundle === 'load' || bundle === 'ignore') {
-          t.assert.deepEqual(await readFile(bundlePath), bundleBuf, `bundle=${bundle} must not modify the bundle`)
-        } else {
-          decodeBundle(await readFile(bundlePath)) // add/replace: a valid bundle was written
-        }
-      }))
+          // Bundle side effects. Same byte-identity guarantee under --mock.
+          if (bundle === 'none') {
+            t.assert.ok(!existsSync(join(tmp, 'stasis.code.br')), 'bundle=none must not write a bundle')
+          } else if (bundle === 'load' || bundle === 'ignore') {
+            t.assert.deepEqual(await readFile(bundlePath), bundleBuf, `bundle=${bundle} must not modify the bundle`)
+          } else if (mock) {
+            t.assert.deepEqual(await readFile(bundlePath), bundleBuf, `bundle=${bundle} --mock must produce the same bundle as without --mock`)
+          } else {
+            decodeBundle(await readFile(bundlePath)) // add/replace: a valid bundle was written
+          }
+        }))
+      }
     }
   }
 })
