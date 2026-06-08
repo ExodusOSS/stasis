@@ -31,6 +31,17 @@ import { createRequire, syncBuiltinESMExports } from 'node:module'
 
 const require = createRequire(import.meta.url)
 
+// Force lazy initialization of process.stdin/stdout/stderr *before* we mock
+// the net/tls constructors. Node's process.std{in,out,err} are lazy getters
+// that construct an underlying net.Socket (or tty.WriteStream) on first read;
+// syncBuiltinESMExports() below would otherwise trigger those getters as it
+// materializes node:process's ESM wrapper, and the constructor would hit our
+// mock and throw mid-setup. Reading the property once here caches the real
+// Socket/TTY in Node's closure, so the later sync just reads the cached value.
+void process.stdin
+void process.stdout
+void process.stderr
+
 const MARKER = '[stasis --mock]'
 
 // Tagged so the unhandledRejection trap below can tell our denials apart from
@@ -66,18 +77,32 @@ const denyModuleSurface = (specifier, mod, prefix = specifier) => {
   }
 }
 
-// Every network-capable builtin. inspector (debug port) and cluster/worker
-// (which fork) are already denied by the permission system, so they're not
-// listed here. child_process is denied at the kernel level by --permission too.
+// Every callable on these builtins is replaced with a thrower. The list
+// covers two categories:
+//
+//   1) Network surface (http/https/http2/net/dgram/tls/dns) -- the permission
+//      system has no --allow-net counterpart, so JS-mock is the *only* layer.
+//
+//   2) Process / worker surface (child_process/worker_threads/cluster/
+//      inspector) -- already denied at the kernel level by --permission (no
+//      --allow-child-process / --allow-worker / --allow-inspector and no
+//      --allow-addons). We duplicate the deny here on purpose: a JS-level
+//      thrower surfaces a clean, attributable ERR_STASIS_MOCK_BLOCKED instead
+//      of the kernel's ERR_ACCESS_DENIED, and it's defense in depth against
+//      anything that might quietly slip the permission rule (a future
+//      bypass, a misconfigured --allow flag, code that grabs primitives via
+//      process.binding before --permission's check fires, ...).
 const DENY_ALL = [
-  'node:http',
-  'node:https',
-  'node:http2',
-  'node:net',
-  'node:dgram',
-  'node:tls',
-  'node:dns',
-  'node:dns/promises',
+  // Network
+  'node:http', 'node:https', 'node:http2',
+  'node:net', 'node:dgram', 'node:tls',
+  'node:dns', 'node:dns/promises',
+  // Process / worker / debug -- duplicated with --permission
+  'node:child_process',
+  'node:worker_threads',
+  'node:cluster',
+  'node:inspector',
+  'node:inspector/promises',
 ]
 
 for (const specifier of DENY_ALL) {

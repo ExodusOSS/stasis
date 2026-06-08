@@ -59,10 +59,12 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   // syncBuiltinESMExports after mock mutated the CJS object). --permission is
   // still on as defense in depth -- it would also deny the same write.
   t.assert.match(r.stdout, /fs-destructured blocked ERR_STASIS_MOCK_BLOCKED/)
-  // --permission catches child_process (no JS mock for it; child_process is
-  // less ESM-bypassable since it has only a few entry points but the
-  // kernel-level rule covers them all uniformly).
-  t.assert.match(r.stdout, /spawn blocked ERR_ACCESS_DENIED/)
+  // child_process and worker_threads are denied at BOTH layers (--permission
+  // and JS mock) as defense in depth. The JS mock fires first, so the user
+  // sees the clean attributable error code rather than the kernel's
+  // ERR_ACCESS_DENIED.
+  t.assert.match(r.stdout, /spawn blocked ERR_STASIS_MOCK_BLOCKED/)
+  t.assert.match(r.stdout, /worker blocked ERR_STASIS_MOCK_BLOCKED/)
   // JS-mock network: every callable on http/https/http2/net/dgram/tls/dns
   // is a thrower, so factory, constructor, and connection paths all surface
   // the same attributable error code.

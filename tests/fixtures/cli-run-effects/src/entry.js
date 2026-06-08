@@ -3,6 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { spawnSync } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
 import { setTimeout as pTimeout } from 'node:timers/promises'
 
 // All side-effecting calls below must be denied (fail closed). The JS mocks
@@ -16,6 +17,7 @@ const log = (kind, fn) => {
 
 log('fs-destructured', () => writeFileSync(process.env.STASIS_MOCK_SENTINEL, 'pwned'))
 log('spawn', () => spawnSync('node', ['-e', 'process.exit(0)']))
+log('worker', () => new Worker('data:,'))
 log('http', () => createServer())
 log('net', () => connect(1234, '127.0.0.1'))
 log('ws', () => new WebSocket('ws://stasis.invalid'))
