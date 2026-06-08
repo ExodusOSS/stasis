@@ -428,7 +428,7 @@ describe('static bundle (stasis bundle) on the 10-package set', { concurrency: t
     t.assert.ok(decoded.imports['*'], `static bundle should record imports under '*'; got ${Object.keys(decoded.imports).join(', ')}`)
 
     const load = await run(
-      ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=none', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -456,7 +456,7 @@ describe('static bundle (stasis bundle) on the 10-package set', { concurrency: t
     await writeFile(staticPath, staticBundleBuf)
 
     const fromStatic = await run(
-      ['run', '--lock=none', '--bundle=load', `--bundle-file=${staticPath}`, 'src/entry.js'],
+      ['run', '--lock=none', '--dependencies', '--bundle=load', `--bundle-file=${staticPath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(fromStatic.status, 0, `static stderr: ${fromStatic.stderr}`)
@@ -478,7 +478,7 @@ describe('static bundle (stasis bundle) on the 10-package set', { concurrency: t
     await writeFile(join(tmp, 'stasis.lock.json'), staticLockText)
 
     const r = await run(
-      ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=frozen', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -522,14 +522,14 @@ describe('static bundle (stasis bundle) on the 10-package set', { concurrency: t
 
     // Each entry independently loads against the same bundle.
     const load1 = await run(
-      ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp },
     )
     t.assert.equal(load1.status, 0, `load entry stderr: ${load1.stderr}`)
     t.assert.equal(load1.stdout, expectedOutput)
 
     const load2 = await run(
-      ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry2.js'],
+      ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry2.js'],
       { cwd: tmp },
     )
     t.assert.equal(load2.status, 0, `load entry2 stderr: ${load2.stderr}`)
@@ -568,7 +568,9 @@ describe('lock x bundle matrix with statically-built bundle', { concurrency: tru
         if (seedLock) await writeFile(lockPath, seedText)
         if (seedBundle) await writeFile(bundlePath, staticBundleBuf)
 
-        const args = ['run', `--lock=${lock}`, `--bundle=${bundle}`]
+        // Fixture is node_modules-scoped; --dependencies opts back into that since
+        // ed41d6f flipped `stasis run`'s default scope to 'full'.
+        const args = ['run', `--lock=${lock}`, '--dependencies', `--bundle=${bundle}`]
         if (bundle !== 'none') args.push(`--bundle-file=${bundlePath}`)
         args.push('src/entry.js')
 
