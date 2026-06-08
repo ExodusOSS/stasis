@@ -42,12 +42,27 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   const bundlePath = join(tmp, 'snapshot.br')
   // Sentinel lives *outside* the project's allowed-write tree: writes inside cwd
   // are intentionally permitted (that's where the bundle/lockfile go).
+  // Two sentinels exercise the two deny layers independently:
+  //  - outside-cwd: the kernel layer (--permission) blocks writeFileSync; the
+  //    JS fs mock also blocks but the kernel wins by going first.
+  //  - inside-cwd: cwd is on --allow-fs-write so the kernel allows the write.
+  //    Only the JS denyFnAsync mock prevents writeFileAsync from landing.
+  //    A broken JS layer would silently no-op (file absent) OR crash the run
+  //    (status != 0) -- the assertions below catch both modes.
   const sentinel = join(dirname(tmp), `mock-test-sentinel-${process.pid}.txt`)
+  const incwdSentinel = join(tmp, 'incwd-sentinel.txt')
   rmSync(sentinel, { force: true })
 
   const r = run(
     ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
-    { cwd: tmp, env: { ...cleanEnv, STASIS_MOCK_SENTINEL: sentinel } }
+    {
+      cwd: tmp,
+      env: {
+        ...cleanEnv,
+        STASIS_MOCK_SENTINEL: sentinel,
+        STASIS_MOCK_INCWD_SENTINEL: incwdSentinel,
+      },
+    }
   )
   // status 0 also proves the unhandledRejection trap swallowed the fire-and-forget
   // `void fetch(beacon)` denial -- otherwise the run would crash before exit.
@@ -82,6 +97,9 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   t.assert.doesNotMatch(r.stdout, /UNREACHABLE/)
 
   t.assert.ok(!existsSync(sentinel), 'fs write outside cwd must be blocked')
+  // The JS-only layer's job: cwd is kernel-allowed, so this sentinel's
+  // absence proves the denyFnAsync mock (not --permission) caught the write.
+  t.assert.ok(!existsSync(incwdSentinel), 'JS fs/promises mock must block writes even when --allow-fs-write would permit them')
 
   // The import graph is captured despite every side effect being denied.
   t.assert.ok(existsSync(bundlePath), 'bundle should be written by stasis (allowed path)')
@@ -102,6 +120,18 @@ test('run --mock with --bundle=load is rejected (mock is for capture, not replay
   const r = run(['run', '--lock=frozen', '--full', '--bundle=load', '--bundle-file=/tmp/x.br', '--mock', 'a.js'])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /--mock is for capturing imports/)
+})
+
+test('run --mock refuses a --bundle-file whose ancestors do not exist', (t) => {
+  // Granting --allow-fs-write for an ancestor walk that terminates at "/"
+  // would effectively disable --permission for the whole filesystem. Refuse
+  // instead and ask the user to pre-create a parent.
+  const r = run([
+    'run', '--lock=frozen', '--full', '--bundle=add',
+    '--bundle-file=/zzz-no-such-toplevel-9999/foo.br', '--mock', 'a.js',
+  ])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /no existing parent directory for --bundle-file/)
 })
 
 test('run --mock writes a --bundle-file under a not-yet-existing directory outside cwd', withTmp(async (t, tmp) => {

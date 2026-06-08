@@ -68,16 +68,22 @@ const denyFnAsync = (label) => function () { return Promise.reject(blocked(label
 // with a thrower. The factory picks denyFnAsync for promise-shaped surfaces
 // (/promises submodules) so fire-and-forget callers reject quietly through
 // the unhandledRejection trap below rather than crashing the script with a
-// synchronous throw. Functions are configurable on the builtins we target;
-// fall back to direct assignment on the off chance one isn't.
+// synchronous throw -- *except* for class-shaped exports (PascalCase),
+// because `new Class()` on a function that returns a Promise yields the
+// Promise as the constructed value (per the `new` semantics), and the caller
+// then sees a confused `r.resolve is not a function` instead of our
+// attributable error. Sync-throw classes give the clean error in both
+// `new dnsp.Resolver()` and `dns.lookup()` cases. Functions are configurable
+// on the builtins we target; fall back to direct assignment on the off
+// chance one isn't.
+const isClassName = (key) => /^[A-Z]/.test(key)
 const denyModuleSurface = (specifier, mod, opts = {}) => {
   const { prefix = specifier, async: isAsync = specifier.endsWith('/promises') } = opts
-  const makeImpl = isAsync ? denyFnAsync : denyFn
   for (const key of Object.getOwnPropertyNames(mod)) {
     const value = mod[key]
     if (typeof value === 'function') {
       const label = `${prefix}.${key}()`
-      const impl = makeImpl(label)
+      const impl = (isAsync && !isClassName(key)) ? denyFnAsync(label) : denyFn(label)
       try {
         mock.method(mod, key, impl)
       } catch {

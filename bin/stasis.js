@@ -98,8 +98,17 @@ if (command === '-v' || command === '--version') {
       // create the parent chain. Walk up to the nearest existing ancestor and
       // grant write there -- broader than ideal, but the user explicitly chose
       // this location for their bundle.
+      // (Note: the cwd check above uses '/' as a separator and is therefore
+      //  unix-only; that matches the rest of the project's path handling.)
       let p = dirname(bundleFile)
       while (!existsSync(p) && dirname(p) !== p) p = dirname(p)
+      // Refuse to grant write access to the filesystem root: it would
+      // effectively disable the --permission layer everywhere, and reaching
+      // it means none of the bundle path's ancestors exist -- the user
+      // almost certainly didn't intend this. Ask them to create a parent.
+      if (p === dirname(p)) {
+        usage(`Error: no existing parent directory for --bundle-file=${bundleFile}; create one first or choose a path under an existing directory`)
+      }
       writeAllow.push(p)
     }
     nodeArgs.push('--permission', '--allow-fs-read=*')

@@ -29,10 +29,13 @@ log('chdir', () => process.chdir('/'))
 // as the never-resolving timer below.
 void fetch('http://stasis.invalid/beacon')
 
-// Fire-and-forget promise-style fs writer: this DOES produce a rejected
-// promise (denyFnAsync), so the unhandledRejection trap must swallow it.
-// Without the trap, this would crash the script before the bundle is written.
-void writeFileAsync(process.env.STASIS_MOCK_SENTINEL, 'pwned-async')
+// Fire-and-forget promise-style fs writer pointed at a path *inside cwd*
+// (cwd is on --allow-fs-write, so the kernel layer would let this through).
+// Only the JS-level denyFnAsync mock prevents the write -- if the JS layer
+// silently no-op'd or returned undefined, the kernel wouldn't catch it
+// either, and STASIS_MOCK_INCWD_SENTINEL would land on disk. The test
+// asserts it does not.
+void writeFileAsync(process.env.STASIS_MOCK_INCWD_SENTINEL, 'pwned-async')
 
 console.log(greet('world'))
 
