@@ -58,7 +58,11 @@ function flattenImports(imports) {
 function captureRuntimeBundle(fixture, entry, tmp, { full = false } = {}) {
   const bundlePath = join(tmp, 'snapshot.br')
   const args = ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`]
-  if (full) args.push('--full')
+  // ed41d6f flipped `stasis run`'s default to scope=full; --dependencies is the
+  // node_modules-only opt-in. The two fixtures have explicit scope in their
+  // stasis.config.json (cli-run-cjs: full, cli-run-nm-cjs: node_modules), so
+  // pass --dependencies for the nm-scoped one to avoid env-vs-file conflict.
+  if (!full) args.push('--dependencies')
   args.push(entry)
   const r = runCli(args, { cwd: fixture })
   if (r.status !== 0) throw new Error(`stasis run failed: ${r.stderr}`)
@@ -245,8 +249,9 @@ test('stasis bundle of module-sync package executes the same code as plain Node'
   const bundlePath = join(tmp, 'snap.br')
   const build = runCli(['bundle', `--scope=full`, `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
   t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
+  // ed41d6f made scope=full the default; no flag needed.
   const load = runCli(
-    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp },
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)

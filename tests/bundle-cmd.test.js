@@ -555,8 +555,10 @@ test('CLI: bundle load surfaces ERR_MODULE_NOT_FOUND for dynamic import of a mis
   t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
 
   // cjsFixture ships a stasis.lock.json; use lock=ignore so `stasis run` tolerates it.
+  // The fixture's stasis.config.json declares scope=full, which is now the CLI default
+  // since ed41d6f flipped --full into the implicit default. No scope flag needed.
   const load = runCli(
-    ['run', '--lock=ignore', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
+    ['run', '--lock=ignore', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
     { cwd: tmp },
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
