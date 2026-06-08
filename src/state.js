@@ -388,8 +388,32 @@ export class State {
     if (conditions !== '*') assert.ok(Array.isArray(conditions))
     const parent = this.relative(this.absolute(parentURL))
     const key = this.#conditionsKey(conditions, importAttributes)
-    const file = this.imports.get(key)?.get(parent)?.get(specifier)
-    assert.ok(file)
+    // Statically-built bundles (e.g. `stasis bundle src/entry.js`) resolve edges
+    // offline and store them under the wildcard '*' key, since they can't
+    // predict the exact condition set Node will pass at load time. The runtime
+    // loader always records the precise conditions Node reported, so the
+    // specific lookup wins when a runtime bundle is in play and only static
+    // bundles take the wildcard fallback. Mismatches between the resolved file
+    // for a given (parent, spec) under the two condition sets remain caller
+    // territory -- the static bundle is authoritative for whichever conditions
+    // the static resolver used.
+    let file = this.imports.get(key)?.get(parent)?.get(specifier)
+    if (file === undefined && key !== '*') {
+      file = this.imports.get('*')?.get(parent)?.get(specifier)
+    }
+    if (file === undefined) {
+      // Throw with Node's ERR_MODULE_NOT_FOUND shape rather than asserting:
+      // plain Node's resolver throws this when a bare or relative specifier
+      // can't be found, and ESM dynamic-import callers commonly do
+      // `try { await import(x) } catch (e) { if (e.code !== 'ERR_MODULE_NOT_FOUND') throw e }`.
+      // A bare assertion produced an ERR_ASSERTION code that re-threw out of
+      // those guards. (CJS `require()` doesn't hit this path: Node's CJS
+      // resolver throws MODULE_NOT_FOUND upstream of our hook, so the only
+      // miss-shape callers can observe is dynamic ESM import().)
+      const err = new Error(`Cannot find module '${specifier}' imported from ${parent}`)
+      err.code = 'ERR_MODULE_NOT_FOUND'
+      throw err
+    }
     const url = pathToFileURL(resolve(this.root, file)).toString()
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
     return { url, format }

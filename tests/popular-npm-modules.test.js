@@ -368,6 +368,236 @@ const isValidCombo = (lock, bundle, mock) => {
   return true
 }
 
+// --- The static-bundle path: `stasis bundle src/entry.js` produces the same
+// loadable artifact as `stasis run --bundle=add`, but without executing any
+// user code. The scan-based bundle resolves through Node's resolver with
+// per-edge conditions (so dual-package and ESM-only deps come out right), and
+// stores edges under '*' so the runtime loader's wildcard fallback picks them
+// up regardless of which condition set Node passes at load time.
+
+// Shared static bundle and its matching lockfile, generated once and reused
+// across the static-bundle matrix. The static and runtime bundles diverge on
+// conditional requires (e.g. debug/src/index.js walks both ./browser and
+// ./node branches statically, but the runtime only takes ./node), so the
+// runtime-generated lockText doesn't attest the static bundle's contents -- a
+// frozen-mode run against the static bundle needs this paired lockfile.
+let staticBundleBuf
+let staticLockText
+
+before(async () => {
+  const gen = await mkdtemp(join(tmpdir(), 'stasis-popular-static-'))
+  try {
+    await hardlinkCopy(fixture, gen)
+    const bundlePath = join(gen, 'snap.br')
+    const lockPath = join(gen, 'snap.lock.json')
+    const r = await run(
+      ['bundle', `--output=${bundlePath}`, `--lockfile=${lockPath}`, 'src/entry.js'],
+      { cwd: gen },
+    )
+    if (r.status !== 0) throw new Error(`Failed to generate static bundle: ${r.stderr}`)
+    staticBundleBuf = await readFile(bundlePath)
+    staticLockText = await readFile(lockPath, 'utf-8')
+  } finally {
+    await rm(gen, { recursive: true, force: true })
+  }
+})
+
+describe('static bundle (stasis bundle) on the 10-package set', { concurrency: true }, () => {
+
+  test('stasis bundle captures all 10 popular packages and loads with identical output', withTmp(async (t, tmp) => {
+    await freshCopy(tmp)
+    const bundlePath = join(tmp, 'static.br')
+    const r = await run(['bundle', `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+    // Warning about unresolved optional/dynamic edges is informational, not a failure.
+    t.assert.match(r.stderr, /Bundled \d+ files/)
+    t.assert.ok(existsSync(bundlePath))
+
+    const decoded = decodeBundle(await readFile(bundlePath))
+    const names = new Set(Object.values(decoded.modules).map((m) => m.name))
+    for (const pkg of popularPackages) {
+      t.assert.ok(names.has(pkg), `static bundle should include ${pkg}; got ${[...names].toSorted().join(', ')}`)
+    }
+    // Both ESM and CJS formats must be present -- chalk/nanoid/uuid are ESM,
+    // express/lodash/debug are CJS. A miss here would catch a regression in
+    // per-parent format detection.
+    const formats = new Set(Object.values(decoded.formats))
+    t.assert.ok(formats.has('module'), `static bundle should include ESM-format files; got ${[...formats].join(', ')}`)
+    t.assert.ok(formats.has('commonjs'), `static bundle should include CJS-format files; got ${[...formats].join(', ')}`)
+    // The static path stores under the wildcard condition key.
+    t.assert.ok(decoded.imports['*'], `static bundle should record imports under '*'; got ${Object.keys(decoded.imports).join(', ')}`)
+
+    const load = await run(
+      ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      { cwd: tmp },
+    )
+    t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+    t.assert.equal(load.stdout, expectedOutput)
+  }))
+
+  test('stasis bundle resolves ESM-only deps that the broken default-conditions path missed', withTmp(async (t, tmp) => {
+    await freshCopy(tmp)
+    const bundlePath = join(tmp, 'static.br')
+    const r = await run(['bundle', `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+    const decoded = decodeBundle(await readFile(bundlePath))
+    // ESM-only packages in the fixture: chalk 5, nanoid 5. Both must be in the
+    // bundle -- before the conditions-aware resolver fix, scan resolved with CJS
+    // defaults and threw ERR_PACKAGE_PATH_NOT_EXPORTED on these.
+    const names = new Set(Object.values(decoded.modules).map((m) => m.name))
+    t.assert.ok(names.has('chalk'), 'chalk (ESM-only) must be in the static bundle')
+    t.assert.ok(names.has('nanoid'), 'nanoid (ESM-only) must be in the static bundle')
+  }))
+
+  test('stasis bundle loads byte-equivalent to a runtime bundle (output strings match exactly)', withTmp(async (t, tmp) => {
+    await freshCopy(tmp)
+    const staticPath = join(tmp, 'static.br')
+    await writeFile(staticPath, staticBundleBuf)
+
+    const fromStatic = await run(
+      ['run', '--lock=none', '--bundle=load', `--bundle-file=${staticPath}`, 'src/entry.js'],
+      { cwd: tmp },
+    )
+    t.assert.equal(fromStatic.status, 0, `static stderr: ${fromStatic.stderr}`)
+    t.assert.equal(fromStatic.stdout, expectedOutput)
+    // The runtime bundle is generated in before() of the sibling describe and
+    // produces this same output; that suite asserts that side. By transitivity:
+    // static bundle -> same stdout <- runtime bundle.
+  }))
+
+  test('stasis bundle --lockfile produces a frozen-compatible bundle/lockfile pair', withTmp(async (t, tmp) => {
+    await freshCopy(tmp)
+    const bundlePath = join(tmp, 'static.br')
+    await writeFile(bundlePath, staticBundleBuf)
+    // The paired lockfile attests exactly the bytes in the static bundle, so
+    // lock=frozen + bundle=load must validate end-to-end. The runtime lockText
+    // would NOT validate here -- the static scan reaches conditional branches
+    // (e.g. debug/src/browser.js) that the runtime doesn't, so a runtime
+    // lockfile is missing entries for those files.
+    await writeFile(join(tmp, 'stasis.lock.json'), staticLockText)
+
+    const r = await run(
+      ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      { cwd: tmp },
+    )
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.equal(r.stdout, expectedOutput)
+  }))
+
+  test('stasis bundle accepts multiple JS entries and bundles the union of their deps', withTmp(async (t, tmp) => {
+    await freshCopy(tmp)
+    // Drop a second entry alongside src/entry.js. It pulls a strict subset of
+    // the deps (semver + uuid), so the bundle is dominated by entry.js -- the
+    // point of the test is that the second entry is *also* a recognised input
+    // and its deps are present.
+    await writeFile(
+      join(tmp, 'src/entry2.js'),
+      [
+        "import semver from 'semver'",
+        "import { v4 as uuidv4 } from 'uuid'",
+        "console.log(JSON.stringify([['semver.eq', semver.eq('1.0.0', '1.0.0')], ['uuid.len', uuidv4().length]]))",
+      ].join('\n') + '\n',
+    )
+    // Tell `stasis bundle` to use scope=full so workspace entries are recorded
+    // in the bundle's `entries` set; this fixture's stasis.config.json defaults
+    // to node_modules but loadConfig honors --scope from the CLI here because
+    // we also have to disable the fixture's stasis.config.json for this run.
+    await rm(join(tmp, 'stasis.config.json'))
+
+    const bundlePath = join(tmp, 'multi.br')
+    const r = await run(
+      ['bundle', `--output=${bundlePath}`, '--scope=full', 'src/entry.js', 'src/entry2.js'],
+      { cwd: tmp },
+    )
+    t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+
+    const decoded = JSON.parse(brotliDecompressSync(await readFile(bundlePath)).toString('utf-8'))
+    // scope=full bundles list entries; both must be present and marked.
+    t.assert.equal(decoded.config.scope, 'full')
+    t.assert.deepEqual([...decoded.entries].toSorted(), ['src/entry.js', 'src/entry2.js'])
+    // Workspace bucket carries the entry sources alongside node_modules buckets.
+    t.assert.ok(decoded.sources['.']?.files?.['src/entry.js'], 'entry.js must be in the workspace bucket')
+    t.assert.ok(decoded.sources['.']?.files?.['src/entry2.js'], 'entry2.js must be in the workspace bucket')
+
+    // Each entry independently loads against the same bundle.
+    const load1 = await run(
+      ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      { cwd: tmp },
+    )
+    t.assert.equal(load1.status, 0, `load entry stderr: ${load1.stderr}`)
+    t.assert.equal(load1.stdout, expectedOutput)
+
+    const load2 = await run(
+      ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry2.js'],
+      { cwd: tmp },
+    )
+    t.assert.equal(load2.status, 0, `load entry2 stderr: ${load2.stderr}`)
+    t.assert.equal(load2.stdout, '[["semver.eq",true],["uuid.len",36]]\n')
+  }))
+
+})
+
+// --- The lock x bundle matrix, but with the bundle produced by `stasis bundle`
+// (static scan) instead of `stasis run --bundle=add` (runtime). The 23-cell
+// shape is identical; only the bundle source changes. Cells that don't load
+// the bundle (bundle=add, bundle=replace, bundle=none) exercise the runtime
+// path independently and are still useful as cross-checks.
+
+describe('lock x bundle matrix with statically-built bundle', { concurrency: true }, () => {
+  for (const lock of LOCK_MODES) {
+    for (const bundle of BUNDLE_MODES) {
+      if (!isValidCombo(lock, bundle)) continue
+
+      test(`lock=${lock} bundle=${bundle} (static): runs and leaves the promised lock/bundle state`, withTmp(async (t, tmp) => {
+        await freshCopy(tmp)
+        const lockPath = join(tmp, 'stasis.lock.json')
+        const bundlePath = join(tmp, 'snap.br')
+
+        const seedLock = lock !== 'none'
+        // load/ignore consume the bundle as-is; for those we seed the STATIC bundle.
+        // add/replace produce a fresh bundle (runtime path) and overwrite anything
+        // we'd seed; none doesn't touch a bundle.
+        const seedBundle = bundle === 'load' || bundle === 'ignore'
+        // The seeded lockfile has to match the seeded bundle: when we seed the
+        // static bundle, we seed the static lockfile (which attests its bytes);
+        // when we don't seed the static bundle (add/replace/none + lock!=none),
+        // we seed the runtime lockfile (since the runtime path is what produces
+        // the bundle on this cell, and that's what frozen would attest).
+        const seedText = seedBundle ? staticLockText : lockText
+        if (seedLock) await writeFile(lockPath, seedText)
+        if (seedBundle) await writeFile(bundlePath, staticBundleBuf)
+
+        const args = ['run', `--lock=${lock}`, `--bundle=${bundle}`]
+        if (bundle !== 'none') args.push(`--bundle-file=${bundlePath}`)
+        args.push('src/entry.js')
+
+        const r = await run(args, { cwd: tmp })
+        t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+        t.assert.equal(r.stdout, expectedOutput)
+
+        // Same side-effect invariants as the runtime matrix: lockfile is left in
+        // the expected state, bundle file is created/preserved/absent per mode.
+        if (lock === 'none') {
+          t.assert.ok(!existsSync(lockPath), 'lock=none must not create a lockfile')
+        } else if (lock === 'frozen' || lock === 'ignore') {
+          t.assert.equal(await readFile(lockPath, 'utf-8'), seedText, `lock=${lock} must not modify the lockfile`)
+        } else {
+          parseLock(await readFile(lockPath, 'utf-8'))
+        }
+
+        if (bundle === 'none') {
+          t.assert.ok(!existsSync(join(tmp, 'stasis.code.br')), 'bundle=none must not write a bundle')
+        } else if (bundle === 'load' || bundle === 'ignore') {
+          t.assert.deepEqual(await readFile(bundlePath), staticBundleBuf, `bundle=${bundle} must not modify the static bundle`)
+        } else {
+          decodeBundle(await readFile(bundlePath))
+        }
+      }))
+    }
+  }
+})
+
 describe('lock x bundle x mock matrix', { concurrency: true }, () => {
   for (const lock of LOCK_MODES) {
     for (const bundle of BUNDLE_MODES) {

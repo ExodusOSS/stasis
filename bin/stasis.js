@@ -21,6 +21,7 @@ function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--full] [--mock] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=path/to/out.stasis.code.br] path/to/file.sol ...
+ stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=path/to/out.stasis.code.br] path/to/file.js ...
  stasis prune [path/to/project]
  stasis audit path/to/file ...
 `.trim())
@@ -126,13 +127,15 @@ if (command === '-v' || command === '--version') {
   process.exitCode = code
 } else if (command === 'bundle') {
   const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '-o'])
+  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '-o'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
   const options = {
     mapping: { type: 'string' },
     output: { type: 'string', short: 'o' },
+    scope: { type: 'string' },
+    lockfile: { type: 'string' },
   }
   let values
   try {
@@ -140,14 +143,24 @@ if (command === '-v' || command === '--version') {
   } catch (cause) {
     usage(`Error: ${cause.message}`)
   }
-  if (argv.length === 0) usage('Nothing to bundle: no .sol file given')
-  if (!argv.every((f) => f.endsWith('.sol'))) usage('Error: bundle only accepts .sol files')
+  if (argv.length === 0) usage('Nothing to bundle: no entry file given')
+  const allSol = argv.every((f) => f.endsWith('.sol'))
+  const allJs = argv.every((f) => /\.(?:js|cjs|mjs)$/u.test(f))
+  if (!allSol && !allJs) usage('Error: bundle entries must all be .sol or all be .js/.cjs/.mjs')
+  if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
+  if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
+  if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
+    usage('Error: --scope must be node_modules or full')
+  }
+  if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
   const { bundleCommand } = await import('../src/cmd/bundle.js')
   await bundleCommand({
     cwd: process.cwd(),
     entries: argv,
     mappingFile: values.mapping,
     output: values.output,
+    scope: values.scope,
+    lockfile: values.lockfile,
   })
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')
