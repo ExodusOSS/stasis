@@ -129,4 +129,18 @@ function resolve(specifier, context, nextResolve) {
   return res
 }
 
+// --mock: install network/timer/fetch denials *before* registerHooks. Doing it
+// here -- after stasis's own state.js / loader.js / etc. have captured their
+// destructured `import { writeFileSync } from 'node:fs'` bindings from the
+// real fs, but before any user code is loaded through the hooks -- lets the
+// mock call module.syncBuiltinESMExports() to refresh the node:fs ESM wrapper
+// without affecting bindings that have already been linked. Stasis keeps its
+// real fs; user-code ESM imports of node:fs (and the network/timer builtins)
+// get the post-sync mocked wrapper. Loading mock.js *inside* loader.js (rather
+// than via a second --import) also avoids the "first non-node file goes through
+// the hook and becomes the bundle entry" trap.
+if (process.env.EXODUS_STASIS_MOCK === '1') {
+  await import('./mock.js')
+}
+
 registerHooks({ load, resolve })

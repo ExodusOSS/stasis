@@ -27,7 +27,7 @@
 // (node:fs/path/url/module/zlib/buffer, none of them network) keeps working.
 
 import { mock } from 'node:test'
-import { createRequire } from 'node:module'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 
 const require = createRequire(import.meta.url)
 
@@ -67,8 +67,9 @@ const denyModuleSurface = (specifier, mod, prefix = specifier) => {
 }
 
 // Every network-capable builtin. inspector (debug port) and cluster/worker
-// (which fork) are already denied by the permission system, so they're not here.
-const DENY = [
+// (which fork) are already denied by the permission system, so they're not
+// listed here. child_process is denied at the kernel level by --permission too.
+const DENY_ALL = [
   'node:http',
   'node:https',
   'node:http2',
@@ -79,7 +80,7 @@ const DENY = [
   'node:dns/promises',
 ]
 
-for (const specifier of DENY) {
+for (const specifier of DENY_ALL) {
   let mod
   try {
     mod = require(specifier)
@@ -88,6 +89,44 @@ for (const specifier of DENY) {
   }
   denyModuleSurface(specifier, mod)
 }
+
+// fs writers: --permission blocks them at the kernel level too, but we mock
+// at the JS layer for cleaner attributable errors and so that user code can't
+// even *try* to mutate files inside the project's cwd (which is on the
+// --allow-fs-write list so stasis can emit its bundle/lockfile). Reads stay
+// real so node_modules resolution and config discovery keep working. This
+// works because loader.js loads us *after* stasis's own destructured
+// `import { writeFileSync } from 'node:fs'` snapshots, so stasis keeps real
+// fs; the syncBuiltinESMExports() call below then refreshes the node:fs ESM
+// wrapper so the user's subsequent ESM imports see the mocked names.
+const fs = require('node:fs')
+const fsPromises = require('node:fs/promises')
+const FS_WRITERS = [
+  'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync',
+  'unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync',
+  'mkdir', 'mkdirSync', 'rename', 'renameSync',
+  'link', 'linkSync', 'symlink', 'symlinkSync',
+  'truncate', 'truncateSync', 'ftruncate', 'ftruncateSync',
+  'utimes', 'utimesSync', 'lutimes', 'lutimesSync', 'futimes', 'futimesSync',
+  'chmod', 'chmodSync', 'lchmod', 'lchmodSync', 'fchmod', 'fchmodSync',
+  'chown', 'chownSync', 'lchown', 'lchownSync', 'fchown', 'fchownSync',
+  'copyFile', 'copyFileSync', 'cp', 'cpSync',
+  'createWriteStream', 'mkdtemp', 'mkdtempSync',
+]
+for (const name of FS_WRITERS) {
+  if (typeof fs[name] === 'function') {
+    mock.method(fs, name, denyFn(`node:fs.${name}()`))
+  }
+  if (typeof fsPromises[name] === 'function') {
+    mock.method(fsPromises, name, denyFn(`node:fs/promises.${name}()`))
+  }
+}
+
+// Refresh the node:fs / node:fs/promises ESM wrappers so destructured/
+// namespace ESM imports made *after* this point see the mocked names.
+// Bindings already captured by stasis's own modules (linked before this file
+// ran) keep their snapshot of the real functions.
+syncBuiltinESMExports()
 
 // Global fetch / WebSocket / EventSource come from undici, not node:http, so
 // they need separate handling. (Their transport bottoms out at node:net, which
@@ -119,19 +158,34 @@ process.on('unhandledRejection', (reason) => {
   throw reason
 })
 
+// User code that awaits a denied promise (a forever-pending timer, an
+// undelivered fetch) leaves the top-level await unsettled, which Node 24+
+// flags by setting exitCode=13 at exit time. The bundle has already been
+// written by then (state.write() ran at beforeExit, before this), so the
+// capture itself succeeded -- override the 13 back to 0 so the CLI doesn't
+// report failure. Anything other than 13 (real assertion failure, syntax
+// error, ...) is preserved.
+process.on('exit', () => {
+  if (process.exitCode === 13) process.exitCode = 0
+})
+
 // Timers: silently ignored. Callback-style timers (setTimeout/setInterval/
-// setImmediate) become no-ops -- the callback never runs but the scheduling
+// setImmediate) become no-ops -- the callback never runs and the scheduling
 // call returns normally so user code keeps going. Promise-style timers
-// (node:timers/promises) resolve *immediately* with the value the caller
-// passed, so `await setTimeout(1000, x)` returns `x` without delay rather
-// than hanging forever. That keeps `await`-based control flow moving past
-// pacing/debounce code instead of deadlocking the capture.
+// (node:timers/promises) return *forever-pending* promises: `await
+// setTimeout(...)` suspends forever and any code past the await never runs.
+// That's the "silently ignored" semantics for promise timers -- the awaiter
+// is dropped, not given a synthetic value. The process still exits cleanly
+// because a pending promise on its own doesn't keep the event loop alive, so
+// once everything else drains, Node tears down (logging an unsettled-
+// top-level-await warning) and the loader's beforeExit hook writes the
+// bundle.
 //
-// Stasis itself does not import node:timers anywhere, so unlike node:fs
-// the ESM wrapper for node:timers is not pre-materialized; the CJS exports
-// mutation below is picked up by the user's first ESM import lazily and
-// propagates to destructured `import { setTimeout } from 'node:timers'`.
+// Stasis itself does not import node:timers anywhere, so unlike node:fs the
+// ESM wrapper for node:timers/timers-promises is not pre-materialized; the
+// CJS exports mutation below propagates to the user's first ESM import.
 const noop = () => undefined
+const pending = () => new Promise(() => {})
 for (const name of ['setTimeout', 'setInterval', 'setImmediate']) globalThis[name] = noop
 for (const name of ['clearTimeout', 'clearInterval', 'clearImmediate']) globalThis[name] = noop
 
@@ -141,12 +195,13 @@ for (const name of ['setTimeout', 'setInterval', 'setImmediate', 'clearTimeout',
 }
 
 const timersPromises = require('node:timers/promises')
-mock.method(timersPromises, 'setTimeout', (_ms, value) => Promise.resolve(value))
-mock.method(timersPromises, 'setImmediate', (value) => Promise.resolve(value))
-// setInterval returns an async iterable that yields on each tick; we yield
-// nothing so `for await (const _ of setInterval(...))` exits immediately.
+mock.method(timersPromises, 'setTimeout', pending)
+mock.method(timersPromises, 'setImmediate', pending)
+// setInterval returns an async iterable; each `await iter.next()` is also a
+// forever-pending promise, so `for await (const _ of setInterval(...))` hangs
+// at the first iteration -- the loop body never runs.
 mock.method(timersPromises, 'setInterval', () => ({
   [Symbol.asyncIterator]() {
-    return { next: () => Promise.resolve({ done: true, value: undefined }) }
+    return { next: pending }
   },
 }))

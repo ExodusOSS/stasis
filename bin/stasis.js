@@ -74,14 +74,20 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
+  setEnv('EXODUS_STASIS_MOCK', values.mock ? '1' : '')
   // --mock: capture imports by running user code with side-effects denied,
   // fail-closed. Node's permission system blocks fs writes, child processes,
-  // worker threads, native addons (no --allow-addons -- addons would bypass the
-  // whole model), and the inspector. The network builtins have no --allow-net
-  // counterpart, so src/mock.js neutralizes them in JS. Reads stay open
-  // (--allow-fs-read=*) so node_modules resolution works; reads aren't a side
-  // effect. Writes are scoped to the project root (default bundle/lockfile
-  // location) plus an explicit --bundle-file if given.
+  // worker threads, native addons (no --allow-addons -- addons would bypass
+  // the whole model), and the inspector. Network and timers have no
+  // --allow-* counterparts, so src/mock.js neutralizes them in JS; loader.js
+  // imports mock.js dynamically after stasis's own destructured fs bindings
+  // are captured but before registerHooks runs, so the mock's
+  // syncBuiltinESMExports() refresh propagates to user-code ESM imports
+  // without touching stasis's snapshots. Reads stay open (--allow-fs-read=*)
+  // so node_modules resolution works; reads aren't a side effect. Writes are
+  // still scoped at the kernel level as defense in depth (the JS layer
+  // covers user code, --permission covers anything that bypasses JS, e.g.
+  // process.binding or a future leak).
   // Node 24 dropped comma-separated --allow-fs-write; repeat the flag instead.
   const nodeArgs = []
   if (values.mock) {
@@ -89,7 +95,12 @@ if (command === '-v' || command === '--version') {
     if (bundleFile && !bundleFile.startsWith(`${process.cwd()}/`)) writeAllow.push(bundleFile)
     nodeArgs.push('--permission', '--allow-fs-read=*')
     for (const p of writeAllow) nodeArgs.push(`--allow-fs-write=${p}`)
-    nodeArgs.push('--import', import.meta.resolve('../src/mock.js'))
+    // --permission without --allow-addons removes "node-addons" from resolution
+    // conditions, which would change how packages with conditional exports
+    // resolve and make the captured import map incompatible with a normal
+    // replay. Restore the condition so resolution matches a non-mock run; this
+    // doesn't allow native addons to actually load (--allow-addons still off).
+    nodeArgs.push('--conditions=node-addons')
   }
   nodeArgs.push('--import', import.meta.resolve('../src/loader.js'))
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })

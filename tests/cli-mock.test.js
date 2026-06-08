@@ -54,20 +54,28 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stderr, /mock: true/)
 
-  // Permission layer (fs write + child_process).
-  t.assert.match(r.stdout, /write blocked ERR_ACCESS_DENIED/)
+  // JS-mock fs layer: the destructured `import { writeFileSync }` snapshot in
+  // user code resolves to the mock (loader.js refreshed the ESM wrapper via
+  // syncBuiltinESMExports after mock mutated the CJS object). --permission is
+  // still on as defense in depth -- it would also deny the same write.
+  t.assert.match(r.stdout, /fs-destructured blocked ERR_STASIS_MOCK_BLOCKED/)
+  // --permission catches child_process (no JS mock for it; child_process is
+  // less ESM-bypassable since it has only a few entry points but the
+  // kernel-level rule covers them all uniformly).
   t.assert.match(r.stdout, /spawn blocked ERR_ACCESS_DENIED/)
-  // JS-mock layer (network builtins + fetch/WebSocket), all fail closed.
+  // JS-mock network: every callable on http/https/http2/net/dgram/tls/dns
+  // is a thrower, so factory, constructor, and connection paths all surface
+  // the same attributable error code.
   t.assert.match(r.stdout, /http blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.match(r.stdout, /net blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.match(r.stdout, /ws blocked ERR_STASIS_MOCK_BLOCKED/)
   t.assert.match(r.stdout, /fetch blocked .*stasis --mock/)
-  // Timer layer: scheduling returns normally, callbacks never fire, the
-  // promise version resolves immediately so the capture doesn't hang.
-  t.assert.match(r.stdout, /timer await: awaited/)
-  t.assert.match(r.stdout, /timer callbacks fired: 0/)
   t.assert.doesNotMatch(r.stdout, /NOT BLOCKED/)
+  // Sanity: user code ran up to the never-resolving timer await...
   t.assert.match(r.stdout, /hello, world/)
+  // ...and nothing past the await printed (the awaiter is silently ignored,
+  // the loader's beforeExit still writes the bundle when the loop drains).
+  t.assert.doesNotMatch(r.stdout, /UNREACHABLE/)
 
   t.assert.ok(!existsSync(sentinel), 'fs write outside cwd must be blocked')
 
