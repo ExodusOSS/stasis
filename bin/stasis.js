@@ -74,23 +74,25 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
-  // --mock: capture imports by running user code with side-effects neutralized.
-  // Network APIs are mocked in src/mock.js (the permission model has no
-  // --allow-net flag); fs writes / child_process / workers are blocked by
-  // Node's permission system. Writes are scoped to the project root (default
-  // bundle/lockfile location) plus an explicit --bundle-file if given. Reads
-  // and native addon loading stay open so node_modules linking keeps working.
+  // --mock: capture imports by running user code with side-effects denied,
+  // fail-closed. Node's permission system blocks fs writes, child processes,
+  // worker threads, native addons (no --allow-addons -- addons would bypass the
+  // whole model), and the inspector. The network builtins have no --allow-net
+  // counterpart, so src/mock.js neutralizes them in JS. Reads stay open
+  // (--allow-fs-read=*) so node_modules resolution works; reads aren't a side
+  // effect. Writes are scoped to the project root (default bundle/lockfile
+  // location) plus an explicit --bundle-file if given.
   // Node 24 dropped comma-separated --allow-fs-write; repeat the flag instead.
   const nodeArgs = []
   if (values.mock) {
     const writeAllow = [process.cwd()]
-    if (bundleFile) writeAllow.push(bundleFile)
-    nodeArgs.push('--permission', '--allow-fs-read=*', '--allow-addons')
+    if (bundleFile && !bundleFile.startsWith(`${process.cwd()}/`)) writeAllow.push(bundleFile)
+    nodeArgs.push('--permission', '--allow-fs-read=*')
     for (const p of writeAllow) nodeArgs.push(`--allow-fs-write=${p}`)
     nodeArgs.push('--import', import.meta.resolve('../src/mock.js'))
   }
   nodeArgs.push('--import', import.meta.resolve('../src/loader.js'))
-  const child = spawn('node', [...nodeArgs, ...argv], { stdio: 'inherit' })
+  const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code] = await once(child, 'close')
   process.exitCode = code
 } else if (command === 'bundle') {

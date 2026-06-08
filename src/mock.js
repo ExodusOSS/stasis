@@ -1,109 +1,120 @@
-// Imported via `--import` *before* `src/loader.js`. The goal is to capture
-// the import graph for a bundle by actually running user code, but without
-// any outbound side-effects: no listening sockets, no HTTP requests, no
-// UDP/TLS chatter. Pair with Node's `--permission` flag (see `bin/stasis.js`
-// when run with `--mock`) to additionally block disk writes, child
-// processes, and worker threads at the kernel level.
+// Imported via `--import` *before* `src/loader.js`. The goal is to capture the
+// import graph for a bundle by actually running user code, but with outbound
+// side-effects denied. Pair with Node's `--permission` flag (see bin/stasis.js
+// when run with `--mock`), which fail-closed-denies fs writes, child processes,
+// worker threads, native addons, and the inspector at the runtime boundary.
+// This file covers what `--permission` cannot: there is no `--allow-net`, so
+// the network builtins are neutralized here in JS.
 //
-// node:test's MockTracker can only redefine *configurable* properties.
-// ESM namespace objects (e.g. `import * as fs from 'node:fs'`) freeze their
-// bindings, so `mock.method(fs, 'writeFileSync', …)` against the ESM
-// namespace throws "Cannot redefine property". The CommonJS exports object
-// for the same builtin is mutable, and ESM live-bindings track CJS mutation
-// for builtins -- so we go through `createRequire` to grab the mutable
-// object and let live bindings propagate to any importer that loads *after*
-// us. Modules linked before this file runs keep their original bindings
-// (that's how the loader's own `state.js` continues to talk to real `fs`).
+// Design: FAIL CLOSED, WHOLE MODULE.
+//  - We replace *every* callable on each network builtin with a thrower, not a
+//    curated method list. There is no "I forgot net.Socket#connect" gap: if
+//    it's a function on a denied module (factory, constructor, or helper),
+//    invoking it is denied. This also closes higher-level HTTP clients
+//    (axios/got/node-fetch/undici/ws) for free -- they all bottom out at
+//    node:net / node:tls / node:dns.
+//  - Anything we don't explicitly model still fails closed, because the call
+//    throws rather than silently succeeding.
+//
+// Mechanism: node:test's MockTracker can only redefine *configurable*
+// properties. ESM namespace objects (`import * as net from 'node:net'`) freeze
+// their bindings, so mocking the ESM namespace throws "Cannot redefine
+// property". The CommonJS exports object for the same builtin is mutable, and
+// ESM live-bindings track CJS mutation for builtins -- so we go through
+// `createRequire` to grab the mutable object and let live bindings propagate to
+// any importer that loads *after* us. Modules linked before this file runs keep
+// their original bindings -- which is exactly why the loader's own state.js
+// (node:fs/path/url/module/zlib/buffer, none of them network) keeps working.
 
 import { mock } from 'node:test'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 
-// Chainable no-op shaped like a Server/Socket/Stream. Enough surface that
-// `createServer().listen(p, cb).on('error', …)` and similar patterns don't
-// blow up. `listen()` deliberately does not invoke its callback: we don't
-// want to pretend the server is up.
-const fakeSocket = () => {
-  const obj = {
-    listen() { return obj },
-    close(cb) { if (cb) queueMicrotask(cb); return obj },
-    address() { return null },
-    on() { return obj },
-    once() { return obj },
-    off() { return obj },
-    removeListener() { return obj },
-    removeAllListeners() { return obj },
-    addListener() { return obj },
-    emit() { return false },
-    setMaxListeners() { return obj },
-    setTimeout() { return obj },
-    setKeepAlive() { return obj },
-    setNoDelay() { return obj },
-    unref() { return obj },
-    ref() { return obj },
-    pipe(dst) { return dst },
-    pause() { return obj },
-    resume() { return obj },
-    write() { return true },
-    end() { return obj },
-    destroy() { return obj },
-    connect() { return obj },
-    bind() { return obj },
-    listening: false,
-    readable: false,
-    writable: false,
-    closed: true,
-    destroyed: true,
-  }
-  return obj
+const MARKER = '[stasis --mock]'
+
+// Tagged so the unhandledRejection trap below can tell our denials apart from
+// genuine application bugs.
+const blocked = (label) => {
+  const err = new Error(`${MARKER} ${label} is blocked while capturing imports`)
+  err.code = 'ERR_STASIS_MOCK_BLOCKED'
+  err.__stasisMock = true
+  return err
 }
 
-// http.ClientRequest-shaped: we accept writes and end() but never emit a
-// 'response' or 'error'. Code that awaits a response hangs -- the caller is
-// expected to kill the run once the import graph is collected, or wrap
-// `await` in their own timeout.
-const fakeRequest = () => {
-  const req = {
-    on() { return req },
-    once() { return req },
-    off() { return req },
-    removeListener() { return req },
-    removeAllListeners() { return req },
-    addListener() { return req },
-    emit() { return false },
-    setMaxListeners() { return req },
-    setTimeout() { return req },
-    setHeader() {},
-    getHeader() {},
-    removeHeader() {},
-    write() { return true },
-    end() { return req },
-    abort() {},
-    destroy() { return req },
-    flushHeaders() {},
-    setSocketKeepAlive() {},
-    setNoDelay() {},
-    unref() { return req },
-    ref() { return req },
-    writableEnded: true,
-    destroyed: true,
+// A *regular* (constructable) function, so that both `mod.factory()` and
+// `new mod.Constructor()` throw our attributable error -- an arrow function
+// would make `new` fail with a confusing "is not a constructor" TypeError.
+const denyFn = (label) => function () { throw blocked(label) }
+
+// Replace every own function on `mod` (and, one level down, on `mod.promises`)
+// with a thrower. Functions are configurable on the builtins we target; fall
+// back to direct assignment on the off chance one isn't.
+const denyModuleSurface = (specifier, mod, prefix = specifier) => {
+  for (const key of Object.getOwnPropertyNames(mod)) {
+    const value = mod[key]
+    if (typeof value === 'function') {
+      const label = `${prefix}.${key}()`
+      try {
+        mock.method(mod, key, denyFn(label))
+      } catch {
+        try { mod[key] = denyFn(label) } catch { /* frozen: leave as-is */ }
+      }
+    } else if (key === 'promises' && value && typeof value === 'object') {
+      denyModuleSurface(specifier, value, `${prefix}.promises`)
+    }
   }
-  return req
 }
 
-const intercepts = [
-  ['node:http', { createServer: fakeSocket, request: fakeRequest, get: fakeRequest }],
-  ['node:https', { createServer: fakeSocket, request: fakeRequest, get: fakeRequest }],
-  ['node:http2', { createServer: fakeSocket, createSecureServer: fakeSocket, connect: fakeSocket }],
-  ['node:net', { createServer: fakeSocket, createConnection: fakeSocket, connect: fakeSocket }],
-  ['node:dgram', { createSocket: fakeSocket }],
-  ['node:tls', { createServer: fakeSocket, connect: fakeSocket }],
+// Every network-capable builtin. inspector (debug port) and cluster/worker
+// (which fork) are already denied by the permission system, so they're not here.
+const DENY = [
+  'node:http',
+  'node:https',
+  'node:http2',
+  'node:net',
+  'node:dgram',
+  'node:tls',
+  'node:dns',
+  'node:dns/promises',
 ]
 
-for (const [specifier, methods] of intercepts) {
-  const mod = require(specifier)
-  for (const [name, impl] of Object.entries(methods)) {
-    if (typeof mod[name] === 'function') mock.method(mod, name, impl)
+for (const specifier of DENY) {
+  let mod
+  try {
+    mod = require(specifier)
+  } catch {
+    continue // not present on this build
+  }
+  denyModuleSurface(specifier, mod)
+}
+
+// Global fetch / WebSocket / EventSource come from undici, not node:http, so
+// they need separate handling. (Their transport bottoms out at node:net, which
+// is already blocked above -- but intercepting here yields a clean, attributable
+// error instead of a confusing low-level socket failure.) These globals are
+// writable + configurable, so assign directly.
+//
+// fetch returns a *rejected* promise rather than throwing synchronously, to
+// honor its contract -- defensive `fetch(...).catch(...)` code then keeps
+// running and we capture more of the graph. WebSocket/EventSource throw from
+// their constructors (fail closed).
+if (typeof globalThis.fetch === 'function') {
+  globalThis.fetch = () => Promise.reject(blocked('fetch()'))
+}
+for (const name of ['WebSocket', 'EventSource']) {
+  if (typeof globalThis[name] === 'function') {
+    globalThis[name] = class {
+      constructor() { throw blocked(name) }
+    }
   }
 }
+
+// A denied fetch used fire-and-forget (e.g. an analytics beacon: `void
+// fetch(url)`) would otherwise surface as an unhandledRejection and tear the
+// process down before the loader writes the bundle on `beforeExit`. Swallow
+// *only* our own denials; rethrow everything else so real bugs still crash.
+process.on('unhandledRejection', (reason) => {
+  if (reason?.__stasisMock) return
+  throw reason
+})

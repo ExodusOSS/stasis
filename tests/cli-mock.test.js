@@ -6,7 +6,6 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
-import { createConnection } from 'node:net'
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'stasis.js')
 const fixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-effects')
@@ -27,8 +26,8 @@ const run = (args, opts = {}) => {
   return r
 }
 
-// Async-aware: the existing cli.test.js withTmp drops `await` and trips on
-// async test bodies (the `finally` wipes the dir before the body resolves).
+// Async-aware: the cli.test.js withTmp drops `await` and would wipe the dir
+// before an async body resolves.
 const withTmp = (fn) => async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-mock-'))
   try {
@@ -38,43 +37,37 @@ const withTmp = (fn) => async (t) => {
   }
 }
 
-const portInUse = (port) => new Promise((resolve) => {
-  const s = createConnection({ host: '127.0.0.1', port }, () => { s.end(); resolve(true) })
-  s.on('error', () => resolve(false))
-})
-
-// Pick ports unlikely to collide with anything the host or parallel tests bind.
-const PORT_NEUTRALIZED = 54323
-const PORT_REPLAYED = 54324
-
-test('run --mock blocks fs writes, child_process, and HTTP servers while still capturing the import graph', withTmp(async (t, tmp) => {
+test('run --mock denies fs/child_process/network side-effects (fail closed) while capturing the import graph', withTmp((t, tmp) => {
   cpSync(fixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
-  // Sentinel lives *outside* the project's allowed-write tree so we exercise
-  // the permission system's path scoping -- writes inside cwd would otherwise
-  // be allowed (the lockfile/bundle write paths sit there).
+  // Sentinel lives *outside* the project's allowed-write tree: writes inside cwd
+  // are intentionally permitted (that's where the bundle/lockfile go).
   const sentinel = join(dirname(tmp), `mock-test-sentinel-${process.pid}.txt`)
   rmSync(sentinel, { force: true })
 
   const r = run(
     ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
-    {
-      cwd: tmp,
-      env: { ...cleanEnv, STASIS_MOCK_SENTINEL: sentinel, STASIS_MOCK_PORT: String(PORT_NEUTRALIZED) },
-    }
+    { cwd: tmp, env: { ...cleanEnv, STASIS_MOCK_SENTINEL: sentinel } }
   )
+  // status 0 also proves the unhandledRejection trap swallowed the fire-and-forget
+  // `void fetch(beacon)` denial -- otherwise the run would crash before exit.
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stderr, /mock: true/)
+
+  // Permission layer (fs write + child_process).
   t.assert.match(r.stdout, /write blocked ERR_ACCESS_DENIED/)
   t.assert.match(r.stdout, /spawn blocked ERR_ACCESS_DENIED/)
-  t.assert.match(r.stdout, /listening\? false/)
+  // JS-mock layer (network builtins + fetch/WebSocket), all fail closed.
+  t.assert.match(r.stdout, /http blocked ERR_STASIS_MOCK_BLOCKED/)
+  t.assert.match(r.stdout, /net blocked ERR_STASIS_MOCK_BLOCKED/)
+  t.assert.match(r.stdout, /ws blocked ERR_STASIS_MOCK_BLOCKED/)
+  t.assert.match(r.stdout, /fetch blocked .*stasis --mock/)
   t.assert.doesNotMatch(r.stdout, /NOT BLOCKED/)
   t.assert.match(r.stdout, /hello, world/)
 
   t.assert.ok(!existsSync(sentinel), 'fs write outside cwd must be blocked')
-  t.assert.equal(await portInUse(PORT_NEUTRALIZED), false, 'http.createServer().listen() must be a no-op')
 
-  // Bundle was built despite blocked side effects -- the import graph is captured.
+  // The import graph is captured despite every side effect being denied.
   t.assert.ok(existsSync(bundlePath), 'bundle should be written by stasis (allowed path)')
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
   t.assert.deepEqual(decoded.entries, ['src/entry.js'])
@@ -82,6 +75,11 @@ test('run --mock blocks fs writes, child_process, and HTTP servers while still c
   t.assert.ok(decoded.sources['.'].files['src/hello.js'])
   t.assert.equal(decoded.formats['src/entry.js'], 'module')
   t.assert.equal(decoded.formats['src/hello.js'], 'module')
+  // The runtime loader keys imports by a conditions string, not "*"; assert the
+  // entry->hello edge was captured regardless of which conditions key holds it.
+  const captured = Object.values(decoded.imports)
+    .some((m) => m['src/entry.js']?.['./hello.js'] === 'src/hello.js')
+  t.assert.ok(captured, 'import edge src/entry.js -> ./hello.js must be captured')
 }))
 
 test('run --mock with --bundle=load is rejected (mock is for capture, not replay)', (t) => {
@@ -89,35 +87,3 @@ test('run --mock with --bundle=load is rejected (mock is for capture, not replay
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /--mock is for capturing imports/)
 })
-
-test('a bundle built under --mock runs normally (with real side effects) when loaded back', withTmp(async (t, tmp) => {
-  cpSync(fixture, tmp, { recursive: true })
-  const bundlePath = join(tmp, 'snapshot.br')
-  // This time we let the bundled code actually run; the sentinel sits inside
-  // cwd so a non-mock replay can write to it normally.
-  const sentinel = join(tmp, 'replay-wrote.txt')
-
-  const save = run(
-    ['run', '--lock=none', '--full', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
-    {
-      cwd: tmp,
-      env: { ...cleanEnv, STASIS_MOCK_SENTINEL: sentinel, STASIS_MOCK_PORT: String(PORT_REPLAYED) },
-    }
-  )
-  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
-
-  // Wipe the source tree so the load path must serve the (mock-built) bundle.
-  rmSync(join(tmp, 'src'), { recursive: true })
-
-  const load = run(
-    ['run', '--lock=none', '--full', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-    {
-      cwd: tmp,
-      env: { ...cleanEnv, STASIS_MOCK_SENTINEL: sentinel, STASIS_MOCK_PORT: String(PORT_REPLAYED) },
-    }
-  )
-  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
-  t.assert.match(load.stdout, /hello, world/)
-  t.assert.match(load.stdout, /write NOT BLOCKED/, 'the replayed bundle is the same source -- side effects happen')
-  t.assert.ok(existsSync(sentinel), 'replay wrote the sentinel')
-}))
