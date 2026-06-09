@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -114,6 +114,52 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   const captured = Object.values(decoded.imports)
     .some((m) => m['src/entry.js']?.['./hello.js'] === 'src/hello.js')
   t.assert.ok(captured, 'import edge src/entry.js -> ./hello.js must be captured')
+}))
+
+test('run --mock denies write-mode fs.open(Sync) inside cwd, keeps read-mode opens, and still captures', withTmp(async (t, tmp) => {
+  // Regression: the fs writer deny-list only covered high-level writers
+  // (writeFileSync, ...), so openSync(path,'w')+writeSync(fd) slipped through.
+  // cwd is on --allow-fs-write (that's where stasis emits its bundle), so the
+  // kernel layer permits in-cwd writes -- only the JS mock can stop them. A read
+  // open must still work (resolution/reads aren't side effects), and stasis's own
+  // bundle write must still land (it opens through the captured, pre-mock openSync).
+  mkdirSync(join(tmp, 'src'))
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'mock-open', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'src', 'readable.js'), 'export const ok = 1\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { openSync, writeSync, closeSync, readFileSync, constants } from 'node:fs'",
+    "import { open as openPromise } from 'node:fs/promises'",
+    "const log = (k, fn) => { try { fn(); console.log(k, 'NOT BLOCKED') } catch (e) { console.log(k, 'blocked', e.code ?? e.message) } }",
+    "const at = (n) => new URL(`../${n}`, import.meta.url)", // inside cwd, outside src/
+    "log('open-w', () => { const fd = openSync(at('pwned-w.txt'), 'w'); writeSync(fd, 'x'); closeSync(fd) })",
+    "log('open-a', () => { const fd = openSync(at('pwned-a.txt'), 'a'); writeSync(fd, 'x'); closeSync(fd) })",
+    "log('open-num', () => { const fd = openSync(at('pwned-num.txt'), constants.O_WRONLY | constants.O_CREAT); writeSync(fd, 'x'); closeSync(fd) })",
+    "void openPromise(at('pwned-promise.txt'), 'w')", // fire-and-forget rejected promise
+    "const txt = readFileSync(new URL('./readable.js', import.meta.url), 'utf8')", // read-mode access must work
+    "console.log('read-ok', txt.trim())",
+  ].join('\n') + '\n')
+  const bundlePath = join(tmp, 'snap.br')
+
+  const r = run(
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, '--mock', 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  // Write-mode opens (string and numeric flags) are denied with the attributable error.
+  t.assert.match(r.stdout, /open-w blocked ERR_STASIS_MOCK_BLOCKED/)
+  t.assert.match(r.stdout, /open-a blocked ERR_STASIS_MOCK_BLOCKED/)
+  t.assert.match(r.stdout, /open-num blocked ERR_STASIS_MOCK_BLOCKED/)
+  t.assert.doesNotMatch(r.stdout, /NOT BLOCKED/)
+  // Read-mode access still works.
+  t.assert.match(r.stdout, /read-ok export const ok = 1/)
+  // No sentinel landed inside cwd, despite cwd being kernel-writable.
+  for (const f of ['pwned-w.txt', 'pwned-a.txt', 'pwned-num.txt', 'pwned-promise.txt']) {
+    t.assert.ok(!existsSync(join(tmp, f)), `${f} must not be written`)
+  }
+  // stasis's own write still lands: state.write opens via the captured openSync.
+  t.assert.ok(existsSync(bundlePath), 'bundle should still be captured')
+  t.assert.deepEqual(JSON.parse(brotliDecompressSync(readFileSync(bundlePath))).entries, ['src/entry.js'])
 }))
 
 test('run --mock with --bundle=load is rejected (mock is for capture, not replay)', (t) => {

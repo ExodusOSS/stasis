@@ -219,6 +219,59 @@ for (const name of FS_WRITERS) {
   }
 }
 
+// open / openSync / fs.promises.open are dual-use: a read-mode open is not a
+// side effect (node_modules resolution and config discovery rely on reads), but
+// a write-mode open is the one fs entry point the blanket list above can't deny
+// without also breaking reads. Wrap them to deny only when the flags request
+// write/create/append/truncate -- this closes the openSync(path,'w') + writeSync(fd)
+// hole that otherwise sidesteps every other fs writer mock. Default flags
+// ('r' / O_RDONLY) and explicit read flags stay real.
+const { O_WRONLY, O_RDWR, O_CREAT, O_APPEND, O_TRUNC } = fs.constants
+const WRITE_FLAG_BITS = O_WRONLY | O_RDWR | O_CREAT | O_APPEND | O_TRUNC
+const isWriteFlags = (flags) => {
+  if (flags === undefined || flags === null) return false // open() defaults to 'r'
+  if (typeof flags === 'number') return (flags & WRITE_FLAG_BITS) !== 0 // O_RDONLY === 0
+  if (typeof flags === 'string') return /[wa+]/u.test(flags) // 'r' / 'rs' are read-only
+  return true // unknown shape: fail closed
+}
+const wrapFn = (obj, key, impl) => {
+  try { mock.method(obj, key, impl) } catch { try { obj[key] = impl } catch { /* frozen: leave as-is */ } }
+}
+const realOpenSync = fs.openSync
+const realOpen = fs.open
+const realPromisesOpen = fsPromises.open
+if (typeof realOpenSync === 'function') {
+  wrapFn(fs, 'openSync', function (path, flags, ...rest) {
+    if (isWriteFlags(flags)) throw blocked('node:fs.openSync() [write flag]')
+    return realOpenSync.call(this, path, flags, ...rest)
+  })
+}
+if (typeof realOpen === 'function') {
+  wrapFn(fs, 'open', function (path, flags, ...rest) {
+    // open(path, cb) leaves flags as the callback (defaults to 'r'); the other
+    // forms are open(path, flags, cb) and open(path, flags, mode, cb).
+    const requested = typeof flags === 'function' ? undefined : flags
+    if (isWriteFlags(requested)) throw blocked('node:fs.open() [write flag]')
+    return realOpen.call(this, path, flags, ...rest)
+  })
+}
+if (typeof realPromisesOpen === 'function') {
+  wrapFn(fsPromises, 'open', function (path, flags, ...rest) {
+    if (isWriteFlags(flags)) return Promise.reject(blocked('node:fs/promises.open() [write flag]'))
+    return realPromisesOpen.call(this, path, flags, ...rest)
+  })
+}
+
+// `new fs.WriteStream(path)` opens for write under the hood. Its open already
+// flows through the wrapped fs.open above (so it can't actually create a file),
+// but that surfaces only as an async 'error' event; deny the constructor too so
+// the failure is a synchronous, attributable error like every other writer.
+// mock.method rejects non-method (constructor) properties, so wrapFn falls back
+// to direct assignment here.
+if (typeof fs.WriteStream === 'function') {
+  wrapFn(fs, 'WriteStream', denyFn('node:fs.WriteStream()'))
+}
+
 // Refresh the node:fs / node:fs/promises ESM wrappers so destructured/
 // namespace ESM imports made *after* this point see the mocked names.
 // Bindings already captured by stasis's own modules (linked before this file

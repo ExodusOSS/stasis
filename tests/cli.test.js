@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -395,6 +395,40 @@ test('run --bundle=load fails when --bundle-file does not exist', withTmp((t, tm
     { cwd: runFixture }
   )
   t.assert.notEqual(r.status, 0)
+}))
+
+test('run --bundle-file round-trips from a nested package (bundleFile is not a per-root marker)', withTmp((t, tmp) => {
+  // Regression: an explicit --bundle-file lives at one fixed path, so it must not
+  // be "discovered" once per package dir along the walk-up. In a nested layout
+  // (top-level package.json + inner package.json, .git boundary) that double
+  // discovery used to throw "Stasis config already loaded" on load.
+  mkdirSync(join(tmp, '.git'))
+  mkdirSync(join(tmp, 'pkg', 'src'), { recursive: true })
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'outer', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pkg', 'package.json'), JSON.stringify({ name: 'inner', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pkg', 'src', 'entry.js'), "console.log('nested bundle-file ok')\n")
+  const pkgDir = join(tmp, 'pkg')
+  const bundlePath = join(tmp, 'out', 'snap.br') // outside the inner package
+
+  const save = run(
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: pkgDir }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.ok(existsSync(bundlePath), 'bundle should be written at the explicit path')
+
+  // The entry is recorded relative to the discovered top-level root, not the cwd.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.deepEqual(decoded.entries, ['pkg/src/entry.js'])
+
+  // Remove the on-disk source so load must serve it from the bundle.
+  rmSync(join(pkgDir, 'src'), { recursive: true })
+  const load = run(
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: pkgDir }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'nested bundle-file ok\n')
 }))
 
 test('run --lock=frozen --bundle=add writes the bundle without rewriting the lockfile', withTmp((t, tmp) => {

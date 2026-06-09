@@ -18,7 +18,7 @@ import { brotliOptions, splitNodeModulesPath } from './util.js'
 // module.syncBuiltinESMExports() to refresh node:fs's ESM wrapper for user code.
 // Direct ESM destructured imports are live bindings and would re-resolve to the
 // mocked names when state.write() fires on beforeExit.
-const { existsSync, mkdirSync, readFileSync, writeFileSync } = fs
+const { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } = fs
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
@@ -84,11 +84,17 @@ export class State {
     this.root = potentialRoots.at(-1)
 
     let loaded = false
+    let lockfileLoaded = false
     for (const rootDir of potentialRoots) {
       const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8')
       const lock = readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
-      const sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
-      const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+      // An explicit bundleFile is one fixed path, not a per-root marker: reading
+      // it under each candidate root would make it "present" everywhere along the
+      // walk and trip the "already loaded" guard below in any nested-package or
+      // monorepo tree. Only the default-path code bundle is discovered per-root;
+      // the explicit bundleFile is loaded once after the loop, against the root
+      // that discovery settles on.
+      const sources = this.config.bundleFile ? null : readFileSyncMaybe(rootDir, FILE_CODE)
       const resources = readFileSyncMaybe(rootDir, FILE_RESOURCES)
       if (config !== null || lock !== null || sources !== null || resources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
@@ -101,7 +107,7 @@ export class State {
           throw new Error(`Unexpected ${join(rootDir, FILE_LOCK)} with config.lock = 'none'`)
         }
         if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
-          throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
+          throw new Error(`Unexpected ${join(rootDir, FILE_CODE)} with config.bundle = 'none'`)
         }
         if (resources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
           throw new Error(`Unexpected ${join(rootDir, FILE_RESOURCES)} with config.bundle = 'none'`)
@@ -112,7 +118,6 @@ export class State {
         }
 
         if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
-        let lockfileLoaded = false
         if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
           const lockfile = Lockfile.parse(lock)
           if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
@@ -133,12 +138,7 @@ export class State {
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
-          const bundle = Bundle.parseCode(brotliDecompressSync(sources).toString('utf-8'))
-          assert.equal(bundle.config.scope, this.config.scope)
-          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
-          this.sources = bundle.sources
-          this.formats = bundle.formats
-          this.imports = bundle.imports
+          this.#loadCodeBundle(sources, { lockfileLoaded })
         }
 
         if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
@@ -153,10 +153,47 @@ export class State {
       }
     }
 
+    // An explicit bundleFile lives at a single fixed path rather than under one of
+    // the candidate roots, so it sits out the per-root discovery above and is loaded
+    // here against whichever root that settled on (the dir holding the lockfile/config,
+    // or the default top-level package when none was found). The lockfile/config it
+    // pairs with were discovered in the loop, so this.config and lockfileLoaded are
+    // already final.
+    if (this.config.bundleFile) {
+      const sources = readFileSyncMaybe(dirname(this.config.bundleFile), basename(this.config.bundleFile))
+      // frozen still requires a lockfile; when the bundleFile is the only artifact
+      // present the discovery loop never reached its own frozen check.
+      if (this.config.frozen) assert.ok(lockfileLoaded, 'No lockfile, but attempting to run in frozen mode')
+      if (sources !== null) {
+        if (!this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
+          throw new Error(`Unexpected ${this.config.bundleFile} with config.bundle = 'none'`)
+        }
+        if (!lockfileLoaded && this.config.useLockfile && !this.config.replaceLockfile) {
+          throw new Error('stasis.lock.json missing, can not use sources')
+        }
+        if ((this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
+          this.#loadCodeBundle(sources, { lockfileLoaded })
+        }
+      }
+    }
+
     // Register only after every fallible step succeeds, so a thrown error during config
     // discovery / lockfile / bundle parsing leaves the static registry untouched.
     if (isPreload) preload = this
     liveStates.add(this)
+  }
+
+  // Parse a brotli-compressed code bundle and fold it into this State: cross-check
+  // its metadata against the lockfile (or absorb it when none was loaded), then take
+  // its sources/formats/imports. Shared by the per-root default-path load and the
+  // explicit-bundleFile load above.
+  #loadCodeBundle(compressed, { lockfileLoaded }) {
+    const bundle = Bundle.parseCode(brotliDecompressSync(compressed).toString('utf-8'))
+    assert.equal(bundle.config.scope, this.config.scope)
+    this.#mergeBundleMetadata(bundle, { lockfileLoaded })
+    this.sources = bundle.sources
+    this.formats = bundle.formats
+    this.imports = bundle.imports
   }
 
   // Cross-check bundle metadata (entries/modules) with what the lockfile already
@@ -464,15 +501,31 @@ export class State {
     }).serializeResources()
   }
 
+  // Write through a descriptor opened with the module-eval (pre-mock) openSync.
+  // Under `stasis run --mock`, fs.openSync is replaced with a write-flag denier;
+  // writeFileSync(path, ...) re-enters that mocked openSync internally, which
+  // would block stasis's own output alongside the user-code writes the mock is
+  // meant to stop. Opening here with the captured-real openSync sidesteps the
+  // property mock, and writeFileSync(fd, ...) takes a numeric fd so it skips the
+  // internal open entirely (writeSync, which it does use, is never mocked).
+  #writeFile(path, data) {
+    const fd = openSync(path, 'w')
+    try {
+      writeFileSync(fd, data)
+    } finally {
+      closeSync(fd)
+    }
+  }
+
   write() {
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     if (this.config.writeLockfile) {
-      writeFileSync(join(this.root, FILE_LOCK), this.lockData)
+      this.#writeFile(join(this.root, FILE_LOCK), this.lockData)
     }
     if (this.config.writeBundle) {
       const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
       mkdirSync(dirname(sourcesPath), { recursive: true })
-      writeFileSync(sourcesPath, brotliCompressSync(this.sourceData, brotliOptions()))
+      this.#writeFile(sourcesPath, brotliCompressSync(this.sourceData, brotliOptions()))
     }
   }
 }
