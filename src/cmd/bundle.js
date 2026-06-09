@@ -321,8 +321,9 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
 // stasis bundle (matching the on-disk format of `stasis.code.br`). When
 // `output` is provided, writes to that path; otherwise writes to stdout.
-// Prints a one-line `[stasis] Bundled <n> files from <dir> to <dest>` summary
-// to stderr so it doesn't interleave with the binary output on stdout.
+// Prints a one-line `[stasis] Bundled <n> files in <p> packages from <dir> to
+// <dest>` summary to stderr so it doesn't interleave with the binary output on
+// stdout.
 //
 // Dispatch by extension: all entries must be either .sol (Solidity), .php
 // (PHP) OR .js/.cjs/.mjs (JS, via static scan). Mixing fails fast; --mapping
@@ -356,19 +357,23 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
 
   let serialized
   let files
+  let modules
   let lockData
   if (isSol) {
     const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
     serialized = bundle.serializeCode()
     files = [...bundle.sources.keys()]
+    modules = bundle.modules
   } else if (isPhp) {
     const bundle = await buildPhpBundle({ cwd, entries })
     serialized = bundle.serializeCode()
     files = [...bundle.sources.keys()]
+    modules = bundle.modules
   } else {
     const state = await buildJsBundle({ cwd, entries, scope })
     serialized = state.sourceData
     files = [...state.sources.keys()]
+    modules = state.modules
     if (lockfile) lockData = state.lockData
   }
 
@@ -387,5 +392,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   }
   const fromDir = outermostDir(files, resolve(cwd))
   const dest = output ?? '<stdout>'
-  console.warn(`[stasis] Bundled ${files.length} files from ${fromDir} to ${dest}`)
+  // Count packages: every non-empty bucket, with the project's own source (the
+  // "." workspace bucket) counting as one package alongside each dependency.
+  const packages = [...modules.values()].filter((m) => Object.keys(m.files).length > 0).length
+  const pkgLabel = `${packages} package${packages === 1 ? '' : 's'}`
+  console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
 }

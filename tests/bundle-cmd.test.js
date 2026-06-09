@@ -423,7 +423,7 @@ test('CLI: bundle prints a summary line to stderr with the file count, outermost
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'src/A.sol'], { cwd: join(fixtures, 'basic') })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
+  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files in 1 package from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
 }))
 
 test('CLI: bundle summary falls back to <stdout> when no -o is given', (t) => {
@@ -432,7 +432,7 @@ test('CLI: bundle summary falls back to <stdout> when no -o is given', (t) => {
     env: cleanEnv,
   })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr.toString('utf8')}`)
-  t.assert.match(r.stderr.toString('utf8'), /\[stasis\] Bundled 2 files from src to <stdout>/)
+  t.assert.match(r.stderr.toString('utf8'), /\[stasis\] Bundled 2 files in 1 package from src to <stdout>/)
 })
 
 test('CLI: bundle summary shows "." as outermost dir when files share no common parent', withTmp((t, tmp) => {
@@ -443,7 +443,7 @@ test('CLI: bundle summary shows "." as outermost dir when files share no common 
     { cwd: join(fixtures, 'with-remappings-txt') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.match(r.stderr, /\[stasis\] Bundled 2 files from \. to /)
+  t.assert.match(r.stderr, /\[stasis\] Bundled 2 files in 1 package from \. to /)
 }))
 
 test('CLI: bundle summary counts files across workspace AND node_modules buckets', withTmp((t, tmp) => {
@@ -455,7 +455,7 @@ test('CLI: bundle summary counts files across workspace AND node_modules buckets
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   // 3 files total: src/A.sol + node_modules/foo/X.sol + node_modules/@oz/contracts/utils/Math.sol
   // Outermost shared parent is the project root ".".
-  t.assert.match(r.stderr, /\[stasis\] Bundled 3 files from \. to /)
+  t.assert.match(r.stderr, /\[stasis\] Bundled 3 files in 3 packages from \. to /)
 }))
 
 test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
@@ -730,7 +730,7 @@ test('CLI: bundle (php) prints a summary line with the file count, outermost dir
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'src/A.php'], { cwd: join(phpFixtures, 'basic') })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
+  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files in 1 package from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
 }))
 
 // --- Regression: JS bundle correctness fixes ---
