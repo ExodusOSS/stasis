@@ -570,16 +570,16 @@ test('buildPhpBundle follows the Composer autoload graph and bundles only refere
   t.assert.ok(!edges.has('App\\Unused\\Ghost'))
 })
 
-test('buildPhpBundle skips a dynamic include without failing or pulling in extra files', async (t) => {
+test('buildPhpBundle bundles the static directory of a dynamic include', async (t) => {
   // index.php has a static `require __DIR__ . '/bootstrap.php'` and a dynamic
-  // `require __DIR__ . '/modules/' . $name . '.php'`. The dynamic one must be
-  // skipped (not partially resolved to the modules/ directory), so the bundle
-  // succeeds with just the entry and the static include.
+  // `require __DIR__ . '/modules/' . $name . '.php'`. The dynamic target is only
+  // known at runtime, so every modules/*.php is bundled as a candidate (the
+  // non-.php modules/notes.txt is not), and the bundle succeeds.
   const cwd = join(phpFixtures, 'dynamic-include')
   const bundle = await buildPhpBundle({ cwd, entries: ['index.php'] })
   t.assert.deepEqual(
     Object.keys(bundle.modules.get('.').files).toSorted(),
-    ['bootstrap.php', 'index.php'],
+    ['bootstrap.php', 'index.php', 'modules/admin.php', 'modules/default.php'],
   )
 })
 

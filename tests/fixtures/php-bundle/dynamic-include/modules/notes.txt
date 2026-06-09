@@ -1,0 +1,1 @@
+Not a PHP file; must not be bundled by the directory glob.

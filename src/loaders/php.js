@@ -32,7 +32,7 @@
 //     that live in no autoload map -- so an unresolved class reference is
 //     silently skipped rather than treated as a missing dependency.
 
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
@@ -82,7 +82,7 @@ function stringLiterals(code) {
         value += c
         j++
       }
-      out.push({ start: i, end: j, value })
+      out.push({ start: i, end: j, value, quote: q })
       i = j
     } else {
       i++
@@ -101,16 +101,35 @@ function stringLiterals(code) {
 const PHP_INCLUDE_KEYWORD_RE = /(?<![\w$>:])(?:require_once|require|include_once|include)\b/gidu
 const DIRNAME_FILE_RE = /dirname\s*\(\s*__FILE__\s*\)/y
 
-// Extract the statically-resolvable include specifiers from PHP source. Rather
-// than pairing quotes with a regex (which mis-fires on `'require'` array values
-// and on concatenated paths), it scans comment/heredoc-masked code for include
-// keywords that are not inside a string, then parses the argument by hand: an
-// optional `(`, an optional `__DIR__ .` / `dirname(__FILE__) .` prefix, then
-// exactly ONE complete string literal. An argument that is a variable/constant,
-// or a string followed by `.` (concatenation, e.g. `__DIR__ . '/d/' . $x`), is
-// dynamic and skipped -- partially extracting it would yield a bogus directory
-// path. Dir-relative includes are normalised to a `./`-prefixed specifier.
-export function extractPhpImports(content) {
+// Interpolation markers inside a double-quoted string (`$var`, `${...}`,
+// `{$...}`). Single-quoted strings never interpolate, so a `$` there is literal.
+const PHP_INTERPOLATION_RE = /\$[A-Za-z_{]|\{\$/u
+
+// Normalise an include path to a specifier. Dir-relative paths (`__DIR__ . …`)
+// get a `./` prefix and have the leading separator stripped; an empty
+// dir-relative path means "the file's own directory" (`.`).
+function normalizeIncludePath(raw, dirRelative) {
+  if (!dirRelative) return raw
+  const rel = raw.replace(/^\/+/u, '')
+  if (rel === '') return '.'
+  return rel.startsWith('.') ? rel : `./${rel}`
+}
+
+// Scan PHP for include statements, classifying each as either a concrete file
+// or -- when the path is built dynamically but has a static directory prefix --
+// a directory whose `.php` files should all be bundled (any could be the runtime
+// target, e.g. Laravel's `require __DIR__ . "/.../components/$view.php"`).
+//
+// Works on comment/heredoc-masked code and uses real string-literal boundaries
+// (never regex quote-pairing). For each include keyword that is not itself
+// inside a string, the argument is parsed by hand: an optional `(`, an optional
+// `__DIR__ .` / `dirname(__FILE__) .` prefix, then a concatenation chain of
+// string literals. Consecutive *static* literals are concatenated into one path
+// (`__DIR__ . '/a' . '/b.php'` -> `./a/b.php`). The chain becomes dynamic at the
+// first variable/function/constant or `"…$interp…"`; everything static before
+// that point is the prefix. Fully-static -> `{ kind: 'file' }`; dynamic with a
+// usable static directory -> `{ kind: 'dir' }`; nothing static -> skipped.
+function scanIncludes(content) {
   const code = maskCommentsAndHeredocs(content)
   const strings = stringLiterals(code)
   const inString = (pos) => strings.some(({ start, end }) => pos > start && pos < end)
@@ -120,40 +139,71 @@ export function extractPhpImports(content) {
     return pos
   }
 
-  const specs = []
+  const out = []
   for (const m of code.matchAll(PHP_INCLUDE_KEYWORD_RE)) {
     if (inString(m.index)) continue
     let i = skipWs(m.index + m[0].length)
     if (code[i] === '(') i = skipWs(i + 1)
 
-    let hasPrefix = false
+    let dirRelative = false
     if (code.startsWith('__DIR__', i)) {
       i = skipWs(i + '__DIR__'.length)
-      hasPrefix = true
+      dirRelative = true
     } else {
       DIRNAME_FILE_RE.lastIndex = i
       if (DIRNAME_FILE_RE.exec(code)) {
         i = skipWs(DIRNAME_FILE_RE.lastIndex)
-        hasPrefix = true
+        dirRelative = true
       }
     }
-    if (hasPrefix) {
+    if (dirRelative) {
       if (code[i] !== '.') continue // `__DIR__` not concatenated with a path
       i = skipWs(i + 1)
     }
 
-    const lit = stringAt(i)
-    if (!lit) continue // argument is not a plain string literal -> dynamic
-    if (code[skipWs(lit.end)] === '.') continue // concatenated with more -> dynamic
-
-    if (hasPrefix) {
-      const rel = lit.value.replace(/^\/+/u, '')
-      specs.push(rel.startsWith('.') ? rel : `./${rel}`)
-    } else {
-      specs.push(lit.value)
+    let prefix = ''
+    let dynamic = false
+    let sawStatic = false
+    for (;;) {
+      const lit = stringAt(i)
+      if (!lit) { dynamic = true; break } // variable/constant/function -> dynamic
+      const interp = lit.quote === '"' ? lit.value.search(PHP_INTERPOLATION_RE) : -1
+      if (interp >= 0) {
+        prefix += lit.value.slice(0, interp)
+        sawStatic = true
+        dynamic = true
+        break
+      }
+      prefix += lit.value
+      sawStatic = true
+      i = skipWs(lit.end)
+      if (code[i] === '.') { i = skipWs(i + 1); continue } // concatenated -> keep going
+      break
     }
+
+    if (!dynamic) {
+      if (sawStatic) out.push({ kind: 'file', spec: normalizeIncludePath(prefix, dirRelative) })
+      continue
+    }
+    // Dynamic path: fall back to bundling the static directory prefix (the part
+    // up to the last separator). Nothing static and no `__DIR__` -> unusable.
+    const slash = prefix.lastIndexOf('/')
+    if (slash < 0 && !dirRelative) continue
+    const dir = slash >= 0 ? prefix.slice(0, slash) : ''
+    out.push({ kind: 'dir', spec: normalizeIncludePath(dir, dirRelative) })
   }
-  return specs
+  return out
+}
+
+// Statically-resolvable include specifiers (concrete files). See scanIncludes.
+export function extractPhpImports(content) {
+  return scanIncludes(content).filter((e) => e.kind === 'file').map((e) => e.spec)
+}
+
+// Directory specifiers for dynamic includes whose path has a static directory
+// prefix; every `.php` file directly in such a directory is a candidate target.
+export function extractPhpImportDirs(content) {
+  return scanIncludes(content).filter((e) => e.kind === 'dir').map((e) => e.spec)
 }
 
 // Apply `segments` (already split on '/') on top of `fromFile`'s directory,
@@ -180,6 +230,46 @@ function isFileOnDisk(baseDir, rel) {
     return statSync(join(baseDir, rel)).isFile()
   } catch {
     return false
+  }
+}
+
+function isDirOnDisk(baseDir, rel) {
+  try {
+    return statSync(join(baseDir, rel)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+// Resolve a directory specifier (from a dynamic include's static prefix) to an
+// existing baseDir-relative directory, or null. `./`/`../` resolve against the
+// including file; a bare spec tries file-relative then project-relative.
+export function resolvePhpDir(spec, fromFile, baseDir) {
+  if (spec.startsWith('.')) {
+    const rel = applyToDir(fromFile, spec.split('/'))
+    return rel !== null && isDirOnDisk(baseDir, rel) ? rel : null
+  }
+  if (baseDir && !isAbsolute(spec)) {
+    const fileRel = applyToDir(fromFile, spec.split('/'))
+    if (fileRel && isDirOnDisk(baseDir, fileRel)) return fileRel
+    const projRel = relative(baseDir, resolve(baseDir, spec)).split(/[\\/]/u).join('/')
+    if (projRel !== '' && !projRel.startsWith('..') && !isAbsolute(projRel) && isDirOnDisk(baseDir, projRel)) {
+      return projRel
+    }
+  }
+  return null
+}
+
+// The `.php` files directly in `dir` (baseDir-relative), as baseDir-relative
+// paths. Non-recursive: a dynamic include like `.../$view.php` targets a file in
+// the directory itself, and recursing could pull in an unbounded subtree.
+function listPhpFiles(baseDir, dir) {
+  try {
+    return readdirSync(join(baseDir, dir), { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.php'))
+      .map((e) => (dir === '.' ? e.name : `${dir}/${e.name}`))
+  } catch {
+    return []
   }
 }
 
@@ -634,6 +724,16 @@ export async function collectPhpFilesFromDisk(baseDir, entries, { autoload = nul
           if (!sources.has(resolved)) next.push(resolved)
         } else {
           console.warn(`[loader.php] Missing import: ${spec} from ${relPath}`)
+        }
+      }
+      // Dynamic includes with a static directory prefix (e.g.
+      // `require __DIR__ . "/views/$view.php"`): the exact file is only known at
+      // runtime, so bundle every `.php` file in that directory as a candidate.
+      for (const dirSpec of extractPhpImportDirs(content)) {
+        const dir = resolvePhpDir(dirSpec, relPath, baseDir)
+        if (!dir) continue
+        for (const file of listPhpFiles(baseDir, dir)) {
+          if (!sources.has(file)) next.push(file)
         }
       }
       // Autoloaded class references (best-effort): enqueue whatever resolves.

@@ -6,10 +6,12 @@ import { fileURLToPath } from 'node:url'
 import {
   buildPhpTree,
   collectPhpFilesFromDisk,
+  extractPhpImportDirs,
   extractPhpImports,
   loadComposerAutoload,
   phpClassDependencies,
   resolveClassFile,
+  resolvePhpDir,
   resolvePhpImport,
 } from '../src/loaders/php.js'
 
@@ -110,18 +112,37 @@ test('extractPhpImports ignores include keywords inside comments and strings', (
   t.assert.deepEqual(extractPhpImports(src), ['real.php'])
 })
 
-test('extractPhpImports skips dynamic includes built by concatenation', (t) => {
-  // Regression: voku/portable-ascii does `require __DIR__ . '/data/' . $x . '.php'`.
-  // Partially extracting the first string yields a bogus directory path; a path
-  // concatenated with anything (a variable, or another string) is dynamic and
-  // must be skipped entirely.
+test('extractPhpImports does not extract a file from a dynamic include', (t) => {
+  // A path with a variable or `"…$interp…"` is dynamic -> no concrete file
+  // (it is offered as a directory instead; see extractPhpImportDirs).
   t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/data/' . $lang . '.php';"), [])
-  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/a' . '/b.php';"), [])
-  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '' . '/x.php';"), [])
+  t.assert.deepEqual(extractPhpImports('<?php require __DIR__ . "/views/$view.php";'), [])
   t.assert.deepEqual(extractPhpImports('<?php require $base . "/x.php";'), [])
   t.assert.deepEqual(extractPhpImports('<?php require $path;'), [])
-  // ...but a single complete string literal is still resolved.
+})
+
+test('extractPhpImports concatenates consecutive static string literals', (t) => {
+  // A path split across static literals is still fully static and resolvable.
+  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/a' . '/b.php';"), ['./a/b.php'])
+  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '' . '/x.php';"), ['./x.php'])
   t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/data/ascii.php';"), ['./data/ascii.php'])
+  // Single quotes never interpolate, so a literal `$` stays part of the path.
+  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/v/$x.php';"), ['./v/$x.php'])
+})
+
+test('extractPhpImportDirs offers the static directory of a dynamic include', (t) => {
+  // Laravel: require __DIR__ . "/.../components/$view.php" -> bundle that dir.
+  t.assert.deepEqual(
+    extractPhpImportDirs('<?php require __DIR__ . "/../../resources/views/components/$view.php";'),
+    ['../../resources/views/components'],
+  )
+  // Interpolation with braces, and concatenation with a variable.
+  t.assert.deepEqual(extractPhpImportDirs('<?php require __DIR__ . "/views/{$view}.php";'), ['./views'])
+  t.assert.deepEqual(extractPhpImportDirs("<?php require __DIR__ . '/data/' . $lang . '.php';"), ['./data'])
+  // No static directory to fall back on (path starts with a variable) -> nothing.
+  t.assert.deepEqual(extractPhpImportDirs('<?php require $base . "/views/$v.php";'), [])
+  // A fully-static include is a file, not a directory.
+  t.assert.deepEqual(extractPhpImportDirs("<?php require __DIR__ . '/data/ascii.php';"), [])
 })
 
 test('resolvePhpImport resolves ./ and ../ against the including file', (t) => {
@@ -168,6 +189,16 @@ test('resolvePhpImport returns null for bare specifiers without baseDir', (t) =>
   t.assert.equal(resolvePhpImport('src/B.php', 'src/A.php'), null)
 })
 
+test('resolvePhpDir resolves an existing directory and rejects a missing one', (t) => {
+  const baseDir = join(fixtures, 'composer')
+  t.assert.equal(resolvePhpDir('./src', 'index.php', baseDir), 'src')
+  t.assert.equal(resolvePhpDir('./vendor/acme', 'index.php', baseDir), 'vendor/acme')
+  t.assert.equal(resolvePhpDir('./Repo', 'src/Service.php', baseDir), 'src/Repo')
+  t.assert.equal(resolvePhpDir('./nope', 'index.php', baseDir), null)
+  // A file (not a directory) is rejected.
+  t.assert.equal(resolvePhpDir('./src/Service.php', 'index.php', baseDir), null)
+})
+
 test('collectPhpFilesFromDisk walks __DIR__ includes starting from entries', async (t) => {
   const baseDir = join(fixtures, 'basic')
   const sources = await collectPhpFilesFromDisk(baseDir, ['src/A.php'])
@@ -199,6 +230,18 @@ test('collectPhpFilesFromDisk skips a directory-valued include without crashing 
   )
   t.assert.deepEqual([...sources.keys()], ['index.php'])
   t.assert.ok(warnings.some((w) => w.includes('Missing import') && w.includes('lib')))
+})
+
+test('collectPhpFilesFromDisk bundles every .php in the static dir of a dynamic include', async (t) => {
+  // index.php does `require __DIR__ . '/modules/' . $name . '.php'` -- a dynamic
+  // include whose static directory is modules/. All modules/*.php are pulled in
+  // (non-.php files are not).
+  const baseDir = join(fixtures, 'dynamic-include')
+  const sources = await collectPhpFilesFromDisk(baseDir, ['index.php'])
+  t.assert.deepEqual(
+    [...sources.keys()].toSorted(),
+    ['bootstrap.php', 'index.php', 'modules/admin.php', 'modules/default.php'],
+  )
 })
 
 test('collectPhpFilesFromDisk warns and skips a missing include', async (t) => {
