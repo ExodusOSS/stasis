@@ -11,6 +11,7 @@ import {
   extractPhpImports,
   extractPhpPathRefs,
   loadComposerAutoload,
+  loadLaravelProviderFiles,
   phpClassDependencies,
   resolveClassFile,
   resolvePhpDir,
@@ -376,6 +377,21 @@ test('bucketizePhpSources falls back to the placeholder identity with no compose
   t.assert.deepEqual([...modules.keys()], ['.'])
   t.assert.equal(modules.get('.').name, 'php-bundle')
   t.assert.equal(modules.get('.').version, '0.0.0')
+})
+
+test('loadLaravelProviderFiles discovers vendor (installed.json) and app (bootstrap) providers', (t) => {
+  const baseDir = join(fixtures, 'laravel-providers')
+  const files = loadLaravelProviderFiles(baseDir, loadComposerAutoload(baseDir)).toSorted()
+  t.assert.deepEqual(files, [
+    'bootstrap/providers.php', // Laravel 11 app provider list
+    'vendor/spatie/laravel-ignition/src/IgnitionServiceProvider.php', // auto-discovered vendor provider
+  ])
+})
+
+test('loadLaravelProviderFiles returns no provider classes without an autoload config', (t) => {
+  // bootstrap/providers.php is still seeded if present, but vendor providers
+  // can't be resolved without the autoload maps.
+  t.assert.deepEqual(loadLaravelProviderFiles(join(fixtures, 'basic'), null), [])
 })
 
 test('loadComposerAutoload merges composer.json and generated maps into baseDir-relative paths', (t) => {

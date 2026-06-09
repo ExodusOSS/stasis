@@ -12,7 +12,13 @@ import {
   collectSolidityFilesFromDisk,
   readRemappingsFile,
 } from '../loaders/solidity.js'
-import { bucketizePhpSources, buildPhpTree, collectPhpFilesFromDisk, loadComposerAutoload } from '../loaders/php.js'
+import {
+  bucketizePhpSources,
+  buildPhpTree,
+  collectPhpFilesFromDisk,
+  loadComposerAutoload,
+  loadLaravelProviderFiles,
+} from '../loaders/php.js'
 
 const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 
@@ -209,7 +215,12 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   const normalized = normalizeEntries(entries, cwd)
   const autoload = loadComposerAutoload(baseDir)
 
-  const sources = await collectPhpFilesFromDisk(baseDir, normalized, { autoload })
+  // Laravel auto-discovers vendor/app service providers (via composer metadata
+  // and bootstrap/providers.php) rather than referencing them statically; seed
+  // them as extra roots so the config/route/view files they pull in get bundled.
+  const providerRoots = loadLaravelProviderFiles(baseDir, autoload)
+
+  const sources = await collectPhpFilesFromDisk(baseDir, [...normalized, ...providerRoots], { autoload })
   const { resolutions, missing } = buildPhpTree(sources, { baseDir, autoload })
 
   const issues = []

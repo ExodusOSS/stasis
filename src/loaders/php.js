@@ -737,6 +737,37 @@ export function bucketizePhpSources(baseDir, sources, fallbackName, fallbackVers
   return modules
 }
 
+// Laravel auto-registers service providers that nothing references statically:
+// vendor packages declare them under `extra.laravel.providers` (aggregated into
+// vendor/composer/installed.json), and the app lists its own in
+// bootstrap/providers.php (Laravel 11) or composer.json's `extra.laravel`. Those
+// providers do real work in boot() -- publishing config, loading routes/views,
+// merging config -- referencing files (`config_path(...)`, `__DIR__ . '/...'`)
+// that would otherwise never be reached. Returns the baseDir-relative files of
+// every discoverable provider class (resolved via the autoload maps) plus
+// bootstrap/providers.php when present, to seed as extra collection roots.
+// Best-effort: unresolvable classes (and a missing autoload config) are skipped.
+export function loadLaravelProviderFiles(baseDir, autoload) {
+  const files = new Set()
+  if (existsSync(join(baseDir, 'bootstrap', 'providers.php'))) files.add('bootstrap/providers.php')
+  if (!autoload) return [...files]
+
+  const composerJson = readJsonIfExists(join(baseDir, 'composer.json'))
+  const vendorDir = normalizeProjectRel(baseDir, composerJson?.config?.['vendor-dir'] ?? 'vendor') ?? 'vendor'
+  const installed = readJsonIfExists(join(baseDir, vendorDir, 'composer', 'installed.json'))
+  const installedPackages = Array.isArray(installed) ? installed : (installed?.packages ?? [])
+
+  const fqcns = new Set(composerJson?.extra?.laravel?.providers ?? [])
+  for (const pkg of installedPackages) {
+    for (const fqcn of pkg?.extra?.laravel?.providers ?? []) fqcns.add(fqcn)
+  }
+  for (const fqcn of fqcns) {
+    const file = resolveClassFile(fqcn, autoload, baseDir)
+    if (file) files.add(file)
+  }
+  return [...files]
+}
+
 // --- Class-reference extraction ----------------------------------------------
 
 const RESERVED = new Set([

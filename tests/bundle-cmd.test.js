@@ -617,6 +617,25 @@ test('buildPhpBundle bundles files referenced via Laravel path helpers (base_pat
   )
 })
 
+test('buildPhpBundle follows auto-discovered Laravel providers and the files they reference', async (t) => {
+  // The entry (public/index.php) references no providers; they are discovered
+  // from vendor/composer/installed.json (extra.laravel.providers) and
+  // bootstrap/providers.php. The config files those providers publish via
+  // config_path(...) -- which previously went unbundled -- are now included.
+  const cwd = join(phpFixtures, 'laravel-providers')
+  const bundle = await buildPhpBundle({ cwd, entries: ['public/index.php'] })
+  const files = new Set(bundle.sources.keys())
+  t.assert.deepEqual([...bundle.entries], ['public/index.php'])
+  // Auto-discovered providers (vendor + app) are reached.
+  t.assert.ok(files.has('vendor/spatie/laravel-ignition/src/IgnitionServiceProvider.php'))
+  t.assert.ok(files.has('app/Providers/AppServiceProvider.php'))
+  // The top-level config files referenced via config_path() are bundled.
+  t.assert.ok(files.has('config/ignition.php'))
+  t.assert.ok(files.has('config/flare.php'))
+  // The vendor package is grouped under its own bucket.
+  t.assert.equal(bundle.modules.get('vendor/spatie/laravel-ignition').name, 'spatie/laravel-ignition')
+})
+
 test('buildPhpBundle deduplicates files included by multiple entries', async (t) => {
   const cwd = join(phpFixtures, 'shared')
   const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php', 'src/B.php'] })
