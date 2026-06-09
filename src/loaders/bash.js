@@ -1,24 +1,30 @@
 // Bash loader: produces a `{ sources, resolutions, missing }` triple from a
 // set of shell scripts, mirroring the Solidity loader's interface (see
-// ./solidity.js). A relative/project-relative reference to a .sh/.bash file
-// must resolve to an in-set script — when it doesn't, it lands in `missing`
-// so the bundle builder can reject the dangling dependency. Everything else
-// is best-effort and dropped: a line like `grep "$x" file`, `bash "$SCRIPT"`,
-// an extensionless `source ./env`, or an absolute `source /etc/x.sh` names a
-// command, dynamic path, or external file, none of which is bundle-able.
+// ./solidity.js). A reference to a .sh/.bash file by a path that lands INSIDE
+// the bundle root (`./lib.sh`, `dir/lib.sh`) must resolve to an in-set script;
+// when it doesn't it lands in `missing` so the bundle builder can reject the
+// dangling dependency. Everything else is best-effort and dropped: PATH
+// commands (`grep`), `$VAR` paths, extensionless `source ./env`, absolute
+// `source /etc/x.sh`, and `../` paths that escape the root — none is bundle-able.
 
 import { statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 
-// `source script.sh`, `. script.sh`, `. ./script.sh`
-const SOURCE_RE = /(?:^|\n|;|&&|\|\||`|\$\()\s*(?:source|\.)\s+["']?([^\s"';&|#]+)["']?/gu
+// The capture class excludes `` ` ``, `(`, `)` (on top of whitespace, quotes,
+// `;`, `&`, `|`, `#`) so a reference inside a command substitution —
+// `` `source x.sh` `` or `$(bash x.sh)` — doesn't swallow the closing delimiter
+// into the path (which would silently drop the edge from the bundle).
 
-// `bash script.sh`, `sh script.sh`, `/usr/bin/env bash script.sh`, etc.
-const EXEC_RE = /(?:^|\n|;|&&|\|\||`|\$\()\s*(?:\/usr\/bin\/env\s+)?(?:ba)?sh\s+["']?([^\s"';&|#]+)["']?/gu
+// `source script.sh`, `. script.sh`, `. ./script.sh`
+const SOURCE_RE = /(?:^|\n|;|&&|\|\||`|\$\()\s*(?:source|\.)\s+["']?([^\s"';&|#`()]+)["']?/gu
+
+// `bash script.sh`, `sh script.sh`, `/usr/bin/env bash script.sh`,
+// `/bin/sh script.sh`, `/usr/bin/bash script.sh`, etc.
+const EXEC_RE = /(?:^|\n|;|&&|\|\||`|\$\()\s*(?:\/usr\/bin\/env\s+|\/bin\/|\/usr\/bin\/)?(?:ba)?sh\s+["']?([^\s"';&|#`()]+)["']?/gu
 
 // Direct invocation: `./script.sh`, `../lib/helper.bash`, `/path/to/script.sh`
-const DIRECT_RE = /(?:^|\n|;|&&|\|\||`|\$\()\s*["']?(\.\.?\/[^\s"';&|#]+\.(?:sh|bash))["']?/gu
+const DIRECT_RE = /(?:^|\n|;|&&|\|\||`|\$\()\s*["']?(\.\.?\/[^\s"';&|#`()]+\.(?:sh|bash))["']?/gu
 
 // Dependency hint comment: `# Depends on: example.sh`
 const COMMENT_RE = /^# Depends on: ([^ ]+\.(?:sh|bash))( |$)/gmu
@@ -52,8 +58,9 @@ export function extractBashCalls(content) {
 //   - relative / project-relative WITH a slash (`./x`, `../x`, `lib/x.sh`):
 //     resolved against the caller's directory and returned as a computed
 //     path WITHOUT an existence check — the walk's readFile surfaces a
-//     missing target and the tree drops it, mirroring the Solidity loader.
-//     Traversal above baseDir returns null rather than clamping.
+//     missing target and the tree flags or drops it, mirroring the Solidity
+//     loader. Traversal above baseDir returns null rather than clamping, so
+//     an escaping `../x.sh` is treated as external (never flagged missing).
 //   - bare name (`helper.sh`, but also `grep`, `node`): could be a sibling
 //     script or a PATH command, so it is accepted only when it names a real
 //     file — caller's dir, then project root, then (knownFiles only) any
@@ -110,19 +117,19 @@ export function resolveBashCall(ref, fromFile, { knownFiles, baseDir } = {}) {
   return null
 }
 
-// A reference is a *local* script when it names a .sh/.bash file by a
-// relative or project-relative path (not an absolute/system one). These must
-// resolve to a bundled script; anything else — PATH commands, extensionless
-// sources, absolute `/etc/...` paths, `$VAR` paths — is best-effort.
-const isLocalScriptRef = (ref) =>
-  !ref.startsWith('/') && (ref.endsWith('.sh') || ref.endsWith('.bash'))
+// A `.sh`/`.bash` extension marks a reference as a shell script (as opposed to
+// an extensionless `source ./env`, which we don't treat as a missing script
+// when absent).
+const hasShellScriptExt = (ref) => ref.endsWith('.sh') || ref.endsWith('.bash')
 
 // Build the { sources, resolutions, missing } triple from a Map of
-// already-loaded scripts. Resolutions only ever point at other in-set files;
-// a relative/project-relative .sh/.bash reference that resolves to nothing is
-// recorded in `missing` (the bundle builder treats it as fatal). Everything
-// else that doesn't resolve — PATH commands, $VAR paths, extensionless
-// sources, absolute system paths — is omitted, as are self-references.
+// already-loaded scripts. A reference is recorded in `missing` (which the
+// bundle builder treats as fatal) only when it resolves to a path INSIDE the
+// bundle root that wasn't collected — i.e. a dangling `source ./lib.sh`.
+// References that resolve to null are external and tolerated: bare names
+// (PATH commands / runtime-cwd scripts), absolute `/etc/...` paths, `$VAR`
+// paths, and `../` paths that escape the root — none can live in the bundle.
+// Self-references and non-script extensions are dropped without flagging.
 export function buildBashTree(sources) {
   const knownFiles = new Set(sources.keys())
   const resolutions = new Map()
@@ -130,13 +137,13 @@ export function buildBashTree(sources) {
   for (const [path, content] of sources) {
     const specMap = new Map()
     for (const ref of extractBashCalls(content)) {
-      let resolved = resolveBashCall(ref, path, { knownFiles })
-      // The slash-bearing relative branch returns an unvalidated path; drop
-      // it here when it doesn't name a collected file (Solidity-style).
-      if (resolved && !knownFiles.has(resolved)) resolved = null
-      if (resolved) {
-        if (resolved !== path) specMap.set(ref, resolved) // drop self-references
-      } else if (isLocalScriptRef(ref)) {
+      // In tree mode the slash branch returns a computed in-bundle path
+      // without checking existence, so a non-null target that isn't a known
+      // file is a genuine dangling local dependency; a null target is external.
+      const target = resolveBashCall(ref, path, { knownFiles })
+      if (target && knownFiles.has(target)) {
+        if (target !== path) specMap.set(ref, target) // drop self-references
+      } else if (target && hasShellScriptExt(ref)) {
         console.warn(`[loader.bash] Missing file: ${ref} from ${path}`)
         missing.push({ spec: ref, from: path })
       }
@@ -165,6 +172,12 @@ export async function collectBashFilesFromDisk(baseDir, entries) {
         } catch (err) {
           if (err.code === 'ENOENT') {
             console.warn(`[loader.bash] Missing file: ${relPath}`)
+            return null
+          }
+          // A slash-bearing ref can resolve to a directory (e.g. `source ./lib`);
+          // readFile then throws EISDIR. Skip it rather than aborting the walk.
+          if (err.code === 'EISDIR') {
+            console.warn(`[loader.bash] Skipping directory reference: ${relPath}`)
             return null
           }
           throw err
@@ -203,7 +216,7 @@ function assertWithinBase(baseDir, candidate, label) {
 // load (`.sh`, `.bash`, or extensionless), resolved relative to the listing.
 // Unlike loadSolidity, the listing is the authoritative manifest — bash
 // sourcing is too dynamic to walk reliably — so exactly the listed files are
-// read and resolutions are computed among them. Returns { sources, resolutions }.
+// read and resolutions are computed among them. Returns { sources, resolutions, missing }.
 export async function loadBash(shTxtFile) {
   const baseDir = dirname(resolve(shTxtFile))
   const listing = await readFile(shTxtFile, 'utf8')

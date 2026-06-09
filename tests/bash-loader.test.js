@@ -57,6 +57,16 @@ test('extractBashCalls skips variable-expansion and flag references', (t) => {
   t.assert.deepEqual(extractBashCalls('source "$DIR/lib.sh"\nbash -c "echo hi"\n'), [])
 })
 
+test('extractBashCalls captures a script in a command substitution without the closing delimiter', (t) => {
+  t.assert.deepEqual(extractBashCalls('result=$(bash ./worker.sh)\n'), ['./worker.sh'])
+  t.assert.deepEqual(extractBashCalls('`source ./config.sh`\n'), ['./config.sh'])
+})
+
+test('extractBashCalls finds scripts run via an absolute interpreter path', (t) => {
+  t.assert.deepEqual(extractBashCalls('/bin/sh ./run.sh\n'), ['./run.sh'])
+  t.assert.deepEqual(extractBashCalls('/usr/bin/bash ./deploy.sh\n'), ['./deploy.sh'])
+})
+
 test('extractBashCalls does not treat a trailing bare `.` (current dir) as a source', (t) => {
   // `grep -rn x .` ends in a bare dot that is NOT a `.`-source command.
   t.assert.deepEqual(extractBashCalls('grep -rn "TODO" .\n'), [])
@@ -132,6 +142,16 @@ test('collectBashFilesFromDisk warns and skips a reference missing on disk', asy
   t.assert.ok(warnings.some((w) => w.includes('Missing file') && w.includes('gone.sh')))
 })
 
+test('collectBashFilesFromDisk skips a reference that resolves to a directory (no EISDIR crash)', async (t) => {
+  // `source ./libs` where ./libs is a directory: readFile throws EISDIR, which
+  // must be skipped, not propagated out of the walk.
+  const { result: sources, warnings } = await captureWarningsAsync(() =>
+    collectBashFilesFromDisk(join(fixtures, 'dir-ref'), ['main.sh']),
+  )
+  t.assert.deepEqual([...sources.keys()], ['main.sh'])
+  t.assert.ok(warnings.some((w) => w.includes('directory reference') && w.includes('libs')))
+})
+
 test('buildBashTree records resolutions among the collected scripts', async (t) => {
   const sources = await collectBashFilesFromDisk(join(fixtures, 'basic'), ['main.sh'])
   const tree = buildBashTree(sources)
@@ -150,14 +170,17 @@ test('buildBashTree records an unresolved relative .sh reference as missing', (t
   t.assert.ok(warnings.some((w) => w.includes('Missing file') && w.includes('./gone.sh')))
 })
 
-test('buildBashTree records an unresolved bare .sh exec reference as missing', (t) => {
-  const { result: tree } = captureWarnings(() => buildBashTree(new Map([['main.sh', 'bash helper.sh\n']])))
-  t.assert.deepEqual(tree.missing, [{ spec: 'helper.sh', from: 'main.sh' }])
+test('buildBashTree tolerates an unresolved bare .sh reference (ambiguous: PATH vs runtime cwd)', (t) => {
+  const tree = buildBashTree(new Map([['main.sh', 'bash helper.sh\n']]))
+  t.assert.deepEqual(tree.missing, [])
 })
 
-test('buildBashTree tolerates unresolved absolute and extensionless references', (t) => {
-  // /etc/x.sh is an external system path; ./env and `config` aren't .sh files.
-  const tree = buildBashTree(new Map([['main.sh', 'source /etc/x.sh\nsource ./env\nsource config\n']]))
+test('buildBashTree tolerates unresolved absolute, escaping, and extensionless references', (t) => {
+  // /etc/x.sh is an external system path; ../outside.sh escapes the root;
+  // ./env and `config` aren't .sh files — none is a bundlable local script.
+  const tree = buildBashTree(new Map([
+    ['main.sh', 'source /etc/x.sh\nsource ../outside.sh\nsource ./env\nsource config\n'],
+  ]))
   t.assert.deepEqual(tree.missing, [])
 })
 

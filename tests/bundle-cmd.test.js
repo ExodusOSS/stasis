@@ -655,6 +655,13 @@ test('buildBashBundle bundles local sources but tolerates commands and absolute 
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['lib.sh', 'main.sh'])
 })
 
+test('buildBashBundle tolerates a ../ source that escapes the bundle root', async (t) => {
+  // main.sh sources ./lib.sh (bundled) and ../shared/common.sh (escapes cwd →
+  // unbundlable → tolerated as external, not a fatal missing script).
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'escaping'), entries: ['main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['lib.sh', 'main.sh'])
+})
+
 test('buildBashBundle accepts .bash entries', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'dotbash'), entries: ['main.bash'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['lib.sh', 'main.bash'])

@@ -198,12 +198,14 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 // Build a stasis Bundle (in-memory) from a list of entry .sh/.bash files by
 // walking the source/exec graph and reading every reachable script from disk.
 // Mirrors buildSolidityBundle's bucketizing, with a bash-specific policy:
-//   - a relative/project-relative reference to a .sh/.bash file that doesn't
-//     resolve to a bundled script is fatal (a self-contained bundle can't
-//     carry a dangling `source ./lib.sh`), as is a missing entry.
+//   - a .sh/.bash reference whose path lands INSIDE the bundle root
+//     (`source ./lib.sh`, `dir/x.sh`) but resolves to no bundled script is
+//     fatal — a self-contained bundle can't carry a dangling local source —
+//     as is a missing entry.
 //   - everything else is best-effort and dropped: PATH commands (`grep`,
-//     `node`), dynamic `$VAR` paths, extensionless sources, and absolute
-//     system paths (`source /etc/profile.d/x.sh`) — none belongs in a bundle.
+//     `node`), dynamic `$VAR` paths, extensionless sources, absolute system
+//     paths (`source /etc/profile.d/x.sh`), and `../` paths that escape the
+//     root — none can live in the bundle.
 //   - imports live under a dedicated "bash" condition key (like "solidity"),
 //     not the JS-bundle wildcard "*".
 export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
@@ -220,10 +222,11 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   const sources = await collectBashFilesFromDisk(baseDir, normalized)
   const { resolutions, missing } = buildBashTree(sources)
 
-  // Bundles must be self-contained: every entry must load, and every
-  // relative/project-relative .sh/.bash reference must resolve to a bundled
-  // script. Best-effort references (commands, $VAR paths, extensionless or
-  // absolute sources) are left out by buildBashTree and never reach `missing`.
+  // Bundles must be self-contained: every entry must load, and every .sh/.bash
+  // reference pointing inside the bundle root must resolve to a bundled script.
+  // External/best-effort references (commands, $VAR paths, extensionless,
+  // absolute, or `../`-escaping sources) are left out by buildBashTree and
+  // never reach `missing`.
   const issues = []
   for (const entry of normalized) {
     if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
