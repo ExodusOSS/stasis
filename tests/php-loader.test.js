@@ -85,6 +85,27 @@ test('extractPhpImports reads __DIR__ includes from a real fixture file', (t) =>
   t.assert.deepEqual(extractPhpImports(src), ['./B.php'])
 })
 
+test('extractPhpImports ignores require keywords inside a heredoc', (t) => {
+  const src = [
+    '<?php',
+    '$sql = <<<SQL',
+    "require 'not-an-include.php';",
+    'SQL;',
+    "require __DIR__ . '/real.php';",
+  ].join('\n')
+  t.assert.deepEqual(extractPhpImports(src), ['./real.php'])
+})
+
+test('the non-code lexer is linear on adversarial unterminated input (ReDoS guard)', (t) => {
+  // A backtracking regex over unterminated heredocs/strings hangs here (O(n^2));
+  // the hand-written linear scanner returns immediately. If this ever starts
+  // timing out, a catastrophic-backtracking regex has been reintroduced.
+  const heredoc = `<?php ${'<<<X\n'.repeat(80000)}` // ~400 KB
+  const dquote = `<?php ${'"a\\"'.repeat(80000)}`
+  t.assert.deepEqual(extractPhpImports(heredoc), [])
+  t.assert.deepEqual(extractPhpImports(dquote), [])
+})
+
 test('extractPhpImports ignores require/include keywords that are string values (method blacklists)', (t) => {
   // Regression: Mockery's MockConfigurationBuilder lists 'require'/'include'
   // etc. as blacklisted method names. The keyword sits inside a string literal
@@ -292,6 +313,19 @@ test('loadComposerAutoload merges composer.json and generated maps into baseDir-
   t.assert.equal(a.classmap.get('App\\Orphan'), 'src/Orphan.php')
   // files: unconditional autoload entry.
   t.assert.ok(a.files.includes('src/helpers.php'))
+  // PSR-4 dir lists are de-duplicated (App\ is in both composer.json and the
+  // generated map).
+  t.assert.deepEqual(a.psr4.get('App\\'), ['src'])
+})
+
+test('loadComposerAutoload drops autoload paths that escape the project root', (t) => {
+  // composer.json autoload entries with interior `..` (e.g. `src/../../../etc`)
+  // must not let the bundler read files outside the project.
+  const a = loadComposerAutoload(join(fixtures, 'escape'))
+  t.assert.deepEqual(a.psr4.get('App\\'), ['src'])
+  t.assert.deepEqual(a.psr4.get('Bad\\'), []) // escaping dir rejected
+  t.assert.ok(a.files.includes('src/helpers.php'))
+  t.assert.ok(!a.files.some((f) => f.includes('etc') || f.includes('..'))) // escaping file rejected
 })
 
 test('resolveClassFile resolves via PSR-4 (root and vendor prefixes)', (t) => {

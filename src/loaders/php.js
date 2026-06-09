@@ -36,24 +36,94 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
+// Max files read concurrently per wave, to avoid EMFILE on large directory globs.
+const READ_CONCURRENCY = 64
+
 // --- Shared lexing helpers ---------------------------------------------------
 
-// One alternation covering everything that is not executable code: heredocs/
-// nowdocs, single/double-quoted strings, and `/* */` // and `#` comments.
-// String alternatives precede the comment ones so a `//` inside a string isn't
-// mistaken for a comment; `#` excludes `#[` so PHP 8 attributes survive.
-const NON_CODE_RE =
-  /<<<\s*(['"]?)(\w+)\1\r?\n[\s\S]*?\r?\n[ \t]*\2\b|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|\/\*[\s\S]*?\*\/|\/\/[^\n]*|#(?!\[)[^\n]*/gu
+// End index (exclusive) of the heredoc/nowdoc opening at `start` (`<<<`), or
+// `start` itself if it isn't a valid opener. Consumes to EOF when unterminated.
+// Recognises the indented closing label (PHP 7.3+) and the leading quote of
+// nowdoc/quoted-heredoc labels.
+function heredocEnd(code, start) {
+  const n = code.length
+  let j = start + 3
+  while (j < n && (code[j] === ' ' || code[j] === '\t')) j++
+  const quote = code[j] === '"' || code[j] === "'" ? code[j++] : ''
+  let label = ''
+  while (j < n && /\w/u.test(code[j])) label += code[j++]
+  if (label === '') return start
+  if (quote && code[j] === quote) j++
+  let p = code.indexOf('\n', j)
+  if (p === -1) return n
+  p += 1
+  while (p <= n) {
+    let q = p
+    while (q < n && (code[q] === ' ' || code[q] === '\t')) q++
+    if (code.startsWith(label, q)) {
+      const after = code[q + label.length]
+      if (after === undefined || !/\w/u.test(after)) {
+        const nl = code.indexOf('\n', q)
+        return nl === -1 ? n : nl
+      }
+    }
+    const nl = code.indexOf('\n', p)
+    if (nl === -1) return n
+    p = nl + 1
+  }
+  return n
+}
 
-// Blank out comments and heredocs (each non-newline char becomes a space, so
-// offsets and line breaks are preserved) while leaving string literals intact
-// -- include paths live in string literals, so we can't drop those, but we must
-// not scan comments/heredocs for include keywords. A `//` inside a string is
-// protected because the string alternative in NON_CODE_RE matches first.
+// Single linear pass that blanks everything which is not executable PHP code:
+// `//`/`#` line comments, `/* */` block comments, heredocs/nowdocs, and (unless
+// `keepStrings`) string literals. Each consumed character becomes a space
+// (newlines preserved), so the output is the same length as the input and byte
+// offsets stay aligned. Strings are scanned in the same loop as comments, so a
+// `//`/`#` inside a string is never mistaken for a comment, and `#[` (a PHP 8
+// attribute) is left intact. A hand-written scanner (rather than one big regex)
+// keeps this strictly linear -- immune to the catastrophic backtracking a regex
+// suffers on unterminated strings/heredocs in adversarial input.
+function maskNonCode(code, keepStrings) {
+  const n = code.length
+  const blank = (s) => s.replace(/[^\n]/gu, ' ')
+  let out = ''
+  let i = 0
+  while (i < n) {
+    const c = code[i]
+    if ((c === '/' && code[i + 1] === '/') || (c === '#' && code[i + 1] !== '[')) {
+      let end = code.indexOf('\n', i)
+      if (end === -1) end = n
+      out += blank(code.slice(i, end))
+      i = end
+    } else if (c === '/' && code[i + 1] === '*') {
+      const close = code.indexOf('*/', i + 2)
+      const end = close === -1 ? n : close + 2
+      out += blank(code.slice(i, end))
+      i = end
+    } else if (c === '<' && code[i + 1] === '<' && code[i + 2] === '<') {
+      const end = heredocEnd(code, i)
+      if (end === i) { out += c; i++ } else { out += blank(code.slice(i, end)); i = end }
+    } else if (c === "'" || c === '"') {
+      let j = i + 1
+      while (j < n) {
+        if (code[j] === '\\') { j += 2; continue }
+        if (code[j] === c) { j++; break }
+        j++
+      }
+      out += keepStrings ? code.slice(i, j) : blank(code.slice(i, j))
+      i = j
+    } else {
+      out += c
+      i++
+    }
+  }
+  return out
+}
+
+// Comments/heredocs blanked, string literals kept (include paths live in
+// strings). See maskNonCode.
 function maskCommentsAndHeredocs(content) {
-  return content.replace(NON_CODE_RE, (seg) =>
-    seg[0] === "'" || seg[0] === '"' ? seg : seg.replace(/[^\n]/gu, ' '),
-  )
+  return maskNonCode(content, true)
 }
 
 // Scan code for string literals, returning each as { start, end, value } with
@@ -303,9 +373,13 @@ export function resolvePhpImport(specifier, fromFile, { baseDir } = {}) {
 
 // Normalise an autoload directory/file path that is relative to the project
 // root to a POSIX baseDir-relative path, or null when it escapes the root.
-function normalizeProjectRel(p) {
-  const rel = p.replace(/\\/gu, '/').replace(/^\.\//u, '').replace(/\/+$/u, '')
-  if (rel === '' || rel === '.') return ''
+// Resolves against baseDir and re-derives the relative path so that *interior*
+// `..` segments (e.g. `src/foo/../../../secret.php`) that escape the root are
+// rejected -- a leading-`..`/absolute check alone would let those through and
+// read files outside the project into the bundle.
+function normalizeProjectRel(baseDir, p) {
+  const rel = relative(baseDir, resolve(baseDir, p.replace(/\\/gu, '/'))).split(/[\\/]/u).join('/')
+  if (rel === '') return ''
   if (rel.startsWith('..') || isAbsolute(rel)) return null
   return rel
 }
@@ -389,7 +463,7 @@ function readJsonIfExists(file) {
 // `{ psr4, psr0, classmap, files }` or null when no Composer config is found.
 export function loadComposerAutoload(baseDir) {
   const composerJson = readJsonIfExists(join(baseDir, 'composer.json'))
-  const vendorDir = normalizeProjectRel(composerJson?.config?.['vendor-dir'] ?? 'vendor') ?? 'vendor'
+  const vendorDir = normalizeProjectRel(baseDir, composerJson?.config?.['vendor-dir'] ?? 'vendor') ?? 'vendor'
 
   const psr4 = new Map() // prefix (trailing '\') -> dirs[]
   const psr0 = new Map() // prefix -> dirs[]
@@ -401,11 +475,11 @@ export function loadComposerAutoload(baseDir) {
     const list = Array.isArray(paths) ? paths : [paths]
     const dirs = []
     for (const p of list) {
-      const rel = normalizeProjectRel(String(p))
+      const rel = normalizeProjectRel(baseDir, String(p))
       if (rel !== null) dirs.push(rel)
     }
     const prev = map.get(prefix) ?? []
-    map.set(prefix, [...prev, ...dirs])
+    map.set(prefix, [...new Set([...prev, ...dirs])])
   }
 
   // Root composer.json autoload (+ dev). PSR-4 keys keep their trailing '\'.
@@ -415,7 +489,7 @@ export function loadComposerAutoload(baseDir) {
     for (const [prefix, paths] of Object.entries(block['psr-4'] ?? {})) addPrefixDirs(psr4, prefix, paths)
     for (const [prefix, paths] of Object.entries(block['psr-0'] ?? {})) addPrefixDirs(psr0, prefix, paths)
     for (const f of block.files ?? []) {
-      const rel = normalizeProjectRel(String(f))
+      const rel = normalizeProjectRel(baseDir, String(f))
       if (rel) files.add(rel)
     }
   }
@@ -433,7 +507,7 @@ export function loadComposerAutoload(baseDir) {
     for (const [prefix, dirs] of parseGeneratedMap(readFileSync(file, 'utf8'), vars, true)) {
       const rels = dirs.map(toRel).filter((d) => d !== null).map((d) => d.replace(/\/+$/u, ''))
       const prev = target.get(prefix) ?? []
-      target.set(prefix, [...prev, ...rels])
+      target.set(prefix, [...new Set([...prev, ...rels])])
     }
   }
   mergePrefixMap(join(composerGenDir, 'autoload_psr4.php'), psr4)
@@ -519,12 +593,12 @@ const RESERVED = new Set([
   'return', 'echo', 'print', 'clone', 'yield', 'throw', 'global', 'and', 'or', 'xor',
 ])
 
-// Blank out PHP heredocs/nowdocs, comments AND string literals (collapsing each
-// to a single space) so class-reference scans don't trip over namespace-like
-// text, braces, or keywords inside them. Unlike `maskCommentsAndHeredocs`, this
-// also removes string contents -- class references never live in strings.
+// Blank out PHP heredocs/nowdocs, comments AND string literals so class-
+// reference scans don't trip over namespace-like text, braces, or keywords
+// inside them. Unlike `maskCommentsAndHeredocs`, this also removes string
+// contents -- class references never live in strings.
 function stripPhp(content) {
-  return content.replace(NON_CODE_RE, ' ')
+  return maskNonCode(content, false)
 }
 
 // Add the FQCN for a class reference written as `raw` in a file whose namespace
@@ -693,26 +767,33 @@ export function buildPhpTree(sources, { baseDir, autoload = null } = {}) {
 export async function collectPhpFilesFromDisk(baseDir, entries, { autoload = null } = {}) {
   const sources = new Map()
 
+  const readOne = async (relPath) => {
+    try {
+      return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
+    } catch (err) {
+      // ENOENT: target doesn't exist. EISDIR: a specifier resolved to a
+      // directory (e.g. an extensionless `require __DIR__ . '/dir'`). Both
+      // mean "not a loadable file" -- warn and skip rather than crash; the
+      // unresolved edge is surfaced later by buildPhpTree for real includes.
+      if (err.code === 'ENOENT' || err.code === 'EISDIR') {
+        console.warn(`[loader.php] Missing import: ${relPath}`)
+        return null
+      }
+      throw err
+    }
+  }
+
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))
     if (toLoad.length === 0) return
-    const reads = await Promise.all(
-      toLoad.map(async (relPath) => {
-        try {
-          return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
-        } catch (err) {
-          // ENOENT: target doesn't exist. EISDIR: a specifier resolved to a
-          // directory (e.g. an extensionless `require __DIR__ . '/dir'`). Both
-          // mean "not a loadable file" -- warn and skip rather than crash; the
-          // unresolved edge is surfaced later by buildPhpTree for real includes.
-          if (err.code === 'ENOENT' || err.code === 'EISDIR') {
-            console.warn(`[loader.php] Missing import: ${relPath}`)
-            return null
-          }
-          throw err
-        }
-      })
-    )
+    // Read in bounded batches: a single wave can be huge (e.g. a dynamic
+    // include's directory glob over thousands of files), and an unbounded
+    // Promise.all would open every file at once and crash with EMFILE.
+    const reads = []
+    for (let k = 0; k < toLoad.length; k += READ_CONCURRENCY) {
+      // eslint-disable-next-line no-await-in-loop -- batches are intentionally sequential to cap open files
+      reads.push(...(await Promise.all(toLoad.slice(k, k + READ_CONCURRENCY).map(readOne))))
+    }
     const next = []
     for (const entry of reads) {
       if (!entry) continue
