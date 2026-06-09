@@ -112,6 +112,28 @@ test('scan does not load the target file (top-level side effects never fire)', (
   t.assert.equal(r.stderr, '')
 })
 
+test('scan records files that fail to parse in parseErrors with no edges', withTmp((t, tmp) => {
+  // oxc-parser recovers from syntax errors instead of throwing, so scan must
+  // read parsed.errors itself -- otherwise a broken file silently scans as a
+  // leaf and any imports inside it vanish from the graph.
+  const entry = join(tmp, 'entry.mjs')
+  const broken = join(tmp, 'broken.mjs')
+  writeFileSync(entry, "import './broken.mjs'\n")
+  writeFileSync(broken, 'export const x = {\nimport "./hidden.mjs"\n')
+  const result = scan([entry])
+  t.assert.equal(result.parseErrors.length, 1)
+  t.assert.ok(result.parseErrors[0].url.endsWith('/broken.mjs'))
+  t.assert.ok(result.parseErrors[0].message.length > 0)
+  const info = [...result.files].find(([url]) => url.endsWith('/broken.mjs'))[1]
+  t.assert.ok(info.parseError, 'files entry must carry the parseError flag')
+  t.assert.deepEqual(info.edges, [], 'a file we could not parse must not contribute edges')
+
+  // toRelative carries parseErrors through, root-relative.
+  const rel = scan([entry]).toRelative(tmp)
+  t.assert.equal(rel.parseErrors.length, 1)
+  t.assert.equal(rel.parseErrors[0].file, 'broken.mjs')
+}))
+
 test('scan reports dynamic require() as unresolved', withTmp((t, tmp) => {
   const file = join(tmp, 'dyn.cjs')
   writeFileSync(file, `const name = process.env.MOD\nmodule.exports = require(name)\n`)

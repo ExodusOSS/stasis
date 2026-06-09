@@ -566,3 +566,69 @@ test('CLI: bundle load surfaces ERR_MODULE_NOT_FOUND for dynamic import of a mis
   t.assert.equal(printed.code, 'ERR_MODULE_NOT_FOUND',
     `expected ERR_MODULE_NOT_FOUND, got ${printed.code} -- the previous ERR_ASSERTION re-threw out of common guards`)
 }))
+
+// --- Regression: JS bundle must fail closed on holes in the static ESM graph ---
+//
+// `stasis bundle file.mjs` where file.mjs is `export * from "@noble/ciphers/_arx.js"`
+// and the dep can't be resolved used to warn on stderr but still exit 0 and write
+// a bundle containing just file.mjs. A static ESM `import`/`export ... from` edge
+// links before any user code runs, so nothing can catch the failure at load time:
+// the bundle was guaranteed broken. require()/dynamic import() edges stay
+// warn-only -- those failures are catchable at runtime (see the test above).
+
+const jsProject = (tmp, files) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'fail-closed', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(tmp, name), content)
+}
+
+test('CLI: bundle (JS) fails closed when an export-from edge cannot be resolved', withTmp((t, tmp) => {
+  jsProject(tmp, { 'file.mjs': 'export * from "@noble/ciphers/_arx.js"\n' })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'file.mjs'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0, 'must exit non-zero on an unresolved static export-from')
+  t.assert.match(r.stderr, /JS bundle has unresolved static imports/)
+  t.assert.match(r.stderr, /export-from @noble\/ciphers\/_arx\.js from .*file\.mjs \(MODULE_NOT_FOUND\)/)
+  t.assert.ok(!existsSync(outPath), 'output file must not be written when bundling fails')
+}))
+
+test('CLI: bundle (JS) fails closed when a static import edge cannot be resolved', withTmp((t, tmp) => {
+  jsProject(tmp, { 'entry.mjs': "import './missing.mjs'\n" })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.mjs'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0, 'must exit non-zero on an unresolved static import')
+  t.assert.match(r.stderr, /JS bundle has unresolved static imports/)
+  t.assert.match(r.stderr, /import \.\/missing\.mjs from .*entry\.mjs/)
+  t.assert.ok(!existsSync(outPath))
+}))
+
+test('CLI: bundle (JS) fails closed when a reachable file does not parse', withTmp((t, tmp) => {
+  // broken.mjs resolves fine (the file exists), but oxc can't parse it -- its
+  // edges are unknown, so the graph may have holes we can't enumerate. oxc
+  // recovers from syntax errors instead of throwing, so this used to be
+  // COMPLETELY silent (no warning at all, unlike the unresolved-edge case).
+  jsProject(tmp, {
+    'entry.mjs': "import './broken.mjs'\n",
+    'broken.mjs': 'export const x = {\n',
+  })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.mjs'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0, 'must exit non-zero when a scanned file fails to parse')
+  t.assert.match(r.stderr, /JS bundle has unresolved static imports/)
+  t.assert.match(r.stderr, /parse error in .*broken\.mjs/)
+  t.assert.ok(!existsSync(outPath))
+}))
+
+test('CLI: bundle (JS) still warns and writes the bundle for an unresolved require()', withTmp((t, tmp) => {
+  // try/catch-able at runtime: the runtime loader never records this edge
+  // either, and the user's catch handles the miss at load time exactly as it
+  // handles MODULE_NOT_FOUND without a bundle. Must stay warn-only.
+  jsProject(tmp, { 'entry.cjs': "try { require('not-installed-pkg') } catch {}\n" })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.cjs'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /unresolved import\(s\); they will fall through at load time/)
+  t.assert.match(r.stderr, /require not-installed-pkg from .*entry\.cjs \(MODULE_NOT_FOUND\)/)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files), ['entry.cjs'])
+}))

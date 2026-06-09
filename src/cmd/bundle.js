@@ -173,9 +173,11 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 // shape matches what `src/loader.js` records at runtime, so the result loads
 // via `stasis run --bundle=load` interchangeably with a runtime-produced one.
 //
-// Refuses to write when any specifier is unresolved (dynamic require, missing
-// dep, conditional `exports` mismatch): a bundle with holes would silently
-// fall through to disk at load time, defeating the point of bundling.
+// Refuses to write when a static ESM `import`/`export ... from` edge can't be
+// resolved (missing dep, conditional `exports` mismatch) or a reachable file
+// can't be parsed: such a bundle is guaranteed broken at load time. Unresolved
+// require()/dynamic import() edges only warn -- those are recoverable at
+// runtime (see below).
 //
 // Scope and per-edge conditions come from the project's stasis.config.json
 // (or `EXODUS_STASIS_SCOPE`); pass `scope` explicitly to override.
@@ -191,22 +193,45 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
   const absEntries = entries.map((e) => resolve(baseDir, e))
 
   const scanner = scan(absEntries)
-  // Unresolved edges (dynamic specifiers, optional deps not installed) are NOT
-  // fatal: they match the runtime loader's behavior. Code like
-  // `try { require('supports-color') } catch {}` never has its `supports-color`
-  // edge recorded by the runtime bundle either, because Node's resolver throws
-  // before the resolve hook can record it. At load time, state.getImport will
-  // assert for these edges -- and the user's try/catch will catch the assertion
-  // exactly as it catches MODULE_NOT_FOUND in the non-bundled path. Warn so the
-  // user knows their bundle isn't fully self-contained for those edges, but
-  // don't refuse to produce it.
-  if (scanner.unresolved.length > 0) {
-    const summary = scanner.unresolved
+
+  // Static ESM `import`/`export ... from` edges link at module-graph build
+  // time, before any user code runs, so no try/catch can intercept a missing
+  // one -- a bundle lacking such an edge is guaranteed dead on load, and
+  // producing it anyway would fail open. Same for files the parser couldn't
+  // parse (oxc error-recovers rather than throwing): their edges are unknown,
+  // so the graph may have holes we can't even enumerate. Refuse to write the
+  // bundle in both cases, mirroring the Solidity branch above.
+  const isStaticEsm = (u) => u.kind === 'import' || u.kind === 'export-from'
+  const fatal = scanner.unresolved
+    .filter((u) => isStaticEsm(u))
+    .map((u) => `  ${u.kind} ${u.spec} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
+  for (const { url, message } of scanner.parseErrors) {
+    fatal.push(`  parse error in ${fileURLToPath(url)}: ${message}`)
+  }
+  if (fatal.length > 0) {
+    throw new Error(`JS bundle has unresolved static imports:\n${fatal.join('\n')}`)
+  }
+
+  // Unresolved require()/dynamic import() edges (dynamic specifiers, optional
+  // deps not installed) are NOT fatal: they match the runtime loader's
+  // behavior. Code like `try { require('supports-color') } catch {}` never has
+  // its `supports-color` edge recorded by the runtime bundle either, because
+  // Node's resolver throws before the resolve hook can record it. At load
+  // time, state.getImport will throw for these edges -- and the user's
+  // try/catch will catch that exactly as it catches MODULE_NOT_FOUND in the
+  // non-bundled path. (`require` calls found in ESM files also land here: the
+  // identifier may be a user-defined function rather than CJS require, so
+  // refusing on it would reject valid code.) Warn so the user knows their
+  // bundle isn't fully self-contained for those edges, but don't refuse to
+  // produce it.
+  const tolerated = scanner.unresolved.filter((u) => !isStaticEsm(u))
+  if (tolerated.length > 0) {
+    const summary = tolerated
       .slice(0, 10)
       .map((u) => `  ${u.kind} ${u.spec ?? '<dynamic>'} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
       .join('\n')
-    const more = scanner.unresolved.length > 10 ? `\n  ... and ${scanner.unresolved.length - 10} more` : ''
-    console.warn(`[stasis] Bundle has ${scanner.unresolved.length} unresolved import(s); they will fall through at load time:\n${summary}${more}`)
+    const more = tolerated.length > 10 ? `\n  ... and ${tolerated.length - 10} more` : ''
+    console.warn(`[stasis] Bundle has ${tolerated.length} unresolved import(s); they will fall through at load time:\n${summary}${more}`)
   }
 
   // Use a non-preload State to materialise the bundle: addFile bucketizes by

@@ -10,8 +10,10 @@ import assert from 'node:assert/strict'
 // reads package.json manifests and applies `exports` conditions but never runs
 // the target module. Dynamic specifiers (`require(name)`, `import('./'+x)`)
 // are recorded as unresolved -- a fundamental limit of static analysis for
-// CJS, not a tooling shortcoming. The parser (oxc-parser) is loaded lazily as
-// an optional peer dependency.
+// CJS, not a tooling shortcoming. Files that fail to parse are recorded in
+// `parseErrors` (and flagged with `parseError` in `files`): their edges are
+// unknown, so consumers that need a complete graph must treat them as fatal.
+// The parser (oxc-parser) is loaded lazily as an optional peer dependency.
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
@@ -100,6 +102,7 @@ export class Scan {
   files = new Map()
   imports = new Map()
   unresolved = []
+  parseErrors = []
   entries = new Set()
 
   // `conditions` is *additive* on top of the format-derived base set: ESM parents
@@ -142,6 +145,11 @@ export class Scan {
     return new Set([...base, ...this.extraConditions])
   }
 
+  #recordParseError(url, format, message) {
+    this.files.set(url, { format, edges: [], parseError: message })
+    this.parseErrors.push({ url, message })
+  }
+
   #scanFile(url, queue) {
     const file = fileURLToPath(url)
     const ext = extname(file)
@@ -162,7 +170,19 @@ export class Scan {
     try {
       parsed = getParser().parseSync(file, src, { sourceType: isESM ? 'module' : 'script' })
     } catch (cause) {
-      this.files.set(url, { format, edges: [], parseError: cause.message })
+      this.#recordParseError(url, format, cause.message)
+      return
+    }
+
+    // oxc-parser recovers from syntax errors instead of throwing: it reports
+    // them in `parsed.errors` and returns whatever AST/module records it could
+    // salvage. A partially-parsed file may have edges we never saw, so treating
+    // it as a leaf would punch an invisible hole in the graph -- record it as a
+    // parse failure, same as a parser throw. (Warning/advice-severity
+    // diagnostics don't imply a broken parse and are not errors.)
+    const errors = (parsed.errors ?? []).filter((e) => e.severity !== 'Warning' && e.severity !== 'Advice')
+    if (errors.length > 0) {
+      this.#recordParseError(url, format, errors.map((e) => e.message).join('; '))
       return
     }
 
@@ -244,6 +264,7 @@ export class Scan {
         ])
       ),
       unresolved: this.unresolved.map(({ parentURL, ...rest }) => ({ parent: rel(parentURL), ...rest })),
+      parseErrors: this.parseErrors.map(({ url, ...rest }) => ({ file: rel(url), ...rest })),
     }
   }
 }
