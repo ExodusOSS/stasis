@@ -63,24 +63,34 @@ export function resolveModPath(modName, fromFile, { knownSources, baseDir } = {}
 }
 
 // Build a `module path -> file` map (e.g. "crate::foo::bar" -> "src/foo/bar.rs")
-// by walking `mod` edges out from every crate root (main.rs / lib.rs). The
-// `seen` guard keeps a pathological mod cycle from recursing forever.
+// by walking `mod` edges out from every crate root (main.rs / lib.rs). The walk
+// is iterative (a deep `mod` chain would overflow a recursive descent) and
+// depth-bounded: a `seen` set stops mod cycles, and MAX_MODULE_DEPTH caps a
+// pathologically deep chain — both the descent and the O(depth²) growth of the
+// joined module-path strings. Real crates nest a handful deep; the cap only
+// ever trims best-effort `use crate::` resolution for absurd input (file
+// collection happens in collectRustFilesFromDisk, which is unaffected).
+const MAX_MODULE_DEPTH = 1000
+
 export function buildModuleTree(sources, resolutions) {
   const tree = new Map()
-  const walk = (filePath, modulePath, seen) => {
-    tree.set(modulePath, filePath)
-    if (seen.has(filePath)) return
-    seen.add(filePath)
-    const specMap = resolutions.get(filePath)
-    if (!specMap) return
-    for (const [spec, resolved] of specMap) {
-      if (!spec.startsWith('mod ')) continue
-      walk(resolved, `${modulePath}::${spec.slice(4)}`, seen)
-    }
-  }
   for (const filePath of sources.keys()) {
     const name = filePath.includes('/') ? filePath.slice(filePath.lastIndexOf('/') + 1) : filePath
-    if (name === 'main.rs' || name === 'lib.rs') walk(filePath, 'crate', new Set())
+    if (name !== 'main.rs' && name !== 'lib.rs') continue
+    const seen = new Set()
+    const stack = [[filePath, 'crate', 0]]
+    while (stack.length > 0) {
+      const [path, modulePath, depth] = stack.pop()
+      tree.set(modulePath, path)
+      if (seen.has(path) || depth >= MAX_MODULE_DEPTH) continue
+      seen.add(path)
+      const specMap = resolutions.get(path)
+      if (!specMap) continue
+      for (const [spec, resolved] of specMap) {
+        if (!spec.startsWith('mod ')) continue
+        stack.push([resolved, `${modulePath}::${spec.slice(4)}`, depth + 1])
+      }
+    }
   }
   return tree
 }
@@ -149,6 +159,12 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
         } catch (err) {
           if (err.code === 'ENOENT') {
             console.warn(`[loader.rust] Missing file: ${relPath}`)
+            return null
+          }
+          // resolveModPath gates candidates with isFile so a directory is
+          // normally never queued; guard EISDIR anyway (symmetry with bash).
+          if (err.code === 'EISDIR') {
+            console.warn(`[loader.rust] Skipping directory reference: ${relPath}`)
             return null
           }
           throw err

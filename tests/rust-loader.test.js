@@ -106,6 +106,22 @@ test('buildModuleTree maps module paths to files from the crate root', async (t)
   t.assert.equal(tree.get('crate::foo::bar'), 'src/foo/bar.rs')
 })
 
+test('buildModuleTree handles a pathologically deep mod chain without overflowing the stack', (t) => {
+  // A crafted crate with a very deep linear `mod` chain must not crash the
+  // bundler — recursive descent RangeErrors around ~10k frames. The walk is
+  // iterative and depth-bounded.
+  const N = 20000
+  const sources = new Map([['main.rs', '']])
+  const resolutions = new Map([['main.rs', new Map([['mod m0', 'm0.rs']])]])
+  for (let i = 0; i < N; i++) {
+    sources.set(`m${i}.rs`, '')
+    resolutions.set(`m${i}.rs`, i + 1 < N ? new Map([[`mod m${i + 1}`, `m${i + 1}.rs`]]) : new Map())
+  }
+  const tree = buildModuleTree(sources, resolutions) // must not throw
+  t.assert.equal(tree.get('crate'), 'main.rs')
+  t.assert.ok(tree.size <= 1002, `module-tree depth should be capped, got ${tree.size}`)
+})
+
 test('resolveUsePath resolves to the deepest matching module', (t) => {
   const tree = new Map([
     ['crate', 'src/main.rs'],
