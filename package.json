@@ -25,6 +25,7 @@
     "src/esbuild.js",
     "src/loader.js",
     "src/loaders/solidity.js",
+    "src/loaders/php.js",
     "src/lockfile.js",
     "src/mock.js",
     "src/prune.js",

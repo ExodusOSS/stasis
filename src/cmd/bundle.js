@@ -12,6 +12,7 @@ import {
   collectSolidityFilesFromDisk,
   readRemappingsFile,
 } from '../loaders/solidity.js'
+import { buildPhpTree, collectPhpFilesFromDisk } from '../loaders/php.js'
 
 const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 
@@ -22,6 +23,10 @@ const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 const SOLIDITY_WORKSPACE_NAME = 'solidity-bundle'
 const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
+
+const PHP_WORKSPACE_NAME = 'php-bundle'
+const PHP_WORKSPACE_VERSION = '0.0.0'
+const PHP_FORMAT = 'php'
 
 // Walk up from the file's directory looking for the nearest package.json
 // with both `name` and `version`. Returns { pkgDir, name, version }
@@ -44,6 +49,44 @@ function findPackageMetadata(baseDir, fileRelPath) {
     if (parent === dir) return null
     dir = parent
   }
+}
+
+// Partition loaded source files into per-package buckets keyed by the
+// directory of the nearest package.json with a name+version. node_modules
+// files land in `node_modules/<pkg>` buckets (or deeper, when a nested
+// package.json claims the file); workspace files land in their nearest
+// workspace package.json's dir, or in the fallback "." bucket with the given
+// placeholder metadata when no package.json could be found. Shared by the
+// Solidity and PHP bundlers, neither of which goes through State.
+function bucketizeSources(baseDir, sources, fallbackName, fallbackVersion) {
+  const modules = new Map()
+  const ensureBucket = (dir, name, version) => {
+    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
+    return modules.get(dir)
+  }
+
+  for (const [path, content] of sources) {
+    const meta = findPackageMetadata(baseDir, path)
+    const inNodeModules = splitNodeModulesPath(path) !== null
+    if (meta) {
+      // A file inside node_modules whose nearest package.json is the
+      // workspace root would silently land in the workspace bucket and
+      // hide the misconfigured dependency — refuse instead.
+      if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
+        throw new Error(`No package.json with name+version found for ${path}`)
+      }
+      const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
+      ensureBucket(meta.pkgDir, meta.name, meta.version).files[rel] = content
+    } else {
+      // Files under node_modules without any discoverable package.json
+      // would otherwise leak into the workspace bucket; that's a project
+      // misconfiguration, surface it loudly.
+      if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
+      ensureBucket('.', fallbackName, fallbackVersion).files[path] = content
+    }
+  }
+
+  return modules
 }
 
 function normalizeEntries(entries, cwd) {
@@ -114,39 +157,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  // Partition every loaded .sol file into a per-package bucket. The
-  // bucket is the directory holding the nearest package.json with a
-  // name+version. node_modules files land in `node_modules/<pkg>` buckets
-  // (or deeper, when a nested package.json claims the file); workspace
-  // files land in their nearest workspace package.json's dir, or in the
-  // fallback "." bucket with placeholder metadata when no package.json
-  // could be found.
-  const modules = new Map()
-  const ensureBucket = (dir, name, version) => {
-    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
-    return modules.get(dir)
-  }
-
-  for (const [path, content] of sources) {
-    const meta = findPackageMetadata(baseDir, path)
-    const inNodeModules = splitNodeModulesPath(path) !== null
-    if (meta) {
-      // A file inside node_modules whose nearest package.json is the
-      // workspace root would silently land in the workspace bucket and
-      // hide the misconfigured dependency — refuse instead.
-      if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
-        throw new Error(`No package.json with name+version found for ${path}`)
-      }
-      const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
-      ensureBucket(meta.pkgDir, meta.name, meta.version).files[rel] = content
-    } else {
-      // Files under node_modules without any discoverable package.json
-      // would otherwise leak into the workspace bucket; that's a project
-      // misconfiguration, surface it loudly.
-      if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
-      ensureBucket('.', SOLIDITY_WORKSPACE_NAME, SOLIDITY_WORKSPACE_VERSION).files[path] = content
-    }
-  }
+  const modules = bucketizeSources(baseDir, sources, SOLIDITY_WORKSPACE_NAME, SOLIDITY_WORKSPACE_VERSION)
 
   const formats = new Map()
   for (const path of sources.keys()) formats.set(path, SOLIDITY_FORMAT)
@@ -157,6 +168,60 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const importsForKey = new Map()
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([['solidity', importsForKey]])
+
+  return new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(normalized),
+    modules,
+    formats,
+    imports,
+  })
+}
+
+// Build a stasis Bundle (in-memory) from a list of entry .php files by
+// statically scanning their `require`/`include` graph and reading every
+// reachable file from disk -- no PHP is ever executed. Mirrors
+// buildSolidityBundle: files are bucketed per package.json, tagged with the
+// `php` format, and edges are keyed under a dedicated "php" condition bucket.
+//
+// Refuses to write when an entry can't be loaded or any include is
+// unresolved (dynamic/interpolated path, missing file) -- a bundle with holes
+// would silently operate on a partial set of sources.
+export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('buildPhpBundle: at least one entry .php file is required')
+  }
+  for (const e of entries) {
+    if (!e.endsWith('.php')) throw new Error(`buildPhpBundle: not a .php file: ${e}`)
+  }
+
+  const baseDir = resolve(cwd)
+  const normalized = normalizeEntries(entries, cwd)
+
+  const sources = await collectPhpFilesFromDisk(baseDir, normalized)
+  const { resolutions, missing } = buildPhpTree(sources, { baseDir })
+
+  const issues = []
+  for (const entry of normalized) {
+    if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
+  }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved import: ${spec} from ${from}`)
+  }
+  if (issues.length > 0) {
+    throw new Error(`PHP bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+  }
+
+  const modules = bucketizeSources(baseDir, sources, PHP_WORKSPACE_NAME, PHP_WORKSPACE_VERSION)
+
+  const formats = new Map()
+  for (const path of sources.keys()) formats.set(path, PHP_FORMAT)
+
+  // PHP includes don't depend on Node conditions; key them under a dedicated
+  // "php" bucket rather than the wildcard "*" used for JS code bundles.
+  const importsForKey = new Map()
+  for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
+  const imports = new Map([['php', importsForKey]])
 
   return new Bundle({
     config: { scope: 'full' },
@@ -246,8 +311,9 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // Prints a one-line `[stasis] Bundled <n> files from <dir> to <dest>` summary
 // to stderr so it doesn't interleave with the binary output on stdout.
 //
-// Dispatch by extension: all entries must be either .sol (Solidity) OR
-// .js/.cjs/.mjs (JS, via static scan). Mixing fails fast; --mapping is .sol only.
+// Dispatch by extension: all entries must be either .sol (Solidity), .php
+// (PHP) OR .js/.cjs/.mjs (JS, via static scan). Mixing fails fast; --mapping
+// is .sol only, --scope/--lockfile are JS only.
 //
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
@@ -260,9 +326,10 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     throw new Error('bundleCommand: at least one entry file is required')
   }
   const isSol = entries.every((e) => e.endsWith('.sol'))
+  const isPhp = entries.every((e) => e.endsWith('.php'))
   const isJs = entries.every((e) => JS_EXTS.has(extname(e)))
-  if (!isSol && !isJs) {
-    throw new Error('bundleCommand: entries must all be .sol or all be .js/.cjs/.mjs (no mixing)')
+  if (!isSol && !isPhp && !isJs) {
+    throw new Error('bundleCommand: entries must all be .sol, all be .php, or all be .js/.cjs/.mjs (no mixing)')
   }
   if (mappingFile && !isSol) {
     throw new Error('bundleCommand: --mapping is only valid for .sol bundles')
@@ -279,6 +346,10 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   let lockData
   if (isSol) {
     const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
+    serialized = bundle.serializeCode()
+    files = [...bundle.sources.keys()]
+  } else if (isPhp) {
+    const bundle = await buildPhpBundle({ cwd, entries })
     serialized = bundle.serializeCode()
     files = [...bundle.sources.keys()]
   } else {
