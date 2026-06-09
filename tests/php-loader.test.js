@@ -110,6 +110,20 @@ test('extractPhpImports ignores include keywords inside comments and strings', (
   t.assert.deepEqual(extractPhpImports(src), ['real.php'])
 })
 
+test('extractPhpImports skips dynamic includes built by concatenation', (t) => {
+  // Regression: voku/portable-ascii does `require __DIR__ . '/data/' . $x . '.php'`.
+  // Partially extracting the first string yields a bogus directory path; a path
+  // concatenated with anything (a variable, or another string) is dynamic and
+  // must be skipped entirely.
+  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/data/' . $lang . '.php';"), [])
+  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/a' . '/b.php';"), [])
+  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '' . '/x.php';"), [])
+  t.assert.deepEqual(extractPhpImports('<?php require $base . "/x.php";'), [])
+  t.assert.deepEqual(extractPhpImports('<?php require $path;'), [])
+  // ...but a single complete string literal is still resolved.
+  t.assert.deepEqual(extractPhpImports("<?php require __DIR__ . '/data/ascii.php';"), ['./data/ascii.php'])
+})
+
 test('resolvePhpImport resolves ./ and ../ against the including file', (t) => {
   t.assert.equal(resolvePhpImport('./B.php', 'src/A.php'), 'src/B.php')
   t.assert.equal(resolvePhpImport('../lib/C.php', 'src/sub/A.php'), 'src/lib/C.php')
