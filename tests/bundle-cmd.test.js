@@ -576,8 +576,8 @@ test('CLI: bundle load surfaces ERR_MODULE_NOT_FOUND for dynamic import of a mis
 // the bundle was guaranteed broken. require()/dynamic import() edges stay
 // warn-only -- those failures are catchable at runtime (see the test above).
 
-const jsProject = (tmp, files) => {
-  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'fail-closed', version: '0.0.0', type: 'module' }))
+const jsProject = (tmp, files, pkg = { name: 'fail-closed', version: '0.0.0', type: 'module' }) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify(pkg))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
   for (const [name, content] of Object.entries(files)) writeFileSync(join(tmp, name), content)
 }
@@ -587,8 +587,8 @@ test('CLI: bundle (JS) fails closed when an export-from edge cannot be resolved'
   const outPath = join(tmp, 'out.br')
   const r = runCli(['bundle', `--output=${outPath}`, 'file.mjs'], { cwd: tmp })
   t.assert.notEqual(r.status, 0, 'must exit non-zero on an unresolved static export-from')
-  t.assert.match(r.stderr, /JS bundle has unresolved static imports/)
-  t.assert.match(r.stderr, /export-from @noble\/ciphers\/_arx\.js from .*file\.mjs \(MODULE_NOT_FOUND\)/)
+  t.assert.match(r.stderr, /JS bundle would be broken at load time/)
+  t.assert.match(r.stderr, /unresolved export-from @noble\/ciphers\/_arx\.js from .*file\.mjs \(MODULE_NOT_FOUND\)/)
   t.assert.ok(!existsSync(outPath), 'output file must not be written when bundling fails')
 }))
 
@@ -597,15 +597,15 @@ test('CLI: bundle (JS) fails closed when a static import edge cannot be resolved
   const outPath = join(tmp, 'out.br')
   const r = runCli(['bundle', `--output=${outPath}`, 'entry.mjs'], { cwd: tmp })
   t.assert.notEqual(r.status, 0, 'must exit non-zero on an unresolved static import')
-  t.assert.match(r.stderr, /JS bundle has unresolved static imports/)
-  t.assert.match(r.stderr, /import \.\/missing\.mjs from .*entry\.mjs/)
+  t.assert.match(r.stderr, /JS bundle would be broken at load time/)
+  t.assert.match(r.stderr, /unresolved import \.\/missing\.mjs from .*entry\.mjs/)
   t.assert.ok(!existsSync(outPath))
 }))
 
-test('CLI: bundle (JS) fails closed when a reachable file does not parse', withTmp((t, tmp) => {
+test('CLI: bundle (JS) fails closed when a statically-imported module file does not parse', withTmp((t, tmp) => {
   // broken.mjs resolves fine (the file exists), but oxc can't parse it -- its
-  // edges are unknown, so the graph may have holes we can't enumerate. oxc
-  // recovers from syntax errors instead of throwing, so this used to be
+  // static edges are unknown, so the graph may have holes we can't enumerate.
+  // oxc recovers from syntax errors instead of throwing, so this used to be
   // COMPLETELY silent (no warning at all, unlike the unresolved-edge case).
   jsProject(tmp, {
     'entry.mjs': "import './broken.mjs'\n",
@@ -613,10 +613,88 @@ test('CLI: bundle (JS) fails closed when a reachable file does not parse', withT
   })
   const outPath = join(tmp, 'out.br')
   const r = runCli(['bundle', `--output=${outPath}`, 'entry.mjs'], { cwd: tmp })
-  t.assert.notEqual(r.status, 0, 'must exit non-zero when a scanned file fails to parse')
-  t.assert.match(r.stderr, /JS bundle has unresolved static imports/)
+  t.assert.notEqual(r.status, 0, 'must exit non-zero when a statically-linked module file fails to parse')
+  t.assert.match(r.stderr, /JS bundle would be broken at load time/)
   t.assert.match(r.stderr, /parse error in .*broken\.mjs/)
   t.assert.ok(!existsSync(outPath))
+}))
+
+test('CLI: bundle (JS) salvages edges from a CJS file with a top-level return (valid in Node, parse error in oxc)', withTmp((t, tmp) => {
+  // Node's module wrapper makes a top-level `return` legal in CJS; oxc reports
+  // it as an error but its recovered AST keeps the require() calls. The bundle
+  // must include the whole chain and only warn -- a hard failure here would
+  // reject code that runs (and previously bundled) fine.
+  jsProject(tmp, {
+    'entry.cjs': "require('./guard.cjs')\n",
+    'guard.cjs': "if (!process.env.NEVER) return\nmodule.exports = require('./extra.cjs')\n",
+    'extra.cjs': 'module.exports = 1\n',
+  })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.cjs'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /file\(s\) with parse errors; their recorded imports may be incomplete/)
+  t.assert.match(r.stderr, /guard\.cjs/)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['entry.cjs', 'extra.cjs', 'guard.cjs'],
+    'the require edge inside the parse-error file must be salvaged and walked')
+}))
+
+test('CLI: bundle (JS) tolerates a missing static import behind a dynamic import() boundary', withTmp((t, tmp) => {
+  // The optional-adapter pattern: a statically-broken subtree entered via
+  // `await import()` surfaces as the dynamic import's rejection -- catchable,
+  // and plain node takes the fallback branch. Only static-ESM-only paths from
+  // an entry are uncatchable; this one must warn and keep bundling.
+  jsProject(tmp, {
+    'entry.mjs': "let impl\ntry { impl = await import('./optional.mjs') } catch { impl = { name: 'fallback' } }\nconsole.log(impl.name)\n",
+    'optional.mjs': "import 'not-installed-pkg'\nexport const name = 'optional'\n",
+  })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.mjs'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /unresolved import\(s\); they will fall through at load time/)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['entry.mjs', 'optional.mjs'])
+}))
+
+test('CLI: bundle (JS) fails closed when an edge resolves to a file a source bundle cannot carry', withTmp((t, tmp) => {
+  // require('./tool') of an extensionless file works in plain node, but scan
+  // records the edge without ever bundling the target (not a RESOLVABLE ext).
+  // This used to exit 0 with NO warning at all -- the import map pointed at a
+  // file with no source behind it, dead at load via state.getFile's assert.
+  jsProject(tmp, {
+    'entry.cjs': "require('./tool')\n",
+    'tool': 'console.log("tool")\n',
+  })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.cjs'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0, 'must exit non-zero on an edge the bundle cannot carry')
+  t.assert.match(r.stderr, /JS bundle would be broken at load time/)
+  t.assert.match(r.stderr, /\.\/tool from .*entry\.cjs resolves to .*tool, which a source bundle can't carry/)
+  t.assert.ok(!existsSync(outPath))
+}))
+
+test('CLI: bundle (JS) honors Node module-syntax detection for ambiguous .js and the bundle loads', withTmp((t, tmp) => {
+  // No "type" in package.json: plain node (detect-module) runs ESM-syntax .js
+  // as ESM. The bundle used to record format=commonjs for dep.js, so loading
+  // it died with "does not provide an export named ..." while plain node ran
+  // the same entry fine.
+  jsProject(tmp, {
+    'entry.mjs': "import { x } from './dep.js'\nconsole.log(x)\n",
+    'dep.js': 'export const x = 42\n',
+  }, { name: 'detect-module', version: '0.0.0' })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.mjs'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.equal(decoded.formats['dep.js'], 'module',
+    'ambiguous .js with module syntax must be recorded as ESM, matching plain node')
+
+  const load = runCli(
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${outPath}`, 'entry.mjs'],
+    { cwd: tmp },
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, '42\n')
 }))
 
 test('CLI: bundle (JS) still warns and writes the bundle for an unresolved require()', withTmp((t, tmp) => {

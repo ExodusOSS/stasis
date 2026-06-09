@@ -256,9 +256,15 @@ export class State {
     assert.ok(closestType === 'module' || closestType === 'commonjs')
     const extToFormat = { __proto__: null, '.json': 'json', '.mjs': 'module', '.cjs': 'commonjs', '.js': closestType }
     const inferredFormat = extToFormat[extname(file)]
+    // A .js file in a scope without an explicit "type" is ambiguous: plain
+    // node picks its format by module-syntax detection, so a caller-supplied
+    // 'module' is legitimate there; only the no-format default falls back to
+    // the CJS inference.
+    const ambiguousJs = extname(file) === '.js' && closestPkg.type === undefined
     if (inferredFormat !== undefined) {
-      if (format != null) assert.equal(format, inferredFormat)
-      else format = inferredFormat
+      if (format == null) format = inferredFormat
+      else if (ambiguousJs) assert.ok(format === 'module' || format === 'commonjs')
+      else assert.equal(format, inferredFormat)
     }
 
     // findPackageJSON may land on a `{"type":"module"}`-style sub-bucket

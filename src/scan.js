@@ -11,8 +11,10 @@ import assert from 'node:assert/strict'
 // the target module. Dynamic specifiers (`require(name)`, `import('./'+x)`)
 // are recorded as unresolved -- a fundamental limit of static analysis for
 // CJS, not a tooling shortcoming. Files that fail to parse are recorded in
-// `parseErrors` (and flagged with `parseError` in `files`): their edges are
-// unknown, so consumers that need a complete graph must treat them as fatal.
+// `parseErrors` (and flagged with `parseError` in `files`): for script (CJS)
+// files oxc's recovered AST still yields the edges (Node's module wrapper
+// accepts code oxc rejects, e.g. top-level `return`), while module files keep
+// no edges -- a missed static edge is a hole consumers can't enumerate.
 // The parser (oxc-parser) is loaded lazily as an optional peer dependency.
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs'])
@@ -33,11 +35,15 @@ function getParser() {
   return _parser
 }
 
+// Raw "type" of the file's nearest package.json scope: 'module', 'commonjs',
+// or undefined when there is no package.json or it has no "type" field -- the
+// ambiguous case where Node applies module-syntax detection to .js files. A
+// malformed package.json is treated as an explicit 'commonjs' (no detection).
 function packageType(file) {
   const pkg = findPackageJSON(pathToFileURL(file).toString())
-  if (!pkg) return 'commonjs'
+  if (!pkg) return undefined
   try {
-    return JSON.parse(readFileSync(pkg, 'utf8')).type ?? 'commonjs'
+    return JSON.parse(readFileSync(pkg, 'utf8')).type
   } catch {
     return 'commonjs'
   }
@@ -45,11 +51,16 @@ function packageType(file) {
 
 function formatForFile(file) {
   const ext = extname(file)
-  if (ext === '.mjs') return 'module'
-  if (ext === '.cjs') return 'commonjs'
-  if (ext === '.json') return 'json'
-  if (ext === '.js') return packageType(file) === 'module' ? 'module' : 'commonjs'
-  return null
+  if (ext === '.mjs') return { format: 'module' }
+  if (ext === '.cjs') return { format: 'commonjs' }
+  if (ext === '.json') return { format: 'json' }
+  if (ext === '.js') {
+    const type = packageType(file)
+    // type undefined = ambiguous scope: plain node runs the file as ESM if it
+    // contains module syntax (detect-module); the caller re-checks after parse.
+    return { format: type === 'module' ? 'module' : 'commonjs', detectModule: type === undefined }
+  }
+  return { format: null }
 }
 
 function literalSpec(node) {
@@ -145,9 +156,13 @@ export class Scan {
     return new Set([...base, ...this.extraConditions])
   }
 
-  #recordParseError(url, format, message) {
+  // `recovered: false` means the parser itself failed (missing oxc-parser
+  // peer, crash) and nothing was salvaged -- the file's edges are entirely
+  // unknown. `recovered: true` means oxc returned, but we discarded its
+  // partial module records (module-format files only; see #scanFile).
+  #recordParseError(url, format, message, recovered) {
     this.files.set(url, { format, edges: [], parseError: message })
-    this.parseErrors.push({ url, message })
+    this.parseErrors.push({ url, format, message, recovered })
   }
 
   #scanFile(url, queue) {
@@ -162,28 +177,49 @@ export class Scan {
       return
     }
 
-    const format = formatForFile(file)
-    const isESM = format === 'module'
+    let { format, detectModule = false } = formatForFile(file)
+    let isESM = format === 'module'
     const src = readFileSync(file, 'utf8')
 
     let parsed
     try {
       parsed = getParser().parseSync(file, src, { sourceType: isESM ? 'module' : 'script' })
+      // Node's detect-module: an ambiguous .js (no "type" in the nearest
+      // package.json scope) that contains module syntax runs as ESM in plain
+      // node. oxc accepts module syntax in script mode and flags it via
+      // hasModuleSyntax (true for import/export/import.meta, false for
+      // dynamic import() -- matching Node's detector), so re-parse as a
+      // module to make the recorded format, strictness, and resolution
+      // conditions all match what plain node would do.
+      if (detectModule && !isESM && parsed.module?.hasModuleSyntax) {
+        format = 'module'
+        isESM = true
+        parsed = getParser().parseSync(file, src, { sourceType: 'module' })
+      }
     } catch (cause) {
-      this.#recordParseError(url, format, cause.message)
+      this.#recordParseError(url, format, cause.message, false)
       return
     }
 
     // oxc-parser recovers from syntax errors instead of throwing: it reports
     // them in `parsed.errors` and returns whatever AST/module records it could
-    // salvage. A partially-parsed file may have edges we never saw, so treating
-    // it as a leaf would punch an invisible hole in the graph -- record it as a
-    // parse failure, same as a parser throw. (Warning/advice-severity
-    // diagnostics don't imply a broken parse and are not errors.)
+    // salvage. (Warning/advice-severity diagnostics don't imply a broken parse
+    // and are not errors.)
+    let parseError
     const errors = (parsed.errors ?? []).filter((e) => e.severity !== 'Warning' && e.severity !== 'Advice')
     if (errors.length > 0) {
-      this.#recordParseError(url, format, errors.map((e) => e.message).join('; '))
-      return
+      parseError = errors.map((e) => e.message).join('; ')
+      // A partially-parsed module file may be missing static link-time edges
+      // -- holes we can't enumerate -- so don't pretend we know its imports.
+      if (isESM) {
+        this.#recordParseError(url, format, parseError, true)
+        return
+      }
+      // Script (CJS) files: Node's module wrapper accepts code oxc rejects
+      // (e.g. a top-level `return` guard), and oxc's recovered AST keeps the
+      // require()/import() calls -- salvage the edges, record the error, and
+      // let callers decide how loud to be.
+      this.parseErrors.push({ url, format, message: parseError, recovered: true })
     }
 
     const specs = []
@@ -236,7 +272,7 @@ export class Scan {
       if (!this.imports.has(key)) this.imports.set(key, new Map())
       this.imports.get(key).set(url, specMap)
     }
-    this.files.set(url, { format, edges })
+    this.files.set(url, parseError ? { format, edges, parseError } : { format, edges })
   }
 
   toRelative(root) {

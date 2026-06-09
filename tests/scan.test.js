@@ -112,10 +112,11 @@ test('scan does not load the target file (top-level side effects never fire)', (
   t.assert.equal(r.stderr, '')
 })
 
-test('scan records files that fail to parse in parseErrors with no edges', withTmp((t, tmp) => {
+test('scan records module files that fail to parse in parseErrors with no edges', withTmp((t, tmp) => {
   // oxc-parser recovers from syntax errors instead of throwing, so scan must
   // read parsed.errors itself -- otherwise a broken file silently scans as a
-  // leaf and any imports inside it vanish from the graph.
+  // leaf and any imports inside it vanish from the graph. For module files the
+  // partial records are discarded: a missed static edge is an invisible hole.
   const entry = join(tmp, 'entry.mjs')
   const broken = join(tmp, 'broken.mjs')
   writeFileSync(entry, "import './broken.mjs'\n")
@@ -124,14 +125,56 @@ test('scan records files that fail to parse in parseErrors with no edges', withT
   t.assert.equal(result.parseErrors.length, 1)
   t.assert.ok(result.parseErrors[0].url.endsWith('/broken.mjs'))
   t.assert.ok(result.parseErrors[0].message.length > 0)
+  t.assert.equal(result.parseErrors[0].format, 'module')
+  t.assert.equal(result.parseErrors[0].recovered, true)
   const info = [...result.files].find(([url]) => url.endsWith('/broken.mjs'))[1]
   t.assert.ok(info.parseError, 'files entry must carry the parseError flag')
-  t.assert.deepEqual(info.edges, [], 'a file we could not parse must not contribute edges')
+  t.assert.deepEqual(info.edges, [], 'a module file we could not parse must not contribute edges')
 
   // toRelative carries parseErrors through, root-relative.
   const rel = scan([entry]).toRelative(tmp)
   t.assert.equal(rel.parseErrors.length, 1)
   t.assert.equal(rel.parseErrors[0].file, 'broken.mjs')
+}))
+
+test('scan salvages edges from a script (CJS) file with a parse error (top-level return)', withTmp((t, tmp) => {
+  // Node's CJS module wrapper accepts a top-level `return`; oxc reports it as
+  // an error but error-recovers a complete AST. The require() edge must
+  // survive, with the parse error recorded alongside it.
+  const entry = join(tmp, 'entry.cjs')
+  writeFileSync(entry, "require('./guard.cjs')\n")
+  writeFileSync(join(tmp, 'guard.cjs'), "if (!process.env.NEVER) return\nmodule.exports = require('./extra.cjs')\n")
+  writeFileSync(join(tmp, 'extra.cjs'), 'module.exports = 1\n')
+  const result = scan([entry])
+  t.assert.equal(result.parseErrors.length, 1)
+  t.assert.ok(result.parseErrors[0].url.endsWith('/guard.cjs'))
+  t.assert.equal(result.parseErrors[0].format, 'commonjs')
+  t.assert.equal(result.parseErrors[0].recovered, true)
+  const info = [...result.files].find(([url]) => url.endsWith('/guard.cjs'))[1]
+  t.assert.ok(info.parseError, 'files entry must carry the parseError flag')
+  t.assert.equal(info.edges.length, 1, 'the require edge must be salvaged from the recovered AST')
+  t.assert.ok([...result.files.keys()].some((u) => u.endsWith('/extra.cjs')), 'salvaged edges must be walked')
+}))
+
+test('scan applies Node module-syntax detection to ambiguous .js (no "type" in scope)', withTmp((t, tmp) => {
+  // package.json without "type": plain node runs ESM-syntax .js as ESM
+  // (detect-module). scan must record format=module and resolve the file's
+  // own edges under import conditions, or the bundle silently records the
+  // wrong format and dies at load while plain node runs fine.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'detect', version: '0.0.0' }))
+  const dep = join(tmp, 'dep.js')
+  writeFileSync(dep, "export { y } from './leaf.js'\n")
+  writeFileSync(join(tmp, 'leaf.js'), 'export const y = 1\n')
+  const result = scan([dep])
+  const depInfo = [...result.files].find(([url]) => url.endsWith('/dep.js'))[1]
+  t.assert.equal(depInfo.format, 'module')
+  t.assert.equal(depInfo.edges.length, 1)
+  t.assert.deepEqual(result.unresolved, [])
+  // dynamic import() alone must NOT flip a CJS file to module (matches Node).
+  const plain = join(tmp, 'plain.js')
+  writeFileSync(plain, "import('./leaf.js').catch(() => {})\nmodule.exports = 1\n")
+  const r2 = scan([plain])
+  t.assert.equal([...r2.files].find(([url]) => url.endsWith('/plain.js'))[1].format, 'commonjs')
 }))
 
 test('scan reports dynamic require() as unresolved', withTmp((t, tmp) => {
