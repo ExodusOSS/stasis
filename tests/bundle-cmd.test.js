@@ -500,8 +500,8 @@ test('buildPhpBundle produces a Bundle with sources, formats, imports, entries',
   t.assert.equal(bundle.imports.get('php').get('src/A.php').get('./B.php'), 'src/B.php')
 })
 
-test('buildPhpBundle takes the workspace name+version from the nearest package.json', async (t) => {
-  const cwd = join(phpFixtures, 'with-package-json')
+test('buildPhpBundle takes the workspace name+version from the nearest composer.json', async (t) => {
+  const cwd = join(phpFixtures, 'with-composer-json')
   const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php'] })
   t.assert.deepEqual([...bundle.modules.keys()], ['.'])
   const workspace = bundle.modules.get('.')
@@ -536,7 +536,7 @@ test('buildPhpBundle follows nested ../ includes across subdirectories', async (
 test('buildPhpBundle follows the Composer autoload graph and bundles only referenced classes', async (t) => {
   const cwd = join(phpFixtures, 'composer')
   const bundle = await buildPhpBundle({ cwd, entries: ['index.php'] })
-  const files = Object.keys(bundle.modules.get('.').files).toSorted()
+  const files = [...bundle.sources.keys()].toSorted()
 
   // Explicit includes (vendor/autoload.php + the composer machinery it requires)
   // AND autoloaded classes reachable from index.php's references.
@@ -554,6 +554,16 @@ test('buildPhpBundle follows the Composer autoload graph and bundles only refere
     'vendor/composer/autoload_psr4.php',
     'vendor/composer/autoload_real.php',
   ])
+
+  // Vendor dependencies are grouped into their own per-package bucket with
+  // name+version (name from composer.json, version from installed.json), not
+  // dumped under "."; the workspace bucket takes the root composer.json's name.
+  t.assert.equal(bundle.modules.get('.').name, 'acme/app')
+  const lib = bundle.modules.get('vendor/acme/lib')
+  t.assert.equal(lib.name, 'acme/lib')
+  t.assert.equal(lib.version, '1.4.2')
+  t.assert.deepEqual(Object.keys(lib.files), ['src/Client.php'])
+  t.assert.ok(!Object.keys(bundle.modules.get('.').files).includes('vendor/acme/lib/src/Client.php'))
 
   // The two classes that exist + are resolvable via the autoload maps but are
   // never referenced must NOT be bundled: an unused `use` import (Ghost) and a
@@ -592,6 +602,18 @@ test('buildPhpBundle bundles dir-anchored .php paths passed as arguments (Larave
   t.assert.deepEqual(
     Object.keys(bundle.modules.get('.').files).toSorted(),
     ['bootstrap/app.php', 'bootstrap/providers.php', 'routes/api.php', 'routes/web.php'],
+  )
+})
+
+test('buildPhpBundle bundles files referenced via Laravel path helpers (base_path, config_path)', async (t) => {
+  // BroadcastServiceProvider does `require base_path('routes/channels.php')` and
+  // `require config_path('broadcasting.php')` -- root-relative paths the
+  // framework loads. Both must be bundled.
+  const cwd = join(phpFixtures, 'path-helpers')
+  const bundle = await buildPhpBundle({ cwd, entries: ['app/Providers/BroadcastServiceProvider.php'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['app/Providers/BroadcastServiceProvider.php', 'config/broadcasting.php', 'routes/channels.php'],
   )
 })
 

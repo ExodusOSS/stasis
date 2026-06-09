@@ -34,7 +34,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 // Max files read concurrently per wave, to avoid EMFILE on large directory globs.
 const READ_CONCURRENCY = 64
@@ -177,6 +177,22 @@ const PHP_DIR_ANCHOR_RE = /__DIR__\b|dirname\s*\(\s*(__FILE__|__DIR__)\s*(?:,\s*
 // Anchor starts, for scanning path literals anywhere (not just after `require`).
 const PHP_DIR_ANCHOR_FIND_RE = /(?<![\w$>])(?:__DIR__\b|dirname\s*\(\s*(?:__FILE__|__DIR__))/gu
 
+// Laravel path helpers that resolve a string argument relative to the project
+// root (or a fixed subdirectory). `base_path('routes/web.php')`,
+// `config_path('app.php')`, … name real PHP files that the framework require()s.
+const PHP_PATH_HELPERS = new Map([
+  ['base_path', ''],
+  ['app_path', 'app'],
+  ['config_path', 'config'],
+  ['database_path', 'database'],
+  ['lang_path', 'lang'],
+  ['public_path', 'public'],
+  ['resource_path', 'resources'],
+  ['storage_path', 'storage'],
+])
+const PHP_PATH_HELPER_FIND_RE =
+  /(?<![\w$>:])(base_path|app_path|config_path|database_path|lang_path|public_path|resource_path|storage_path)\s*\(/giu
+
 // Interpolation markers inside a double-quoted string (`$var`, `${...}`,
 // `{$...}`). Single-quoted strings never interpolate, so a `$` there is literal.
 const PHP_INTERPOLATION_RE = /\$[A-Za-z_{]|\{\$/u
@@ -292,14 +308,27 @@ function scanPathLiterals(content) {
   const code = maskCommentsAndHeredocs(content)
   const strings = stringLiterals(code)
   const inString = (pos) => strings.some(({ start, end }) => pos > start && pos < end)
+  const stringAt = (pos) => strings.find(({ start }) => start === pos)
 
   const out = []
+  // Dir-anchored literals: `__DIR__ . '/x.php'` (anchor: resolve against the file).
   for (const m of code.matchAll(PHP_DIR_ANCHOR_FIND_RE)) {
     if (inString(m.index)) continue
     const arg = parseArgPath(code, m.index, strings)
     if (!arg || arg.dynamic || !arg.sawStatic || !arg.dirRelative) continue
     const spec = normalizeIncludePath(arg.prefix, true)
-    if (spec.endsWith('.php')) out.push(spec)
+    if (spec.endsWith('.php')) out.push({ spec, anchor: 'file' })
+  }
+  // Laravel path helpers: `base_path('routes/web.php')` etc. (anchor: resolve
+  // against the project root, with the helper's fixed subdirectory prefixed).
+  for (const m of code.matchAll(PHP_PATH_HELPER_FIND_RE)) {
+    if (inString(m.index)) continue
+    const lit = stringAt(skipWs(code, m.index + m[0].length))
+    if (!lit || (lit.quote === '"' && PHP_INTERPOLATION_RE.test(lit.value))) continue
+    const sub = PHP_PATH_HELPERS.get(m[1].toLowerCase())
+    const arg = lit.value.replace(/^\/+/u, '')
+    const spec = sub ? `${sub}/${arg}` : arg
+    if (spec.endsWith('.php')) out.push({ spec, anchor: 'root' })
   }
   return out
 }
@@ -315,10 +344,18 @@ export function extractPhpImportDirs(content) {
   return scanIncludes(content).filter((e) => e.kind === 'dir').map((e) => e.spec)
 }
 
-// Dir-anchored `.php` path literals used outside a `require`/`include` (e.g.
-// passed to a framework that loads them). De-duplicated; best-effort.
+// `.php` path literals used outside a `require`/`include` -- dir-anchored
+// (`__DIR__ . '/x.php'`, `anchor: 'file'`) or via a Laravel path helper
+// (`base_path('routes/x.php')`, `anchor: 'root'`). Frameworks pass these to code
+// that require()s them. De-duplicated; best-effort (bundled only if they exist).
 export function extractPhpPathRefs(content) {
-  return [...new Set(scanPathLiterals(content))]
+  const seen = new Set()
+  return scanPathLiterals(content).filter(({ spec, anchor }) => {
+    const key = `${anchor}:${spec}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 // Apply `segments` (already split on '/') on top of `fromFile`'s directory,
@@ -625,6 +662,81 @@ function matchingPrefixes(map, name) {
   return [...map].filter(([prefix]) => name.startsWith(prefix)).toSorted((a, b) => b[0].length - a[0].length)
 }
 
+// --- Per-package bucketing ---------------------------------------------------
+
+// Read installed-package versions from `vendor/composer/installed.json` -- the
+// authoritative source, since a package's own composer.json usually omits
+// `version` (Composer derives it at install time). Handles both the Composer 2
+// shape ({ packages: [...] }) and the Composer 1 flat array. Returns maps from
+// install dir (baseDir-relative) and from package name to version.
+function loadInstalledVersions(baseDir, vendorDir) {
+  const json = readJsonIfExists(join(baseDir, vendorDir, 'composer', 'installed.json'))
+  const byDir = new Map()
+  const byName = new Map()
+  const packages = Array.isArray(json) ? json : (json?.packages ?? [])
+  for (const p of packages) {
+    if (!p?.name || !p.version) continue
+    byName.set(p.name, p.version)
+    // install-path is relative to vendor/composer; default layout is vendor/<name>.
+    const abs = p['install-path']
+      ? resolve(baseDir, vendorDir, 'composer', p['install-path'])
+      : resolve(baseDir, vendorDir, p.name)
+    const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) byDir.set(rel, p.version)
+  }
+  return { byDir, byName }
+}
+
+// Walk up from a bundled file to the nearest composer.json with a `name`,
+// returning { pkgDir, name, version } (pkgDir baseDir-relative, "." for the
+// root package). Version comes from installed.json (by dir, then by name),
+// falling back to composer.json's own `version`, then `fallbackVersion`.
+// Returns null when no named composer.json sits at or above the file.
+function findComposerPackage(baseDir, fileRelPath, installed, fallbackVersion) {
+  let dir = dirname(fileRelPath)
+  for (;;) {
+    const cj = readJsonIfExists(join(baseDir, dir, 'composer.json'))
+    if (cj?.name) {
+      const version = installed.byDir.get(dir) ?? installed.byName.get(cj.name) ?? cj.version ?? fallbackVersion
+      return { pkgDir: dir, name: cj.name, version }
+    }
+    if (dir === '.' || dir === '/' || dir === '') return null
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
+// Group bundled PHP sources into per-package buckets keyed by the directory of
+// the nearest composer.json: vendor dependencies land in their own
+// `vendor/<vendor>/<pkg>` bucket (name + version from composer.json /
+// installed.json), workspace files in the root package's "." bucket. Files with
+// no named composer.json above them (e.g. Composer's generated autoloader glue,
+// or a project without a composer.json) fall back to "." with the given
+// placeholder identity. Returns a Map<dir, { name, version, files }>.
+export function bucketizePhpSources(baseDir, sources, fallbackName, fallbackVersion) {
+  const composerJson = readJsonIfExists(join(baseDir, 'composer.json'))
+  const vendorDir = normalizeProjectRel(baseDir, composerJson?.config?.['vendor-dir'] ?? 'vendor') ?? 'vendor'
+  const installed = loadInstalledVersions(baseDir, vendorDir)
+
+  const modules = new Map()
+  const ensureBucket = (dir, name, version) => {
+    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
+    return modules.get(dir)
+  }
+
+  for (const [path, content] of sources) {
+    const pkg = findComposerPackage(baseDir, path, installed, fallbackVersion)
+    if (pkg) {
+      const rel = pkg.pkgDir === '.' ? path : path.slice(pkg.pkgDir.length + 1)
+      ensureBucket(pkg.pkgDir, pkg.name, pkg.version).files[rel] = content
+    } else {
+      ensureBucket('.', fallbackName, fallbackVersion).files[path] = content
+    }
+  }
+  return modules
+}
+
 // --- Class-reference extraction ----------------------------------------------
 
 const RESERVED = new Set([
@@ -872,10 +984,14 @@ export async function collectPhpFilesFromDisk(baseDir, entries, { autoload = nul
           if (!sources.has(file)) next.push(file)
         }
       }
-      // Dir-anchored `.php` path literals not in a require (e.g. route/config
-      // files passed to a framework). Best-effort: bundle only if they exist.
-      for (const ref of extractPhpPathRefs(content)) {
-        const resolved = resolvePhpImport(ref, relPath, { baseDir })
+      // `.php` path literals not in a require (e.g. route/config files passed
+      // to a framework). Dir-anchored refs resolve against the file; Laravel
+      // helper refs (`base_path(...)`) against the project root. Best-effort:
+      // bundle only if they resolve to a file that exists.
+      for (const { spec, anchor } of extractPhpPathRefs(content)) {
+        const resolved = anchor === 'root'
+          ? normalizeProjectRel(baseDir, spec)
+          : resolvePhpImport(spec, relPath, { baseDir })
         if (resolved && isFileOnDisk(baseDir, resolved) && !sources.has(resolved)) next.push(resolved)
       }
       // Autoloaded class references (best-effort): enqueue whatever resolves.

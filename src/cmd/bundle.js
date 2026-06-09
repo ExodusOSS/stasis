@@ -12,7 +12,7 @@ import {
   collectSolidityFilesFromDisk,
   readRemappingsFile,
 } from '../loaders/solidity.js'
-import { buildPhpTree, collectPhpFilesFromDisk, loadComposerAutoload } from '../loaders/php.js'
+import { bucketizePhpSources, buildPhpTree, collectPhpFilesFromDisk, loadComposerAutoload } from '../loaders/php.js'
 
 const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 
@@ -223,7 +223,9 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
     throw new Error(`PHP bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  const modules = bucketizeSources(baseDir, sources, PHP_WORKSPACE_NAME, PHP_WORKSPACE_VERSION)
+  // Group per Composer package (vendor/<pkg> buckets with name+version from
+  // composer.json / installed.json), not the node_modules-based bucketizer.
+  const modules = bucketizePhpSources(baseDir, sources, PHP_WORKSPACE_NAME, PHP_WORKSPACE_VERSION)
 
   const formats = new Map()
   for (const path of sources.keys()) formats.set(path, PHP_FORMAT)

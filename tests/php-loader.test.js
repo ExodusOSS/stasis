@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  bucketizePhpSources,
   buildPhpTree,
   collectPhpFilesFromDisk,
   extractPhpImportDirs,
@@ -184,9 +185,28 @@ test('extractPhpPathRefs finds dir-anchored .php paths used outside a require', 
     "    health: '/up',", // bare string, not a path
     '  );',
   ].join('\n')
-  t.assert.deepEqual(extractPhpPathRefs(app), ['../routes/web.php', '../routes/api.php'])
+  t.assert.deepEqual(extractPhpPathRefs(app), [
+    { spec: '../routes/web.php', anchor: 'file' },
+    { spec: '../routes/api.php', anchor: 'file' },
+  ])
   // A bare (non-dir-anchored) string is not treated as a path reference.
   t.assert.deepEqual(extractPhpPathRefs("<?php $x = 'config/app.php';"), [])
+})
+
+test('extractPhpPathRefs resolves Laravel path helpers against the project root', (t) => {
+  // Laravel's BroadcastServiceProvider does `require base_path('routes/channels.php')`.
+  t.assert.deepEqual(extractPhpPathRefs("<?php require base_path('routes/channels.php');"), [
+    { spec: 'routes/channels.php', anchor: 'root' },
+  ])
+  // Other helpers prepend their fixed subdirectory.
+  t.assert.deepEqual(extractPhpPathRefs("<?php $c = config_path('app.php');"), [
+    { spec: 'config/app.php', anchor: 'root' },
+  ])
+  t.assert.deepEqual(extractPhpPathRefs("<?php require app_path('Helpers.php');"), [
+    { spec: 'app/Helpers.php', anchor: 'root' },
+  ])
+  // A dynamic helper argument (concatenation) is not a static path -> skipped.
+  t.assert.deepEqual(extractPhpPathRefs("<?php require base_path('routes/' . $f);"), [])
 })
 
 test('resolvePhpImport resolves ./ and ../ against the including file', (t) => {
@@ -324,6 +344,38 @@ const composer = join(fixtures, 'composer')
 
 test('loadComposerAutoload returns null for a project with no Composer config', (t) => {
   t.assert.equal(loadComposerAutoload(join(fixtures, 'basic')), null)
+})
+
+test('bucketizePhpSources groups vendor packages with name+version from composer.json/installed.json', (t) => {
+  const sources = new Map([
+    ['index.php', '<?php'],
+    ['src/Service.php', '<?php'],
+    ['vendor/acme/lib/src/Client.php', '<?php'],
+    ['vendor/autoload.php', '<?php'], // no package composer.json -> workspace
+  ])
+  const modules = bucketizePhpSources(composer, sources, 'php-bundle', '0.0.0')
+
+  // Vendor package: own bucket, name from composer.json, version from installed.json.
+  const lib = modules.get('vendor/acme/lib')
+  t.assert.equal(lib.name, 'acme/lib')
+  t.assert.equal(lib.version, '1.4.2')
+  t.assert.deepEqual(Object.keys(lib.files), ['src/Client.php']) // package-relative
+
+  // Workspace bucket: root composer.json name; carries everything without a
+  // nearer package (incl. the autoloader glue), keyed project-relative.
+  const root = modules.get('.')
+  t.assert.equal(root.name, 'acme/app')
+  t.assert.deepEqual(
+    Object.keys(root.files).toSorted(),
+    ['index.php', 'src/Service.php', 'vendor/autoload.php'],
+  )
+})
+
+test('bucketizePhpSources falls back to the placeholder identity with no composer.json', (t) => {
+  const modules = bucketizePhpSources(join(fixtures, 'basic'), new Map([['src/A.php', '<?php']]), 'php-bundle', '0.0.0')
+  t.assert.deepEqual([...modules.keys()], ['.'])
+  t.assert.equal(modules.get('.').name, 'php-bundle')
+  t.assert.equal(modules.get('.').version, '0.0.0')
 })
 
 test('loadComposerAutoload merges composer.json and generated maps into baseDir-relative paths', (t) => {

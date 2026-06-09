@@ -1,0 +1,9 @@
+{
+  "packages": [
+    {
+      "name": "acme/lib",
+      "version": "1.4.2",
+      "install-path": "../acme/lib"
+    }
+  ]
+}
