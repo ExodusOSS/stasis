@@ -583,6 +583,18 @@ test('buildPhpBundle bundles the static directory of a dynamic include', async (
   )
 })
 
+test('buildPhpBundle bundles dir-anchored .php paths passed as arguments (Laravel routes)', async (t) => {
+  // bootstrap/app.php passes route files to the framework via `web:`/`api:` args
+  // (no `require` keyword). They must still be bundled; the static `require` of
+  // providers.php is too, while `dirname(__DIR__)` (a dir) and `'/up'` are not.
+  const cwd = join(phpFixtures, 'path-refs')
+  const bundle = await buildPhpBundle({ cwd, entries: ['bootstrap/app.php'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['bootstrap/app.php', 'bootstrap/providers.php', 'routes/api.php', 'routes/web.php'],
+  )
+})
+
 test('buildPhpBundle deduplicates files included by multiple entries', async (t) => {
   const cwd = join(phpFixtures, 'shared')
   const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php', 'src/B.php'] })

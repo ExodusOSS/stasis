@@ -8,6 +8,7 @@ import {
   collectPhpFilesFromDisk,
   extractPhpImportDirs,
   extractPhpImports,
+  extractPhpPathRefs,
   loadComposerAutoload,
   phpClassDependencies,
   resolveClassFile,
@@ -164,6 +165,28 @@ test('extractPhpImportDirs offers the static directory of a dynamic include', (t
   t.assert.deepEqual(extractPhpImportDirs('<?php require $base . "/views/$v.php";'), [])
   // A fully-static include is a file, not a directory.
   t.assert.deepEqual(extractPhpImportDirs("<?php require __DIR__ . '/data/ascii.php';"), [])
+})
+
+test('extractPhpImports resolves dirname(__DIR__) and dirname(__DIR__, N) includes', (t) => {
+  t.assert.deepEqual(extractPhpImports("<?php require dirname(__DIR__) . '/bootstrap.php';"), ['../bootstrap.php'])
+  t.assert.deepEqual(extractPhpImports("<?php require dirname(__DIR__, 2) . '/config/app.php';"), ['../../config/app.php'])
+})
+
+test('extractPhpPathRefs finds dir-anchored .php paths used outside a require', (t) => {
+  // Laravel bootstrap/app.php passes route files as arguments; they are real
+  // PHP files even though there is no `require` keyword.
+  const app = [
+    '<?php',
+    'return Application::configure(basePath: dirname(__DIR__))',
+    "  ->withRouting(",
+    "    web: __DIR__ . '/../routes/web.php',",
+    "    api: __DIR__ . '/../routes/api.php',",
+    "    health: '/up',", // bare string, not a path
+    '  );',
+  ].join('\n')
+  t.assert.deepEqual(extractPhpPathRefs(app), ['../routes/web.php', '../routes/api.php'])
+  // A bare (non-dir-anchored) string is not treated as a path reference.
+  t.assert.deepEqual(extractPhpPathRefs("<?php $x = 'config/app.php';"), [])
 })
 
 test('resolvePhpImport resolves ./ and ../ against the including file', (t) => {
@@ -353,6 +376,36 @@ test('resolveClassFile returns null when a PSR-4 prefix matches but the file is 
 test('resolveClassFile returns null for a class in no autoload map', (t) => {
   const a = loadComposerAutoload(composer)
   t.assert.equal(resolveClassFile('Totally\\Unknown', a, composer), null)
+})
+
+test('resolveClassFile falls back from a longer PSR-4 prefix to a shorter one', (t) => {
+  // Composer tries prefixes longest-first but continues to a shorter prefix
+  // when the file isn't under the longer one's directories.
+  const a = {
+    psr4: new Map([['App\\Repo\\', ['nonexistent']], ['App\\', ['src']]]),
+    psr0: new Map(),
+    classmap: new Map(),
+    files: [],
+  }
+  t.assert.equal(resolveClassFile('App\\Repo\\UserRepo', a, composer), 'src/Repo/UserRepo.php')
+})
+
+test('phpClassDependencies captures every member of a union/intersection type', (t) => {
+  const t1 = phpClassDependencies('<?php namespace App; class X { function f(Foo|Bar $a) {} }')
+  t.assert.ok(t1.has('App\\Foo') && t1.has('App\\Bar'))
+  const t2 = phpClassDependencies('<?php namespace App; class X { function f(): R1|R2 { return new R1(); } }')
+  t.assert.ok(t2.has('App\\R1') && t2.has('App\\R2'))
+  const t3 = phpClassDependencies('<?php namespace App; class X { function f(A&B $a) {} }')
+  t.assert.ok(t3.has('App\\A') && t3.has('App\\B'))
+  const t4 = phpClassDependencies('<?php namespace App; class X { function f(): ?Foo {} }')
+  t.assert.ok(t4.has('App\\Foo')) // nullable marker stripped
+})
+
+test('phpClassDependencies does not emit bogus refs for keywords before a $var or after new', (t) => {
+  const deps = phpClassDependencies('<?php namespace App; class X { function f($xs) { foreach ($xs as $x) {} return new class extends Base {}; } }')
+  t.assert.ok(deps.has('App\\Base'))
+  t.assert.ok(!deps.has('App\\as'))
+  t.assert.ok(!deps.has('App\\class'))
 })
 
 test('phpClassDependencies resolves references but not unused `use` imports', (t) => {

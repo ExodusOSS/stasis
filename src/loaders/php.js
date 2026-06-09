@@ -169,11 +169,33 @@ function stringLiterals(code) {
 // inside `requireConfig`. Matches inside string literals are filtered out by
 // the caller using the real string spans.
 const PHP_INCLUDE_KEYWORD_RE = /(?<![\w$>:])(?:require_once|require|include_once|include)\b/gidu
-const DIRNAME_FILE_RE = /dirname\s*\(\s*__FILE__\s*\)/y
+
+// Directory anchor at a position (sticky): `__DIR__` or `dirname(__FILE__)`
+// (both = the file's own directory), or `dirname(__DIR__[, N])` (N parent levels
+// up -- the idiom for locating bootstrap/vendor/config relative to a file).
+const PHP_DIR_ANCHOR_RE = /__DIR__\b|dirname\s*\(\s*(__FILE__|__DIR__)\s*(?:,\s*(\d+)\s*)?\)/y
+// Anchor starts, for scanning path literals anywhere (not just after `require`).
+const PHP_DIR_ANCHOR_FIND_RE = /(?<![\w$>])(?:__DIR__\b|dirname\s*\(\s*(?:__FILE__|__DIR__))/gu
 
 // Interpolation markers inside a double-quoted string (`$var`, `${...}`,
 // `{$...}`). Single-quoted strings never interpolate, so a `$` there is literal.
 const PHP_INTERPOLATION_RE = /\$[A-Za-z_{]|\{\$/u
+
+function skipWs(code, pos) {
+  while (pos < code.length && /\s/u.test(code[pos])) pos++
+  return pos
+}
+
+// If a directory anchor starts at `pos`, return { end, up } (up = parent levels
+// above the file's directory: 0 for `__DIR__`/`dirname(__FILE__)`, N for
+// `dirname(__DIR__[, N])`); otherwise null.
+function matchDirAnchor(code, pos) {
+  PHP_DIR_ANCHOR_RE.lastIndex = pos
+  const m = PHP_DIR_ANCHOR_RE.exec(code)
+  if (!m) return null
+  const up = m[1] === '__DIR__' ? (m[2] ? Number(m[2]) : 1) : 0
+  return { end: PHP_DIR_ANCHOR_RE.lastIndex, up }
+}
 
 // Normalise an include path to a specifier. Dir-relative paths (`__DIR__ . …`)
 // get a `./` prefix and have the leading separator stripped; an empty
@@ -185,82 +207,99 @@ function normalizeIncludePath(raw, dirRelative) {
   return rel.startsWith('.') ? rel : `./${rel}`
 }
 
-// Scan PHP for include statements, classifying each as either a concrete file
+// Parse an include/path argument starting at `start`: an optional directory
+// anchor (`__DIR__`/`dirname(...)`), then a concatenation chain of string
+// literals. Consecutive *static* literals are concatenated (`__DIR__ . '/a' .
+// '/b.php'` -> one static path); the chain becomes `dynamic` at the first
+// variable/function/constant or `"…$interp…"`. Parent levels from the anchor
+// (`dirname(__DIR__, N)`) are folded in as leading `/..`. Returns null when
+// there's neither an anchor nor any static string. The accumulated `prefix` is
+// the static path up to the first dynamic piece.
+function parseArgPath(code, start, strings) {
+  const stringAt = (pos) => strings.find(({ start: s }) => s === pos)
+  let i = start
+  let dirRelative = false
+  let up = 0
+  const anchor = matchDirAnchor(code, i)
+  if (anchor) {
+    i = skipWs(code, anchor.end)
+    dirRelative = true
+    up = anchor.up
+    if (code[i] !== '.') return null // anchor not concatenated with a path
+    i = skipWs(code, i + 1)
+  }
+
+  let prefix = '/..'.repeat(up)
+  let dynamic = false
+  let sawStatic = false
+  for (;;) {
+    const lit = stringAt(i)
+    if (!lit) { dynamic = true; break } // variable/constant/function -> dynamic
+    const interp = lit.quote === '"' ? lit.value.search(PHP_INTERPOLATION_RE) : -1
+    if (interp >= 0) { prefix += lit.value.slice(0, interp); sawStatic = true; dynamic = true; break }
+    prefix += lit.value
+    sawStatic = true
+    i = skipWs(code, lit.end)
+    if (code[i] === '.') { i = skipWs(code, i + 1); continue } // concatenated -> keep going
+    break
+  }
+  if (!dirRelative && !sawStatic) return null
+  return { dirRelative, up, prefix, dynamic, sawStatic }
+}
+
+// Scan PHP `require`/`include` statements, classifying each as a concrete file
 // or -- when the path is built dynamically but has a static directory prefix --
 // a directory whose `.php` files should all be bundled (any could be the runtime
-// target, e.g. Laravel's `require __DIR__ . "/.../components/$view.php"`).
-//
-// Works on comment/heredoc-masked code and uses real string-literal boundaries
-// (never regex quote-pairing). For each include keyword that is not itself
-// inside a string, the argument is parsed by hand: an optional `(`, an optional
-// `__DIR__ .` / `dirname(__FILE__) .` prefix, then a concatenation chain of
-// string literals. Consecutive *static* literals are concatenated into one path
-// (`__DIR__ . '/a' . '/b.php'` -> `./a/b.php`). The chain becomes dynamic at the
-// first variable/function/constant or `"…$interp…"`; everything static before
-// that point is the prefix. Fully-static -> `{ kind: 'file' }`; dynamic with a
-// usable static directory -> `{ kind: 'dir' }`; nothing static -> skipped.
+// target, e.g. Laravel's `require __DIR__ . "/.../components/$view.php"`). Works
+// on comment/heredoc-masked code and real string-literal boundaries (never regex
+// quote-pairing); keyword matches inside a string are skipped.
 function scanIncludes(content) {
   const code = maskCommentsAndHeredocs(content)
   const strings = stringLiterals(code)
   const inString = (pos) => strings.some(({ start, end }) => pos > start && pos < end)
-  const stringAt = (pos) => strings.find(({ start }) => start === pos)
-  const skipWs = (pos) => {
-    while (pos < code.length && /\s/u.test(code[pos])) pos++
-    return pos
-  }
 
   const out = []
   for (const m of code.matchAll(PHP_INCLUDE_KEYWORD_RE)) {
     if (inString(m.index)) continue
-    let i = skipWs(m.index + m[0].length)
-    if (code[i] === '(') i = skipWs(i + 1)
-
-    let dirRelative = false
-    if (code.startsWith('__DIR__', i)) {
-      i = skipWs(i + '__DIR__'.length)
-      dirRelative = true
-    } else {
-      DIRNAME_FILE_RE.lastIndex = i
-      if (DIRNAME_FILE_RE.exec(code)) {
-        i = skipWs(DIRNAME_FILE_RE.lastIndex)
-        dirRelative = true
-      }
-    }
-    if (dirRelative) {
-      if (code[i] !== '.') continue // `__DIR__` not concatenated with a path
-      i = skipWs(i + 1)
-    }
-
-    let prefix = ''
-    let dynamic = false
-    let sawStatic = false
-    for (;;) {
-      const lit = stringAt(i)
-      if (!lit) { dynamic = true; break } // variable/constant/function -> dynamic
-      const interp = lit.quote === '"' ? lit.value.search(PHP_INTERPOLATION_RE) : -1
-      if (interp >= 0) {
-        prefix += lit.value.slice(0, interp)
-        sawStatic = true
-        dynamic = true
-        break
-      }
-      prefix += lit.value
-      sawStatic = true
-      i = skipWs(lit.end)
-      if (code[i] === '.') { i = skipWs(i + 1); continue } // concatenated -> keep going
-      break
-    }
+    let i = skipWs(code, m.index + m[0].length)
+    if (code[i] === '(') i = skipWs(code, i + 1)
+    const arg = parseArgPath(code, i, strings)
+    if (!arg) continue
+    const { dirRelative, up, prefix, dynamic, sawStatic } = arg
 
     if (!dynamic) {
       if (sawStatic) out.push({ kind: 'file', spec: normalizeIncludePath(prefix, dirRelative) })
       continue
     }
-    // Dynamic path: fall back to bundling the static directory prefix (the part
-    // up to the last separator). Nothing static and no `__DIR__` -> unusable.
-    const slash = prefix.lastIndexOf('/')
-    if (slash < 0 && !dirRelative) continue
-    const dir = slash >= 0 ? prefix.slice(0, slash) : ''
+    // Dynamic path: fall back to the static directory prefix (up to the last
+    // separator). A bare path with no separator has no usable directory.
+    if (!dirRelative && !prefix.includes('/')) continue
+    const lastSlash = prefix.lastIndexOf('/')
+    let dir = lastSlash >= 0 ? prefix.slice(0, lastSlash) : ''
+    if (dir === '' && up > 0) dir = '/..'.repeat(up) // `dirname(__DIR__) . $x` -> parent dir
     out.push({ kind: 'dir', spec: normalizeIncludePath(dir, dirRelative) })
+  }
+  return out
+}
+
+// Dir-anchored static `.php` path literals anywhere in the file (not only after
+// `require`/`include`). Frameworks pass file paths as arguments for code that
+// `require`s them internally -- e.g. Laravel's `->withRouting(web: __DIR__ .
+// '/../routes/web.php', …)`. These are best-effort: bundled only if they resolve
+// to a file that exists (see collectPhpFilesFromDisk), so a path that's just a
+// string and never loaded does no harm.
+function scanPathLiterals(content) {
+  const code = maskCommentsAndHeredocs(content)
+  const strings = stringLiterals(code)
+  const inString = (pos) => strings.some(({ start, end }) => pos > start && pos < end)
+
+  const out = []
+  for (const m of code.matchAll(PHP_DIR_ANCHOR_FIND_RE)) {
+    if (inString(m.index)) continue
+    const arg = parseArgPath(code, m.index, strings)
+    if (!arg || arg.dynamic || !arg.sawStatic || !arg.dirRelative) continue
+    const spec = normalizeIncludePath(arg.prefix, true)
+    if (spec.endsWith('.php')) out.push(spec)
   }
   return out
 }
@@ -274,6 +313,12 @@ export function extractPhpImports(content) {
 // prefix; every `.php` file directly in such a directory is a candidate target.
 export function extractPhpImportDirs(content) {
   return scanIncludes(content).filter((e) => e.kind === 'dir').map((e) => e.spec)
+}
+
+// Dir-anchored `.php` path literals used outside a `require`/`include` (e.g.
+// passed to a framework that loads them). De-duplicated; best-effort.
+export function extractPhpPathRefs(content) {
+  return [...new Set(scanPathLiterals(content))]
 }
 
 // Apply `segments` (already split on '/') on top of `fromFile`'s directory,
@@ -547,36 +592,37 @@ export function resolveClassFile(fqcn, autoload, baseDir) {
   const exact = autoload.classmap.get(name)
   if (exact && isFileOnDisk(baseDir, exact)) return exact
 
-  let best = null
-  for (const [prefix, dirs] of autoload.psr4) {
-    if (name.startsWith(prefix) && (!best || prefix.length > best.prefix.length)) best = { prefix, dirs }
-  }
-  if (best) {
-    const sub = name.slice(best.prefix.length).replace(/\\/gu, '/')
-    for (const dir of best.dirs) {
+  // PSR-4: try every matching prefix longest-first (Composer falls back from a
+  // longer prefix whose file is absent to a shorter one, incl. the `""` prefix).
+  for (const [prefix, dirs] of matchingPrefixes(autoload.psr4, name)) {
+    const sub = name.slice(prefix.length).replace(/\\/gu, '/')
+    for (const dir of dirs) {
       const file = dir ? `${dir}/${sub}.php` : `${sub}.php`
       if (isFileOnDisk(baseDir, file)) return file
     }
   }
 
-  let best0 = null
-  for (const [prefix, dirs] of autoload.psr0) {
-    if (name.startsWith(prefix) && (!best0 || prefix.length > best0.prefix.length)) best0 = { prefix, dirs }
-  }
-  if (best0) {
-    // PSR-0: namespace separators AND underscores in the class name map to
-    // directory separators; the namespace prefix is kept under the mapped dir.
+  // PSR-0: namespace separators AND underscores in the class name map to
+  // directory separators; the namespace prefix is kept under the mapped dir.
+  for (const [, dirs] of matchingPrefixes(autoload.psr0, name)) {
     const lastNs = name.lastIndexOf('\\')
     const nsPart = lastNs === -1 ? '' : name.slice(0, lastNs).replace(/\\/gu, '/')
     const clsPart = (lastNs === -1 ? name : name.slice(lastNs + 1)).replace(/_/gu, '/')
     const sub = `${nsPart ? `${nsPart}/` : ''}${clsPart}.php`
-    for (const dir of best0.dirs) {
+    for (const dir of dirs) {
       const file = dir ? `${dir}/${sub}` : sub
       if (isFileOnDisk(baseDir, file)) return file
     }
   }
 
   return null
+}
+
+// All [prefix, dirs] entries of a PSR map whose prefix is a prefix of `name`,
+// longest first -- so resolution prefers the most specific mapping but falls
+// back to shorter ones (and the `""` fallback) when a file isn't present.
+function matchingPrefixes(map, name) {
+  return [...map].filter(([prefix]) => name.startsWith(prefix)).toSorted((a, b) => b[0].length - a[0].length)
 }
 
 // --- Class-reference extraction ----------------------------------------------
@@ -588,9 +634,12 @@ const RESERVED = new Set([
   'int', 'integer', 'float', 'double', 'string', 'bool', 'boolean', 'void',
   'array', 'callable', 'iterable', 'object', 'mixed', 'null', 'false', 'true',
   'never', 'numeric',
-  // statement keywords that can sit immediately before a `$var` and would
-  // otherwise be mistaken for a type hint (`return $x`, `echo $x`, …)
+  // statement / expression keywords that can sit before a `$var`, after `new`,
+  // or before `::` and would otherwise be mistaken for a class reference
+  // (`return $x`, `echo $x`, `foreach (… as $x)`, `new class`, `match ($x)`, …)
   'return', 'echo', 'print', 'clone', 'yield', 'throw', 'global', 'and', 'or', 'xor',
+  'as', 'else', 'elseif', 'do', 'class', 'fn', 'match', 'enddeclare', 'endforeach',
+  'endif', 'endswitch', 'endwhile', 'endfor',
 ])
 
 // Blank out PHP heredocs/nowdocs, comments AND string literals so class-
@@ -607,7 +656,7 @@ function stripPhp(content) {
 // through it; otherwise an unqualified/qualified name is relative to the
 // current namespace.
 function addRef(set, raw, ns, aliasMap) {
-  const n = raw.trim()
+  const n = raw.trim().replace(/^\?/u, '') // drop a nullable-type marker (`?Foo`)
   if (!n || !/^\\?[A-Za-z_][\w\\]*$/u.test(n)) return
   if (n.startsWith('\\')) {
     set.add(n.replace(/^\\+/u, ''))
@@ -707,10 +756,16 @@ export function phpClassDependencies(content) {
     for (const nm of m[1].split('|')) add(nm)
   }
 
-  // parameter / property type hints: `Type $var` (also `?Type`, `Type ...$var`).
-  for (const m of stripped.matchAll(/(?<![\w$\\])(\\?[\w\\]+)\s+&?\s*(?:\.\.\.)?\s*\$\w+/giu)) add(m[1])
-  // return types: `): Type` / `): ?Type`.
-  for (const m of stripped.matchAll(/\)\s*:\s*\??\s*(\\?[\w\\]+)/giu)) add(m[1])
+  // parameter / property type hints: `Type $var`, incl. nullable `?Type`,
+  // variadic `Type ...$var`, and union/intersection `A|B`/`A&B $var` (each
+  // member counts -- a class used only in a union must still be bundled).
+  for (const m of stripped.matchAll(/(?<![\w$\\])([?\w\\|&]+)\s+&?\s*(?:\.\.\.)?\s*\$\w+/giu)) {
+    for (const nm of m[1].split(/[|&]/u)) add(nm)
+  }
+  // return types: `): Type`, incl. nullable and union/intersection `): A|B`.
+  for (const m of stripped.matchAll(/\)\s*:\s*([?\w\\|&]+)/giu)) {
+    for (const nm of m[1].split(/[|&]/u)) add(nm)
+  }
 
   return set
 }
@@ -816,6 +871,12 @@ export async function collectPhpFilesFromDisk(baseDir, entries, { autoload = nul
         for (const file of listPhpFiles(baseDir, dir)) {
           if (!sources.has(file)) next.push(file)
         }
+      }
+      // Dir-anchored `.php` path literals not in a require (e.g. route/config
+      // files passed to a framework). Best-effort: bundle only if they exist.
+      for (const ref of extractPhpPathRefs(content)) {
+        const resolved = resolvePhpImport(ref, relPath, { baseDir })
+        if (resolved && isFileOnDisk(baseDir, resolved) && !sources.has(resolved)) next.push(resolved)
       }
       // Autoloaded class references (best-effort): enqueue whatever resolves.
       for (const [, file] of autoloadEdges(content, autoload, baseDir, null)) {
