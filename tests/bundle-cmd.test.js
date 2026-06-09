@@ -648,8 +648,9 @@ test('buildBashBundle resolves ../ references across subdirectories', async (t) 
   t.assert.equal(bundle.imports.get('bash').get('bin/main.sh').get('../lib/helper.sh'), 'lib/helper.sh')
 })
 
-test('buildBashBundle does not bundle PATH commands and tolerates unresolved refs', async (t) => {
-  // main.sh sources ./lib.sh but also calls grep/curl/node — none of which is bundled.
+test('buildBashBundle bundles local sources but tolerates commands and absolute system paths', async (t) => {
+  // main.sh sources ./lib.sh (bundled) plus an absolute /opt/legacy/system.sh and
+  // grep/curl/node — none of those is bundled, and none is treated as a missing script.
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'external'), entries: ['main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['lib.sh', 'main.sh'])
 })
@@ -681,9 +682,25 @@ test('buildBashBundle rejects entries that escape baseDir', async (t) => {
 test('buildBashBundle throws when an entry is missing on disk', async (t) => {
   await t.assert.rejects(
     () => buildBashBundle({ cwd: join(bashFixtures, 'basic'), entries: ['nope.sh'] }),
-    /Bash bundle has missing entries[\s\S]*nope\.sh/u,
+    /Bash bundle has unresolved scripts[\s\S]*nope\.sh/u,
   )
 })
+
+test('buildBashBundle throws on an unresolved relative .sh reference (dangling source)', async (t) => {
+  await t.assert.rejects(
+    () => buildBashBundle({ cwd: join(bashFixtures, 'missing-dep'), entries: ['main.sh'] }),
+    /Bash bundle has unresolved scripts[\s\S]*Unresolved script: \.\/gone\.sh from main\.sh/u,
+  )
+})
+
+test('CLI: bundle (bash) exits non-zero and writes no output on an unresolved script', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'main.sh'], { cwd: join(bashFixtures, 'missing-dep') })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Bash bundle has unresolved scripts/)
+  t.assert.match(r.stderr, /gone\.sh/)
+  t.assert.ok(!existsSync(outPath), 'output must not be written when bundling fails')
+}))
 
 test('bundleCommand writes a bash Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
@@ -806,9 +823,25 @@ test('buildRustBundle rejects non-.rs entries', async (t) => {
 test('buildRustBundle throws when an entry is missing on disk', async (t) => {
   await t.assert.rejects(
     () => buildRustBundle({ cwd: join(rustFixtures, 'basic'), entries: ['src/nope.rs'] }),
-    /Rust bundle has missing entries[\s\S]*nope\.rs/u,
+    /Rust bundle has unresolved modules[\s\S]*nope\.rs/u,
   )
 })
+
+test('buildRustBundle throws on an unresolvable mod declaration', async (t) => {
+  await t.assert.rejects(
+    () => buildRustBundle({ cwd: join(rustFixtures, 'missing-mod'), entries: ['src/main.rs'] }),
+    /Rust bundle has unresolved modules[\s\S]*Unresolved module: mod gone from src\/main\.rs/u,
+  )
+})
+
+test('CLI: bundle (rust) exits non-zero and writes no output on an unresolvable mod', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/main.rs'], { cwd: join(rustFixtures, 'missing-mod') })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Rust bundle has unresolved modules/)
+  t.assert.match(r.stderr, /mod gone/)
+  t.assert.ok(!existsSync(outPath), 'output must not be written when bundling fails')
+}))
 
 test('bundleCommand writes a rust Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')

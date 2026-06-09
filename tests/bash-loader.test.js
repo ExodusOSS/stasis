@@ -12,6 +12,17 @@ import {
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'bash-bundle')
 
+const captureWarnings = (fn) => {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    return { result: fn(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+
 const captureWarningsAsync = async (fn) => {
   const original = console.warn
   const warnings = []
@@ -124,19 +135,36 @@ test('collectBashFilesFromDisk warns and skips a reference missing on disk', asy
 test('buildBashTree records resolutions among the collected scripts', async (t) => {
   const sources = await collectBashFilesFromDisk(join(fixtures, 'basic'), ['main.sh'])
   const tree = buildBashTree(sources)
-  t.assert.deepEqual(Object.keys(tree).toSorted(), ['resolutions', 'sources'])
+  t.assert.deepEqual(Object.keys(tree).toSorted(), ['missing', 'resolutions', 'sources'])
   t.assert.equal(tree.resolutions.get('main.sh').get('./lib.sh'), 'lib.sh')
   t.assert.equal(tree.resolutions.get('lib.sh').size, 0)
+  t.assert.deepEqual(tree.missing, [])
 })
 
-test('buildBashTree drops references to files not in the set', (t) => {
-  const tree = buildBashTree(new Map([['main.sh', 'source ./gone.sh\n']]))
+test('buildBashTree records an unresolved relative .sh reference as missing', (t) => {
+  const { result: tree, warnings } = captureWarnings(() =>
+    buildBashTree(new Map([['main.sh', 'source ./gone.sh\n']])),
+  )
   t.assert.equal(tree.resolutions.get('main.sh').size, 0)
+  t.assert.deepEqual(tree.missing, [{ spec: './gone.sh', from: 'main.sh' }])
+  t.assert.ok(warnings.some((w) => w.includes('Missing file') && w.includes('./gone.sh')))
 })
 
-test('buildBashTree drops self-references', (t) => {
+test('buildBashTree records an unresolved bare .sh exec reference as missing', (t) => {
+  const { result: tree } = captureWarnings(() => buildBashTree(new Map([['main.sh', 'bash helper.sh\n']])))
+  t.assert.deepEqual(tree.missing, [{ spec: 'helper.sh', from: 'main.sh' }])
+})
+
+test('buildBashTree tolerates unresolved absolute and extensionless references', (t) => {
+  // /etc/x.sh is an external system path; ./env and `config` aren't .sh files.
+  const tree = buildBashTree(new Map([['main.sh', 'source /etc/x.sh\nsource ./env\nsource config\n']]))
+  t.assert.deepEqual(tree.missing, [])
+})
+
+test('buildBashTree drops self-references without reporting them missing', (t) => {
   const tree = buildBashTree(new Map([['main.sh', 'source ./main.sh\n']]))
   t.assert.equal(tree.resolutions.get('main.sh').size, 0)
+  t.assert.deepEqual(tree.missing, [])
 })
 
 test('loadBash reads a .sh.txt listing and resolves among the listed files', async (t) => {

@@ -16,6 +16,17 @@ import {
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 
+const captureWarnings = (fn) => {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    return { result: fn(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+
 test('extractModDecls finds external mod declarations (incl. pub / pub(crate))', (t) => {
   t.assert.deepEqual(extractModDecls('mod foo;\npub mod bar;\npub(crate) mod baz;\n'), ['foo', 'bar', 'baz'])
 })
@@ -108,7 +119,8 @@ test('resolveUsePath resolves to the deepest matching module', (t) => {
 test('buildRustTree records mod edges and crate:: use edges', async (t) => {
   const sources = await collectRustFilesFromDisk(join(fixtures, 'use-crate'), ['src/main.rs'])
   const tree = buildRustTree(sources)
-  t.assert.deepEqual(Object.keys(tree).toSorted(), ['resolutions', 'sources'])
+  t.assert.deepEqual(Object.keys(tree).toSorted(), ['missing', 'resolutions', 'sources'])
+  t.assert.deepEqual(tree.missing, [])
 
   const main = tree.resolutions.get('src/main.rs')
   t.assert.equal(main.get('mod foo'), 'src/foo.rs')
@@ -120,12 +132,15 @@ test('buildRustTree records mod edges and crate:: use edges', async (t) => {
   t.assert.equal(tree.resolutions.get('src/foo.rs').size, 0)
 })
 
-test('buildRustTree drops a mod declaration with no resolvable file', async (t) => {
+test('buildRustTree records an unresolvable mod declaration in `missing`', async (t) => {
   const sources = await collectRustFilesFromDisk(join(fixtures, 'missing-mod'), ['src/main.rs'])
   t.assert.deepEqual([...sources.keys()].toSorted(), ['src/main.rs', 'src/real.rs'])
-  const main = buildRustTree(sources).resolutions.get('src/main.rs')
+  const { result: tree, warnings } = captureWarnings(() => buildRustTree(sources))
+  const main = tree.resolutions.get('src/main.rs')
   t.assert.equal(main.get('mod real'), 'src/real.rs')
   t.assert.ok(!main.has('mod gone'))
+  t.assert.deepEqual(tree.missing, [{ spec: 'mod gone', from: 'src/main.rs' }])
+  t.assert.ok(warnings.some((w) => w.includes('Missing module') && w.includes('gone')))
 })
 
 test('loadRust reads a .rs.txt listing and walks the crate', async (t) => {

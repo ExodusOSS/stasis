@@ -197,11 +197,13 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 
 // Build a stasis Bundle (in-memory) from a list of entry .sh/.bash files by
 // walking the source/exec graph and reading every reachable script from disk.
-// Mirrors buildSolidityBundle's bucketizing, but two things differ by design:
-//   - unresolved references are NOT fatal. A shell script naming a PATH
-//     command (`grep`, `node`) or a dynamic path (`bash "$x"`) is normal;
-//     only those references that resolve to a real in-tree script are
-//     recorded. A missing *entry*, by contrast, is still fatal.
+// Mirrors buildSolidityBundle's bucketizing, with a bash-specific policy:
+//   - a relative/project-relative reference to a .sh/.bash file that doesn't
+//     resolve to a bundled script is fatal (a self-contained bundle can't
+//     carry a dangling `source ./lib.sh`), as is a missing entry.
+//   - everything else is best-effort and dropped: PATH commands (`grep`,
+//     `node`), dynamic `$VAR` paths, extensionless sources, and absolute
+//     system paths (`source /etc/profile.d/x.sh`) — none belongs in a bundle.
 //   - imports live under a dedicated "bash" condition key (like "solidity"),
 //     not the JS-bundle wildcard "*".
 export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
@@ -216,18 +218,21 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   const normalized = normalizeEntries(entries, cwd)
 
   const sources = await collectBashFilesFromDisk(baseDir, normalized)
-  const { resolutions } = buildBashTree(sources)
+  const { resolutions, missing } = buildBashTree(sources)
 
-  // Bundles must be self-contained, but for bash that only constrains the
-  // entries: every entry must load from disk. Unresolved source/exec
-  // references are expected (commands, dynamic paths) and intentionally left
-  // out rather than treated as holes.
+  // Bundles must be self-contained: every entry must load, and every
+  // relative/project-relative .sh/.bash reference must resolve to a bundled
+  // script. Best-effort references (commands, $VAR paths, extensionless or
+  // absolute sources) are left out by buildBashTree and never reach `missing`.
   const issues = []
   for (const entry of normalized) {
     if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
   }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved script: ${spec} from ${from}`)
+  }
   if (issues.length > 0) {
-    throw new Error(`Bash bundle has missing entries:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+    throw new Error(`Bash bundle has unresolved scripts:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
   return assembleCodeBundle({
@@ -244,11 +249,12 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
 
 // Build a stasis Bundle (in-memory) from a list of entry .rs files by walking
 // `mod` declarations from each crate root and reading every reachable module
-// from disk. Like the Bash bundle, unresolved references are NOT fatal: a
-// `use` of an external crate or a `mod` we can't find on disk is dropped, not
-// treated as a hole; only a missing *entry* is fatal. `use crate::` edges are
-// recorded in the import graph but never widen the file set. Imports live
-// under a dedicated "rust" condition key.
+// from disk. The bundle must be self-contained: an unresolvable `mod foo;`
+// (no backing file) is fatal, as is a missing entry. `use crate::` edges are
+// recorded in the import graph but stay best-effort — they never widen the
+// file set, and their resolution is approximate (item-vs-module, re-exports),
+// so they aren't gated; external crates and std are ignored outright. Imports
+// live under a dedicated "rust" condition key.
 export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildRustBundle: at least one entry .rs file is required')
@@ -261,14 +267,17 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   const normalized = normalizeEntries(entries, cwd)
 
   const sources = await collectRustFilesFromDisk(baseDir, normalized)
-  const { resolutions } = buildRustTree(sources)
+  const { resolutions, missing } = buildRustTree(sources)
 
   const issues = []
   for (const entry of normalized) {
     if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
   }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved module: ${spec} from ${from}`)
+  }
   if (issues.length > 0) {
-    throw new Error(`Rust bundle has missing entries:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+    throw new Error(`Rust bundle has unresolved modules:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
   return assembleCodeBundle({

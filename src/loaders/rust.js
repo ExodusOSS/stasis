@@ -5,10 +5,11 @@
 // files, they just reference modules already declared, so they're resolved
 // against the module tree for the import graph but never widen the walk.
 //
-// Like the Bash loader, resolution is best-effort: a `use` of an external
-// crate, a macro path, or a `mod` whose file we can't find is simply dropped
-// rather than treated as fatal. Only a missing *entry* is fatal (enforced by
-// the bundle builder).
+// Resolution of `use crate::` references is best-effort (external crates,
+// macro paths, and item-vs-module ambiguity are simply dropped), but a
+// `mod foo;` with no backing file is reported in `missing` so the bundle
+// builder can reject it — an unresolvable `mod` is a genuine hole (and a
+// compile error in a real crate). Only `mod` edges widen the file set.
 
 import { statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -96,18 +97,25 @@ export function resolveUsePath(usePath, moduleTree) {
   return null
 }
 
-// Build the { sources, resolutions } pair from a Map of already-loaded Rust
-// sources. Two-phase: resolve `mod` edges (which also defines the module
-// tree), then resolve `crate::` references against that tree. Edges that
-// resolve to nothing (external crates, unknown paths) are omitted; self- and
-// duplicate references are dropped.
+// Build the { sources, resolutions, missing } triple from a Map of
+// already-loaded Rust sources. Two-phase: resolve `mod` edges (which also
+// defines the module tree), then resolve `crate::` references against it.
+// A `mod foo;` with no file is recorded in `missing` (the bundle builder
+// treats it as fatal); unresolved `crate::` references are best-effort and
+// simply omitted, as are self- and duplicate references.
 export function buildRustTree(sources) {
   const resolutions = new Map()
+  const missing = []
   for (const [path, content] of sources) {
     const specMap = new Map()
     for (const modName of extractModDecls(content)) {
       const resolved = resolveModPath(modName, path, { knownSources: sources })
-      if (resolved) specMap.set(`mod ${modName}`, resolved)
+      if (resolved) {
+        specMap.set(`mod ${modName}`, resolved)
+      } else {
+        console.warn(`[loader.rust] Missing module: ${modName} from ${path}`)
+        missing.push({ spec: `mod ${modName}`, from: path })
+      }
     }
     resolutions.set(path, specMap)
   }
@@ -122,7 +130,7 @@ export function buildRustTree(sources) {
       }
     }
   }
-  return { sources, resolutions }
+  return { sources, resolutions, missing }
 }
 
 // Walk the filesystem from `entries`, following `mod` declarations and reading

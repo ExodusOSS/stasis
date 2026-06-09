@@ -1,11 +1,11 @@
-// Bash loader: produces a `{ sources, resolutions }` pair from a set of
-// shell scripts, mirroring the Solidity loader's interface (see
-// ./solidity.js). Where Solidity imports must all resolve, bash references
-// are best-effort: a script line like `grep "$x" file` or `bash "$SCRIPT"`
-// names a PATH command or a dynamically-built path, neither of which is a
-// bundle-able file. We record the references that point at a real, in-set
-// script and silently drop the rest — only a missing *entry* is fatal
-// (enforced by the bundle builder, not here).
+// Bash loader: produces a `{ sources, resolutions, missing }` triple from a
+// set of shell scripts, mirroring the Solidity loader's interface (see
+// ./solidity.js). A relative/project-relative reference to a .sh/.bash file
+// must resolve to an in-set script — when it doesn't, it lands in `missing`
+// so the bundle builder can reject the dangling dependency. Everything else
+// is best-effort and dropped: a line like `grep "$x" file`, `bash "$SCRIPT"`,
+// an extensionless `source ./env`, or an absolute `source /etc/x.sh` names a
+// command, dynamic path, or external file, none of which is bundle-able.
 
 import { statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -110,13 +110,23 @@ export function resolveBashCall(ref, fromFile, { knownFiles, baseDir } = {}) {
   return null
 }
 
-// Build the { sources, resolutions } pair from a Map of already-loaded
-// scripts. Resolutions only ever point at other in-set files; references
-// that resolve to nothing (PATH commands, dynamic paths, scripts not in the
-// set) are omitted. Self-references are dropped too.
+// A reference is a *local* script when it names a .sh/.bash file by a
+// relative or project-relative path (not an absolute/system one). These must
+// resolve to a bundled script; anything else — PATH commands, extensionless
+// sources, absolute `/etc/...` paths, `$VAR` paths — is best-effort.
+const isLocalScriptRef = (ref) =>
+  !ref.startsWith('/') && (ref.endsWith('.sh') || ref.endsWith('.bash'))
+
+// Build the { sources, resolutions, missing } triple from a Map of
+// already-loaded scripts. Resolutions only ever point at other in-set files;
+// a relative/project-relative .sh/.bash reference that resolves to nothing is
+// recorded in `missing` (the bundle builder treats it as fatal). Everything
+// else that doesn't resolve — PATH commands, $VAR paths, extensionless
+// sources, absolute system paths — is omitted, as are self-references.
 export function buildBashTree(sources) {
   const knownFiles = new Set(sources.keys())
   const resolutions = new Map()
+  const missing = []
   for (const [path, content] of sources) {
     const specMap = new Map()
     for (const ref of extractBashCalls(content)) {
@@ -124,11 +134,16 @@ export function buildBashTree(sources) {
       // The slash-bearing relative branch returns an unvalidated path; drop
       // it here when it doesn't name a collected file (Solidity-style).
       if (resolved && !knownFiles.has(resolved)) resolved = null
-      if (resolved && resolved !== path) specMap.set(ref, resolved)
+      if (resolved) {
+        if (resolved !== path) specMap.set(ref, resolved) // drop self-references
+      } else if (isLocalScriptRef(ref)) {
+        console.warn(`[loader.bash] Missing file: ${ref} from ${path}`)
+        missing.push({ spec: ref, from: path })
+      }
     }
     resolutions.set(path, specMap)
   }
-  return { sources, resolutions }
+  return { sources, resolutions, missing }
 }
 
 // Walk the filesystem from `entries`, following resolved source/exec/direct
