@@ -1,0 +1,225 @@
+import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { stripVTControlCharacters } from 'node:util'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
+
+import { Bundle } from '../src/bundle.js'
+import { Lockfile } from '../src/lockfile.js'
+import { buildSolidityBundle, bundleCommand } from '../src/cmd/bundle.js'
+import { extractCommand, lockfileFromBundle } from '../src/cmd/extract.js'
+import { prune } from '../src/prune.js'
+import { sha512integrity } from '../src/state.util.js'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const cli = join(here, '..', 'bin', 'stasis.js')
+const fixtures = join(here, 'fixtures')
+const solFixtures = join(fixtures, 'solidity-bundle')
+
+const withTmp = (fn) => async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-extract-cmd-'))
+  try {
+    return await fn(t, dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const cleanEnv = (() => {
+  const {
+    EXODUS_STASIS_LOCK: _l,
+    EXODUS_STASIS_SCOPE: _s,
+    EXODUS_STASIS_BUNDLE: _b,
+    EXODUS_STASIS_BUNDLE_FILE: _bf,
+    EXODUS_STASIS_DEBUG: _d,
+    ...rest
+  } = process.env
+  return rest
+})()
+
+const runCli = (args, opts = {}) => {
+  const r = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf-8', env: cleanEnv, ...opts })
+  r.stdout = stripVTControlCharacters(r.stdout)
+  r.stderr = stripVTControlCharacters(r.stderr)
+  return r
+}
+
+// Build a real brotli code bundle at `out` from the given fixture + entries.
+// Uses the Solidity bundler, which extracts imports without the optional
+// oxc-parser peer dep (the JS scanner needs it; CI may not have it installed).
+const buildBundle = async (cwd, entries, out, extra = {}) => {
+  await bundleCommand({ cwd, entries, output: out, ...extra })
+  return Bundle.parseCode(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+}
+
+test('lockfileFromBundle hashes every source and carries entries/config/metadata across', async (t) => {
+  const bundle = await buildSolidityBundle({ cwd: join(solFixtures, 'basic'), entries: ['src/A.sol'] })
+  const lock = lockfileFromBundle(bundle)
+  t.assert.ok(lock instanceof Lockfile)
+  t.assert.deepEqual(lock.config, bundle.config)
+  t.assert.deepEqual([...lock.entries], [...bundle.entries])
+
+  // Same bucket dirs, and each file's recorded value is the SRI digest of the
+  // bundle's source bytes (not the bytes themselves).
+  t.assert.deepEqual([...lock.modules.keys()].toSorted(), [...bundle.modules.keys()].toSorted())
+  for (const [dir, { files }] of bundle.modules) {
+    for (const [rel, content] of Object.entries(files)) {
+      t.assert.equal(lock.modules.get(dir).files[rel], sha512integrity(content))
+    }
+  }
+})
+
+test('extractCommand writes every bundled source to disk with byte-for-byte fidelity', withTmp(async (t, tmp) => {
+  const bundlePath = join(tmp, 'out.code.br')
+  const bundle = await buildBundle(join(solFixtures, 'basic'), ['src/A.sol'], bundlePath)
+
+  const outDir = join(tmp, 'extracted')
+  const { dir, files } = extractCommand({ bundleFile: bundlePath, output: outDir })
+
+  t.assert.equal(dir, outDir)
+  t.assert.equal(files, bundle.sources.size)
+  for (const [file, content] of bundle.sources) {
+    t.assert.equal(readFileSync(join(outDir, file), 'utf8'), content)
+  }
+}))
+
+test('extractCommand writes a stasis.lock.json that is consistent with the extracted files', withTmp(async (t, tmp) => {
+  const bundlePath = join(tmp, 'out.code.br')
+  const bundle = await buildBundle(join(solFixtures, 'basic'), ['src/A.sol'], bundlePath)
+
+  const outDir = join(tmp, 'extracted')
+  extractCommand({ bundleFile: bundlePath, output: outDir })
+
+  const lockPath = join(outDir, 'stasis.lock.json')
+  t.assert.ok(existsSync(lockPath), 'lockfile must be written into the output dir')
+  const lock = Lockfile.parse(readFileSync(lockPath, 'utf8'))
+
+  t.assert.deepEqual([...lock.entries].toSorted(), [...bundle.entries].toSorted())
+  // Every hash in the lockfile matches the on-disk file we just extracted.
+  for (const [dir, { files }] of lock.modules) {
+    for (const [rel, hash] of Object.entries(files)) {
+      const file = dir === '.' ? rel : `${dir}/${rel}`
+      t.assert.equal(hash, sha512integrity(readFileSync(join(outDir, file))))
+    }
+  }
+}))
+
+test('extractCommand round-trips a scope=full bundle with workspace sources + node_modules buckets', withTmp(async (t, tmp) => {
+  const cwd = join(solFixtures, 'with-node-modules')
+  const bundlePath = join(tmp, 'nm.code.br')
+  const bundle = await buildBundle(cwd, ['src/A.sol'], bundlePath, { mappingFile: 'remappings.txt' })
+
+  const outDir = join(tmp, 'extracted')
+  const { files } = extractCommand({ bundleFile: bundlePath, output: outDir })
+
+  // Workspace source + both dependency files land at their project-relative paths.
+  t.assert.equal(files, bundle.sources.size)
+  for (const [file, content] of bundle.sources) {
+    t.assert.equal(readFileSync(join(outDir, file), 'utf8'), content)
+  }
+
+  // node_modules buckets carry their package identity through to the lockfile.
+  const lock = Lockfile.parse(readFileSync(join(outDir, 'stasis.lock.json'), 'utf8'))
+  t.assert.deepEqual([...lock.entries], ['src/A.sol'])
+  t.assert.equal(lock.modules.get('node_modules/foo')?.name, 'foo')
+  t.assert.equal(lock.modules.get('node_modules/foo')?.version, '1.2.3')
+  t.assert.equal(lock.modules.get('node_modules/@oz/contracts')?.name, '@oz/contracts')
+  t.assert.equal(lock.modules.get('node_modules/@oz/contracts')?.version, '5.0.0')
+}))
+
+test('an extracted tree validates cleanly under stasis prune', withTmp(async (t, tmp) => {
+  const cwd = join(solFixtures, 'with-node-modules')
+  const bundlePath = join(tmp, 'nm.code.br')
+  await buildBundle(cwd, ['src/A.sol'], bundlePath, { mappingFile: 'remappings.txt' })
+
+  const outDir = join(tmp, 'extracted')
+  extractCommand({ bundleFile: bundlePath, output: outDir })
+
+  // prune is a separate code path: it reads the extracted lockfile and re-hashes
+  // the extracted node_modules files from disk. A consistent extract validates
+  // every dependency file and removes none.
+  const { removed, validated } = prune({ root: outDir })
+  t.assert.deepEqual(removed, [])
+  t.assert.deepEqual(
+    validated.toSorted(),
+    ['node_modules/@oz/contracts/utils/Math.sol', 'node_modules/foo/X.sol'],
+  )
+}))
+
+test('extractCommand defaults the output dir to cwd', withTmp(async (t, tmp) => {
+  const bundlePath = join(tmp, 'out.code.br')
+  await buildBundle(join(solFixtures, 'basic'), ['src/A.sol'], bundlePath)
+
+  const { dir } = extractCommand({ cwd: tmp, bundleFile: bundlePath })
+  t.assert.equal(dir, tmp)
+  t.assert.ok(existsSync(join(tmp, 'src', 'A.sol')))
+  t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')))
+}))
+
+test('extractCommand throws when the bundle file does not exist', withTmp((t, tmp) => {
+  t.assert.throws(
+    () => extractCommand({ bundleFile: join(tmp, 'nope.code.br'), output: tmp }),
+    /bundle file not found/,
+  )
+}))
+
+test('extractCommand refuses a bundle whose path escapes the output dir', withTmp((t, tmp) => {
+  // Hand-craft a v1 code bundle whose source bucket dir climbs out of the
+  // output dir via mid-path "..". Bundle.parseCode only rejects paths that
+  // *start* with "..", so this passes parsing; extract must catch it.
+  const evil = {
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['evil.js'],
+    sources: {
+      'x/../../../../../../../../tmp-stasis-escape': {
+        name: 'evil',
+        version: '0.0.0',
+        files: { 'pwned.js': 'boom\n' },
+      },
+    },
+    modules: {},
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'evil.code.br')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(evil)))
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
+    /escapes output dir/,
+  )
+  t.assert.ok(!existsSync('/tmp-stasis-escape/pwned.js'), 'must not write outside the output dir')
+}))
+
+// --- CLI integration ---
+
+test('CLI: extract with no bundle file prints usage', (t) => {
+  const r = runCli(['extract'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /Nothing to extract/)
+})
+
+test('CLI: extract with more than one bundle file prints usage', (t) => {
+  const r = runCli(['extract', 'a.code.br', 'b.code.br'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /extract takes exactly one bundle file/)
+})
+
+test('CLI: extract writes sources + lockfile and prints a summary', withTmp(async (t, tmp) => {
+  const bundlePath = join(tmp, 'out.code.br')
+  await buildBundle(join(solFixtures, 'basic'), ['src/A.sol'], bundlePath)
+
+  const outDir = join(tmp, 'extracted')
+  const r = runCli(['extract', '-o', outDir, bundlePath])
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(
+    r.stderr,
+    new RegExp(`\\[stasis\\] Extracted 2 file\\(s\\) and stasis\\.lock\\.json to ${outDir.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'),
+  )
+  t.assert.ok(existsSync(join(outDir, 'src', 'A.sol')))
+  t.assert.ok(existsSync(join(outDir, 'src', 'B.sol')))
+  t.assert.ok(existsSync(join(outDir, 'stasis.lock.json')))
+}))

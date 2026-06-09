@@ -21,6 +21,7 @@
     "src/audit.js",
     "src/bundle.js",
     "src/cmd/bundle.js",
+    "src/cmd/extract.js",
     "src/config.js",
     "src/esbuild.js",
     "src/loader.js",
