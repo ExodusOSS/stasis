@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
@@ -50,11 +50,16 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
   // inside outDir before touching disk, so a malformed bundle can't write a
   // partial tree. Bundle.parseCode already rejects paths that *start* with
   // '..', but a crafted bundle could still embed '..' mid-path; treat the
-  // bundle as untrusted input and verify containment explicitly.
+  // bundle as untrusted input and verify containment two ways. The resolved
+  // path must be BOTH non-escaping relative to outDir (no leading '..', and
+  // not absolute -- `relative` returns an absolute path across Windows drives)
+  // AND lexically under `outDir/` (the trailing separator rejects sibling dirs
+  // that merely share outDir as a name prefix, e.g. `<outDir>-evil`).
   const writes = []
   for (const [file, content] of bundle.sources) {
     const abs = resolve(outDir, file)
-    if (abs !== outDir && !abs.startsWith(`${outDir}${sep}`)) {
+    const rel = relative(outDir, abs)
+    if (rel.startsWith('..') || isAbsolute(rel) || !abs.startsWith(`${outDir}${sep}`)) {
       throw new Error(`extract: bundle path escapes output dir: ${file}`)
     }
     writes.push([abs, content])

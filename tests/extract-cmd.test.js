@@ -194,6 +194,31 @@ test('extractCommand refuses a bundle whose path escapes the output dir', withTm
   t.assert.ok(!existsSync('/tmp-stasis-escape/pwned.js'), 'must not write outside the output dir')
 }))
 
+test('extractCommand rejects a sibling dir that merely shares the output dir name as a prefix', withTmp((t, tmp) => {
+  // Resolves to `<tmp>/out-evil/pwned.js`, a sibling of the `<tmp>/out` output
+  // dir. A naive `startsWith(outDir)` (no separator) would wrongly accept it;
+  // the containment check requires the trailing separator (and a non-'..'
+  // relative path) to reject it.
+  const evil = {
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['evil.js'],
+    sources: {
+      'z/../../out-evil': { name: 'evil', version: '0.0.0', files: { 'pwned.js': 'boom\n' } },
+    },
+    modules: {},
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'evil.code.br')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(evil)))
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
+    /escapes output dir/,
+  )
+  t.assert.ok(!existsSync(join(tmp, 'out-evil', 'pwned.js')), 'must not write into a sibling dir')
+}))
+
 // --- CLI integration ---
 
 test('CLI: extract with no bundle file prints usage', (t) => {
