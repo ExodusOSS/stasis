@@ -8,11 +8,19 @@ import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '../src/bundle.js'
-import { buildSolidityBundle, bundleCommand, outermostDir } from '../src/cmd/bundle.js'
+import {
+  buildBashBundle,
+  buildRustBundle,
+  buildSolidityBundle,
+  bundleCommand,
+  outermostDir,
+} from '../src/cmd/bundle.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'bin', 'stasis.js')
 const fixtures = join(here, 'fixtures', 'solidity-bundle')
+const bashFixtures = join(here, 'fixtures', 'bash-bundle')
+const rustFixtures = join(here, 'fixtures', 'rust-bundle')
 
 const withTmp = (fn) => async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-cmd-'))
@@ -332,13 +340,13 @@ test('CLI: bundle with no files prints usage', (t) => {
 test('CLI: bundle rejects an arg with an unsupported extension', (t) => {
   const r = runCli(['bundle', 'foo.txt'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /must all be \.sol or all be \.js\/\.cjs\/\.mjs/)
+  t.assert.match(r.stderr, /bundle entries must all be \.sol/)
 })
 
 test('CLI: bundle rejects mixing .sol and .js entries', (t) => {
   const r = runCli(['bundle', 'a.sol', 'b.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /must all be \.sol or all be \.js\/\.cjs\/\.mjs/)
+  t.assert.match(r.stderr, /bundle entries must all be \.sol/)
 })
 
 test('CLI: bundle rejects --mapping when entries are JS', (t) => {
@@ -566,3 +574,265 @@ test('CLI: bundle load surfaces ERR_MODULE_NOT_FOUND for dynamic import of a mis
   t.assert.equal(printed.code, 'ERR_MODULE_NOT_FOUND',
     `expected ERR_MODULE_NOT_FOUND, got ${printed.code} -- the previous ERR_ASSERTION re-threw out of common guards`)
 }))
+
+// --- Bash bundles ---
+
+test('buildBashBundle produces a Bundle with sources, formats, imports, entries', async (t) => {
+  const cwd = join(bashFixtures, 'basic')
+  const bundle = await buildBashBundle({ cwd, entries: ['main.sh'] })
+
+  t.assert.ok(bundle instanceof Bundle)
+  t.assert.deepEqual(bundle.config, { scope: 'full' })
+  t.assert.deepEqual([...bundle.entries], ['main.sh'])
+
+  // No package.json → fallback "." bucket with placeholder identity.
+  t.assert.deepEqual([...bundle.modules.keys()], ['.'])
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'bash-bundle')
+  t.assert.equal(workspace.version, '0.0.0')
+  t.assert.deepEqual(Object.keys(workspace.files).toSorted(), ['lib.sh', 'main.sh'])
+  t.assert.equal(workspace.files['main.sh'], readFileSync(join(cwd, 'main.sh'), 'utf8'))
+
+  // Every loaded file gets a 'bash' format tag.
+  t.assert.equal(bundle.formats.get('main.sh'), 'bash')
+  t.assert.equal(bundle.formats.get('lib.sh'), 'bash')
+
+  // Imports live under the "bash" condition key.
+  t.assert.deepEqual([...bundle.imports.keys()], ['bash'])
+  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('./lib.sh'), 'lib.sh')
+})
+
+test('buildBashBundle takes the workspace bucket name/version from package.json', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'with-package-json'), entries: ['main.sh'] })
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'my-scripts')
+  t.assert.equal(workspace.version, '2.1.0')
+})
+
+test('buildBashBundle follows a multi-level source chain', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'nested'), entries: ['main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['a.sh', 'b.sh', 'main.sh'])
+  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('./a.sh'), 'a.sh')
+  t.assert.equal(bundle.imports.get('bash').get('a.sh').get('./b.sh'), 'b.sh')
+})
+
+test('buildBashBundle deduplicates a file sourced by multiple entries', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'shared'), entries: ['a.sh', 'b.sh'] })
+  t.assert.deepEqual([...bundle.entries].toSorted(), ['a.sh', 'b.sh'])
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['a.sh', 'b.sh', 'shared.sh'])
+})
+
+test('buildBashBundle resolves bash/sh exec references', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'exec'), entries: ['main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['helper.sh', 'main.sh', 'worker.sh'])
+  const edges = bundle.imports.get('bash').get('main.sh')
+  t.assert.equal(edges.get('./worker.sh'), 'worker.sh')
+  t.assert.equal(edges.get('helper.sh'), 'helper.sh')
+})
+
+test('buildBashBundle resolves direct ./script.sh invocations', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'direct'), entries: ['main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['main.sh', 'worker.sh'])
+  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('./worker.sh'), 'worker.sh')
+})
+
+test('buildBashBundle resolves `# Depends on:` comment hints', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'comment'), entries: ['main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['helper.sh', 'main.sh'])
+  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('helper.sh'), 'helper.sh')
+})
+
+test('buildBashBundle resolves ../ references across subdirectories', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'subdir'), entries: ['bin/main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['bin/main.sh', 'lib/helper.sh'])
+  t.assert.equal(bundle.imports.get('bash').get('bin/main.sh').get('../lib/helper.sh'), 'lib/helper.sh')
+})
+
+test('buildBashBundle does not bundle PATH commands and tolerates unresolved refs', async (t) => {
+  // main.sh sources ./lib.sh but also calls grep/curl/node — none of which is bundled.
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'external'), entries: ['main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['lib.sh', 'main.sh'])
+})
+
+test('buildBashBundle accepts .bash entries', async (t) => {
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'dotbash'), entries: ['main.bash'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['lib.sh', 'main.bash'])
+  t.assert.equal(bundle.formats.get('main.bash'), 'bash')
+})
+
+test('buildBashBundle rejects an empty entry list', async (t) => {
+  await t.assert.rejects(() => buildBashBundle({ cwd: join(bashFixtures, 'basic'), entries: [] }), /at least one entry/)
+})
+
+test('buildBashBundle rejects non-.sh/.bash entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBashBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.js'] }),
+    /not a \.sh\/\.bash file/,
+  )
+})
+
+test('buildBashBundle rejects entries that escape baseDir', async (t) => {
+  await t.assert.rejects(
+    () => buildBashBundle({ cwd: join(bashFixtures, 'basic'), entries: ['../nested/main.sh'] }),
+    /Entry escapes baseDir/,
+  )
+})
+
+test('buildBashBundle throws when an entry is missing on disk', async (t) => {
+  await t.assert.rejects(
+    () => buildBashBundle({ cwd: join(bashFixtures, 'basic'), entries: ['nope.sh'] }),
+    /Bash bundle has missing entries[\s\S]*nope\.sh/u,
+  )
+})
+
+test('bundleCommand writes a bash Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'], output: outPath })
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['main.sh'])
+  t.assert.deepEqual(Object.keys(parsed.modules.get('.').files).toSorted(), ['lib.sh', 'main.sh'])
+  t.assert.equal(parsed.formats.get('main.sh'), 'bash')
+  t.assert.equal(parsed.imports.get('bash').get('main.sh').get('./lib.sh'), 'lib.sh')
+}))
+
+test('CLI: bundle writes a brotli-compressed Bundle for a .sh entry', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'main.sh'], { cwd: join(bashFixtures, 'basic') })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const buf = readFileSync(outPath)
+  t.assert.notEqual(buf[0], 0x7b)
+  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['main.sh'])
+  t.assert.equal(parsed.imports.get('bash').get('main.sh').get('./lib.sh'), 'lib.sh')
+}))
+
+test('CLI: bundle rejects mixing .sh and .js entries', (t) => {
+  const r = runCli(['bundle', 'a.sh', 'b.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /bundle entries must all be \.sol/)
+})
+
+test('CLI: bundle rejects --scope for a .sh bundle', (t) => {
+  const r = runCli(['bundle', '--scope=full', 'main.sh'], { cwd: join(bashFixtures, 'basic') })
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--scope is only valid for JS bundles/)
+})
+
+// --- Rust bundles ---
+
+test('buildRustBundle produces a Bundle with sources, formats, imports, entries', async (t) => {
+  const cwd = join(rustFixtures, 'basic')
+  const bundle = await buildRustBundle({ cwd, entries: ['src/main.rs'] })
+
+  t.assert.ok(bundle instanceof Bundle)
+  t.assert.deepEqual(bundle.config, { scope: 'full' })
+  t.assert.deepEqual([...bundle.entries], ['src/main.rs'])
+
+  t.assert.deepEqual([...bundle.modules.keys()], ['.'])
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'rust-bundle')
+  t.assert.equal(workspace.version, '0.0.0')
+  t.assert.deepEqual(Object.keys(workspace.files).toSorted(), ['src/foo.rs', 'src/main.rs'])
+
+  t.assert.equal(bundle.formats.get('src/main.rs'), 'rust')
+  t.assert.equal(bundle.formats.get('src/foo.rs'), 'rust')
+
+  t.assert.deepEqual([...bundle.imports.keys()], ['rust'])
+  t.assert.equal(bundle.imports.get('rust').get('src/main.rs').get('mod foo'), 'src/foo.rs')
+})
+
+test('buildRustBundle records mod edges and crate:: use edges', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'use-crate'), entries: ['src/main.rs'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/bar.rs', 'src/foo.rs', 'src/main.rs'])
+  const main = bundle.imports.get('rust').get('src/main.rs')
+  t.assert.equal(main.get('mod foo'), 'src/foo.rs')
+  t.assert.equal(main.get('mod bar'), 'src/bar.rs')
+  t.assert.equal(main.get('crate::foo::Greeter'), 'src/foo.rs')
+  t.assert.equal(bundle.imports.get('rust').get('src/bar.rs').get('crate::foo::Greeter'), 'src/foo.rs')
+})
+
+test('buildRustBundle follows nested mods into stem subdirectories', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'nested'), entries: ['src/main.rs'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['src/foo.rs', 'src/foo/bar.rs', 'src/main.rs'],
+  )
+  t.assert.equal(bundle.imports.get('rust').get('src/foo.rs').get('mod bar'), 'src/foo/bar.rs')
+})
+
+test('buildRustBundle follows mod.rs-style submodules', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'mod-rs'), entries: ['src/main.rs'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['src/foo/bar.rs', 'src/foo/mod.rs', 'src/main.rs'],
+  )
+})
+
+test('buildRustBundle bundles from a lib.rs crate root', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'lib'), entries: ['src/lib.rs'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/bar.rs', 'src/foo.rs', 'src/lib.rs'])
+  t.assert.equal(bundle.imports.get('rust').get('src/lib.rs').get('mod foo'), 'src/foo.rs')
+  t.assert.equal(bundle.imports.get('rust').get('src/lib.rs').get('mod bar'), 'src/bar.rs')
+})
+
+test('buildRustBundle does not follow inline mods', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'inline-mod'), entries: ['src/main.rs'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/main.rs', 'src/real.rs'])
+})
+
+test('buildRustBundle does not bundle external crates', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'external-crate'), entries: ['src/main.rs'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/local.rs', 'src/main.rs'])
+})
+
+test('buildRustBundle takes the workspace bucket name/version from package.json', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'with-package-json'), entries: ['src/main.rs'] })
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'rusty')
+  t.assert.equal(workspace.version, '3.0.0')
+})
+
+test('buildRustBundle rejects an empty entry list', async (t) => {
+  await t.assert.rejects(() => buildRustBundle({ cwd: join(rustFixtures, 'basic'), entries: [] }), /at least one entry/)
+})
+
+test('buildRustBundle rejects non-.rs entries', async (t) => {
+  await t.assert.rejects(
+    () => buildRustBundle({ cwd: join(rustFixtures, 'basic'), entries: ['src/main.js'] }),
+    /not a \.rs file/,
+  )
+})
+
+test('buildRustBundle throws when an entry is missing on disk', async (t) => {
+  await t.assert.rejects(
+    () => buildRustBundle({ cwd: join(rustFixtures, 'basic'), entries: ['src/nope.rs'] }),
+    /Rust bundle has missing entries[\s\S]*nope\.rs/u,
+  )
+})
+
+test('bundleCommand writes a rust Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: join(rustFixtures, 'use-crate'), entries: ['src/main.rs'], output: outPath })
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['src/main.rs'])
+  t.assert.deepEqual(Object.keys(parsed.modules.get('.').files).toSorted(), ['src/bar.rs', 'src/foo.rs', 'src/main.rs'])
+  t.assert.equal(parsed.formats.get('src/main.rs'), 'rust')
+  t.assert.equal(parsed.imports.get('rust').get('src/main.rs').get('mod foo'), 'src/foo.rs')
+}))
+
+test('CLI: bundle writes a brotli-compressed Bundle for a .rs entry', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/main.rs'], { cwd: join(rustFixtures, 'basic') })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const buf = readFileSync(outPath)
+  t.assert.notEqual(buf[0], 0x7b)
+  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['src/main.rs'])
+  t.assert.equal(parsed.imports.get('rust').get('src/main.rs').get('mod foo'), 'src/foo.rs')
+}))
+
+test('CLI: bundle rejects mixing .rs and .js entries', (t) => {
+  const r = runCli(['bundle', 'a.rs', 'b.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /bundle entries must all be \.sol/)
+})
