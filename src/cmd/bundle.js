@@ -12,7 +12,7 @@ import {
   collectSolidityFilesFromDisk,
   readRemappingsFile,
 } from '../loaders/solidity.js'
-import { buildPhpTree, collectPhpFilesFromDisk } from '../loaders/php.js'
+import { buildPhpTree, collectPhpFilesFromDisk, loadComposerAutoload } from '../loaders/php.js'
 
 const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 
@@ -179,14 +179,24 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 }
 
 // Build a stasis Bundle (in-memory) from a list of entry .php files by
-// statically scanning their `require`/`include` graph and reading every
-// reachable file from disk -- no PHP is ever executed. Mirrors
-// buildSolidityBundle: files are bucketed per package.json, tagged with the
-// `php` format, and edges are keyed under a dedicated "php" condition bucket.
+// statically scanning their `require`/`include` graph -- and, when the project
+// uses Composer, the class-autoload graph too -- reading every reachable file
+// from disk. No PHP is ever executed. Mirrors buildSolidityBundle: files are
+// bucketed per package.json, tagged with the `php` format, and edges are keyed
+// under a dedicated "php" condition bucket.
 //
-// Refuses to write when an entry can't be loaded or any include is
-// unresolved (dynamic/interpolated path, missing file) -- a bundle with holes
-// would silently operate on a partial set of sources.
+// Composer autoloading is followed automatically when a composer.json (or
+// generated vendor/composer/autoload_*.php map) is present: PSR-4/PSR-0/
+// classmap/files config is read and the classes each file references (`use`
+// imports, `new`/`extends`/`implements`, type hints, …) are resolved to their
+// files the way Composer's ClassLoader would. That resolution is best-effort
+// (unresolvable references are typically built-in or extension classes), so it
+// never blocks the bundle; explicit `require`/`include` of a literal path is
+// still strict.
+//
+// Refuses to write when an entry can't be loaded or any explicit include is
+// unresolved -- a bundle with holes would silently operate on a partial set of
+// sources.
 export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildPhpBundle: at least one entry .php file is required')
@@ -197,9 +207,10 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
 
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
+  const autoload = loadComposerAutoload(baseDir)
 
-  const sources = await collectPhpFilesFromDisk(baseDir, normalized)
-  const { resolutions, missing } = buildPhpTree(sources, { baseDir })
+  const sources = await collectPhpFilesFromDisk(baseDir, normalized, { autoload })
+  const { resolutions, missing } = buildPhpTree(sources, { baseDir, autoload })
 
   const issues = []
   for (const entry of normalized) {

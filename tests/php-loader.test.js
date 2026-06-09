@@ -7,6 +7,9 @@ import {
   buildPhpTree,
   collectPhpFilesFromDisk,
   extractPhpImports,
+  loadComposerAutoload,
+  phpClassDependencies,
+  resolveClassFile,
   resolvePhpImport,
 } from '../src/loaders/php.js'
 
@@ -176,4 +179,124 @@ test('buildPhpTree records unresolved includes in `missing`', async (t) => {
   t.assert.deepEqual(tree.missing, [{ spec: './Nope.php', from: 'src/A.php' }])
   t.assert.equal(tree.resolutions.get('src/A.php').size, 0)
   t.assert.ok(warnings.some((w) => w.includes('Missing import') && w.includes('./Nope.php')))
+})
+
+// --- Composer autoload ---
+
+const composer = join(fixtures, 'composer')
+
+test('loadComposerAutoload returns null for a project with no Composer config', (t) => {
+  t.assert.equal(loadComposerAutoload(join(fixtures, 'basic')), null)
+})
+
+test('loadComposerAutoload merges composer.json and generated maps into baseDir-relative paths', (t) => {
+  const a = loadComposerAutoload(composer)
+  // PSR-4: App\ from composer.json + generated; Vendor\Acme\ from generated only.
+  t.assert.ok(a.psr4.get('App\\').includes('src'))
+  t.assert.deepEqual(a.psr4.get('Vendor\\Acme\\'), ['vendor/acme/lib/src'])
+  // classmap: exact FQCN -> file, with the doubled backslashes unescaped.
+  t.assert.equal(a.classmap.get('Legacy\\Thing'), 'src/Legacy/Thing.php')
+  t.assert.equal(a.classmap.get('App\\Orphan'), 'src/Orphan.php')
+  // files: unconditional autoload entry.
+  t.assert.ok(a.files.includes('src/helpers.php'))
+})
+
+test('resolveClassFile resolves via PSR-4 (root and vendor prefixes)', (t) => {
+  const a = loadComposerAutoload(composer)
+  t.assert.equal(resolveClassFile('App\\Repo\\UserRepo', a, composer), 'src/Repo/UserRepo.php')
+  t.assert.equal(resolveClassFile('Vendor\\Acme\\Client', a, composer), 'vendor/acme/lib/src/Client.php')
+})
+
+test('resolveClassFile resolves via the classmap', (t) => {
+  const a = loadComposerAutoload(composer)
+  t.assert.equal(resolveClassFile('Legacy\\Thing', a, composer), 'src/Legacy/Thing.php')
+})
+
+test('resolveClassFile resolves via PSR-0 (namespace and underscores map to directories)', (t) => {
+  // Synthetic PSR-0 prefix pointing at src/: `Legacy_Thing` -> src/Legacy/Thing.php.
+  const a = { psr4: new Map(), psr0: new Map([['Legacy_', ['src']]]), classmap: new Map(), files: [] }
+  t.assert.equal(resolveClassFile('Legacy_Thing', a, composer), 'src/Legacy/Thing.php')
+})
+
+test('resolveClassFile returns null when a PSR-4 prefix matches but the file is absent', (t) => {
+  const a = loadComposerAutoload(composer)
+  t.assert.equal(resolveClassFile('App\\DoesNotExist', a, composer), null)
+})
+
+test('resolveClassFile returns null for a class in no autoload map', (t) => {
+  const a = loadComposerAutoload(composer)
+  t.assert.equal(resolveClassFile('Totally\\Unknown', a, composer), null)
+})
+
+test('phpClassDependencies resolves references but not unused `use` imports', (t) => {
+  const src = [
+    '<?php',
+    'namespace App;',
+    'use App\\Repo\\UserRepo;',
+    'use App\\Unused\\Ghost;', // imported, never referenced below
+    'class Service {',
+    '  public function run() {',
+    '    $r = new UserRepo();',
+    '    return Helper::greet();', // same-namespace, no `use`
+    '  }',
+    '}',
+  ].join('\n')
+  const deps = phpClassDependencies(src)
+  t.assert.ok(deps.has('App\\Repo\\UserRepo'))
+  t.assert.ok(deps.has('App\\Helper'))
+  t.assert.ok(!deps.has('App\\Unused\\Ghost'), 'an unused `use` import must not be a dependency')
+})
+
+test('phpClassDependencies resolves fully-qualified names and skips self/static/parent', (t) => {
+  const src = [
+    '<?php',
+    'namespace App;',
+    'function f() {',
+    '  $x = new \\Vendor\\Thing();',
+    '  $y = new self();',
+    '  return static::make();',
+    '}',
+  ].join('\n')
+  const deps = phpClassDependencies(src)
+  t.assert.ok(deps.has('Vendor\\Thing'))
+  t.assert.ok(!deps.has('self'))
+  t.assert.ok(!deps.has('App\\self'))
+  t.assert.ok(!deps.has('static'))
+})
+
+test('phpClassDependencies treats an in-class trait `use` as a reference', (t) => {
+  const src = [
+    '<?php',
+    'namespace App;',
+    'use App\\Concerns\\Sluggable;', // top-level import (alias only)
+    'class Post {',
+    '  use Sluggable;', // trait use -> reference, resolved via the alias
+    '  use \\App\\Concerns\\Timestamped;', // fully-qualified trait use
+    '}',
+  ].join('\n')
+  const deps = phpClassDependencies(src)
+  t.assert.ok(deps.has('App\\Concerns\\Sluggable'))
+  t.assert.ok(deps.has('App\\Concerns\\Timestamped'))
+})
+
+test('phpClassDependencies ignores class-like tokens inside strings, comments and heredocs', (t) => {
+  const src = [
+    '<?php',
+    'namespace App;',
+    'class X {',
+    '  public function f() {',
+    '    $a = "new App\\\\Bar";', // inside a string
+    '    // new App\\Baz();', // inside a comment',
+    '    $sql = <<<SQL',
+    '      new App\\Qux()',
+    'SQL;',
+    '    return new Real();',
+    '  }',
+    '}',
+  ].join('\n')
+  const deps = phpClassDependencies(src)
+  t.assert.ok(deps.has('App\\Real'))
+  t.assert.ok(!deps.has('App\\Bar'))
+  t.assert.ok(!deps.has('App\\Baz'))
+  t.assert.ok(!deps.has('App\\Qux'))
 })

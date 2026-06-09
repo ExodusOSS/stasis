@@ -533,6 +533,43 @@ test('buildPhpBundle follows nested ../ includes across subdirectories', async (
   t.assert.equal(bundle.imports.get('php').get('src/sub/B.php').get('../C.php'), 'src/C.php')
 })
 
+test('buildPhpBundle follows the Composer autoload graph and bundles only referenced classes', async (t) => {
+  const cwd = join(phpFixtures, 'composer')
+  const bundle = await buildPhpBundle({ cwd, entries: ['index.php'] })
+  const files = Object.keys(bundle.modules.get('.').files).toSorted()
+
+  // Explicit includes (vendor/autoload.php + the composer machinery it requires)
+  // AND autoloaded classes reachable from index.php's references.
+  t.assert.deepEqual(files, [
+    'index.php',
+    'src/Helper.php', // same-namespace reference, no `use`
+    'src/Legacy/Thing.php', // resolved via the classmap
+    'src/Repo/UserRepo.php', // PSR-4 (root)
+    'src/Service.php', // `use App\Service` + `new Service()`
+    'src/helpers.php', // `files` autoload (unconditional)
+    'vendor/acme/lib/src/Client.php', // PSR-4 (vendor)
+    'vendor/autoload.php',
+    'vendor/composer/autoload_classmap.php',
+    'vendor/composer/autoload_files.php',
+    'vendor/composer/autoload_psr4.php',
+    'vendor/composer/autoload_real.php',
+  ])
+
+  // The two classes that exist + are resolvable via the autoload maps but are
+  // never referenced must NOT be bundled: an unused `use` import (Ghost) and a
+  // class present in both the PSR-4 tree and the classmap (Orphan).
+  t.assert.ok(!files.includes('src/Unused/Ghost.php'), 'unused `use` import must not be bundled')
+  t.assert.ok(!files.includes('src/Orphan.php'), 'unreferenced classmap/PSR-4 class must not be bundled')
+
+  // Autoloaded classes are tagged `php` and recorded as edges keyed by FQCN.
+  t.assert.equal(bundle.formats.get('vendor/acme/lib/src/Client.php'), 'php')
+  const edges = bundle.imports.get('php').get('src/Service.php')
+  t.assert.equal(edges.get('Vendor\\Acme\\Client'), 'vendor/acme/lib/src/Client.php')
+  t.assert.equal(edges.get('App\\Helper'), 'src/Helper.php')
+  t.assert.equal(edges.get('Legacy\\Thing'), 'src/Legacy/Thing.php')
+  t.assert.ok(!edges.has('App\\Unused\\Ghost'))
+})
+
 test('buildPhpBundle deduplicates files included by multiple entries', async (t) => {
   const cwd = join(phpFixtures, 'shared')
   const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php', 'src/B.php'] })
