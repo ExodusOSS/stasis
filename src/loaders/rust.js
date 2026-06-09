@@ -1,33 +1,74 @@
-// Rust loader: produces a `{ sources, resolutions }` pair from a crate's
-// source files, mirroring the Solidity/Bash loaders' interface. The reachable
-// set is discovered by following `mod foo;` declarations (the only thing that
-// pulls a new file into a crate); `use crate::path` statements don't add
-// files, they just reference modules already declared, so they're resolved
-// against the module tree for the import graph but never widen the walk.
+// Rust loader: produces a `{ sources, resolutions, missing }` triple from a
+// crate's source files, mirroring the Solidity/Bash loaders' interface. The
+// reachable set is discovered by following `mod foo;` declarations (the only
+// thing that pulls a new file into a crate); `use crate::path` statements
+// don't add files, they just reference already-declared modules, so they're
+// resolved against the module tree for the import graph but never widen the walk.
 //
-// Resolution of `use crate::` references is best-effort (external crates,
-// macro paths, and item-vs-module ambiguity are simply dropped), but a
-// `mod foo;` with no backing file is reported in `missing` so the bundle
-// builder can reject it — an unresolvable `mod` is a genuine hole (and a
-// compile error in a real crate). Only `mod` edges widen the file set.
+// `use crate::` resolution is best-effort (external crates, macro paths, and
+// item-vs-module ambiguity are simply dropped). An unconditional `mod foo;`
+// with no backing file is a genuine hole (a compile error in a real crate) and
+// is reported in `missing` so the bundle builder can reject it; a cfg-gated
+// `mod` (e.g. `#[cfg(test)] mod tests;`) may be compiled out and is tolerated.
+// Comments are stripped before extraction so a commented-out `mod`/`use` is
+// neither followed nor flagged.
 
-import { statSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 
+import { assertRealPathWithinBase } from '../util.js'
+
 // `mod foo;` / `pub mod foo;` / `pub(crate) mod foo;` — external module
 // declarations only. Inline `mod foo { ... }` is intentionally NOT matched.
-const MOD_DECL_RE = /^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/gmu
+// Applied per (trimmed) line, so it stays anchored at the line start.
+const MOD_DECL_RE = /^(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/u
 
 // `crate::path::to::item` references (in `use` or expression position).
 const USE_CRATE_RE = /\bcrate(?:::\w+)+/gu
 
+// A `#[cfg(...)]` / `#[cfg_attr(...)]` attribute gates the next item on a build
+// configuration that may be off (e.g. `#[cfg(test)]`).
+const CFG_ATTR_RE = /^#\[\s*cfg(?:_attr)?\b/u
+
+// Strip `//` line comments and `/* */` block comments so a commented-out
+// `mod`/`use` isn't mistaken for a real one — a commented `mod foo;` with no
+// backing file would otherwise be reported as a fatal "missing module".
+// Newlines inside block comments are preserved so the per-line matching below
+// stays aligned. Not string-literal aware (a `//` or `/* */` inside a string
+// can't masquerade as a line-anchored `mod` decl, so it doesn't matter for
+// extraction), and nested block comments aren't handled — both are acceptable
+// for best-effort extraction and match the Solidity loader's fidelity.
+function stripRustComments(content) {
+  const noBlock = content.replace(/\/\*[\s\S]*?\*\//gu, (m) => m.replace(/[^\n]/gu, ' '))
+  return noBlock.replace(/\/\/[^\n]*/gu, '')
+}
+
+// Extract external `mod <name>;` declarations as { name, conditional } records.
+// `conditional` is true when a `#[cfg(...)]` attribute gates the declaration:
+// such a module may be compiled out (e.g. `#[cfg(test)] mod tests;`), so the
+// bundle builder treats its absence as tolerable rather than fatal.
 export function extractModDecls(content) {
-  return [...content.matchAll(MOD_DECL_RE)].map((m) => m[1])
+  const decls = []
+  let cfgPending = false
+  for (const raw of stripRustComments(content).split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue // blank lines don't break a contiguous attribute group
+    const m = MOD_DECL_RE.exec(line)
+    if (m) {
+      decls.push({ name: m[1], conditional: cfgPending })
+      cfgPending = false
+    } else if (CFG_ATTR_RE.test(line)) {
+      cfgPending = true
+    } else if (!line.startsWith('#[')) {
+      cfgPending = false // a non-attribute line ends the attribute group
+    }
+  }
+  return decls
 }
 
 export function extractCrateUses(content) {
-  return [...content.matchAll(USE_CRATE_RE)].map((m) => m[0])
+  return [...stripRustComments(content).matchAll(USE_CRATE_RE)].map((m) => m[0])
 }
 
 // The directory where this file's submodules live, per Rust's path rules:
@@ -110,22 +151,24 @@ export function resolveUsePath(usePath, moduleTree) {
 // Build the { sources, resolutions, missing } triple from a Map of
 // already-loaded Rust sources. Two-phase: resolve `mod` edges (which also
 // defines the module tree), then resolve `crate::` references against it.
-// A `mod foo;` with no file is recorded in `missing` (the bundle builder
-// treats it as fatal); unresolved `crate::` references are best-effort and
-// simply omitted, as are self- and duplicate references.
+// An unconditional `mod foo;` with no file is recorded in `missing` (the
+// bundle builder treats it as fatal); a cfg-gated `mod`, unresolved `crate::`
+// references, and self/duplicate references are omitted.
 export function buildRustTree(sources) {
   const resolutions = new Map()
   const missing = []
   for (const [path, content] of sources) {
     const specMap = new Map()
-    for (const modName of extractModDecls(content)) {
-      const resolved = resolveModPath(modName, path, { knownSources: sources })
+    for (const { name, conditional } of extractModDecls(content)) {
+      const resolved = resolveModPath(name, path, { knownSources: sources })
       if (resolved) {
-        specMap.set(`mod ${modName}`, resolved)
-      } else {
-        console.warn(`[loader.rust] Missing module: ${modName} from ${path}`)
-        missing.push({ spec: `mod ${modName}`, from: path })
+        specMap.set(`mod ${name}`, resolved)
+      } else if (!conditional) {
+        console.warn(`[loader.rust] Missing module: ${name} from ${path}`)
+        missing.push({ spec: `mod ${name}`, from: path })
       }
+      // conditional && unresolved: a cfg-gated module that may be compiled out
+      // (e.g. #[cfg(test)] mod tests;) — tolerated, not a fatal hole.
     }
     resolutions.set(path, specMap)
   }
@@ -148,6 +191,7 @@ export function buildRustTree(sources) {
 // skipped; the walk continues. Files in a wave are read in parallel.
 export async function collectRustFilesFromDisk(baseDir, entries) {
   const sources = new Map()
+  const realBase = realpathSync(baseDir)
 
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))
@@ -155,6 +199,7 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
     const reads = await Promise.all(
       toLoad.map(async (relPath) => {
         try {
+          assertRealPathWithinBase(realBase, baseDir, relPath)
           return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
         } catch (err) {
           if (err.code === 'ENOENT') {
@@ -176,8 +221,8 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
       if (!entry) continue
       const [relPath, content] = entry
       sources.set(relPath, content)
-      for (const modName of extractModDecls(content)) {
-        const resolved = resolveModPath(modName, relPath, { baseDir })
+      for (const { name } of extractModDecls(content)) {
+        const resolved = resolveModPath(name, relPath, { baseDir })
         if (resolved && !sources.has(resolved)) next.push(resolved)
       }
     }

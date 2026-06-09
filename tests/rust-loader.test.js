@@ -28,11 +28,30 @@ const captureWarnings = (fn) => {
 }
 
 test('extractModDecls finds external mod declarations (incl. pub / pub(crate))', (t) => {
-  t.assert.deepEqual(extractModDecls('mod foo;\npub mod bar;\npub(crate) mod baz;\n'), ['foo', 'bar', 'baz'])
+  t.assert.deepEqual(extractModDecls('mod foo;\npub mod bar;\npub(crate) mod baz;\n'), [
+    { name: 'foo', conditional: false },
+    { name: 'bar', conditional: false },
+    { name: 'baz', conditional: false },
+  ])
 })
 
 test('extractModDecls ignores inline `mod foo { ... }`', (t) => {
-  t.assert.deepEqual(extractModDecls('mod inline {\n    pub fn x() {}\n}\nmod real;\n'), ['real'])
+  t.assert.deepEqual(extractModDecls('mod inline {\n    pub fn x() {}\n}\nmod real;\n'), [
+    { name: 'real', conditional: false },
+  ])
+})
+
+test('extractModDecls marks #[cfg(...)]-gated modules as conditional', (t) => {
+  t.assert.deepEqual(extractModDecls('#[cfg(test)]\nmod tests;\nmod real;\n'), [
+    { name: 'tests', conditional: true },
+    { name: 'real', conditional: false },
+  ])
+})
+
+test('extractModDecls / extractCrateUses ignore commented-out declarations', (t) => {
+  const src = '/*\nmod blockgone;\n*/\n// mod linegone;\n// use crate::gone::X;\nmod real;\nuse crate::foo::Y;\n'
+  t.assert.deepEqual(extractModDecls(src), [{ name: 'real', conditional: false }])
+  t.assert.deepEqual(extractCrateUses(src), ['crate::foo::Y'])
 })
 
 test('extractCrateUses finds crate:: paths', (t) => {
@@ -157,6 +176,18 @@ test('buildRustTree records an unresolvable mod declaration in `missing`', async
   t.assert.ok(!main.has('mod gone'))
   t.assert.deepEqual(tree.missing, [{ spec: 'mod gone', from: 'src/main.rs' }])
   t.assert.ok(warnings.some((w) => w.includes('Missing module') && w.includes('gone')))
+})
+
+test('buildRustTree does not flag a cfg-gated mod with no file as missing', (t) => {
+  // #[cfg(test)] mod tests; with no tests.rs must not fail the bundle.
+  const tree = buildRustTree(new Map([['src/lib.rs', '#[cfg(test)]\nmod tests;\npub fn f() {}\n']]))
+  t.assert.deepEqual(tree.missing, [])
+  t.assert.equal(tree.resolutions.get('src/lib.rs').size, 0)
+})
+
+test('buildRustTree ignores mod declarations inside comments', (t) => {
+  const tree = buildRustTree(new Map([['src/main.rs', '/*\nmod blockgone;\n*/\n// mod linegone;\nfn main() {}\n']]))
+  t.assert.deepEqual(tree.missing, [])
 })
 
 test('loadRust reads a .rs.txt listing and walks the crate', async (t) => {

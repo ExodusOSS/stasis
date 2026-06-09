@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -876,3 +876,53 @@ test('CLI: bundle rejects mixing .rs and .js entries', (t) => {
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /bundle entries must all be \.sol/)
 })
+
+// --- Symlink containment (security) ---
+// A symlink whose name stays in-tree but whose real target escapes the bundle
+// root must be refused, not silently followed and embedded under the in-tree key.
+
+test('buildBashBundle refuses a symlink whose target escapes the bundle root', withTmp(async (t, tmp) => {
+  const outside = mkdtempSync(join(tmpdir(), 'stasis-outside-'))
+  try {
+    writeFileSync(join(outside, 'secret.sh'), 'echo secret\n')
+    writeFileSync(join(tmp, 'main.sh'), 'source ./link.sh\n')
+    symlinkSync(join(outside, 'secret.sh'), join(tmp, 'link.sh'))
+    await t.assert.rejects(
+      () => buildBashBundle({ cwd: tmp, entries: ['main.sh'] }),
+      /symlink escaping bundle root/,
+    )
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+}))
+
+test('buildRustBundle refuses a symlink whose target escapes the crate root', withTmp(async (t, tmp) => {
+  const outside = mkdtempSync(join(tmpdir(), 'stasis-outside-'))
+  try {
+    writeFileSync(join(outside, 'secret.rs'), 'pub fn s() {}\n')
+    mkdirSync(join(tmp, 'src'))
+    writeFileSync(join(tmp, 'src', 'main.rs'), 'mod foo;\n')
+    symlinkSync(join(outside, 'secret.rs'), join(tmp, 'src', 'foo.rs'))
+    await t.assert.rejects(
+      () => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }),
+      /symlink escaping bundle root/,
+    )
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+}))
+
+test('buildSolidityBundle refuses a symlink whose target escapes the bundle root', withTmp(async (t, tmp) => {
+  const outside = mkdtempSync(join(tmpdir(), 'stasis-outside-'))
+  try {
+    writeFileSync(join(outside, 'Secret.sol'), '// SPDX-License-Identifier: MIT\n')
+    writeFileSync(join(tmp, 'A.sol'), 'import "./link.sol";\n')
+    symlinkSync(join(outside, 'Secret.sol'), join(tmp, 'link.sol'))
+    await t.assert.rejects(
+      () => buildSolidityBundle({ cwd: tmp, entries: ['A.sol'] }),
+      /symlink escaping bundle root/,
+    )
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+}))

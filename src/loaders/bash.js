@@ -7,9 +7,11 @@
 // commands (`grep`), `$VAR` paths, extensionless `source ./env`, absolute
 // `source /etc/x.sh`, and `../` paths that escape the root — none is bundle-able.
 
-import { statSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
+
+import { assertRealPathWithinBase } from '../util.js'
 
 // The capture class excludes `` ` ``, `(`, `)` (on top of whitespace, quotes,
 // `;`, `&`, `|`, `#`) so a reference inside a command substitution —
@@ -161,6 +163,7 @@ export function buildBashTree(sources) {
 // unresolved references (commands, dynamic paths) are silently ignored.
 export async function collectBashFilesFromDisk(baseDir, entries) {
   const sources = new Map()
+  const realBase = realpathSync(baseDir)
 
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))
@@ -168,6 +171,7 @@ export async function collectBashFilesFromDisk(baseDir, entries) {
     const reads = await Promise.all(
       toLoad.map(async (relPath) => {
         try {
+          assertRealPathWithinBase(realBase, baseDir, relPath)
           return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
         } catch (err) {
           if (err.code === 'ENOENT') {
@@ -229,8 +233,12 @@ export async function loadBash(shTxtFile) {
   }
   for (const line of lines) assertWithinBase(baseDir, line, 'Entry path')
 
+  const realBase = realpathSync(baseDir)
   const reads = await Promise.all(
-    lines.map(async (relPath) => [relPath, await readFile(join(baseDir, relPath), 'utf8')]),
+    lines.map(async (relPath) => {
+      assertRealPathWithinBase(realBase, baseDir, relPath)
+      return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
+    }),
   )
   return buildBashTree(new Map(reads))
 }

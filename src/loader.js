@@ -8,6 +8,10 @@ import { State } from './state.js'
 
 // Warning: only covers code imports, not file reads
 
+// Formats produced by the non-JS source bundlers (Solidity/Bash/Rust). These
+// bundles are inspection artifacts, not runnable by Node's module loader.
+const NON_EXECUTABLE_FORMATS = new Set(['solidity', 'bash', 'rust'])
+
 let state
 let saved = false
 
@@ -48,6 +52,13 @@ function load(url, context, nextLoad) {
     // hash-valid file. Derive format from extension + module.type (recorded in the
     // lockfile) and reject the bundle's claim when it disagrees.
     if (context.format != null) assert.equal(format, context.format)
+    // Non-JS bundles (`stasis bundle` of .sol/.sh/.bash/.rs) tag files with
+    // their source language. They're artifacts for external analysis, not
+    // executable by Node — surface that clearly instead of an opaque
+    // format assertion if one is ever loaded via `--bundle=load`.
+    if (NON_EXECUTABLE_FORMATS.has(format)) {
+      throw new Error(`[stasis] cannot execute a '${format}' bundle: ${format} bundles are produced for external analysis, not for 'stasis run --bundle=load' (${url})`)
+    }
     assert.ok(['module', 'commonjs', 'json'].includes(format))
     return { source, format, shortCircuit: true }
   }

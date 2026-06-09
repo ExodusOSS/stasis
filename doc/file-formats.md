@@ -109,10 +109,12 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
   `sources` are present only when `scope = full`; `modules` may be
   omitted (treated as empty).
 - `formats`: project-relative path → Node loader format (`module`,
-  `commonjs`, …). May be missing per file.
+  `commonjs`, `json`). May be missing per file. Source-language bundles
+  (see below) use a language tag here instead: `solidity`, `bash`, or `rust`.
 - `imports`: conditions → parent file → specifier → resolved
-  project-relative path. The conditions key is either `"*"` or a
-  comma-joined list (e.g. `"node, import"`).
+  project-relative path. The conditions key is either `"*"`, a
+  comma-joined list (e.g. `"node, import"`), or — for source-language
+  bundles — the language tag (`solidity`/`bash`/`rust`).
 - When a `stasis.lock.json` is loaded alongside, the bundle's `entries`,
   module/source dirs, `name`/`version`, and per-module file lists must
   match. Each loaded source is hash-verified against the lockfile.
@@ -123,6 +125,36 @@ A legacy `version: 0` shape — flat top-level `sources` keyed by project-
 relative path with no `entries`/`modules` — is still accepted on load
 (loses cross-check of module metadata; lockfile-driven integrity checks
 still apply). The bundle is always written as `version: 1`.
+
+### Source-language bundles (Solidity / Bash / Rust)
+
+`stasis bundle` dispatches on the entry file extension (no mixing within one
+invocation):
+
+| Extension(s) | Language | How the graph is found | `format` / `imports` key |
+| --- | --- | --- | --- |
+| `.js` `.cjs` `.mjs` | JavaScript | static require/import scan | Node format / `"*"` + conditions |
+| `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
+| `.sh` `.bash` | Bash | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:` | `bash` |
+| `.rs` | Rust | `mod` declarations (+ `use crate::` edges) | `rust` |
+
+These three are **`scope = full`, produce-only artifacts** written in the same
+`stasis.code.br` shape as a JS bundle, but tagged with a language `format` and
+keyed under a language `imports` condition. They are intended for external
+static analysis / inspection — **not** for `stasis run --bundle=load`, which
+executes JavaScript through Node's module hooks and rejects a non-JS `format`
+with a clear error. Every reachable file is read from disk (symlinks whose real
+target escapes the bundle root are refused), bucketized by the nearest
+`package.json` like a JS bundle; with no such `package.json` the workspace
+bucket gets a placeholder identity (`solidity-bundle`/`bash-bundle`/`rust-bundle`
+at `0.0.0`).
+
+What counts as a fatal unresolved reference differs by language: Solidity
+requires every `import` to resolve; Bash requires every in-root `.sh`/`.bash`
+reference to resolve (PATH commands, `$VAR` paths, absolute/system paths, and
+`../`-escaping sources are tolerated as external); Rust requires every
+unconditional `mod foo;` to resolve (a `#[cfg(...)]`-gated `mod` and all
+`use crate::` edges are best-effort). A missing entry is always fatal.
 
 ## `stasis.resources.br`
 
