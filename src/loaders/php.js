@@ -36,27 +36,58 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
+// --- Shared lexing helpers ---------------------------------------------------
+
+// One alternation covering everything that is not executable code: heredocs/
+// nowdocs, single/double-quoted strings, and `/* */` // and `#` comments.
+// String alternatives precede the comment ones so a `//` inside a string isn't
+// mistaken for a comment; `#` excludes `#[` so PHP 8 attributes survive.
+const NON_CODE_RE =
+  /<<<\s*(['"]?)(\w+)\1\r?\n[\s\S]*?\r?\n[ \t]*\2\b|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|\/\*[\s\S]*?\*\/|\/\/[^\n]*|#(?!\[)[^\n]*/gu
+
+// Mask everything that is not executable code so the include scan only sees
+// real code: comments/heredocs become spaces, and string *interiors* are
+// replaced with `x` (keeping the surrounding quotes). Length and newlines are
+// preserved, so match offsets still index into the original `content`. Blanking
+// string interiors -- rather than keeping or dropping whole strings -- means a
+// `'require'`/`'include'` array value (common in method blacklists) has no
+// keyword left to match AND can't have its greedy span swallow the real include
+// that follows, while a genuine `require '...path...'` keeps its quotes so the
+// real path can be recovered from `content` via the match's group offsets.
+function maskForKeywords(content) {
+  return content.replace(NON_CODE_RE, (seg) =>
+    seg[0] === "'" || seg[0] === '"'
+      ? `${seg[0]}${seg.slice(1, -1).replace(/[^\n]/gu, 'x')}${seg[seg.length - 1]}`
+      : seg.replace(/[^\n]/gu, ' '),
+  )
+}
+
 // --- Explicit includes -------------------------------------------------------
 
 // Matches an include keyword followed by a single string-literal argument,
 // optionally prefixed by `__DIR__ .` or `dirname(__FILE__) .`. The leading
 // lookbehind keeps method calls (`$x->require(...)`), scope resolutions
 // (`Foo::include(...)`) and longer identifiers from matching; the trailing
-// `\b` stops `require` from matching inside `requireConfig`.
+// `\b` stops `require` from matching inside `requireConfig`. The `d` flag
+// exposes capture offsets so the path can be read from the unmasked source.
 const PHP_INCLUDE_RE =
-  /(?<![\w$>:])(?:require_once|require|include_once|include)\b\s*\(?\s*(__DIR__|dirname\s*\(\s*__FILE__\s*\))?\s*\.?\s*(['"])([^'"]+)\2/giu
+  /(?<![\w$>:])(?:require_once|require|include_once|include)\b\s*\(?\s*(__DIR__|dirname\s*\(\s*__FILE__\s*\))?\s*\.?\s*(['"])([^'"]+)\2/gidu
 
-// Extract the resolvable include specifiers from PHP source. Dir-relative
-// includes are normalised to a `./`-prefixed specifier (the leading slash
-// after `__DIR__` is a path separator, not an absolute-path marker) so
+// Extract the resolvable include specifiers from PHP source. The scan runs over
+// a masked copy (comments/heredocs blanked, string interiors `x`-ed out) so
+// keywords inside strings or comments are never matched; the actual path is
+// then read from the original `content` at the matched group's offsets. Dir-
+// relative includes are normalised to a `./`-prefixed specifier (the leading
+// slash after `__DIR__` is a path separator, not an absolute-path marker) so
 // `resolvePhpImport` can treat them like ordinary relative imports. Bare
 // specifiers are returned verbatim.
 export function extractPhpImports(content) {
+  const code = maskForKeywords(content)
   const specs = []
-  for (const m of content.matchAll(PHP_INCLUDE_RE)) {
-    const dirPrefix = m[1]
-    const raw = m[3]
-    if (dirPrefix) {
+  for (const m of code.matchAll(PHP_INCLUDE_RE)) {
+    const [start, end] = m.indices[3]
+    const raw = content.slice(start, end).replace(/\\(['\\])/gu, '$1')
+    if (m[1]) {
       const rel = raw.replace(/^\/+/u, '')
       specs.push(rel.startsWith('.') ? rel : `./${rel}`)
     } else {
@@ -339,17 +370,12 @@ const RESERVED = new Set([
   'return', 'echo', 'print', 'clone', 'yield', 'throw', 'global', 'and', 'or', 'xor',
 ])
 
-// Blank out PHP heredocs/nowdocs, comments and string literals (replacing each
-// with a space) so later reference scans don't trip over namespace-like text,
-// braces, or keywords inside them. Heredocs come first so their contents can't
-// be re-interpreted; string alternatives precede the comment ones so a `//`
-// inside a string isn't mistaken for a comment; `#` line comments exclude `#[`
-// so PHP 8 attributes survive.
+// Blank out PHP heredocs/nowdocs, comments AND string literals (collapsing each
+// to a single space) so class-reference scans don't trip over namespace-like
+// text, braces, or keywords inside them. Unlike `maskCommentsAndHeredocs`, this
+// also removes string contents -- class references never live in strings.
 function stripPhp(content) {
-  return content.replace(
-    /<<<\s*(['"]?)(\w+)\1\r?\n[\s\S]*?\r?\n[ \t]*\2\b|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|\/\*[\s\S]*?\*\/|\/\/[^\n]*|#(?!\[)[^\n]*/gu,
-    ' ',
-  )
+  return content.replace(NON_CODE_RE, ' ')
 }
 
 // Add the FQCN for a class reference written as `raw` in a file whose namespace
@@ -526,7 +552,11 @@ export async function collectPhpFilesFromDisk(baseDir, entries, { autoload = nul
         try {
           return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
         } catch (err) {
-          if (err.code === 'ENOENT') {
+          // ENOENT: target doesn't exist. EISDIR: a specifier resolved to a
+          // directory (e.g. an extensionless `require __DIR__ . '/dir'`). Both
+          // mean "not a loadable file" -- warn and skip rather than crash; the
+          // unresolved edge is surfaced later by buildPhpTree for real includes.
+          if (err.code === 'ENOENT' || err.code === 'EISDIR') {
             console.warn(`[loader.php] Missing import: ${relPath}`)
             return null
           }

@@ -83,6 +83,33 @@ test('extractPhpImports reads __DIR__ includes from a real fixture file', (t) =>
   t.assert.deepEqual(extractPhpImports(src), ['./B.php'])
 })
 
+test('extractPhpImports ignores require/include keywords that are string values (method blacklists)', (t) => {
+  // Regression: Mockery's MockConfigurationBuilder lists 'require'/'include'
+  // etc. as blacklisted method names. The keyword sits inside a string literal
+  // and must not be read as an include (it used to capture the `, ` gap to the
+  // next array element as a bogus specifier).
+  const src = [
+    '<?php',
+    '$blackListed = array(',
+    "    '__construct',",
+    "    'require', 'require_once', 'include', 'include_once',",
+    ');',
+    "require __DIR__ . '/Real.php';",
+  ].join('\n')
+  t.assert.deepEqual(extractPhpImports(src), ['./Real.php'])
+})
+
+test('extractPhpImports ignores include keywords inside comments and strings', (t) => {
+  const src = [
+    '<?php',
+    "// require 'commented.php';",
+    '$msg = "you must require \'embedded.php\' first";',
+    "/* include 'block.php' */",
+    "include 'real.php';",
+  ].join('\n')
+  t.assert.deepEqual(extractPhpImports(src), ['real.php'])
+})
+
 test('resolvePhpImport resolves ./ and ../ against the including file', (t) => {
   t.assert.equal(resolvePhpImport('./B.php', 'src/A.php'), 'src/B.php')
   t.assert.equal(resolvePhpImport('../lib/C.php', 'src/sub/A.php'), 'src/lib/C.php')
@@ -149,6 +176,15 @@ test('collectPhpFilesFromDisk resolves bare includes file- and project-relative'
   const baseDir = join(fixtures, 'bare')
   const sources = await collectPhpFilesFromDisk(baseDir, ['index.php'])
   t.assert.deepEqual([...sources.keys()].toSorted(), ['helpers.php', 'index.php', 'lib/Util.php'])
+})
+
+test('collectPhpFilesFromDisk skips a directory-valued include without crashing (EISDIR)', async (t) => {
+  const baseDir = join(fixtures, 'eisdir')
+  const { result: sources, warnings } = await captureWarningsAsync(() =>
+    collectPhpFilesFromDisk(baseDir, ['index.php']),
+  )
+  t.assert.deepEqual([...sources.keys()], ['index.php'])
+  t.assert.ok(warnings.some((w) => w.includes('Missing import') && w.includes('lib')))
 })
 
 test('collectPhpFilesFromDisk warns and skips a missing include', async (t) => {
