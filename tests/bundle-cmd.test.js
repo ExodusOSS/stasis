@@ -1093,7 +1093,9 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser peer dependency is missi
   const r = spawnSync(
     process.execPath,
     [join(stasisCopy, 'bin', 'stasis.js'), 'bundle', `--output=${outPath}`, 'file.mjs'],
-    { encoding: 'utf-8', env: cleanEnv, cwd: proj },
+    // NODE_PATH could expose an oxc-parser from elsewhere; blank it so the
+    // lazy peer lookup genuinely misses regardless of the host environment.
+    { encoding: 'utf-8', env: { ...cleanEnv, NODE_PATH: '' }, cwd: proj },
   )
   t.assert.notEqual(r.status, 0, 'must exit non-zero when the parser peer is missing')
   t.assert.match(r.stderr, /oxc-parser peer dependency/)
@@ -1123,6 +1125,31 @@ test('CLI: bundle (JS) honors Node module-syntax detection for ambiguous .js and
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, '42\n')
+}))
+
+test('CLI: bundle (JS) detects module via top-level await in ambiguous .js and the bundle loads', withTmp((t, tmp) => {
+  // Node's detector counts top-level await as module syntax; oxc's
+  // hasModuleSyntax does not. This lazy-load entry runs as ESM in plain node
+  // but used to be bundled as format=commonjs -- a parse-error warning, exit
+  // 0, then SyntaxError at load: the exact fail-open this branch removes.
+  jsProject(tmp, {
+    'entry.js': "const lazy = await import('./lazy.js')\nconsole.log('lazy', lazy.v)\n",
+    'lazy.js': 'export const v = 42\n',
+  }, { name: 'tla', version: '0.0.0' })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.doesNotMatch(r.stderr, /parse error/, 'a clean module re-parse must not surface as a parse error')
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.equal(decoded.formats['entry.js'], 'module',
+    'TLA-only ambiguous .js must be recorded as ESM, matching plain node')
+
+  const load = runCli(
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${outPath}`, 'entry.js'],
+    { cwd: tmp },
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'lazy 42\n')
 }))
 
 test('CLI: bundle (JS) still warns and writes the bundle for an unresolved require()', withTmp((t, tmp) => {

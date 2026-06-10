@@ -217,15 +217,35 @@ export class Scan {
     // commonjs variant here would make `--bundle=load` feed the source to the
     // wrong translator, which throws instead of reparsing as ESM the way
     // Node's on-disk loader does.
-    const format = declared
+    let format = declared
       ?? `${parsed.module.hasModuleSyntax ? 'module' : 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
 
     // oxc-parser recovers from syntax errors instead of throwing: it reports
     // them in `parsed.errors` and returns whatever AST/module records it could
     // salvage. (Warning/advice-severity diagnostics don't imply a broken parse
     // and are not errors.)
+    const nonWarning = (p) => (p.errors ?? []).filter((e) => e.severity !== 'Warning' && e.severity !== 'Advice')
+    let errors = nonWarning(parsed)
+
+    // Node's detector also counts top-level await as module syntax, which
+    // oxc's hasModuleSyntax does not flag: a typeless file whose ESM-ness
+    // rests on TLA alone parses here as a broken script while plain node runs
+    // it as a clean module. Mirror Node's parse-as-CJS-retry-as-ESM: when the
+    // detected-commonjs parse has errors but a module parse is clean, the
+    // module parse wins. Genuine CJS salvage cases (e.g. a top-level `return`
+    // guard) error under BOTH source types and stay on the script path.
+    if (errors.length > 0 && declared === null && !format.startsWith('module')) {
+      try {
+        const asModule = parser.parseSync(file, src, { sourceType: 'module' })
+        if (nonWarning(asModule).length === 0) {
+          parsed = asModule
+          format = `module${ext === '.ts' ? '-typescript' : ''}`
+          errors = []
+        }
+      } catch { /* keep the script parse and its recorded errors */ }
+    }
+
     let parseError
-    const errors = (parsed.errors ?? []).filter((e) => e.severity !== 'Warning' && e.severity !== 'Advice')
     if (errors.length > 0) {
       parseError = errors.map((e) => e.message).join('; ')
       // A partially-parsed module file may be missing static link-time edges

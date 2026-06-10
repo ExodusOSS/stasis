@@ -176,6 +176,14 @@ test('scan applies Node module-syntax detection to ambiguous .js (no "type" in s
   writeFileSync(plain, "import('./leaf.js').catch(() => {})\nmodule.exports = 1\n")
   const r2 = scan([plain])
   t.assert.equal([...r2.files].find(([url]) => url.endsWith('/plain.js'))[1].format, 'commonjs')
+  // Top-level await alone MUST flip (Node counts TLA as module syntax, oxc's
+  // hasModuleSyntax does not -- scan retries the failed script parse as a
+  // module and adopts it when clean). Not a parse error.
+  const tla = join(tmp, 'tla.js')
+  writeFileSync(tla, 'const one = await Promise.resolve(1)\n')
+  const r3 = scan([tla])
+  t.assert.equal([...r3.files].find(([url]) => url.endsWith('/tla.js'))[1].format, 'module')
+  t.assert.deepEqual(r3.parseErrors, [])
 }))
 
 test('scan reports dynamic require() as unresolved', withTmp((t, tmp) => {
