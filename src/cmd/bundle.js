@@ -387,9 +387,14 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
 // at runtime, so the result loads via `stasis run --bundle=load`
 // interchangeably with a runtime-produced one.
 //
-// Refuses to write when any specifier is unresolved (dynamic require, missing
-// dep, conditional `exports` mismatch): a bundle with holes would silently
-// fall through to disk at load time, defeating the point of bundling.
+// Refuses to write when the bundle is guaranteed broken (or silently divergent
+// from plain node) at load time: an unresolved static ESM `import`/`export ...
+// from` edge reachable from an entry through static edges alone (link-time,
+// uncatchable), a module file that can't be parsed (its static edges are
+// unknown), or an edge resolving to a file a source bundle can't carry
+// (extensionless, .node, .wasm). Failures that runtime code can catch --
+// unresolved require()/dynamic import() edges, including entire subtrees
+// behind such a boundary -- only warn (see below).
 //
 // Scope and per-edge conditions come from the project's stasis.config.json
 // (or `EXODUS_STASIS_SCOPE`); pass `scope` explicitly to override.
@@ -405,22 +410,93 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
   const absEntries = entries.map((e) => resolve(baseDir, e))
 
   const scanner = scan(absEntries)
-  // Unresolved edges (dynamic specifiers, optional deps not installed) are NOT
-  // fatal: they match the runtime loader's behavior. Code like
-  // `try { require('supports-color') } catch {}` never has its `supports-color`
-  // edge recorded by the runtime bundle either, because Node's resolver throws
-  // before the resolve hook can record it. At load time, state.getImport will
-  // assert for these edges -- and the user's try/catch will catch the assertion
-  // exactly as it catches MODULE_NOT_FOUND in the non-bundled path. Warn so the
-  // user knows their bundle isn't fully self-contained for those edges, but
-  // don't refuse to produce it.
-  if (scanner.unresolved.length > 0) {
-    const summary = scanner.unresolved
+
+  // Fail closed exactly where the bundle is GUARANTEED broken (or silently
+  // divergent from plain node) at load time; warn where runtime code can catch
+  // the miss the same way it would without a bundle.
+  //
+  // Static reachability: files linked from an entry through static ESM
+  // `import`/`export ... from` edges alone load eagerly, before any user code
+  // runs, so no try/catch can intercept a failure there. Below a require()/
+  // dynamic import() boundary the same failure surfaces at the callsite as a
+  // catchable error, so the optional-dependency pattern (`try { impl = await
+  // import('optional-impl') } catch { fallback }`) keeps bundling with a
+  // warning -- exactly like `try { require('supports-color') } catch {}`: the
+  // runtime loader never records those edges either, because Node's resolver
+  // throws before the resolve hook can record them, and at load time
+  // state.getImport throws a miss the user's catch handles just like
+  // MODULE_NOT_FOUND in the non-bundled path. (`require` calls found in ESM
+  // files also stay warn-only: the identifier may be a user-defined function
+  // rather than CJS require, so refusing on it would reject valid code.)
+  const staticKinds = new Set(['import', 'export-from'])
+  const staticReachable = new Set(scanner.entries)
+  const walk = [...scanner.entries]
+  while (walk.length > 0) {
+    for (const e of scanner.files.get(walk.shift())?.edges ?? []) {
+      if (staticKinds.has(e.kind) && e.child && !staticReachable.has(e.child)) {
+        staticReachable.add(e.child)
+        walk.push(e.child)
+      }
+    }
+  }
+
+  // Fatal: unresolved static ESM edges in the eagerly-linked set.
+  const fatalUnresolved = (u) => staticKinds.has(u.kind) && staticReachable.has(u.parentURL)
+  const fatal = scanner.unresolved
+    .filter((u) => fatalUnresolved(u))
+    .map((u) => `unresolved ${u.kind} ${u.spec} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
+
+  // Fatal: parse failures whose edges are genuinely unknown. Script (CJS)
+  // files only warn: oxc's recovered AST keeps their require()/import() calls
+  // (Node's module wrapper accepts code oxc rejects, e.g. a top-level `return`
+  // guard), so scan salvages the edges. A module-family file ('module' /
+  // 'module-typescript') in the eagerly-linked set is a hole we can't
+  // enumerate; so is any file the parser couldn't process at all
+  // (recovered=false -- nothing was salvaged, and format may even be null).
+  const fatalParse = (p) => staticReachable.has(p.url) && (p.format?.startsWith('module') === true || !p.recovered)
+  for (const p of scanner.parseErrors) {
+    if (fatalParse(p)) fatal.push(`parse error in ${fileURLToPath(p.url)}: ${p.message}`)
+  }
+
+  // Fatal: edges that resolved to a file a source bundle can't carry
+  // (extensionless, .node, .wasm -- scan records the edge but never queues the
+  // child). Plain node loads these fine, so the written bundle would silently
+  // diverge: the edge sits in the import map with no source behind it, and
+  // load dies on state.getFile's assertion -- regardless of try/catch and of
+  // where in the graph it sits, so reachability doesn't soften this one.
+  for (const [, byParent] of scanner.imports) {
+    for (const [parentURL, specMap] of byParent) {
+      for (const [spec, childURL] of specMap) {
+        if (!scanner.files.has(childURL)) {
+          fatal.push(`${spec} from ${fileURLToPath(parentURL)} resolves to ${fileURLToPath(childURL)}, which a source bundle can't carry`)
+        }
+      }
+    }
+  }
+
+  if (fatal.length > 0) {
+    const shown = fatal.slice(0, 10).map((s) => `  ${s}`).join('\n')
+    const more = fatal.length > 10 ? `\n  ... and ${fatal.length - 10} more` : ''
+    throw new Error(`JS bundle would be broken at load time:\n${shown}${more}`)
+  }
+
+  const tolerated = scanner.unresolved.filter((u) => !fatalUnresolved(u))
+  if (tolerated.length > 0) {
+    const summary = tolerated
       .slice(0, 10)
       .map((u) => `  ${u.kind} ${u.spec ?? '<dynamic>'} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
       .join('\n')
-    const more = scanner.unresolved.length > 10 ? `\n  ... and ${scanner.unresolved.length - 10} more` : ''
-    console.warn(`[stasis] Bundle has ${scanner.unresolved.length} unresolved import(s); they will fall through at load time:\n${summary}${more}`)
+    const more = tolerated.length > 10 ? `\n  ... and ${tolerated.length - 10} more` : ''
+    console.warn(`[stasis] Bundle has ${tolerated.length} unresolved import(s); they will fall through at load time:\n${summary}${more}`)
+  }
+  const toleratedParse = scanner.parseErrors.filter((p) => !fatalParse(p))
+  if (toleratedParse.length > 0) {
+    const summary = toleratedParse
+      .slice(0, 10)
+      .map((p) => `  ${fileURLToPath(p.url)}: ${p.message}`)
+      .join('\n')
+    const more = toleratedParse.length > 10 ? `\n  ... and ${toleratedParse.length - 10} more` : ''
+    console.warn(`[stasis] Bundle has ${toleratedParse.length} file(s) with parse errors; their recorded imports may be incomplete:\n${summary}${more}`)
   }
 
   // Use a non-preload State to materialise the bundle: addFile bucketizes by

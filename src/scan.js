@@ -10,8 +10,12 @@ import assert from 'node:assert/strict'
 // reads package.json manifests and applies `exports` conditions but never runs
 // the target module. Dynamic specifiers (`require(name)`, `import('./'+x)`)
 // are recorded as unresolved -- a fundamental limit of static analysis for
-// CJS, not a tooling shortcoming. The parser (oxc-parser) is loaded lazily as
-// an optional peer dependency.
+// CJS, not a tooling shortcoming. Files that fail to parse are recorded in
+// `parseErrors` (and flagged with `parseError` in `files`): for script (CJS)
+// files oxc's recovered AST still yields the edges (Node's module wrapper
+// accepts code oxc rejects, e.g. top-level `return`), while module files keep
+// no edges -- a missed static edge is a hole consumers can't enumerate.
+// The parser (oxc-parser) is loaded lazily as an optional peer dependency.
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
@@ -122,6 +126,7 @@ export class Scan {
   files = new Map()
   imports = new Map()
   unresolved = []
+  parseErrors = []
   entries = new Set()
 
   // `conditions` is *additive* on top of the format-derived base set: ESM parents
@@ -164,6 +169,15 @@ export class Scan {
     return new Set([...base, ...this.extraConditions])
   }
 
+  // `recovered: false` means the parser crashed on this file and nothing was
+  // salvaged -- its edges are entirely unknown. `recovered: true` means oxc
+  // returned, but we discarded its partial module records (module-family
+  // formats only; see #scanFile).
+  #recordParseError(url, format, message, recovered) {
+    this.files.set(url, { format, edges: [], parseError: message })
+    this.parseErrors.push({ url, format, message, recovered })
+  }
+
   #scanFile(url, queue) {
     const file = fileURLToPath(url)
     const ext = extname(file)
@@ -181,14 +195,20 @@ export class Scan {
     const declared = formatForFile(file)
     const src = readFileSync(file, 'utf8')
 
+    // Resolve the parser OUTSIDE the per-file try: a missing oxc-parser peer
+    // is an environment error, not a property of this file. Swallowing it
+    // here turned every file into a silent zero-edge leaf -- the original
+    // "bundles just the entry, exit 0" failure -- instead of surfacing the
+    // actionable install hint from getParser().
+    const parser = getParser()
     let parsed
     try {
-      parsed = getParser().parseSync(file, src, {
+      parsed = parser.parseSync(file, src, {
         sourceType: declared === null ? 'unambiguous'
           : declared.startsWith('module') ? 'module' : 'script',
       })
     } catch (cause) {
-      this.files.set(url, { format: declared, edges: [], parseError: cause.message })
+      this.#recordParseError(url, declared, cause.message, false)
       return
     }
 
@@ -197,8 +217,49 @@ export class Scan {
     // commonjs variant here would make `--bundle=load` feed the source to the
     // wrong translator, which throws instead of reparsing as ESM the way
     // Node's on-disk loader does.
-    const format = declared
+    let format = declared
       ?? `${parsed.module.hasModuleSyntax ? 'module' : 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
+
+    // oxc-parser recovers from syntax errors instead of throwing: it reports
+    // them in `parsed.errors` and returns whatever AST/module records it could
+    // salvage. (Warning/advice-severity diagnostics don't imply a broken parse
+    // and are not errors.)
+    const nonWarning = (p) => (p.errors ?? []).filter((e) => e.severity !== 'Warning' && e.severity !== 'Advice')
+    let errors = nonWarning(parsed)
+
+    // Node's detector also counts top-level await as module syntax, which
+    // oxc's hasModuleSyntax does not flag: a typeless file whose ESM-ness
+    // rests on TLA alone parses here as a broken script while plain node runs
+    // it as a clean module. Mirror Node's parse-as-CJS-retry-as-ESM: when the
+    // detected-commonjs parse has errors but a module parse is clean, the
+    // module parse wins. Genuine CJS salvage cases (e.g. a top-level `return`
+    // guard) error under BOTH source types and stay on the script path.
+    if (errors.length > 0 && declared === null && !format.startsWith('module')) {
+      try {
+        const asModule = parser.parseSync(file, src, { sourceType: 'module' })
+        if (nonWarning(asModule).length === 0) {
+          parsed = asModule
+          format = `module${ext === '.ts' ? '-typescript' : ''}`
+          errors = []
+        }
+      } catch { /* keep the script parse and its recorded errors */ }
+    }
+
+    let parseError
+    if (errors.length > 0) {
+      parseError = errors.map((e) => e.message).join('; ')
+      // A partially-parsed module file may be missing static link-time edges
+      // -- holes we can't enumerate -- so don't pretend we know its imports.
+      if (format.startsWith('module')) {
+        this.#recordParseError(url, format, parseError, true)
+        return
+      }
+      // Script (CJS) files: Node's module wrapper accepts code oxc rejects
+      // (e.g. a top-level `return` guard), and oxc's recovered AST keeps the
+      // require()/import() calls -- salvage the edges, record the error, and
+      // let callers decide how loud to be.
+      this.parseErrors.push({ url, format, message: parseError, recovered: true })
+    }
 
     const specs = []
     // ESM static imports + re-exports come from oxc's pre-extracted module info.
@@ -255,7 +316,7 @@ export class Scan {
       if (!this.imports.has(key)) this.imports.set(key, new Map())
       this.imports.get(key).set(url, specMap)
     }
-    this.files.set(url, { format, edges })
+    this.files.set(url, parseError ? { format, edges, parseError } : { format, edges })
   }
 
   toRelative(root) {
@@ -283,6 +344,7 @@ export class Scan {
         ])
       ),
       unresolved: this.unresolved.map(({ parentURL, ...rest }) => ({ parent: rel(parentURL), ...rest })),
+      parseErrors: this.parseErrors.map(({ url, ...rest }) => ({ file: rel(url), ...rest })),
     }
   }
 }
