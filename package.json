@@ -24,6 +24,8 @@
     "src/config.js",
     "src/esbuild.js",
     "src/loader.js",
+    "src/loaders/bash.js",
+    "src/loaders/rust.js",
     "src/loaders/solidity.js",
     "src/lockfile.js",
     "src/mock.js",
