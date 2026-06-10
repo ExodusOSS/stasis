@@ -894,15 +894,21 @@ export function phpClassDependencies(content) {
     if (impl) for (const nm of impl[1].split(',')) add(nm)
   }
 
-  // catch (A | B $e)
-  for (const m of stripped.matchAll(/\bcatch\s*\(\s*([^)$]*?)\s*\$/giu)) {
+  // catch (A | B $e): capture the type list up to the `$var`. A single lazy
+  // `[^)]*?` (no second whitespace quantifier) keeps this linear even when a
+  // long blanked run sits inside the parens with no `$var`.
+  for (const m of stripped.matchAll(/\bcatch\s*\(([^)]*?)\$\w+/giu)) {
     for (const nm of m[1].split('|')) add(nm)
   }
 
   // parameter / property type hints: `Type $var`, incl. nullable `?Type`,
-  // variadic `Type ...$var`, and union/intersection `A|B`/`A&B $var` (each
-  // member counts -- a class used only in a union must still be bundled).
-  for (const m of stripped.matchAll(/(?<![\w$\\])([?\w\\|&]+)\s+&?\s*(?:\.\.\.)?\s*\$\w+/giu)) {
+  // variadic `Type ...$var`, by-ref `Type &$var`, and union/intersection
+  // `A|B`/`A&B $var` (each member counts). The separator before `$var` is one
+  // `\s+` plus an optional `&`/`...` run -- written so only a single whitespace
+  // quantifier is unbounded (the inner `\s*` is gated behind a required `[&.]`),
+  // which avoids catastrophic backtracking when a token is followed by a long
+  // blanked run (comment/heredoc/string) with no `$var` after it.
+  for (const m of stripped.matchAll(/(?<![\w$\\])([?\w\\|&]+)\s+(?:[&.]+\s*)?\$\w+/giu)) {
     for (const nm of m[1].split(/[|&]/u)) add(nm)
   }
   // return types: `): Type`, incl. nullable and union/intersection `): A|B`.

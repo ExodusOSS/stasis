@@ -109,6 +109,16 @@ test('the non-code lexer is linear on adversarial unterminated input (ReDoS guar
   t.assert.deepEqual(extractPhpImports(dquote), [])
 })
 
+test('phpClassDependencies is linear on a token before a long blanked run (ReDoS guard)', (t) => {
+  // After stripPhp blanks comments/heredocs/strings to whitespace, a code token
+  // followed by a long blank span with no `$var`/`)`/`:` after it used to make
+  // the type-hint and catch regexes backtrack cubically. These must return
+  // promptly; a timeout means a backtracking-prone regex has come back.
+  t.assert.deepEqual([...phpClassDependencies(`<?php foo ${' '.repeat(50000)}`)], [])
+  t.assert.deepEqual([...phpClassDependencies(`<?php try {} catch (${' '.repeat(50000)})`)], [])
+  t.assert.deepEqual([...phpClassDependencies(`<?php ${'<<<X\n'.repeat(50000)}`)], [])
+})
+
 test('extractPhpImports ignores require/include keywords that are string values (method blacklists)', (t) => {
   // Regression: Mockery's MockConfigurationBuilder lists 'require'/'include'
   // etc. as blacklisted method names. The keyword sits inside a string literal
