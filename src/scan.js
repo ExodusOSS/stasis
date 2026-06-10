@@ -156,10 +156,10 @@ export class Scan {
     return new Set([...base, ...this.extraConditions])
   }
 
-  // `recovered: false` means the parser itself failed (missing oxc-parser
-  // peer, crash) and nothing was salvaged -- the file's edges are entirely
-  // unknown. `recovered: true` means oxc returned, but we discarded its
-  // partial module records (module-format files only; see #scanFile).
+  // `recovered: false` means the parser crashed on this file and nothing was
+  // salvaged -- its edges are entirely unknown. `recovered: true` means oxc
+  // returned, but we discarded its partial module records (module-format
+  // files only; see #scanFile).
   #recordParseError(url, format, message, recovered) {
     this.files.set(url, { format, edges: [], parseError: message })
     this.parseErrors.push({ url, format, message, recovered })
@@ -181,9 +181,15 @@ export class Scan {
     let isESM = format === 'module'
     const src = readFileSync(file, 'utf8')
 
+    // Resolve the parser OUTSIDE the per-file try: a missing oxc-parser peer
+    // is an environment error, not a property of this file. Swallowing it
+    // here turned every file into a silent zero-edge leaf -- the original
+    // "bundles just the entry, exit 0" failure -- instead of surfacing the
+    // actionable install hint from getParser().
+    const parser = getParser()
     let parsed
     try {
-      parsed = getParser().parseSync(file, src, { sourceType: isESM ? 'module' : 'script' })
+      parsed = parser.parseSync(file, src, { sourceType: isESM ? 'module' : 'script' })
       // Node's detect-module: an ambiguous .js (no "type" in the nearest
       // package.json scope) that contains module syntax runs as ESM in plain
       // node. oxc accepts module syntax in script mode and flags it via
@@ -194,7 +200,7 @@ export class Scan {
       if (detectModule && !isESM && parsed.module?.hasModuleSyntax) {
         format = 'module'
         isESM = true
-        parsed = getParser().parseSync(file, src, { sourceType: 'module' })
+        parsed = parser.parseSync(file, src, { sourceType: 'module' })
       }
     } catch (cause) {
       this.#recordParseError(url, format, cause.message, false)
