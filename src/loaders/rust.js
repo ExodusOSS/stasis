@@ -246,7 +246,7 @@ function assertWithinBase(baseDir, candidate, label) {
 // High-level: takes a `.rs.txt` listing whose lines are crate entry points
 // (typically src/main.rs or src/lib.rs), resolved relative to the listing.
 // Walks `mod` declarations from there, then resolves `crate::` references.
-// Returns { sources, resolutions }.
+// Returns { sources, resolutions, missing }.
 export async function loadRust(rsTxtFile) {
   const baseDir = dirname(resolve(rsTxtFile))
   const listing = await readFile(rsTxtFile, 'utf8')
