@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 // CJS, not a tooling shortcoming. The parser (oxc-parser) is loaded lazily as
 // an optional peer dependency.
 
-const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs'])
+const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
 
 let _parser
@@ -33,21 +33,32 @@ function getParser() {
 
 function packageType(file) {
   const pkg = findPackageJSON(pathToFileURL(file).toString())
-  if (!pkg) return 'commonjs'
+  if (!pkg) return null
   try {
-    return JSON.parse(readFileSync(pkg, 'utf8')).type ?? 'commonjs'
+    const type = JSON.parse(readFileSync(pkg, 'utf8')).type
+    return type === 'module' || type === 'commonjs' ? type : null
   } catch {
-    return 'commonjs'
+    return null
   }
 }
 
+// Format per Node's own rules. TypeScript files get Node's type-stripping
+// formats ('module-typescript' / 'commonjs-typescript'), matching what Node's
+// load hook reports for them. For .js/.ts the module system comes from the
+// nearest package.json `type`; when that's absent (or unrecognized), Node
+// falls back to module-syntax detection, which requires the parse — null
+// signals "detect from syntax" to the caller.
 function formatForFile(file) {
   const ext = extname(file)
   if (ext === '.mjs') return 'module'
   if (ext === '.cjs') return 'commonjs'
   if (ext === '.json') return 'json'
-  if (ext === '.js') return packageType(file) === 'module' ? 'module' : 'commonjs'
-  return null
+  if (ext === '.mts') return 'module-typescript'
+  if (ext === '.cts') return 'commonjs-typescript'
+  const type = packageType(file)
+  if (type === null) return null
+  const suffix = ext === '.ts' ? '-typescript' : ''
+  return `${type}${suffix}`
 }
 
 function literalSpec(node) {
@@ -82,6 +93,17 @@ function findCallSpecifiers(ast, push) {
       const spec = literalSpec(node.source)
       if (spec != null) push({ kind: 'dynamic-import', spec })
       else push({ kind: 'dynamic-import', dynamic: true })
+    } else if (node.type === 'TSImportEqualsDeclaration') {
+      // `import lib = require('./dep.cts')`: TS-only CJS import form. Node's
+      // type stripping refuses to run it (non-erasable syntax), but the
+      // dependency edge is real — record it like a require() so the bundle
+      // stays self-contained for transform-types users and external analysis.
+      // Qualified-name references (`import A = B.C`) carry no file edge.
+      if (node.moduleReference?.type === 'TSExternalModuleReference') {
+        const spec = literalSpec(node.moduleReference.expression)
+        if (spec != null) push({ kind: 'require', spec })
+        else push({ kind: 'require', dynamic: true })
+      }
     }
 
     for (const key of Object.keys(node)) {
@@ -136,7 +158,7 @@ export class Scan {
   // Confirmed by reproducer with module-sync: plain node hits sync.js, static
   // bundle loads with async.js -- silently runs different code.
   #conditionsFor(format) {
-    const base = format === 'module'
+    const base = ['module', 'module-typescript'].includes(format)
       ? ['node', 'import', 'module-sync', 'node-addons']
       : ['node', 'require', 'module-sync', 'node-addons']
     return new Set([...base, ...this.extraConditions])
@@ -154,29 +176,46 @@ export class Scan {
       return
     }
 
-    const format = formatForFile(file)
-    const isESM = format === 'module'
+    // declared === null: typeless package, where Node decides .js/.ts by
+    // module-syntax detection — that needs the parse, so resolve it below.
+    const declared = formatForFile(file)
     const src = readFileSync(file, 'utf8')
 
     let parsed
     try {
-      parsed = getParser().parseSync(file, src, { sourceType: isESM ? 'module' : 'script' })
+      parsed = getParser().parseSync(file, src, {
+        sourceType: declared === null ? 'unambiguous'
+          : declared.startsWith('module') ? 'module' : 'script',
+      })
     } catch (cause) {
-      this.files.set(url, { format, edges: [], parseError: cause.message })
+      this.files.set(url, { format: declared, edges: [], parseError: cause.message })
       return
     }
 
+    // Match Node's module-syntax detection for typeless packages: ESM syntax
+    // (import/export/import.meta) selects the module variant. Recording the
+    // commonjs variant here would make `--bundle=load` feed the source to the
+    // wrong translator, which throws instead of reparsing as ESM the way
+    // Node's on-disk loader does.
+    const format = declared
+      ?? `${parsed.module.hasModuleSyntax ? 'module' : 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
+
     const specs = []
     // ESM static imports + re-exports come from oxc's pre-extracted module info.
+    // Type-only edges (`import type ... from`, `export type ... from`) are
+    // erased before runtime and never loaded by Node; skip them so the bundle
+    // matches Node's actual load graph. A mixed `import { type A, B }` still
+    // loads, and bare side-effect imports have no entries — both are kept.
     if (parsed.module?.staticImports) {
       for (const imp of parsed.module.staticImports) {
+        if (imp.entries.length > 0 && imp.entries.every((e) => e.isType)) continue
         specs.push({ kind: 'import', spec: imp.moduleRequest.value })
       }
     }
     if (parsed.module?.staticExports) {
       for (const exp of parsed.module.staticExports) {
         for (const entry of exp.entries) {
-          if (entry.moduleRequest) specs.push({ kind: 'export-from', spec: entry.moduleRequest.value })
+          if (entry.moduleRequest && !entry.isType) specs.push({ kind: 'export-from', spec: entry.moduleRequest.value })
         }
       }
     }

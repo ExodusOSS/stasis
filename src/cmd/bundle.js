@@ -22,7 +22,7 @@ import {
   loadLaravelProviderFiles,
 } from '../loaders/php.js'
 
-const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
+const JS_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const BASH_EXTS = new Set(['.sh', '.bash'])
 const RUST_EXTS = new Set(['.rs'])
 
@@ -378,11 +378,14 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   })
 }
 
-// Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs files
-// by statically scanning the require/import graph and reading reachable file
-// contents from disk -- no user code is ever loaded or executed. The bundle
-// shape matches what `src/loader.js` records at runtime, so the result loads
-// via `stasis run --bundle=load` interchangeably with a runtime-produced one.
+// Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs (or
+// .ts/.cts/.mts) files by statically scanning the require/import graph and
+// reading reachable file contents from disk -- no user code is ever loaded or
+// executed. TypeScript files behave exactly like JS ones: sources are stored
+// verbatim with Node's type-stripping formats recorded, and Node strips the
+// types at load time. The bundle shape matches what `src/loader.js` records
+// at runtime, so the result loads via `stasis run --bundle=load`
+// interchangeably with a runtime-produced one.
 //
 // Refuses to write when any specifier is unresolved (dynamic require, missing
 // dep, conditional `exports` mismatch): a bundle with holes would silently
@@ -392,10 +395,10 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
 // (or `EXODUS_STASIS_SCOPE`); pass `scope` explicitly to override.
 export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
-    throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs file is required')
+    throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
   for (const e of entries) {
-    if (!JS_EXTS.has(extname(e))) throw new Error(`buildJsBundle: not a JS file: ${e}`)
+    if (!JS_EXTS.has(extname(e))) throw new Error(`buildJsBundle: not a JS/TS file: ${e}`)
   }
 
   const baseDir = resolve(cwd)
@@ -459,9 +462,9 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // stdout.
 //
 // Dispatch by extension: all entries must be one language — .sol (Solidity),
-// .php (PHP), .js/.cjs/.mjs (JS, via static scan), .sh/.bash (Bash, via
-// source/exec graph walk), or .rs (Rust, via mod-declaration walk). Mixing
-// fails fast; --mapping is .sol only, --scope/--lockfile are JS only.
+// .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static scan), .sh/.bash
+// (Bash, via source/exec graph walk), or .rs (Rust, via mod-declaration walk).
+// Mixing fails fast; --mapping is .sol only, --scope/--lockfile are JS/TS only.
 //
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
@@ -479,7 +482,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   const isBash = entries.every((e) => BASH_EXTS.has(extname(e)))
   const isRust = entries.every((e) => RUST_EXTS.has(extname(e)))
   if (!isSol && !isPhp && !isJs && !isBash && !isRust) {
-    throw new Error('bundleCommand: entries must all be .sol, all be .php, all be .js/.cjs/.mjs, all be .sh/.bash, or all be .rs (no mixing)')
+    throw new Error('bundleCommand: entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs (no mixing)')
   }
   if (mappingFile && !isSol) {
     throw new Error('bundleCommand: --mapping is only valid for .sol bundles')

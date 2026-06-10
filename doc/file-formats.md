@@ -109,8 +109,11 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
   `sources` are present only when `scope = full`; `modules` may be
   omitted (treated as empty).
 - `formats`: project-relative path → Node loader format (`module`,
-  `commonjs`, `json`). May be missing per file. Source-language bundles
-  (see below) use a language tag here instead: `solidity`, `bash`, or `rust`.
+  `commonjs`, `module-typescript`, `commonjs-typescript`, `json`). May be
+  missing per file. TypeScript sources are stored verbatim (types intact);
+  Node strips the types at load time based on the format. Source-language
+  bundles (see below) use a language tag here instead: `solidity`, `bash`,
+  or `rust`.
 - `imports`: conditions → parent file → specifier → resolved
   project-relative path. The conditions key is either `"*"`, a
   comma-joined list (e.g. `"node, import"`), or — for source-language
@@ -133,7 +136,7 @@ invocation):
 
 | Extension(s) | Language | How the graph is found | `format` / `imports` key |
 | --- | --- | --- | --- |
-| `.js` `.cjs` `.mjs` | JavaScript | static require/import scan | Node format / `"*"` + conditions |
+| `.js` `.cjs` `.mjs` `.ts` `.cts` `.mts` | JavaScript / TypeScript | static require/import scan | Node format / `"*"` + conditions |
 | `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
 | `.sh` `.bash` | Bash | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:` | `bash` |
 | `.rs` | Rust | `mod` declarations (+ `use crate::` edges) | `rust` |

@@ -11,6 +11,7 @@ import { Scan, scan } from '../src/scan.js'
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'bin', 'stasis.js')
 const cjsFixture = join(here, 'fixtures', 'cli-run-cjs')
+const tsFixture = join(here, 'fixtures', 'cli-run-ts')
 const nmCjsFixture = join(here, 'fixtures', 'cli-run-nm-cjs')
 const esmConditionsFixture = join(here, 'fixtures', 'scan-esm-conditions')
 const moduleSyncFixture = join(here, 'fixtures', 'scan-module-sync')
@@ -166,6 +167,82 @@ test('static scan agrees with runtime loader on the node_modules CJS fixture', w
   const staticGraph = scan([join(tmp, 'src/entry.js')]).toRelative(tmp)
   assertGraphAgrees(t, runtime, staticGraph)
 }))
+
+// --- TypeScript: .ts/.cts/.mts behave like their JS counterparts. ---
+
+test('scan walks a TS import chain and records Node\'s type-stripping formats', (t) => {
+  const result = scan([join(tsFixture, 'src/entry.ts')]).toRelative(tsFixture)
+  t.assert.deepEqual([...result.entries], ['src/entry.ts'])
+  t.assert.deepEqual([...result.files.keys()].toSorted(), ['src/entry.ts', 'src/hello.ts'])
+  // type: module package → .ts files are module-typescript, mirroring .js → module
+  t.assert.equal(result.files.get('src/entry.ts').format, 'module-typescript')
+  t.assert.equal(result.files.get('src/hello.ts').format, 'module-typescript')
+  t.assert.deepEqual(result.unresolved, [])
+
+  const edges = result.files.get('src/entry.ts').edges
+  t.assert.deepEqual(edges, [{ kind: 'import', spec: './hello.ts', child: 'src/hello.ts' }])
+})
+
+test('scan derives commonjs-typescript for .ts in a CJS package and per-extension for .cts/.mts', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-formats', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'require("./a.cts")\n')
+  writeFileSync(join(tmp, 'a.cts'), 'exports.x = 1 as number\n')
+  writeFileSync(join(tmp, 'b.mts'), 'export const y: number = 2\n')
+  const result = scan([join(tmp, 'entry.ts'), join(tmp, 'b.mts')]).toRelative(tmp)
+  t.assert.equal(result.files.get('entry.ts').format, 'commonjs-typescript')
+  t.assert.equal(result.files.get('a.cts').format, 'commonjs-typescript')
+  t.assert.equal(result.files.get('b.mts').format, 'module-typescript')
+}))
+
+test('scan matches Node\'s module-syntax detection for typeless packages', withTmp((t, tmp) => {
+  // No `type` in package.json: Node detects the module system from syntax.
+  // Deriving commonjs(-typescript) here would record a format the CJS
+  // translator can't execute under --bundle=load.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'detect', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'esm.ts'), 'export const x: number = 1\n')
+  writeFileSync(join(tmp, 'cjs.ts'), 'exports.x = 1 as number\n')
+  writeFileSync(join(tmp, 'esm.js'), 'export const y = 2\n')
+  writeFileSync(join(tmp, 'cjs.js'), 'exports.y = 2\n')
+  const result = scan([join(tmp, 'esm.ts'), join(tmp, 'cjs.ts'), join(tmp, 'esm.js'), join(tmp, 'cjs.js')]).toRelative(tmp)
+  t.assert.equal(result.files.get('esm.ts').format, 'module-typescript')
+  t.assert.equal(result.files.get('cjs.ts').format, 'commonjs-typescript')
+  t.assert.equal(result.files.get('esm.js').format, 'module')
+  t.assert.equal(result.files.get('cjs.js').format, 'commonjs')
+}))
+
+test('scan records `import x = require(...)` edges (TS-only CJS import form)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-import-eq', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'entry.cts'), 'import lib = require("./dep.cts")\nlib.x()\n')
+  writeFileSync(join(tmp, 'dep.cts'), 'exports.x = (): void => {}\n')
+  const result = scan([join(tmp, 'entry.cts')]).toRelative(tmp)
+  t.assert.ok(result.files.has('dep.cts'), 'import = require() target must be walked into the bundle')
+  t.assert.deepEqual(result.files.get('entry.cts').edges, [
+    { kind: 'require', spec: './dep.cts', child: 'dep.cts' },
+  ])
+  t.assert.deepEqual(result.unresolved, [])
+}))
+
+test('scan skips type-only imports/re-exports (erased before runtime, never loaded by Node)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-type-only', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import type { A } from "./types-only.ts"\n' +
+    'export type { B } from "./types-only.ts"\n' +
+    'import { type C, real } from "./mixed.ts"\n' +
+    'export const a: A | null = null\nreal()\n')
+  writeFileSync(join(tmp, 'types-only.ts'), 'export interface A {}\nexport interface B {}\n')
+  writeFileSync(join(tmp, 'mixed.ts'), 'export interface C {}\nexport const real = (): void => {}\n')
+  const result = scan([join(tmp, 'entry.ts')]).toRelative(tmp)
+  t.assert.ok(!result.files.has('types-only.ts'), 'type-only target must not be bundled')
+  t.assert.ok(result.files.has('mixed.ts'), 'mixed type+value import still loads at runtime')
+  t.assert.deepEqual(result.unresolved, [])
+}))
+
+test('scan files TS ESM-parent edges under the full ESM condition key Node uses', (t) => {
+  // module-typescript parents must resolve with the `import` condition set,
+  // exactly like module parents -- not the `require` fallback.
+  const result = scan([join(tsFixture, 'src/entry.ts')]).toRelative(tsFixture)
+  t.assert.deepEqual([...result.imports.keys()], ['node, import, module-sync, node-addons'])
+})
 
 test('scan instance is reusable via the Scan class', (t) => {
   const s = new Scan().walk([join(cjsFixture, 'src/entry.cjs')])

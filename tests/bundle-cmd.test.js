@@ -761,6 +761,117 @@ test('CLI: bundle (php) prints a summary line with the file count, outermost dir
   t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files in 1 package from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
 }))
 
+// --- TypeScript entries: *.ts/.cts/.mts behave like JS files ---
+
+const tsFixture = join(here, 'fixtures', 'cli-run-ts')
+
+test('CLI: bundle accepts a .ts entry and records type-stripping formats', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/entry.ts'], { cwd: tsFixture })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /\[stasis\] Bundled 2 files in 1 package from src to /)
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['src/entry.ts'])
+  t.assert.deepEqual(
+    Object.keys(parsed.modules.get('.').files).toSorted(),
+    ['src/entry.ts', 'src/hello.ts'],
+  )
+  // Sources are stored verbatim (types intact); Node strips them at load time.
+  t.assert.equal(
+    parsed.modules.get('.').files['src/hello.ts'],
+    readFileSync(join(tsFixture, 'src/hello.ts'), 'utf8'),
+  )
+  t.assert.equal(parsed.formats.get('src/entry.ts'), 'module-typescript')
+  t.assert.equal(parsed.formats.get('src/hello.ts'), 'module-typescript')
+  t.assert.equal(parsed.imports.get('*').get('src/entry.ts').get('./hello.ts'), 'src/hello.ts')
+}))
+
+test('CLI: bundle allows mixing .ts and .js entries (both are JS-family)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-js-mix', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'a.ts'), 'export const a: number = 1\n')
+  writeFileSync(join(tmp, 'b.js'), 'export const b = 2\n')
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'a.ts', 'b.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries].toSorted(), ['a.ts', 'b.js'])
+  t.assert.equal(parsed.formats.get('a.ts'), 'module-typescript')
+  t.assert.equal(parsed.formats.get('b.js'), 'module')
+}))
+
+test('CLI: bundle rejects mixing .sol and .ts entries', (t) => {
+  const r = runCli(['bundle', 'a.sol', 'b.ts'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /must all be \.sol, all be \.php, all be \.js\/\.cjs\/\.mjs\/\.ts\/\.cts\/\.mts/)
+})
+
+test('CLI: a bundled .ts entry runs via --bundle=load, serving ESM TS sources from the bundle', withTmp((t, tmp) => {
+  cpSync(tsFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snap.br')
+  const build = runCli(['bundle', `--output=${bundlePath}`, 'src/entry.ts'], { cwd: tmp })
+  t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
+
+  // ESM resolution goes fully through the hooks, so the imported file can be
+  // served from the bundle even when it no longer exists on disk.
+  rmSync(join(tmp, 'src', 'hello.ts'))
+  const load = runCli(
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.ts'],
+    { cwd: tmp },
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+test('CLI: a .ts entry with ESM syntax in a typeless package bundles with the detected format and runs via --bundle=load', withTmp((t, tmp) => {
+  // No `type` field: Node decides by module-syntax detection. The bundle must
+  // record module-typescript (matching Node), not commonjs-typescript derived
+  // from the package default — the CJS-TS translator would throw
+  // "Cannot use import statement outside a module" on these sources.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-detect', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { greet } from "./hello.ts"\nconsole.log(greet("detected"))\n')
+  writeFileSync(join(tmp, 'hello.ts'), 'export const greet = (name: string): string => `hello, ${name}`\n')
+
+  const bundlePath = join(tmp, 'snap.br')
+  const build = runCli(['bundle', `--output=${bundlePath}`, 'entry.ts'], { cwd: tmp })
+  t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
+  t.assert.equal(parsed.formats.get('entry.ts'), 'module-typescript')
+  t.assert.equal(parsed.formats.get('hello.ts'), 'module-typescript')
+
+  const load = runCli(
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'entry.ts'],
+    { cwd: tmp },
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, detected\n')
+}))
+
+test('CLI: a commonjs-typescript bundle (.ts requiring .cts) runs via --bundle=load', withTmp((t, tmp) => {
+  // No `type` in package.json → .ts is commonjs-typescript, like .js → commonjs.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-cjs', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'const { greet }: { greet: (n: string) => string } = require("./hello.cts")\nconsole.log(greet("cjs"))\n')
+  writeFileSync(join(tmp, 'hello.cts'), 'exports.greet = (name: string): string => `hello, ${name}`\n')
+
+  const bundlePath = join(tmp, 'snap.br')
+  const build = runCli(['bundle', `--output=${bundlePath}`, 'entry.ts'], { cwd: tmp })
+  t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
+  t.assert.equal(parsed.formats.get('entry.ts'), 'commonjs-typescript')
+  t.assert.equal(parsed.formats.get('hello.cts'), 'commonjs-typescript')
+
+  const load = runCli(
+    ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'entry.ts'],
+    { cwd: tmp },
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, cjs\n')
+}))
+
 // --- Regression: JS bundle correctness fixes ---
 
 const cjsFixture = join(here, 'fixtures', 'cli-run-cjs')

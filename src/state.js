@@ -252,13 +252,30 @@ export class State {
     const closestPkgAbsolute = findPackageJSON(url)
     const closestPkg = readPackageJSON(closestPkgAbsolute)
 
-    const closestType = closestPkg.type ?? 'commonjs'
-    assert.ok(closestType === 'module' || closestType === 'commonjs')
-    const extToFormat = { __proto__: null, '.json': 'json', '.mjs': 'module', '.cjs': 'commonjs', '.js': closestType }
+    const closestType = closestPkg.type
+    assert.ok(closestType === undefined || closestType === 'module' || closestType === 'commonjs')
+    const extToFormat = {
+      __proto__: null,
+      '.json': 'json',
+      '.mjs': 'module',
+      '.cjs': 'commonjs',
+      '.mts': 'module-typescript',
+      '.cts': 'commonjs-typescript',
+    }
+    if (closestType !== undefined) {
+      extToFormat['.js'] = closestType
+      extToFormat['.ts'] = `${closestType}-typescript`
+    }
     const inferredFormat = extToFormat[extname(file)]
     if (inferredFormat !== undefined) {
       if (format != null) assert.equal(format, inferredFormat)
       else format = inferredFormat
+    } else if (format == null) {
+      // No `type` in the nearest package.json: Node decides .js/.ts by
+      // module-syntax detection, so either variant is legitimate and the
+      // caller's reported format wins. When no format was provided at all
+      // (e.g. bundler plugins), keep the legacy commonjs default.
+      format = { __proto__: null, '.js': 'commonjs', '.ts': 'commonjs-typescript' }[extname(file)]
     }
 
     // findPackageJSON may land on a `{"type":"module"}`-style sub-bucket
