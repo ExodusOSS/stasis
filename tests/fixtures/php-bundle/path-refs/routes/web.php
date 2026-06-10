@@ -1,0 +1,4 @@
+<?php
+
+// web routes
+return [];

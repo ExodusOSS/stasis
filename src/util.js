@@ -1,6 +1,24 @@
+import { realpathSync } from 'node:fs'
+import { isAbsolute, join, relative } from 'node:path'
 import { constants as zlibConstants } from 'node:zlib'
 
 const sep = '/'
+
+// Resolve `baseDir/relPath` through symlinks and confirm the real target stays
+// within `realBase` (the caller-resolved real path of baseDir). Throws on a
+// symlink that escapes the bundle root: a crafted in-tree symlink
+// (`link.sh -> /etc/passwd`, or a symlinked directory) must not pull an
+// external file into a self-contained, attestable bundle. The textual path
+// guards elsewhere don't catch this because they never resolve symlinks.
+// realpathSync surfaces ENOENT for a missing path, which the loaders' disk
+// walks already handle as "missing".
+export function assertRealPathWithinBase(realBase, baseDir, relPath) {
+  const real = realpathSync(join(baseDir, relPath))
+  const rel = relative(realBase, real).split(/[\\/]/u).join('/')
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`Refusing to follow symlink escaping bundle root: ${relPath} -> ${real}`)
+  }
+}
 
 export function assert(condition, msg) {
   if (!condition) throw new Error(msg)

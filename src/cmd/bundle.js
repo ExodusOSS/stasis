@@ -12,8 +12,19 @@ import {
   collectSolidityFilesFromDisk,
   readRemappingsFile,
 } from '../loaders/solidity.js'
+import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
+import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
+import {
+  bucketizePhpSources,
+  buildPhpTree,
+  collectPhpFilesFromDisk,
+  loadComposerAutoload,
+  loadLaravelProviderFiles,
+} from '../loaders/php.js'
 
-const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
+const JS_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
+const BASH_EXTS = new Set(['.sh', '.bash'])
+const RUST_EXTS = new Set(['.rs'])
 
 // Fallback package identity for the workspace bucket when no package.json
 // with a name+version can be found by walking up from any of the bundled
@@ -22,6 +33,18 @@ const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 const SOLIDITY_WORKSPACE_NAME = 'solidity-bundle'
 const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
+
+const BASH_WORKSPACE_NAME = 'bash-bundle'
+const BASH_WORKSPACE_VERSION = '0.0.0'
+const BASH_FORMAT = 'bash'
+
+const RUST_WORKSPACE_NAME = 'rust-bundle'
+const RUST_WORKSPACE_VERSION = '0.0.0'
+const RUST_FORMAT = 'rust'
+
+const PHP_WORKSPACE_NAME = 'php-bundle'
+const PHP_WORKSPACE_VERSION = '0.0.0'
+const PHP_FORMAT = 'php'
 
 // Walk up from the file's directory looking for the nearest package.json
 // with both `name` and `version`. Returns { pkgDir, name, version }
@@ -80,6 +103,63 @@ export function outermostDir(paths, cwd) {
   return rel === '' ? '.' : rel
 }
 
+// Assemble a scope=full code Bundle from a collected source set and its
+// resolution graph. Shared by every non-JS bundler (Solidity/Bash/Rust): the
+// language-specific work (collecting files, resolving the graph, deciding what
+// counts as "missing") happens in the caller; here every file is bucketized
+// the same way, tagged `format`, and the whole resolution graph is keyed under
+// a single `conditionKey`.
+//
+// Files are partitioned into per-package buckets by the nearest package.json
+// with name+version: node_modules files into `node_modules/<pkg>` buckets,
+// workspace files into their package dir, and anything with no discoverable
+// package.json into the "." bucket with the given placeholder identity (the
+// Bundle layout requires every bucket to attest a name+version). A file under
+// node_modules whose nearest package.json is the workspace root is rejected —
+// that hides a misconfigured dependency rather than silently mislabeling it.
+//
+// Unlike the wildcard "*" JS bundles use, these formats don't vary by Node
+// resolution condition, so every edge lands under the one `conditionKey`.
+function assembleCodeBundle({
+  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, conditionKey,
+}) {
+  const modules = new Map()
+  const ensureBucket = (dir, name, version) => {
+    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
+    return modules.get(dir)
+  }
+
+  for (const [path, content] of sources) {
+    const meta = findPackageMetadata(baseDir, path)
+    const inNodeModules = splitNodeModulesPath(path) !== null
+    if (meta) {
+      if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
+        throw new Error(`No package.json with name+version found for ${path}`)
+      }
+      const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
+      ensureBucket(meta.pkgDir, meta.name, meta.version).files[rel] = content
+    } else {
+      if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
+      ensureBucket('.', workspaceName, workspaceVersion).files[path] = content
+    }
+  }
+
+  const formats = new Map()
+  for (const path of sources.keys()) formats.set(path, format)
+
+  const importsForKey = new Map()
+  for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
+  const imports = new Map([[conditionKey, importsForKey]])
+
+  return new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(entries),
+    modules,
+    formats,
+    imports,
+  })
+}
+
 // Build a stasis Bundle (in-memory) from a list of entry .sol files and
 // an optional mapping file. The mapping file (foundry.toml or
 // remappings.txt) is parsed for remappings but NOT included in the
@@ -114,49 +194,180 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  // Partition every loaded .sol file into a per-package bucket. The
-  // bucket is the directory holding the nearest package.json with a
-  // name+version. node_modules files land in `node_modules/<pkg>` buckets
-  // (or deeper, when a nested package.json claims the file); workspace
-  // files land in their nearest workspace package.json's dir, or in the
-  // fallback "." bucket with placeholder metadata when no package.json
-  // could be found.
-  const modules = new Map()
-  const ensureBucket = (dir, name, version) => {
-    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
-    return modules.get(dir)
+  return assembleCodeBundle({
+    baseDir,
+    entries: normalized,
+    sources,
+    resolutions,
+    workspaceName: SOLIDITY_WORKSPACE_NAME,
+    workspaceVersion: SOLIDITY_WORKSPACE_VERSION,
+    format: SOLIDITY_FORMAT,
+    conditionKey: 'solidity',
+  })
+}
+
+// Build a stasis Bundle (in-memory) from a list of entry .sh/.bash files by
+// walking the source/exec graph and reading every reachable script from disk.
+// Mirrors buildSolidityBundle's bucketizing, with a bash-specific policy:
+//   - a .sh/.bash reference whose path lands INSIDE the bundle root
+//     (`source ./lib.sh`, `dir/x.sh`) but resolves to no bundled script is
+//     fatal — a self-contained bundle can't carry a dangling local source —
+//     as is a missing entry.
+//   - everything else is best-effort and dropped: PATH commands (`grep`,
+//     `node`), dynamic `$VAR` paths, extensionless sources, absolute system
+//     paths (`source /etc/profile.d/x.sh`), and `../` paths that escape the
+//     root — none can live in the bundle.
+//   - imports live under a dedicated "bash" condition key (like "solidity"),
+//     not the JS-bundle wildcard "*".
+export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('buildBashBundle: at least one entry .sh/.bash file is required')
+  }
+  for (const e of entries) {
+    if (!BASH_EXTS.has(extname(e))) throw new Error(`buildBashBundle: not a .sh/.bash file: ${e}`)
   }
 
-  for (const [path, content] of sources) {
-    const meta = findPackageMetadata(baseDir, path)
-    const inNodeModules = splitNodeModulesPath(path) !== null
-    if (meta) {
-      // A file inside node_modules whose nearest package.json is the
-      // workspace root would silently land in the workspace bucket and
-      // hide the misconfigured dependency — refuse instead.
-      if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
-        throw new Error(`No package.json with name+version found for ${path}`)
-      }
-      const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
-      ensureBucket(meta.pkgDir, meta.name, meta.version).files[rel] = content
-    } else {
-      // Files under node_modules without any discoverable package.json
-      // would otherwise leak into the workspace bucket; that's a project
-      // misconfiguration, surface it loudly.
-      if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
-      ensureBucket('.', SOLIDITY_WORKSPACE_NAME, SOLIDITY_WORKSPACE_VERSION).files[path] = content
-    }
+  const baseDir = resolve(cwd)
+  const normalized = normalizeEntries(entries, cwd)
+
+  const sources = await collectBashFilesFromDisk(baseDir, normalized)
+  const { resolutions, missing } = buildBashTree(sources)
+
+  // Bundles must be self-contained: every entry must load, and every .sh/.bash
+  // reference pointing inside the bundle root must resolve to a bundled script.
+  // External/best-effort references (commands, $VAR paths, extensionless,
+  // absolute, or `../`-escaping sources) are left out by buildBashTree and
+  // never reach `missing`.
+  const issues = []
+  for (const entry of normalized) {
+    if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
   }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved script: ${spec} from ${from}`)
+  }
+  if (issues.length > 0) {
+    throw new Error(`Bash bundle has unresolved scripts:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+  }
+
+  return assembleCodeBundle({
+    baseDir,
+    entries: normalized,
+    sources,
+    resolutions,
+    workspaceName: BASH_WORKSPACE_NAME,
+    workspaceVersion: BASH_WORKSPACE_VERSION,
+    format: BASH_FORMAT,
+    conditionKey: 'bash',
+  })
+}
+
+// Build a stasis Bundle (in-memory) from a list of entry .rs files by walking
+// `mod` declarations from each crate root and reading every reachable module
+// from disk. The bundle must be self-contained: an unresolvable `mod foo;`
+// (no backing file) is fatal, as is a missing entry. `use crate::` edges are
+// recorded in the import graph but stay best-effort — they never widen the
+// file set, and their resolution is approximate (item-vs-module, re-exports),
+// so they aren't gated; external crates and std are ignored outright. Imports
+// live under a dedicated "rust" condition key.
+export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('buildRustBundle: at least one entry .rs file is required')
+  }
+  for (const e of entries) {
+    if (!RUST_EXTS.has(extname(e))) throw new Error(`buildRustBundle: not a .rs file: ${e}`)
+  }
+
+  const baseDir = resolve(cwd)
+  const normalized = normalizeEntries(entries, cwd)
+
+  const sources = await collectRustFilesFromDisk(baseDir, normalized)
+  const { resolutions, missing } = buildRustTree(sources)
+
+  const issues = []
+  for (const entry of normalized) {
+    if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
+  }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved module: ${spec} from ${from}`)
+  }
+  if (issues.length > 0) {
+    throw new Error(`Rust bundle has unresolved modules:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+  }
+
+  return assembleCodeBundle({
+    baseDir,
+    entries: normalized,
+    sources,
+    resolutions,
+    workspaceName: RUST_WORKSPACE_NAME,
+    workspaceVersion: RUST_WORKSPACE_VERSION,
+    format: RUST_FORMAT,
+    conditionKey: 'rust',
+  })
+}
+
+// Build a stasis Bundle (in-memory) from a list of entry .php files by
+// statically scanning their `require`/`include` graph -- and, when the project
+// uses Composer, the class-autoload graph too -- reading every reachable file
+// from disk. No PHP is ever executed. Mirrors buildSolidityBundle: files are
+// bucketed per package.json, tagged with the `php` format, and edges are keyed
+// under a dedicated "php" condition bucket.
+//
+// Composer autoloading is followed automatically when a composer.json (or
+// generated vendor/composer/autoload_*.php map) is present: PSR-4/PSR-0/
+// classmap/files config is read and the classes each file references (`use`
+// imports, `new`/`extends`/`implements`, type hints, …) are resolved to their
+// files the way Composer's ClassLoader would. That resolution is best-effort
+// (unresolvable references are typically built-in or extension classes), so it
+// never blocks the bundle; explicit `require`/`include` of a literal path is
+// still strict.
+//
+// Refuses to write when an entry can't be loaded or any explicit include is
+// unresolved -- a bundle with holes would silently operate on a partial set of
+// sources.
+export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('buildPhpBundle: at least one entry .php file is required')
+  }
+  for (const e of entries) {
+    if (!e.endsWith('.php')) throw new Error(`buildPhpBundle: not a .php file: ${e}`)
+  }
+
+  const baseDir = resolve(cwd)
+  const normalized = normalizeEntries(entries, cwd)
+  const autoload = loadComposerAutoload(baseDir)
+
+  // Laravel auto-discovers vendor/app service providers (via composer metadata
+  // and bootstrap/providers.php) rather than referencing them statically; seed
+  // them as extra roots so the config/route/view files they pull in get bundled.
+  const providerRoots = loadLaravelProviderFiles(baseDir, autoload)
+
+  const sources = await collectPhpFilesFromDisk(baseDir, [...normalized, ...providerRoots], { autoload })
+  const { resolutions, missing } = buildPhpTree(sources, { baseDir, autoload })
+
+  const issues = []
+  for (const entry of normalized) {
+    if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
+  }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved import: ${spec} from ${from}`)
+  }
+  if (issues.length > 0) {
+    throw new Error(`PHP bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+  }
+
+  // Group per Composer package (vendor/<pkg> buckets with name+version from
+  // composer.json / installed.json), not the node_modules-based bucketizer.
+  const modules = bucketizePhpSources(baseDir, sources, PHP_WORKSPACE_NAME, PHP_WORKSPACE_VERSION)
 
   const formats = new Map()
-  for (const path of sources.keys()) formats.set(path, SOLIDITY_FORMAT)
+  for (const path of sources.keys()) formats.set(path, PHP_FORMAT)
 
-  // Solidity imports don't depend on Node conditions; key them under a
-  // dedicated "solidity" bucket rather than the wildcard "*" used for
-  // JS code bundles.
+  // PHP includes don't depend on Node conditions; key them under a dedicated
+  // "php" bucket rather than the wildcard "*" used for JS code bundles.
   const importsForKey = new Map()
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
-  const imports = new Map([['solidity', importsForKey]])
+  const imports = new Map([['php', importsForKey]])
 
   return new Bundle({
     config: { scope: 'full' },
@@ -167,11 +378,14 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   })
 }
 
-// Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs files
-// by statically scanning the require/import graph and reading reachable file
-// contents from disk -- no user code is ever loaded or executed. The bundle
-// shape matches what `src/loader.js` records at runtime, so the result loads
-// via `stasis run --bundle=load` interchangeably with a runtime-produced one.
+// Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs (or
+// .ts/.cts/.mts) files by statically scanning the require/import graph and
+// reading reachable file contents from disk -- no user code is ever loaded or
+// executed. TypeScript files behave exactly like JS ones: sources are stored
+// verbatim with Node's type-stripping formats recorded, and Node strips the
+// types at load time. The bundle shape matches what `src/loader.js` records
+// at runtime, so the result loads via `stasis run --bundle=load`
+// interchangeably with a runtime-produced one.
 //
 // Refuses to write when the bundle is guaranteed broken (or silently divergent
 // from plain node) at load time: an unresolved static ESM `import`/`export ...
@@ -186,10 +400,10 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 // (or `EXODUS_STASIS_SCOPE`); pass `scope` explicitly to override.
 export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
-    throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs file is required')
+    throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
   for (const e of entries) {
-    if (!JS_EXTS.has(extname(e))) throw new Error(`buildJsBundle: not a JS file: ${e}`)
+    if (!JS_EXTS.has(extname(e))) throw new Error(`buildJsBundle: not a JS/TS file: ${e}`)
   }
 
   const baseDir = resolve(cwd)
@@ -235,10 +449,11 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
   // Fatal: parse failures whose edges are genuinely unknown. Script (CJS)
   // files only warn: oxc's recovered AST keeps their require()/import() calls
   // (Node's module wrapper accepts code oxc rejects, e.g. a top-level `return`
-  // guard), so scan salvages the edges. A module-format file in the
-  // eagerly-linked set is a hole we can't enumerate; so is any file the parser
-  // couldn't process at all (recovered=false -- nothing was salvaged).
-  const fatalParse = (p) => staticReachable.has(p.url) && (p.format === 'module' || !p.recovered)
+  // guard), so scan salvages the edges. A module-family file ('module' /
+  // 'module-typescript') in the eagerly-linked set is a hole we can't
+  // enumerate; so is any file the parser couldn't process at all
+  // (recovered=false -- nothing was salvaged, and format may even be null).
+  const fatalParse = (p) => staticReachable.has(p.url) && (p.format?.startsWith('module') === true || !p.recovered)
   for (const p of scanner.parseErrors) {
     if (fatalParse(p)) fatal.push(`parse error in ${fileURLToPath(p.url)}: ${p.message}`)
   }
@@ -318,11 +533,14 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
 // stasis bundle (matching the on-disk format of `stasis.code.br`). When
 // `output` is provided, writes to that path; otherwise writes to stdout.
-// Prints a one-line `[stasis] Bundled <n> files from <dir> to <dest>` summary
-// to stderr so it doesn't interleave with the binary output on stdout.
+// Prints a one-line `[stasis] Bundled <n> files in <p> packages from <dir> to
+// <dest>` summary to stderr so it doesn't interleave with the binary output on
+// stdout.
 //
-// Dispatch by extension: all entries must be either .sol (Solidity) OR
-// .js/.cjs/.mjs (JS, via static scan). Mixing fails fast; --mapping is .sol only.
+// Dispatch by extension: all entries must be one language — .sol (Solidity),
+// .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static scan), .sh/.bash
+// (Bash, via source/exec graph walk), or .rs (Rust, via mod-declaration walk).
+// Mixing fails fast; --mapping is .sol only, --scope/--lockfile are JS/TS only.
 //
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
@@ -335,9 +553,12 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     throw new Error('bundleCommand: at least one entry file is required')
   }
   const isSol = entries.every((e) => e.endsWith('.sol'))
+  const isPhp = entries.every((e) => e.endsWith('.php'))
   const isJs = entries.every((e) => JS_EXTS.has(extname(e)))
-  if (!isSol && !isJs) {
-    throw new Error('bundleCommand: entries must all be .sol or all be .js/.cjs/.mjs (no mixing)')
+  const isBash = entries.every((e) => BASH_EXTS.has(extname(e)))
+  const isRust = entries.every((e) => RUST_EXTS.has(extname(e)))
+  if (!isSol && !isPhp && !isJs && !isBash && !isRust) {
+    throw new Error('bundleCommand: entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs (no mixing)')
   }
   if (mappingFile && !isSol) {
     throw new Error('bundleCommand: --mapping is only valid for .sol bundles')
@@ -351,15 +572,33 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
 
   let serialized
   let files
+  let modules
   let lockData
   if (isSol) {
     const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
     serialized = bundle.serializeCode()
     files = [...bundle.sources.keys()]
+    modules = bundle.modules
+  } else if (isPhp) {
+    const bundle = await buildPhpBundle({ cwd, entries })
+    serialized = bundle.serializeCode()
+    files = [...bundle.sources.keys()]
+    modules = bundle.modules
+  } else if (isBash) {
+    const bundle = await buildBashBundle({ cwd, entries })
+    serialized = bundle.serializeCode()
+    files = [...bundle.sources.keys()]
+    modules = bundle.modules
+  } else if (isRust) {
+    const bundle = await buildRustBundle({ cwd, entries })
+    serialized = bundle.serializeCode()
+    files = [...bundle.sources.keys()]
+    modules = bundle.modules
   } else {
     const state = await buildJsBundle({ cwd, entries, scope })
     serialized = state.sourceData
     files = [...state.sources.keys()]
+    modules = state.modules
     if (lockfile) lockData = state.lockData
   }
 
@@ -378,5 +617,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   }
   const fromDir = outermostDir(files, resolve(cwd))
   const dest = output ?? '<stdout>'
-  console.warn(`[stasis] Bundled ${files.length} files from ${fromDir} to ${dest}`)
+  // Count packages: every non-empty bucket, with the project's own source (the
+  // "." workspace bucket) counting as one package alongside each dependency.
+  const packages = [...modules.values()].filter((m) => Object.keys(m.files).length > 0).length
+  const pkgLabel = `${packages} package${packages === 1 ? '' : 's'}`
+  console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
 }

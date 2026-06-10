@@ -5,10 +5,12 @@
 // file (foundry.toml or remappings.txt) is read to extract `remappings`,
 // but is itself not included in `sources`.
 
-import { statSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+
+import { assertRealPathWithinBase } from '../util.js'
 
 const SOL_IMPORT_RE = /import\s[^"']*["']([^"']+)["']/gu
 
@@ -145,6 +147,7 @@ export function buildSolidityTree(sources, { remappings = [], baseDir } = {}) {
 export async function collectSolidityFilesFromDisk(baseDir, entries, remappings) {
   const sources = new Map()
   const knownEntries = new Set(entries)
+  const realBase = realpathSync(baseDir)
 
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))
@@ -152,6 +155,7 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings)
     const reads = await Promise.all(
       toLoad.map(async (relPath) => {
         try {
+          assertRealPathWithinBase(realBase, baseDir, relPath)
           return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
         } catch (err) {
           if (err.code === 'ENOENT') {
