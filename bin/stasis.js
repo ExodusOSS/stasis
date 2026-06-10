@@ -21,6 +21,7 @@ function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=path/to/out.stasis.code.br] path/to/file.sol ...
+ stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=path/to/out.stasis.code.br] path/to/file.js ...
  stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.(sh|bash) ...
  stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.rs ...
@@ -147,10 +148,13 @@ if (command === '-v' || command === '--version') {
   }
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
   const allSol = argv.every((f) => f.endsWith('.sol'))
+  const allPhp = argv.every((f) => f.endsWith('.php'))
   const allJs = argv.every((f) => /\.(?:js|cjs|mjs)$/u.test(f))
   const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))
   const allRust = argv.every((f) => f.endsWith('.rs'))
-  if (!allSol && !allJs && !allBash && !allRust) usage('Error: bundle entries must all be .sol, all be .js/.cjs/.mjs, all be .sh/.bash, or all be .rs')
+  if (!allSol && !allPhp && !allJs && !allBash && !allRust) {
+    usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs, all be .sh/.bash, or all be .rs')
+  }
   if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
   if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
   if (values.scope && !['node_modules', 'full'].includes(values.scope)) {

@@ -1,0 +1,12 @@
+{
+  "autoload": {
+    "psr-4": {
+      "App\\": "src/",
+      "Bad\\": "src/../../../../etc"
+    },
+    "files": [
+      "src/helpers.php",
+      "src/../../../../etc/passwd"
+    ]
+  }
+}

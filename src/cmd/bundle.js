@@ -14,6 +14,13 @@ import {
 } from '../loaders/solidity.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
+import {
+  bucketizePhpSources,
+  buildPhpTree,
+  collectPhpFilesFromDisk,
+  loadComposerAutoload,
+  loadLaravelProviderFiles,
+} from '../loaders/php.js'
 
 const JS_EXTS = new Set(['.js', '.cjs', '.mjs'])
 const BASH_EXTS = new Set(['.sh', '.bash'])
@@ -34,6 +41,10 @@ const BASH_FORMAT = 'bash'
 const RUST_WORKSPACE_NAME = 'rust-bundle'
 const RUST_WORKSPACE_VERSION = '0.0.0'
 const RUST_FORMAT = 'rust'
+
+const PHP_WORKSPACE_NAME = 'php-bundle'
+const PHP_WORKSPACE_VERSION = '0.0.0'
+const PHP_FORMAT = 'php'
 
 // Walk up from the file's directory looking for the nearest package.json
 // with both `name` and `version`. Returns { pkgDir, name, version }
@@ -295,6 +306,78 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   })
 }
 
+// Build a stasis Bundle (in-memory) from a list of entry .php files by
+// statically scanning their `require`/`include` graph -- and, when the project
+// uses Composer, the class-autoload graph too -- reading every reachable file
+// from disk. No PHP is ever executed. Mirrors buildSolidityBundle: files are
+// bucketed per package.json, tagged with the `php` format, and edges are keyed
+// under a dedicated "php" condition bucket.
+//
+// Composer autoloading is followed automatically when a composer.json (or
+// generated vendor/composer/autoload_*.php map) is present: PSR-4/PSR-0/
+// classmap/files config is read and the classes each file references (`use`
+// imports, `new`/`extends`/`implements`, type hints, …) are resolved to their
+// files the way Composer's ClassLoader would. That resolution is best-effort
+// (unresolvable references are typically built-in or extension classes), so it
+// never blocks the bundle; explicit `require`/`include` of a literal path is
+// still strict.
+//
+// Refuses to write when an entry can't be loaded or any explicit include is
+// unresolved -- a bundle with holes would silently operate on a partial set of
+// sources.
+export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('buildPhpBundle: at least one entry .php file is required')
+  }
+  for (const e of entries) {
+    if (!e.endsWith('.php')) throw new Error(`buildPhpBundle: not a .php file: ${e}`)
+  }
+
+  const baseDir = resolve(cwd)
+  const normalized = normalizeEntries(entries, cwd)
+  const autoload = loadComposerAutoload(baseDir)
+
+  // Laravel auto-discovers vendor/app service providers (via composer metadata
+  // and bootstrap/providers.php) rather than referencing them statically; seed
+  // them as extra roots so the config/route/view files they pull in get bundled.
+  const providerRoots = loadLaravelProviderFiles(baseDir, autoload)
+
+  const sources = await collectPhpFilesFromDisk(baseDir, [...normalized, ...providerRoots], { autoload })
+  const { resolutions, missing } = buildPhpTree(sources, { baseDir, autoload })
+
+  const issues = []
+  for (const entry of normalized) {
+    if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
+  }
+  for (const { spec, from } of missing) {
+    issues.push(`Unresolved import: ${spec} from ${from}`)
+  }
+  if (issues.length > 0) {
+    throw new Error(`PHP bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
+  }
+
+  // Group per Composer package (vendor/<pkg> buckets with name+version from
+  // composer.json / installed.json), not the node_modules-based bucketizer.
+  const modules = bucketizePhpSources(baseDir, sources, PHP_WORKSPACE_NAME, PHP_WORKSPACE_VERSION)
+
+  const formats = new Map()
+  for (const path of sources.keys()) formats.set(path, PHP_FORMAT)
+
+  // PHP includes don't depend on Node conditions; key them under a dedicated
+  // "php" bucket rather than the wildcard "*" used for JS code bundles.
+  const importsForKey = new Map()
+  for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
+  const imports = new Map([['php', importsForKey]])
+
+  return new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(normalized),
+    modules,
+    formats,
+    imports,
+  })
+}
+
 // Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs files
 // by statically scanning the require/import graph and reading reachable file
 // contents from disk -- no user code is ever loaded or executed. The bundle
@@ -371,13 +454,14 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
 // stasis bundle (matching the on-disk format of `stasis.code.br`). When
 // `output` is provided, writes to that path; otherwise writes to stdout.
-// Prints a one-line `[stasis] Bundled <n> files from <dir> to <dest>` summary
-// to stderr so it doesn't interleave with the binary output on stdout.
+// Prints a one-line `[stasis] Bundled <n> files in <p> packages from <dir> to
+// <dest>` summary to stderr so it doesn't interleave with the binary output on
+// stdout.
 //
 // Dispatch by extension: all entries must be one language — .sol (Solidity),
-// .js/.cjs/.mjs (JS, via static scan), .sh/.bash (Bash, via source/exec graph
-// walk), or .rs (Rust, via mod-declaration walk). Mixing fails fast;
-// --mapping is .sol only, --scope/--lockfile are JS only.
+// .php (PHP), .js/.cjs/.mjs (JS, via static scan), .sh/.bash (Bash, via
+// source/exec graph walk), or .rs (Rust, via mod-declaration walk). Mixing
+// fails fast; --mapping is .sol only, --scope/--lockfile are JS only.
 //
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
@@ -390,11 +474,12 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     throw new Error('bundleCommand: at least one entry file is required')
   }
   const isSol = entries.every((e) => e.endsWith('.sol'))
+  const isPhp = entries.every((e) => e.endsWith('.php'))
   const isJs = entries.every((e) => JS_EXTS.has(extname(e)))
   const isBash = entries.every((e) => BASH_EXTS.has(extname(e)))
   const isRust = entries.every((e) => RUST_EXTS.has(extname(e)))
-  if (!isSol && !isJs && !isBash && !isRust) {
-    throw new Error('bundleCommand: entries must all be .sol, all be .js/.cjs/.mjs, all be .sh/.bash, or all be .rs (no mixing)')
+  if (!isSol && !isPhp && !isJs && !isBash && !isRust) {
+    throw new Error('bundleCommand: entries must all be .sol, all be .php, all be .js/.cjs/.mjs, all be .sh/.bash, or all be .rs (no mixing)')
   }
   if (mappingFile && !isSol) {
     throw new Error('bundleCommand: --mapping is only valid for .sol bundles')
@@ -408,23 +493,33 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
 
   let serialized
   let files
+  let modules
   let lockData
   if (isSol) {
     const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
     serialized = bundle.serializeCode()
     files = [...bundle.sources.keys()]
+    modules = bundle.modules
+  } else if (isPhp) {
+    const bundle = await buildPhpBundle({ cwd, entries })
+    serialized = bundle.serializeCode()
+    files = [...bundle.sources.keys()]
+    modules = bundle.modules
   } else if (isBash) {
     const bundle = await buildBashBundle({ cwd, entries })
     serialized = bundle.serializeCode()
     files = [...bundle.sources.keys()]
+    modules = bundle.modules
   } else if (isRust) {
     const bundle = await buildRustBundle({ cwd, entries })
     serialized = bundle.serializeCode()
     files = [...bundle.sources.keys()]
+    modules = bundle.modules
   } else {
     const state = await buildJsBundle({ cwd, entries, scope })
     serialized = state.sourceData
     files = [...state.sources.keys()]
+    modules = state.modules
     if (lockfile) lockData = state.lockData
   }
 
@@ -443,5 +538,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   }
   const fromDir = outermostDir(files, resolve(cwd))
   const dest = output ?? '<stdout>'
-  console.warn(`[stasis] Bundled ${files.length} files from ${fromDir} to ${dest}`)
+  // Count packages: every non-empty bucket, with the project's own source (the
+  // "." workspace bucket) counting as one package alongside each dependency.
+  const packages = [...modules.values()].filter((m) => Object.keys(m.files).length > 0).length
+  const pkgLabel = `${packages} package${packages === 1 ? '' : 's'}`
+  console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
 }

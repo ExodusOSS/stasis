@@ -10,6 +10,7 @@ import { brotliDecompressSync } from 'node:zlib'
 import { Bundle } from '../src/bundle.js'
 import {
   buildBashBundle,
+  buildPhpBundle,
   buildRustBundle,
   buildSolidityBundle,
   bundleCommand,
@@ -21,6 +22,7 @@ const cli = join(here, '..', 'bin', 'stasis.js')
 const fixtures = join(here, 'fixtures', 'solidity-bundle')
 const bashFixtures = join(here, 'fixtures', 'bash-bundle')
 const rustFixtures = join(here, 'fixtures', 'rust-bundle')
+const phpFixtures = join(here, 'fixtures', 'php-bundle')
 
 const withTmp = (fn) => async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-cmd-'))
@@ -430,7 +432,7 @@ test('CLI: bundle prints a summary line to stderr with the file count, outermost
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'src/A.sol'], { cwd: join(fixtures, 'basic') })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
+  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files in 1 package from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
 }))
 
 test('CLI: bundle summary falls back to <stdout> when no -o is given', (t) => {
@@ -439,7 +441,7 @@ test('CLI: bundle summary falls back to <stdout> when no -o is given', (t) => {
     env: cleanEnv,
   })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr.toString('utf8')}`)
-  t.assert.match(r.stderr.toString('utf8'), /\[stasis\] Bundled 2 files from src to <stdout>/)
+  t.assert.match(r.stderr.toString('utf8'), /\[stasis\] Bundled 2 files in 1 package from src to <stdout>/)
 })
 
 test('CLI: bundle summary shows "." as outermost dir when files share no common parent', withTmp((t, tmp) => {
@@ -450,7 +452,7 @@ test('CLI: bundle summary shows "." as outermost dir when files share no common 
     { cwd: join(fixtures, 'with-remappings-txt') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.match(r.stderr, /\[stasis\] Bundled 2 files from \. to /)
+  t.assert.match(r.stderr, /\[stasis\] Bundled 2 files in 1 package from \. to /)
 }))
 
 test('CLI: bundle summary counts files across workspace AND node_modules buckets', withTmp((t, tmp) => {
@@ -462,7 +464,7 @@ test('CLI: bundle summary counts files across workspace AND node_modules buckets
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   // 3 files total: src/A.sol + node_modules/foo/X.sol + node_modules/@oz/contracts/utils/Math.sol
   // Outermost shared parent is the project root ".".
-  t.assert.match(r.stderr, /\[stasis\] Bundled 3 files from \. to /)
+  t.assert.match(r.stderr, /\[stasis\] Bundled 3 files in 3 packages from \. to /)
 }))
 
 test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
@@ -478,6 +480,285 @@ test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['src/A.sol', 'src/B.sol', 'src/Shared.sol'],
   )
+}))
+
+// --- PHP bundles ---
+
+test('buildPhpBundle produces a Bundle with sources, formats, imports, entries', async (t) => {
+  const cwd = join(phpFixtures, 'basic')
+  const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php'] })
+
+  t.assert.ok(bundle instanceof Bundle)
+  t.assert.deepEqual(bundle.config, { scope: 'full' })
+  t.assert.deepEqual([...bundle.entries], ['src/A.php'])
+
+  // No package.json anywhere in the basic fixture → fallback bucket "."
+  t.assert.deepEqual([...bundle.modules.keys()], ['.'])
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'php-bundle')
+  t.assert.equal(workspace.version, '0.0.0')
+  t.assert.deepEqual(Object.keys(workspace.files).toSorted(), ['src/A.php', 'src/B.php'])
+  t.assert.equal(workspace.files['src/A.php'], readFileSync(join(cwd, 'src/A.php'), 'utf8'))
+
+  // Every loaded file gets a 'php' format tag.
+  t.assert.equal(bundle.formats.get('src/A.php'), 'php')
+  t.assert.equal(bundle.formats.get('src/B.php'), 'php')
+
+  // Includes live under the "php" condition key (not the JS-bundle "*").
+  t.assert.deepEqual([...bundle.imports.keys()], ['php'])
+  t.assert.equal(bundle.imports.get('php').get('src/A.php').get('./B.php'), 'src/B.php')
+})
+
+test('buildPhpBundle takes the workspace name+version from the nearest composer.json', async (t) => {
+  const cwd = join(phpFixtures, 'with-composer-json')
+  const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php'] })
+  t.assert.deepEqual([...bundle.modules.keys()], ['.'])
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'my-php-app')
+  t.assert.equal(workspace.version, '2.1.0')
+  t.assert.deepEqual(Object.keys(workspace.files).toSorted(), ['src/A.php', 'src/B.php'])
+})
+
+test('buildPhpBundle resolves bare includes file- and project-relative', async (t) => {
+  const cwd = join(phpFixtures, 'bare')
+  const bundle = await buildPhpBundle({ cwd, entries: ['index.php'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['helpers.php', 'index.php', 'lib/Util.php'],
+  )
+  const resolutions = bundle.imports.get('php').get('index.php')
+  t.assert.equal(resolutions.get('helpers.php'), 'helpers.php')
+  t.assert.equal(resolutions.get('lib/Util.php'), 'lib/Util.php')
+})
+
+test('buildPhpBundle follows nested ../ includes across subdirectories', async (t) => {
+  const cwd = join(phpFixtures, 'nested')
+  const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['src/A.php', 'src/C.php', 'src/sub/B.php'],
+  )
+  t.assert.equal(bundle.imports.get('php').get('src/A.php').get('./sub/B.php'), 'src/sub/B.php')
+  t.assert.equal(bundle.imports.get('php').get('src/sub/B.php').get('../C.php'), 'src/C.php')
+})
+
+test('buildPhpBundle follows the Composer autoload graph and bundles only referenced classes', async (t) => {
+  const cwd = join(phpFixtures, 'composer')
+  const bundle = await buildPhpBundle({ cwd, entries: ['index.php'] })
+  const files = [...bundle.sources.keys()].toSorted()
+
+  // Explicit includes (vendor/autoload.php + the composer machinery it requires)
+  // AND autoloaded classes reachable from index.php's references.
+  t.assert.deepEqual(files, [
+    'index.php',
+    'src/Helper.php', // same-namespace reference, no `use`
+    'src/Legacy/Thing.php', // resolved via the classmap
+    'src/Repo/UserRepo.php', // PSR-4 (root)
+    'src/Service.php', // `use App\Service` + `new Service()`
+    'src/helpers.php', // `files` autoload (unconditional)
+    'vendor/acme/lib/src/Client.php', // PSR-4 (vendor)
+    'vendor/autoload.php',
+    'vendor/composer/autoload_classmap.php',
+    'vendor/composer/autoload_files.php',
+    'vendor/composer/autoload_psr4.php',
+    'vendor/composer/autoload_real.php',
+  ])
+
+  // Vendor dependencies are grouped into their own per-package bucket with
+  // name+version (name from composer.json, version from installed.json), not
+  // dumped under "."; the workspace bucket takes the root composer.json's name.
+  t.assert.equal(bundle.modules.get('.').name, 'acme/app')
+  const lib = bundle.modules.get('vendor/acme/lib')
+  t.assert.equal(lib.name, 'acme/lib')
+  t.assert.equal(lib.version, '1.4.2')
+  t.assert.deepEqual(Object.keys(lib.files), ['src/Client.php'])
+  t.assert.ok(!Object.keys(bundle.modules.get('.').files).includes('vendor/acme/lib/src/Client.php'))
+
+  // The two classes that exist + are resolvable via the autoload maps but are
+  // never referenced must NOT be bundled: an unused `use` import (Ghost) and a
+  // class present in both the PSR-4 tree and the classmap (Orphan).
+  t.assert.ok(!files.includes('src/Unused/Ghost.php'), 'unused `use` import must not be bundled')
+  t.assert.ok(!files.includes('src/Orphan.php'), 'unreferenced classmap/PSR-4 class must not be bundled')
+
+  // Autoloaded classes are tagged `php` and recorded as edges keyed by FQCN.
+  t.assert.equal(bundle.formats.get('vendor/acme/lib/src/Client.php'), 'php')
+  const edges = bundle.imports.get('php').get('src/Service.php')
+  t.assert.equal(edges.get('Vendor\\Acme\\Client'), 'vendor/acme/lib/src/Client.php')
+  t.assert.equal(edges.get('App\\Helper'), 'src/Helper.php')
+  t.assert.equal(edges.get('Legacy\\Thing'), 'src/Legacy/Thing.php')
+  t.assert.ok(!edges.has('App\\Unused\\Ghost'))
+})
+
+test('buildPhpBundle bundles the static directory of a dynamic include', async (t) => {
+  // index.php has a static `require __DIR__ . '/bootstrap.php'` and a dynamic
+  // `require __DIR__ . '/modules/' . $name . '.php'`. The dynamic target is only
+  // known at runtime, so every modules/*.php is bundled as a candidate (the
+  // non-.php modules/notes.txt is not), and the bundle succeeds.
+  const cwd = join(phpFixtures, 'dynamic-include')
+  const bundle = await buildPhpBundle({ cwd, entries: ['index.php'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['bootstrap.php', 'index.php', 'modules/admin.php', 'modules/default.php'],
+  )
+})
+
+test('buildPhpBundle bundles dir-anchored .php paths passed as arguments (Laravel routes)', async (t) => {
+  // bootstrap/app.php passes route files to the framework via `web:`/`api:` args
+  // (no `require` keyword). They must still be bundled; the static `require` of
+  // providers.php is too, while `dirname(__DIR__)` (a dir) and `'/up'` are not.
+  const cwd = join(phpFixtures, 'path-refs')
+  const bundle = await buildPhpBundle({ cwd, entries: ['bootstrap/app.php'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['bootstrap/app.php', 'bootstrap/providers.php', 'routes/api.php', 'routes/web.php'],
+  )
+})
+
+test('buildPhpBundle bundles files referenced via Laravel path helpers (base_path, config_path)', async (t) => {
+  // BroadcastServiceProvider does `require base_path('routes/channels.php')` and
+  // `require config_path('broadcasting.php')` -- root-relative paths the
+  // framework loads. Both must be bundled.
+  const cwd = join(phpFixtures, 'path-helpers')
+  const bundle = await buildPhpBundle({ cwd, entries: ['app/Providers/BroadcastServiceProvider.php'] })
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['app/Providers/BroadcastServiceProvider.php', 'config/broadcasting.php', 'routes/channels.php'],
+  )
+})
+
+test('buildPhpBundle follows auto-discovered Laravel providers and the files they reference', async (t) => {
+  // The entry (public/index.php) references no providers; they are discovered
+  // from vendor/composer/installed.json (extra.laravel.providers) and
+  // bootstrap/providers.php. The config files those providers publish via
+  // config_path(...) -- which previously went unbundled -- are now included.
+  const cwd = join(phpFixtures, 'laravel-providers')
+  const bundle = await buildPhpBundle({ cwd, entries: ['public/index.php'] })
+  const files = new Set(bundle.sources.keys())
+  t.assert.deepEqual([...bundle.entries], ['public/index.php'])
+  // Auto-discovered providers (vendor + app) are reached.
+  t.assert.ok(files.has('vendor/spatie/laravel-ignition/src/IgnitionServiceProvider.php'))
+  t.assert.ok(files.has('app/Providers/AppServiceProvider.php'))
+  // The top-level config files referenced via config_path() are bundled.
+  t.assert.ok(files.has('config/ignition.php'))
+  t.assert.ok(files.has('config/flare.php'))
+  // The vendor package is grouped under its own bucket.
+  t.assert.equal(bundle.modules.get('vendor/spatie/laravel-ignition').name, 'spatie/laravel-ignition')
+})
+
+test('buildPhpBundle deduplicates files included by multiple entries', async (t) => {
+  const cwd = join(phpFixtures, 'shared')
+  const bundle = await buildPhpBundle({ cwd, entries: ['src/A.php', 'src/B.php'] })
+  t.assert.deepEqual([...bundle.entries].toSorted(), ['src/A.php', 'src/B.php'])
+  t.assert.deepEqual(
+    Object.keys(bundle.modules.get('.').files).toSorted(),
+    ['src/A.php', 'src/B.php', 'src/Shared.php'],
+  )
+})
+
+test('buildPhpBundle normalises ./src/A.php-style entries', async (t) => {
+  const bundle = await buildPhpBundle({ cwd: join(phpFixtures, 'basic'), entries: ['./src/A.php'] })
+  t.assert.deepEqual([...bundle.entries], ['src/A.php'])
+})
+
+test('buildPhpBundle rejects an empty entry list', async (t) => {
+  await t.assert.rejects(() => buildPhpBundle({ cwd: join(phpFixtures, 'basic'), entries: [] }), /at least one entry/)
+})
+
+test('buildPhpBundle rejects non-.php entries', async (t) => {
+  await t.assert.rejects(
+    () => buildPhpBundle({ cwd: join(phpFixtures, 'basic'), entries: ['src/A.txt'] }),
+    /not a \.php file/,
+  )
+})
+
+test('buildPhpBundle rejects entries that escape baseDir', async (t) => {
+  await t.assert.rejects(
+    () => buildPhpBundle({ cwd: join(phpFixtures, 'basic'), entries: ['../missing/src/A.php'] }),
+    /Entry escapes baseDir/,
+  )
+})
+
+test('buildPhpBundle throws on an unresolved include', async (t) => {
+  await t.assert.rejects(
+    () => buildPhpBundle({ cwd: join(phpFixtures, 'missing'), entries: ['src/A.php'] }),
+    /PHP bundle has unresolved imports[\s\S]*Nope\.php/u,
+  )
+})
+
+test('buildPhpBundle throws when an entry file is missing on disk', async (t) => {
+  await t.assert.rejects(
+    () => buildPhpBundle({ cwd: join(phpFixtures, 'basic'), entries: ['src/DoesNotExist.php'] }),
+    /Missing entry: src\/DoesNotExist\.php/,
+  )
+})
+
+test('bundleCommand writes a brotli-compressed PHP Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: join(phpFixtures, 'basic'), entries: ['src/A.php'], output: outPath })
+  const buf = readFileSync(outPath)
+  t.assert.notEqual(buf[0], 0x7b)
+  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['src/A.php'])
+  t.assert.deepEqual(
+    Object.keys(parsed.modules.get('.').files).toSorted(),
+    ['src/A.php', 'src/B.php'],
+  )
+  t.assert.equal(parsed.formats.get('src/A.php'), 'php')
+  t.assert.equal(parsed.imports.get('php').get('src/A.php').get('./B.php'), 'src/B.php')
+}))
+
+// CLI integration (PHP)
+
+test('CLI: bundle accepts .php entries and writes a Bundle', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/A.php'], { cwd: join(phpFixtures, 'basic') })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['src/A.php'])
+  t.assert.deepEqual(
+    Object.keys(parsed.modules.get('.').files).toSorted(),
+    ['src/A.php', 'src/B.php'],
+  )
+}))
+
+test('CLI: bundle rejects mixing .php and .js entries', (t) => {
+  const r = runCli(['bundle', 'a.php', 'b.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /bundle entries must all be \.sol/)
+})
+
+test('CLI: bundle rejects --mapping when entries are PHP', (t) => {
+  const r = runCli(['bundle', '--mapping=remappings.txt', 'a.php'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--mapping is only valid for \.sol bundles/)
+})
+
+test('CLI: bundle rejects --scope when entries are .php', (t) => {
+  const r = runCli(['bundle', '--scope=full', 'a.php'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--scope is only valid for JS bundles/)
+})
+
+test('CLI: bundle rejects --lockfile when entries are .php', (t) => {
+  const r = runCli(['bundle', '--lockfile=stasis.lock.json', 'a.php'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--lockfile is only valid for JS bundles/)
+})
+
+test('CLI: bundle (php) exits non-zero and writes no output when there are unresolved includes', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/A.php'], { cwd: join(phpFixtures, 'missing') })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /PHP bundle has unresolved imports/)
+  t.assert.match(r.stderr, /Nope\.php/)
+  t.assert.ok(!existsSync(outPath), 'output file must not be written when bundling fails')
+}))
+
+test('CLI: bundle (php) prints a summary line with the file count, outermost dir, and destination', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/A.php'], { cwd: join(phpFixtures, 'basic') })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files in 1 package from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
 }))
 
 // --- Regression: JS bundle correctness fixes ---

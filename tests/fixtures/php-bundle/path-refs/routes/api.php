@@ -1,0 +1,4 @@
+<?php
+
+// api routes
+return [];

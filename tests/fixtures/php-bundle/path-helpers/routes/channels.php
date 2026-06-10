@@ -1,0 +1,4 @@
+<?php
+
+// channel routes
+return [];
