@@ -24,13 +24,36 @@ The lockfile is derived from the bundle's own contents: each file's recorded
 UTF-8 bytes are hashed (sha512) into the same SRI digest `stasis run` would
 record, and the bundle's `entries`, package dirs, and `name`/`version` metadata
 are carried across verbatim. The extracted tree therefore validates against the
-lockfile out of the box — e.g. `stasis run --lock=frozen` against the sources,
-or `stasis prune` against the extracted `node_modules`.
+lockfile out of the box — `stasis prune` works directly against the extracted
+`node_modules`; a `stasis run --lock=frozen` additionally needs the project's
+`package.json` files, which are only present if the bundle recorded them.
 
-`extract` reads the bundle as untrusted input: paths are resolved and checked to
-stay inside the output directory before anything is written, so a malformed
-bundle can't escape it or leave a half-written tree behind.
+Legacy `version: 0` bundles record no package `name`/`version`, so no lockfile
+can be restored from them. Their sources are still extracted; the lockfile is
+skipped with a warning.
+
+Existing files at target paths are overwritten, including a pre-existing
+`stasis.lock.json` in the output directory.
+
+## Untrusted input
+
+`extract` reads the bundle as untrusted input, and plans the whole tree before
+writing anything, so a malformed bundle fails before the first write rather
+than leaving a partial tree behind. It refuses bundles with:
+
+- paths that escape the output directory (checked both as not-`..`-relative to
+  it and as lexically under `<dir>/`),
+- non-canonical paths (mid-path `..` or `.`, empty segments or file names),
+- duplicate paths, or a path used as both a file and a directory,
+- non-string file contents,
+- a bundled file named `stasis.lock.json`, which would collide with the
+  derived lockfile.
+
+The path checks are lexical: `extract` does not resolve symlinks, so writes
+pass through any symlink already present inside the output directory (e.g. a
+pnpm-managed `node_modules`). Extract untrusted bundles into a fresh, empty
+directory.
 
 > [!NOTE]
 > `extract` operates on code bundles (`stasis.code.br`). Resource bundles
-> (`stasis.resources.br`) are not handled.
+> (`stasis.resources.br`) are not handled and are rejected with a clear error.

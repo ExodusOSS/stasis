@@ -55,6 +55,10 @@ const buildBundle = async (cwd, entries, out, extra = {}) => {
   return Bundle.parseCode(brotliDecompressSync(readFileSync(out)).toString('utf8'))
 }
 
+// Hand-craft an on-disk bundle from raw JSON, bypassing Bundle.serializeCode --
+// for malformed/adversarial shapes a real builder would never produce.
+const writeRawBundle = (path, json) => writeFileSync(path, brotliCompressSync(JSON.stringify(json)))
+
 test('lockfileFromBundle hashes every source and carries entries/config/metadata across', async (t) => {
   const bundle = await buildSolidityBundle({ cwd: join(solFixtures, 'basic'), entries: ['src/A.sol'] })
   const lock = lockfileFromBundle(bundle)
@@ -186,7 +190,7 @@ test('extractCommand refuses a bundle whose path escapes the output dir', withTm
     imports: {},
   }
   const bundlePath = join(tmp, 'evil.code.br')
-  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(evil)))
+  writeRawBundle(bundlePath, evil)
   t.assert.throws(
     () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
     /escapes output dir/,
@@ -211,12 +215,220 @@ test('extractCommand rejects a sibling dir that merely shares the output dir nam
     imports: {},
   }
   const bundlePath = join(tmp, 'evil.code.br')
-  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(evil)))
+  writeRawBundle(bundlePath, evil)
   t.assert.throws(
     () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
     /escapes output dir/,
   )
   t.assert.ok(!existsSync(join(tmp, 'out-evil', 'pwned.js')), 'must not write into a sibling dir')
+}))
+
+test('extractCommand extracts a legacy v0 bundle but skips the lockfile', withTmp((t, tmp) => {
+  // v0 buckets carry no package name/version; a lockfile must attest both for
+  // every node_modules bucket, so none can be restored. The sources are still
+  // extracted. (Deriving one used to crash inside Lockfile.serialize with an
+  // empty error message.)
+  const v0 = {
+    version: 0,
+    config: { scope: 'full' },
+    sources: { 'src/a.js': 'x\n', 'node_modules/foo/index.js': 'y\n' },
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'v0.code.br')
+  writeRawBundle(bundlePath, v0)
+  const outDir = join(tmp, 'out')
+  const { files } = extractCommand({ bundleFile: bundlePath, output: outDir })
+  t.assert.equal(files, 2)
+  t.assert.equal(readFileSync(join(outDir, 'src/a.js'), 'utf8'), 'x\n')
+  t.assert.equal(readFileSync(join(outDir, 'node_modules/foo/index.js'), 'utf8'), 'y\n')
+  t.assert.ok(!existsSync(join(outDir, 'stasis.lock.json')), 'no lockfile may be written for a v0 bundle')
+}))
+
+test('CLI: extract on a v0 bundle warns that the lockfile was not written', withTmp((t, tmp) => {
+  const v0 = {
+    version: 0,
+    config: { scope: 'full' },
+    sources: { 'src/a.js': 'x\n' },
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'v0.code.br')
+  writeRawBundle(bundlePath, v0)
+  const outDir = join(tmp, 'out')
+  const r = runCli(['extract', '-o', outDir, bundlePath])
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /\[stasis\] Extracted 1 file\(s\) to /)
+  t.assert.match(r.stderr, /legacy v0 bundle records no package name\/version, so stasis\.lock\.json can not be restored/)
+  t.assert.ok(!existsSync(join(outDir, 'stasis.lock.json')))
+}))
+
+test('extractCommand extracts a scope=node_modules bundle and its lockfile validates under prune', withTmp((t, tmp) => {
+  // node_modules-scope bundles carry no entries/sources blocks; the derived
+  // lockfile must omit them too (Lockfile.serialize branches on scope).
+  const nm = {
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: {
+      'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'module.exports = 1\n' } },
+    },
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'nm.code.br')
+  writeRawBundle(bundlePath, nm)
+  const outDir = join(tmp, 'out')
+  const { files } = extractCommand({ bundleFile: bundlePath, output: outDir })
+  t.assert.equal(files, 1)
+  t.assert.equal(readFileSync(join(outDir, 'node_modules/foo/index.js'), 'utf8'), 'module.exports = 1\n')
+
+  const lockJson = JSON.parse(readFileSync(join(outDir, 'stasis.lock.json'), 'utf8'))
+  t.assert.ok(!('entries' in lockJson) && !('sources' in lockJson), 'node_modules scope must omit entries/sources')
+  const lock = Lockfile.parse(JSON.stringify(lockJson))
+  t.assert.equal(lock.modules.get('node_modules/foo')?.version, '1.2.3')
+
+  const { removed, validated } = prune({ root: outDir })
+  t.assert.deepEqual(removed, [])
+  t.assert.deepEqual(validated, ['node_modules/foo/index.js'])
+}))
+
+test('extractCommand extracts an empty bundle to just a lockfile', withTmp((t, tmp) => {
+  const empty = { version: 1, config: { scope: 'node_modules' }, modules: {}, formats: {}, imports: {} }
+  const bundlePath = join(tmp, 'empty.code.br')
+  writeRawBundle(bundlePath, empty)
+  const outDir = join(tmp, 'out')
+  const { files } = extractCommand({ bundleFile: bundlePath, output: outDir })
+  t.assert.equal(files, 0)
+  t.assert.ok(Lockfile.parse(readFileSync(join(outDir, 'stasis.lock.json'), 'utf8')) instanceof Lockfile)
+}))
+
+test('extractCommand refuses duplicate paths from overlapping buckets', withTmp((t, tmp) => {
+  // Two buckets that collapse to the same project-relative path: the
+  // flattening `sources` getter would silently last-win, writing one file
+  // while the lockfile records two buckets with different hashes for it.
+  const evil = {
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: {
+      'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'bar/x.js': 'one\n' } },
+      'node_modules/foo/bar': { name: 'bar', version: '1.0.0', files: { 'x.js': 'two\n' } },
+    },
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'dup.code.br')
+  writeRawBundle(bundlePath, evil)
+  const outDir = join(tmp, 'out')
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: outDir }),
+    /duplicate bundle path: node_modules\/foo\/bar\/x\.js/,
+  )
+  t.assert.ok(!existsSync(outDir), 'nothing may be written for a refused bundle')
+}))
+
+test('extractCommand refuses a bundle path used as both file and directory', withTmp((t, tmp) => {
+  // `node_modules/foo/bar` is a file in one bucket and a directory implied by
+  // another bucket's file -- writing both would throw halfway through (EEXIST
+  // on the mkdir), leaving a partial tree. The plan phase must reject it.
+  const evil = {
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: {
+      'node_modules/foo': { name: 'foo', version: '1.0.0', files: { bar: 'I am a file\n' } },
+      'node_modules/foo/bar': { name: 'bar', version: '1.0.0', files: { 'x.js': 'nested\n' } },
+    },
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'conflict.code.br')
+  writeRawBundle(bundlePath, evil)
+  const outDir = join(tmp, 'out')
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: outDir }),
+    /used as both file and directory: node_modules\/foo\/bar/,
+  )
+  t.assert.ok(!existsSync(outDir), 'nothing may be written for a refused bundle')
+}))
+
+test('extractCommand refuses non-canonical bundle paths (empty file name)', withTmp((t, tmp) => {
+  // files: { '': ... } resolves to the bucket dir itself; writing file content
+  // AT node_modules/foo would break the next write into that dir.
+  const evil = {
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: {
+      'node_modules/foo': { name: 'foo', version: '1.0.0', files: { '': 'boom\n', 'x.js': 'ok\n' } },
+    },
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'noncanon.code.br')
+  writeRawBundle(bundlePath, evil)
+  const outDir = join(tmp, 'out')
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: outDir }),
+    /non-canonical bundle path/,
+  )
+  t.assert.ok(!existsSync(outDir), 'nothing may be written for a refused bundle')
+}))
+
+test('extractCommand refuses non-string file content', withTmp((t, tmp) => {
+  const evil = {
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: {
+      'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'x.js': 42 } },
+    },
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'nonstring.code.br')
+  writeRawBundle(bundlePath, evil)
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
+    /content is not a string: node_modules\/foo\/x\.js/,
+  )
+}))
+
+test('extractCommand refuses a bundle that contains stasis.lock.json', withTmp((t, tmp) => {
+  // The bundled file would first be written, then clobbered by the derived
+  // lockfile -- which itself records a hash for it that no longer matches disk.
+  const evil = {
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['a.js'],
+    sources: {
+      '.': { name: 'app', version: '0.0.0', files: { 'a.js': 'x\n', 'stasis.lock.json': '{"fake":true}\n' } },
+    },
+    modules: {},
+    formats: {},
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'lockclash.code.br')
+  writeRawBundle(bundlePath, evil)
+  const outDir = join(tmp, 'out')
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: outDir }),
+    /bundle contains stasis\.lock\.json/,
+  )
+  t.assert.ok(!existsSync(outDir), 'nothing may be written for a refused bundle')
+}))
+
+test('extractCommand reports a clear error for a file that is not a code bundle', withTmp((t, tmp) => {
+  // A resources bundle has no formats/imports; Bundle.parseCode rejects it via
+  // a message-less assert, which extract must wrap with context.
+  const resources = {
+    version: 1,
+    config: { scope: 'full' },
+    sources: { '.': { name: 'app', version: '0.0.0', files: { 'asset.bin': 'AAAA' } } },
+    modules: {},
+  }
+  const bundlePath = join(tmp, 'resources.br')
+  writeRawBundle(bundlePath, resources)
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
+    /not a valid stasis code bundle/,
+  )
 }))
 
 // --- CLI integration ---
@@ -246,5 +458,15 @@ test('CLI: extract writes sources + lockfile and prints a summary', withTmp(asyn
   )
   t.assert.ok(existsSync(join(outDir, 'src', 'A.sol')))
   t.assert.ok(existsSync(join(outDir, 'src', 'B.sol')))
+  t.assert.ok(existsSync(join(outDir, 'stasis.lock.json')))
+}))
+
+test('CLI: extract accepts the --output= long form', withTmp(async (t, tmp) => {
+  const bundlePath = join(tmp, 'out.code.br')
+  await buildBundle(join(solFixtures, 'basic'), ['src/A.sol'], bundlePath)
+  const outDir = join(tmp, 'extracted')
+  const r = runCli(['extract', `--output=${outDir}`, bundlePath])
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.ok(existsSync(join(outDir, 'src', 'A.sol')))
   t.assert.ok(existsSync(join(outDir, 'stasis.lock.json')))
 }))
