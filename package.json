@@ -9,6 +9,7 @@
     "./loader": "./src/loader.js",
     "./mock": "./src/mock.js",
     "./bundle": "./src/bundle.js",
+    "./cmd/bundle": "./src/cmd/bundle.js",
     "./lockfile": "./src/lockfile.js",
     "./prune": "./src/prune.js",
     "./logo.svg": "./logo.svg"
