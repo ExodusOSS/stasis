@@ -52,6 +52,16 @@ test('extractBashCalls finds `# Depends on:` comment hints (.sh and .bash)', (t)
   t.assert.deepEqual(extractBashCalls('# Depends on: helper.bash\n'), ['helper.bash'])
 })
 
+test('extractBashCalls reads a `# shellcheck source=` directive (and drops the $VAR source line)', (t) => {
+  const src = '# shellcheck source=../lib/config.sh\nsource "${LIB_DIR}/config.sh"\n'
+  t.assert.deepEqual(extractBashCalls(src), ['../lib/config.sh'])
+})
+
+test('extractBashCalls reads source= alongside other shellcheck directives, ignores /dev/null', (t) => {
+  t.assert.deepEqual(extractBashCalls('# shellcheck disable=SC1091 source=lib/x.sh\n'), ['lib/x.sh'])
+  t.assert.deepEqual(extractBashCalls('# shellcheck source=/dev/null\nsource "$x"\n'), [])
+})
+
 test('extractBashCalls skips variable-expansion and flag references', (t) => {
   // `$DIR/lib.sh` is a dynamic path; `-c` is a flag — neither is a file.
   t.assert.deepEqual(extractBashCalls('source "$DIR/lib.sh"\nbash -c "echo hi"\n'), [])
