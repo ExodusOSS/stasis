@@ -138,7 +138,7 @@ invocation):
 | --- | --- | --- | --- |
 | `.js` `.cjs` `.mjs` `.ts` `.cts` `.mts` | JavaScript / TypeScript | static require/import scan | Node format / `"*"` + conditions |
 | `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
-| `.sh` `.bash` | Bash | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:` | `bash` |
+| `.sh` `.bash` | Bash | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:`, `# shellcheck source=` | `bash` |
 | `.rs` | Rust | `mod` declarations (+ `use crate::` edges) | `rust` |
 
 These three are **`scope = full`, produce-only artifacts** written in the same
@@ -155,7 +155,9 @@ at `0.0.0`).
 What counts as a fatal unresolved reference differs by language: Solidity
 requires every `import` to resolve; Bash requires every in-root `.sh`/`.bash`
 reference to resolve (PATH commands, `$VAR` paths, absolute/system paths, and
-`../`-escaping sources are tolerated as external); Rust requires every
+`../`-escaping sources are tolerated as external — a dynamic
+`source "${VAR}/x.sh"` is followed via its `# shellcheck source=` directive
+when present); Rust requires every
 unconditional `mod foo;` to resolve (a `#[cfg(...)]`-gated `mod` and all
 `use crate::` edges are best-effort). A missing entry is always fatal.
 

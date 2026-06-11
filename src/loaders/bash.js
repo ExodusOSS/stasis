@@ -6,6 +6,8 @@
 // dangling dependency. Everything else is best-effort and dropped: PATH
 // commands (`grep`), `$VAR` paths, extensionless `source ./env`, absolute
 // `source /etc/x.sh`, and `../` paths that escape the root — none is bundle-able.
+// A `source "${VAR}/x.sh"` whose path can't be evaluated statically is picked
+// up from its `# shellcheck source=...` directive when one is present.
 
 import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -31,16 +33,27 @@ const DIRECT_RE = /(?:^|\n|;|&&|\|\||`|\$\()\s*["']?(\.\.?\/[^\s"';&|#`()]+\.(?:
 // Dependency hint comment: `# Depends on: example.sh`
 const COMMENT_RE = /^# Depends on: ([^ ]+\.(?:sh|bash))( |$)/gmu
 
+// shellcheck `source=` directive: `# shellcheck source=../lib/config.sh`
+// (optionally alongside other directives, e.g. `# shellcheck disable=SC1091 source=lib/x.sh`).
+// This is the standard, explicit way to tell tooling where a dynamically
+// sourced file lives — e.g. `source "${LIB_DIR}/config.sh"`, whose path is a
+// `$VAR` expansion that can't be evaluated statically. The path is resolved
+// relative to the script (matching shellcheck's default). `source=/dev/null`
+// is shellcheck's "don't follow this source" sentinel and is ignored below.
+const SHELLCHECK_SOURCE_RE = /#\s*shellcheck\s[^\n]*?\bsource=["']?([^\s"'#]+)["']?/gu
+
 // Extract every file-like reference from a script's text. Variable
 // expansions (`$VAR`, `${VAR}`, `$HOME/x.sh`) and flags (`-c`) are dropped
-// here — they are never bundle-able file paths. The remaining strings are
-// candidate references; resolveBashCall decides which name a real file.
+// here — they are never bundle-able file paths; a `source "${VAR}/x.sh"` whose
+// real location can't be computed statically should carry a `# shellcheck
+// source=` directive instead. The remaining strings are candidate references;
+// resolveBashCall decides which name a real file.
 export function extractBashCalls(content) {
   const calls = new Set()
-  for (const re of [SOURCE_RE, EXEC_RE, DIRECT_RE, COMMENT_RE]) {
+  for (const re of [SOURCE_RE, EXEC_RE, DIRECT_RE, COMMENT_RE, SHELLCHECK_SOURCE_RE]) {
     for (const m of content.matchAll(re)) {
       const ref = m[1]
-      if (ref.includes('$') || ref.startsWith('-')) continue
+      if (ref.includes('$') || ref.startsWith('-') || ref === '/dev/null') continue
       calls.add(ref)
     }
   }

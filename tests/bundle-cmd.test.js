@@ -1233,6 +1233,14 @@ test('buildBashBundle resolves `# Depends on:` comment hints', async (t) => {
   t.assert.equal(bundle.imports.get('bash').get('main.sh').get('helper.sh'), 'helper.sh')
 })
 
+test('buildBashBundle resolves a `${VAR}` source via its `# shellcheck source=` directive', async (t) => {
+  // `source "${LIB_DIR}/config.sh"` can't be resolved statically; the
+  // `# shellcheck source=../lib/config.sh` directive pins the real location.
+  const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'shellcheck'), entries: ['bin/main.sh'] })
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['bin/main.sh', 'lib/config.sh'])
+  t.assert.equal(bundle.imports.get('bash').get('bin/main.sh').get('../lib/config.sh'), 'lib/config.sh')
+})
+
 test('buildBashBundle resolves ../ references across subdirectories', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'subdir'), entries: ['bin/main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['bin/main.sh', 'lib/helper.sh'])
