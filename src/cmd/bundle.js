@@ -530,6 +530,55 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
   return state
 }
 
+// Classify entries into the single bundle language they all share and check
+// option applicability. Shared by buildBundle and bundleCommand; `name`
+// prefixes error messages with the caller.
+function classifyEntries(name, { entries, mappingFile, scope, lockfile }) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error(`${name}: at least one entry file is required`)
+  }
+  let kind
+  if (entries.every((e) => e.endsWith('.sol'))) kind = 'sol'
+  else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
+  else if (entries.every((e) => JS_EXTS.has(extname(e)))) kind = 'js'
+  else if (entries.every((e) => BASH_EXTS.has(extname(e)))) kind = 'bash'
+  else if (entries.every((e) => RUST_EXTS.has(extname(e)))) kind = 'rust'
+  else {
+    throw new Error(`${name}: entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs (no mixing)`)
+  }
+  if (mappingFile && kind !== 'sol') {
+    throw new Error(`${name}: --mapping is only valid for .sol bundles`)
+  }
+  if (scope !== undefined && kind !== 'js') {
+    throw new Error(`${name}: --scope is only valid for JS bundles`)
+  }
+  if (lockfile !== undefined && kind !== 'js') {
+    throw new Error(`${name}: --lockfile is only valid for JS bundles`)
+  }
+  return kind
+}
+
+// Programmatic equivalent of `stasis bundle`: build and return an in-memory
+// Bundle from a list of entry files, without writing anything to disk
+// (serialize with bundle.serializeCode() to get the JSON that `stasis bundle`
+// brotli-compresses into stasis.code.br).
+//
+// Dispatch by extension matches the CLI: all entries must be one language —
+// .sol (Solidity), .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static
+// scan), .sh/.bash (Bash), or .rs (Rust); mixing fails fast. `mappingFile` is
+// the optional Solidity remappings file (foundry.toml or remappings.txt) and
+// is only valid for .sol entries; `scope` overrides the configured bundle
+// scope and is only valid for JS/TS entries.
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope })
+  if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
+  if (kind === 'php') return buildPhpBundle({ cwd, entries })
+  if (kind === 'bash') return buildBashBundle({ cwd, entries })
+  if (kind === 'rust') return buildRustBundle({ cwd, entries })
+  const state = await buildJsBundle({ cwd, entries, scope })
+  return state.sourceBundle
+}
+
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
 // stasis bundle (matching the on-disk format of `stasis.code.br`). When
 // `output` is provided, writes to that path; otherwise writes to stdout.
@@ -549,58 +598,22 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // won't attest the unused branch -- if the user wants `lock=frozen` against a
 // statically-built bundle, they need this companion lockfile.
 export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile } = {}) {
-  if (!Array.isArray(entries) || entries.length === 0) {
-    throw new Error('bundleCommand: at least one entry file is required')
-  }
-  const isSol = entries.every((e) => e.endsWith('.sol'))
-  const isPhp = entries.every((e) => e.endsWith('.php'))
-  const isJs = entries.every((e) => JS_EXTS.has(extname(e)))
-  const isBash = entries.every((e) => BASH_EXTS.has(extname(e)))
-  const isRust = entries.every((e) => RUST_EXTS.has(extname(e)))
-  if (!isSol && !isPhp && !isJs && !isBash && !isRust) {
-    throw new Error('bundleCommand: entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs (no mixing)')
-  }
-  if (mappingFile && !isSol) {
-    throw new Error('bundleCommand: --mapping is only valid for .sol bundles')
-  }
-  if (scope !== undefined && !isJs) {
-    throw new Error('bundleCommand: --scope is only valid for JS bundles')
-  }
-  if (lockfile !== undefined && !isJs) {
-    throw new Error('bundleCommand: --lockfile is only valid for JS bundles')
-  }
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile })
 
-  let serialized
-  let files
-  let modules
+  let bundle
   let lockData
-  if (isSol) {
-    const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
-    modules = bundle.modules
-  } else if (isPhp) {
-    const bundle = await buildPhpBundle({ cwd, entries })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
-    modules = bundle.modules
-  } else if (isBash) {
-    const bundle = await buildBashBundle({ cwd, entries })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
-    modules = bundle.modules
-  } else if (isRust) {
-    const bundle = await buildRustBundle({ cwd, entries })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
-    modules = bundle.modules
-  } else {
+  if (kind === 'js' && lockfile) {
+    // The companion lockfile attests file hashes, which only State carries —
+    // a Bundle holds sources, not digests — so this path keeps the State.
     const state = await buildJsBundle({ cwd, entries, scope })
-    serialized = state.sourceData
-    files = [...state.sources.keys()]
-    modules = state.modules
-    if (lockfile) lockData = state.lockData
+    bundle = state.sourceBundle
+    lockData = state.lockData
+  } else {
+    bundle = await buildBundle({ cwd, entries, mappingFile, scope })
   }
+  const serialized = bundle.serializeCode()
+  const files = [...bundle.sources.keys()]
+  const modules = bundle.modules
 
   const data = brotliCompressSync(serialized, brotliOptions())
   if (output) {

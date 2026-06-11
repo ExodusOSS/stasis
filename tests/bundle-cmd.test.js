@@ -10,6 +10,7 @@ import { brotliDecompressSync } from 'node:zlib'
 import { Bundle } from '../src/bundle.js'
 import {
   buildBashBundle,
+  buildBundle,
   buildPhpBundle,
   buildRustBundle,
   buildSolidityBundle,
@@ -1525,3 +1526,84 @@ test('buildSolidityBundle refuses a symlink whose target escapes the bundle root
     rmSync(outside, { recursive: true, force: true })
   }
 }))
+
+test('buildBundle dispatches .sol entries to the Solidity builder and returns an in-memory Bundle', async (t) => {
+  const cwd = join(fixtures, 'basic')
+  const bundle = await buildBundle({ cwd, entries: ['src/A.sol'] })
+  t.assert.ok(bundle instanceof Bundle)
+  const expected = await buildSolidityBundle({ cwd, entries: ['src/A.sol'] })
+  t.assert.equal(bundle.serializeCode(), expected.serializeCode())
+})
+
+test('buildBundle passes the mapping file through to the Solidity builder', async (t) => {
+  const cwd = join(fixtures, 'with-remappings-txt')
+  const bundle = await buildBundle({ cwd, entries: ['src/A.sol'], mappingFile: 'remappings.txt' })
+  t.assert.equal(
+    bundle.imports.get('solidity').get('src/A.sol').get('@openzeppelin/contracts/utils/Math.sol'),
+    'lib/openzeppelin-contracts/contracts/utils/Math.sol',
+  )
+  // mapping file itself must NOT appear in the bundle's files
+  t.assert.ok(!Object.hasOwn(bundle.modules.get('.').files, 'remappings.txt'))
+})
+
+test('buildBundle dispatches .php, .sh, and .rs entries to their builders', async (t) => {
+  const php = await buildBundle({ cwd: join(phpFixtures, 'basic'), entries: ['src/A.php'] })
+  t.assert.ok(php instanceof Bundle)
+  t.assert.equal(php.formats.get('src/A.php'), 'php')
+
+  const bash = await buildBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'] })
+  t.assert.ok(bash instanceof Bundle)
+  t.assert.equal(bash.formats.get('main.sh'), 'bash')
+
+  const rust = await buildBundle({ cwd: join(rustFixtures, 'basic'), entries: ['src/main.rs'] })
+  t.assert.ok(rust instanceof Bundle)
+  t.assert.equal(rust.formats.get('src/main.rs'), 'rust')
+})
+
+test('buildBundle builds a JS Bundle identical to what bundleCommand writes, without touching disk', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'js-api', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'a.js'), "import { b } from './b.js'\nexport const a = b + 1\n")
+  writeFileSync(join(tmp, 'b.js'), 'export const b = 2\n')
+
+  const bundle = await buildBundle({ cwd: tmp, entries: ['a.js'] })
+  t.assert.ok(bundle instanceof Bundle)
+  t.assert.deepEqual([...bundle.entries], ['a.js'])
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['a.js', 'b.js'])
+  t.assert.equal(bundle.formats.get('a.js'), 'module')
+  // Static JS bundles store edges under the wildcard '*' condition key
+  t.assert.equal(bundle.imports.get('*').get('a.js').get('./b.js'), 'b.js')
+  // In-memory only: no bundle/lockfile artifacts were written
+  t.assert.ok(!existsSync(join(tmp, 'stasis.code.br')))
+  t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')))
+
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: tmp, entries: ['a.js'], output: outPath })
+  const written = brotliDecompressSync(readFileSync(outPath)).toString('utf8')
+  t.assert.equal(bundle.serializeCode(), written)
+}))
+
+test('buildBundle rejects an empty entry list', async (t) => {
+  await t.assert.rejects(() => buildBundle({ cwd: fixtures, entries: [] }), /at least one entry/)
+})
+
+test('buildBundle rejects mixed-language entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: fixtures, entries: ['a.sol', 'b.js'] }),
+    /must all be \.sol, all be \.php, all be \.js\/\.cjs\/\.mjs\/\.ts\/\.cts\/\.mts, all be \.sh\/\.bash, or all be \.rs/,
+  )
+})
+
+test('buildBundle rejects a mapping file for non-.sol entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: fixtures, entries: ['a.js'], mappingFile: 'remappings.txt' }),
+    /--mapping is only valid for \.sol bundles/,
+  )
+})
+
+test('buildBundle rejects scope for non-JS entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], scope: 'full' }),
+    /--scope is only valid for JS bundles/,
+  )
+})

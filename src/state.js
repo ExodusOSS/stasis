@@ -464,14 +464,18 @@ export class State {
     return modules
   }
 
-  get sourceData() {
+  get sourceBundle() {
     return new Bundle({
       config: this.config.values,
       entries: this.entries,
       modules: this.#bundleModules(this.sources),
       formats: this.formats,
       imports: this.imports,
-    }).serializeCode()
+    })
+  }
+
+  get sourceData() {
+    return this.sourceBundle.serializeCode()
   }
 
   get resourceData() {

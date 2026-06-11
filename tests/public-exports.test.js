@@ -1,11 +1,17 @@
 import { test } from 'node:test'
 
 import { Bundle } from '@exodus/stasis/bundle'
+import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
 import { Lockfile } from '@exodus/stasis/lockfile'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
   t.assert.equal(Bundle.VERSION, 1)
+})
+
+test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API', (t) => {
+  t.assert.equal(typeof buildBundle, 'function')
+  t.assert.equal(typeof bundleCommand, 'function')
 })
 
 test('@exodus/stasis/lockfile exports Lockfile class', (t) => {
