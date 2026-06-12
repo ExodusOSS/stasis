@@ -112,12 +112,12 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
   `commonjs`, `module-typescript`, `commonjs-typescript`, `json`). May be
   missing per file. TypeScript sources are stored verbatim (types intact);
   Node strips the types at load time based on the format. Source-language
-  bundles (see below) use a language tag here instead: `solidity`, `bash`,
-  or `rust`.
+  bundles (see below) use a language tag here instead: `solidity`, `php`,
+  `bash`, or `rust`.
 - `imports`: conditions → parent file → specifier → resolved
   project-relative path. The conditions key is either `"*"`, a
   comma-joined list (e.g. `"node, import"`), or — for source-language
-  bundles — the language tag (`solidity`/`bash`/`rust`).
+  bundles — the language tag (`solidity`/`php`/`bash`/`rust`).
 - When a `stasis.lock.json` is loaded alongside, the bundle's `entries`,
   module/source dirs, `name`/`version`, and per-module file lists must
   match. Each loaded source is hash-verified against the lockfile.
@@ -129,7 +129,7 @@ relative path with no `entries`/`modules` — is still accepted on load
 (loses cross-check of module metadata; lockfile-driven integrity checks
 still apply). The bundle is always written as `version: 1`.
 
-### Source-language bundles (Solidity / Bash / Rust)
+### Source-language bundles (Solidity / PHP / Bash / Rust)
 
 `stasis bundle` dispatches on the entry file extension (no mixing within one
 invocation):
@@ -138,26 +138,33 @@ invocation):
 | --- | --- | --- | --- |
 | `.js` `.cjs` `.mjs` `.ts` `.cts` `.mts` | JavaScript / TypeScript | static require/import scan | Node format / `"*"` + conditions |
 | `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
+| `.php` | PHP | literal `require`/`include` paths + Composer-autoloaded class references (PSR-4/PSR-0/classmap/files) | `php` |
 | `.sh` `.bash` | Bash | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:`, `# shellcheck source=` | `bash` |
 | `.rs` | Rust | `mod` declarations (+ `use crate::` edges) | `rust` |
 
-These three are **`scope = full`, produce-only artifacts** written in the same
+These four are **`scope = full`, produce-only artifacts** written in the same
 `stasis.code.br` shape as a JS bundle, but tagged with a language `format` and
 keyed under a language `imports` condition. They are intended for external
 static analysis / inspection — **not** for `stasis run --bundle=load`, which
 executes JavaScript through Node's module hooks and rejects a non-JS `format`
 with a clear error. Every reachable file is read from disk (symlinks whose real
 target escapes the bundle root are refused), bucketized by the nearest
-`package.json` like a JS bundle; with no such `package.json` the workspace
-bucket gets a placeholder identity (`solidity-bundle`/`bash-bundle`/`rust-bundle`
-at `0.0.0`).
+`package.json` like a JS bundle — except PHP, which buckets by the nearest
+`composer.json` instead (`vendor/<vendor>/<pkg>` buckets, with versions from
+`vendor/composer/installed.json`). With no such manifest above a file the
+workspace bucket gets a placeholder identity
+(`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
 
 What counts as a fatal unresolved reference differs by language: Solidity
-requires every `import` to resolve; Bash requires every in-root `.sh`/`.bash`
-reference to resolve (PATH commands, `$VAR` paths, absolute/system paths, and
-`../`-escaping sources are tolerated as external — a dynamic
-`source "${VAR}/x.sh"` is followed via its `# shellcheck source=` directive
-when present); Rust requires every
+requires every `import` to resolve; PHP requires every literal
+`require`/`include` path to resolve (Composer-autoloaded class references stay
+best-effort — unresolved ones are typically built-in or extension classes —
+and a dynamic include with a static directory prefix pulls in every `.php`
+file of that directory as a candidate); Bash requires every in-root
+`.sh`/`.bash` reference to resolve (PATH commands, `$VAR` paths,
+absolute/system paths, and `../`-escaping sources are tolerated as external —
+a dynamic `source "${VAR}/x.sh"` is followed via its `# shellcheck source=`
+directive when present); Rust requires every
 unconditional `mod foo;` to resolve (a `#[cfg(...)]`-gated `mod` and all
 `use crate::` edges are best-effort). A missing entry is always fatal.
 

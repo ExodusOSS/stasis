@@ -8,9 +8,9 @@ import { State } from './state.js'
 
 // Warning: only covers code imports, not file reads
 
-// Formats produced by the non-JS source bundlers (Solidity/Bash/Rust). These
-// bundles are inspection artifacts, not runnable by Node's module loader.
-const NON_EXECUTABLE_FORMATS = new Set(['solidity', 'bash', 'rust'])
+// Formats produced by the non-JS source bundlers (Solidity/PHP/Bash/Rust).
+// These bundles are inspection artifacts, not runnable by Node's module loader.
+const NON_EXECUTABLE_FORMATS = new Set(['solidity', 'php', 'bash', 'rust'])
 
 let state
 let saved = false
@@ -56,7 +56,7 @@ function load(url, context, nextLoad) {
     // extension + module.type (recorded in the lockfile) and reject the bundle's
     // claim when it disagrees.
     if (context.format != null) assert.equal(format, context.format)
-    // Non-JS bundles (`stasis bundle` of .sol/.sh/.bash/.rs) tag files with
+    // Non-JS bundles (`stasis bundle` of .sol/.php/.sh/.bash/.rs) tag files with
     // their source language. They're artifacts for external analysis, not
     // executable by Node — surface that clearly instead of an opaque
     // format assertion if one is ever loaded via `--bundle=load`.

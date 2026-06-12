@@ -1527,6 +1527,21 @@ test('buildSolidityBundle refuses a symlink whose target escapes the bundle root
   }
 }))
 
+test('buildPhpBundle refuses a symlink whose target escapes the bundle root', withTmp(async (t, tmp) => {
+  const outside = mkdtempSync(join(tmpdir(), 'stasis-outside-'))
+  try {
+    writeFileSync(join(outside, 'secret.php'), '<?php echo "secret";\n')
+    writeFileSync(join(tmp, 'entry.php'), '<?php require __DIR__ . "/link.php";\n')
+    symlinkSync(join(outside, 'secret.php'), join(tmp, 'link.php'))
+    await t.assert.rejects(
+      () => buildPhpBundle({ cwd: tmp, entries: ['entry.php'] }),
+      /symlink escaping bundle root/,
+    )
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+}))
+
 test('buildBundle dispatches .sol entries to the Solidity builder and returns an in-memory Bundle', async (t) => {
   const cwd = join(fixtures, 'basic')
   const bundle = await buildBundle({ cwd, entries: ['src/A.sol'] })

@@ -32,9 +32,11 @@
 //     that live in no autoload map -- so an unresolved class reference is
 //     silently skipped rather than treated as a missing dependency.
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+
+import { assertRealPathWithinBase } from '../util.js'
 
 // Max files read concurrently per wave, to avoid EMFILE on large directory globs.
 const READ_CONCURRENCY = 64
@@ -970,9 +972,11 @@ export function buildPhpTree(sources, { baseDir, autoload = null } = {}) {
 // in parallel; the next wave depends on what the previous one referenced.
 export async function collectPhpFilesFromDisk(baseDir, entries, { autoload = null } = {}) {
   const sources = new Map()
+  const realBase = realpathSync(baseDir)
 
   const readOne = async (relPath) => {
     try {
+      assertRealPathWithinBase(realBase, baseDir, relPath)
       return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
     } catch (err) {
       // ENOENT: target doesn't exist. EISDIR: a specifier resolved to a
