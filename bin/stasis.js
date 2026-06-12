@@ -25,6 +25,7 @@ function usage(prefix = '') {
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=path/to/out.stasis.code.br] path/to/file.(js|ts) ...
  stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.(sh|bash) ...
  stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.rs ...
+ stasis bundle --npm name[@version] [--lockfile=path/to/stasis.lock.json] [--output=path/to/out.stasis.code.br]
  stasis prune [path/to/project]
  stasis audit path/to/file ...
 `.trim())
@@ -130,7 +131,7 @@ if (command === '-v' || command === '--version') {
   process.exitCode = code
 } else if (command === 'bundle') {
   const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '-o'])
+  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--npm', '-o'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -139,6 +140,7 @@ if (command === '-v' || command === '--version') {
     output: { type: 'string', short: 'o' },
     scope: { type: 'string' },
     lockfile: { type: 'string' },
+    npm: { type: 'string' },
   }
   let values
   try {
@@ -146,21 +148,29 @@ if (command === '-v' || command === '--version') {
   } catch (cause) {
     usage(`Error: ${cause.message}`)
   }
-  if (argv.length === 0) usage('Nothing to bundle: no entry file given')
-  const allSol = argv.every((f) => f.endsWith('.sol'))
-  const allPhp = argv.every((f) => f.endsWith('.php'))
-  const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
-  const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))
-  const allRust = argv.every((f) => f.endsWith('.rs'))
-  if (!allSol && !allPhp && !allJs && !allBash && !allRust) {
-    usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
+  if (values.npm !== undefined) {
+    // --npm replaces entry files with a registry package spec.
+    if (!values.npm) usage('Error: --npm requires a package spec (name or name@version)')
+    if (argv.length > 0) usage('Error: --npm takes no entry files (the package spec is the input)')
+    if (values.mapping) usage('Error: --mapping is not valid with --npm')
+    if (values.scope) usage('Error: --scope is not valid with --npm (npm bundles are always scope=full)')
+  } else {
+    if (argv.length === 0) usage('Nothing to bundle: no entry file given')
+    const allSol = argv.every((f) => f.endsWith('.sol'))
+    const allPhp = argv.every((f) => f.endsWith('.php'))
+    const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
+    const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))
+    const allRust = argv.every((f) => f.endsWith('.rs'))
+    if (!allSol && !allPhp && !allJs && !allBash && !allRust) {
+      usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
+    }
+    if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
+    if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
+    if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
+      usage('Error: --scope must be node_modules or full')
+    }
+    if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
   }
-  if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
-  if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
-  if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
-    usage('Error: --scope must be node_modules or full')
-  }
-  if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
   const { bundleCommand } = await import('../src/cmd/bundle.js')
   await bundleCommand({
     cwd: process.cwd(),
@@ -169,6 +179,7 @@ if (command === '-v' || command === '--version') {
     output: values.output,
     scope: values.scope,
     lockfile: values.lockfile,
+    npm: values.npm,
   })
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')

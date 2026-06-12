@@ -398,7 +398,14 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
 //
 // Scope and per-edge conditions come from the project's stasis.config.json
 // (or `EXODUS_STASIS_SCOPE`); pass `scope` explicitly to override.
-export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}) {
+//
+// `tolerateMissingBare` downgrades unresolved BARE specifiers (and `#imports`,
+// which may map to them) from fatal to warn-only even on static ESM edges:
+// the --npm path scans a lone extracted tarball whose dependency tree is by
+// definition not installed, so every import of a dependency would otherwise
+// abort the bundle. Unresolved relative/absolute specifiers stay fatal --
+// those are holes in the scanned files themselves.
+export async function buildJsBundle({ cwd = process.cwd(), entries, scope, tolerateMissingBare = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
@@ -440,8 +447,12 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
     }
   }
 
-  // Fatal: unresolved static ESM edges in the eagerly-linked set.
-  const fatalUnresolved = (u) => staticKinds.has(u.kind) && staticReachable.has(u.parentURL)
+  // Fatal: unresolved static ESM edges in the eagerly-linked set. Bare specs
+  // are exempt under tolerateMissingBare (see the doc comment above).
+  const bareSpec = (spec) =>
+    typeof spec === 'string' && !spec.startsWith('.') && !spec.startsWith('/') && !spec.startsWith('file:')
+  const fatalUnresolved = (u) =>
+    staticKinds.has(u.kind) && staticReachable.has(u.parentURL) && !(tolerateMissingBare && bareSpec(u.spec))
   const fatal = scanner.unresolved
     .filter((u) => fatalUnresolved(u))
     .map((u) => `unresolved ${u.kind} ${u.spec} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
@@ -542,64 +553,92 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // (Bash, via source/exec graph walk), or .rs (Rust, via mod-declaration walk).
 // Mixing fails fast; --mapping is .sol only, --scope/--lockfile are JS/TS only.
 //
+// Alternatively, `npm` takes a `name[@version]` spec instead of entry files:
+// the package is fetched from the npm registry (latest when no version is
+// given), integrity-verified, and bundled from its manifest-derived entry
+// points (main/exports/browser/react-native, excluding types). npm bundles
+// are always scope=full; --lockfile works the same as for local JS bundles.
+//
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
 // conditional requires (e.g. debug/src/index.js' `if (browser) require('./browser')
 // else require('./node')`), so the runtime lockfile from `stasis run --lock=add`
 // won't attest the unused branch -- if the user wants `lock=frozen` against a
 // statically-built bundle, they need this companion lockfile.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile } = {}) {
-  if (!Array.isArray(entries) || entries.length === 0) {
-    throw new Error('bundleCommand: at least one entry file is required')
-  }
-  const isSol = entries.every((e) => e.endsWith('.sol'))
-  const isPhp = entries.every((e) => e.endsWith('.php'))
-  const isJs = entries.every((e) => JS_EXTS.has(extname(e)))
-  const isBash = entries.every((e) => BASH_EXTS.has(extname(e)))
-  const isRust = entries.every((e) => RUST_EXTS.has(extname(e)))
-  if (!isSol && !isPhp && !isJs && !isBash && !isRust) {
-    throw new Error('bundleCommand: entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs (no mixing)')
-  }
-  if (mappingFile && !isSol) {
-    throw new Error('bundleCommand: --mapping is only valid for .sol bundles')
-  }
-  if (scope !== undefined && !isJs) {
-    throw new Error('bundleCommand: --scope is only valid for JS bundles')
-  }
-  if (lockfile !== undefined && !isJs) {
-    throw new Error('bundleCommand: --lockfile is only valid for JS bundles')
-  }
-
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, npm } = {}) {
   let serialized
   let files
   let modules
   let lockData
-  if (isSol) {
-    const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
+  let npmLabel
+  if (npm !== undefined) {
+    if (Array.isArray(entries) && entries.length > 0) {
+      throw new Error('bundleCommand: --npm takes no entry files (the package spec is the input)')
+    }
+    if (mappingFile) throw new Error('bundleCommand: --mapping is not valid with --npm')
+    if (scope !== undefined) {
+      throw new Error('bundleCommand: --scope is not valid with --npm (npm bundles are always scope=full)')
+    }
+    // Lazy import: npm.js pulls in tar-stream, which non-npm bundle commands
+    // must not require to be installed (it would mask the actionable
+    // oxc-parser hint in minimal environments, and .sol/.sh/... bundles
+    // don't need it at all).
+    const { buildNpmBundle } = await import('./npm.js')
+    const bundle = await buildNpmBundle({ spec: npm })
+    serialized = bundle.sourceData
+    files = bundle.files
     modules = bundle.modules
-  } else if (isPhp) {
-    const bundle = await buildPhpBundle({ cwd, entries })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
-    modules = bundle.modules
-  } else if (isBash) {
-    const bundle = await buildBashBundle({ cwd, entries })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
-    modules = bundle.modules
-  } else if (isRust) {
-    const bundle = await buildRustBundle({ cwd, entries })
-    serialized = bundle.serializeCode()
-    files = [...bundle.sources.keys()]
-    modules = bundle.modules
+    if (lockfile) lockData = bundle.lockData
+    npmLabel = `${bundle.name}@${bundle.version}`
   } else {
-    const state = await buildJsBundle({ cwd, entries, scope })
-    serialized = state.sourceData
-    files = [...state.sources.keys()]
-    modules = state.modules
-    if (lockfile) lockData = state.lockData
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new Error('bundleCommand: at least one entry file is required')
+    }
+    const isSol = entries.every((e) => e.endsWith('.sol'))
+    const isPhp = entries.every((e) => e.endsWith('.php'))
+    const isJs = entries.every((e) => JS_EXTS.has(extname(e)))
+    const isBash = entries.every((e) => BASH_EXTS.has(extname(e)))
+    const isRust = entries.every((e) => RUST_EXTS.has(extname(e)))
+    if (!isSol && !isPhp && !isJs && !isBash && !isRust) {
+      throw new Error('bundleCommand: entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs (no mixing)')
+    }
+    if (mappingFile && !isSol) {
+      throw new Error('bundleCommand: --mapping is only valid for .sol bundles')
+    }
+    if (scope !== undefined && !isJs) {
+      throw new Error('bundleCommand: --scope is only valid for JS bundles')
+    }
+    if (lockfile !== undefined && !isJs) {
+      throw new Error('bundleCommand: --lockfile is only valid for JS bundles')
+    }
+
+    if (isSol) {
+      const bundle = await buildSolidityBundle({ cwd, entries, mappingFile })
+      serialized = bundle.serializeCode()
+      files = [...bundle.sources.keys()]
+      modules = bundle.modules
+    } else if (isPhp) {
+      const bundle = await buildPhpBundle({ cwd, entries })
+      serialized = bundle.serializeCode()
+      files = [...bundle.sources.keys()]
+      modules = bundle.modules
+    } else if (isBash) {
+      const bundle = await buildBashBundle({ cwd, entries })
+      serialized = bundle.serializeCode()
+      files = [...bundle.sources.keys()]
+      modules = bundle.modules
+    } else if (isRust) {
+      const bundle = await buildRustBundle({ cwd, entries })
+      serialized = bundle.serializeCode()
+      files = [...bundle.sources.keys()]
+      modules = bundle.modules
+    } else {
+      const state = await buildJsBundle({ cwd, entries, scope })
+      serialized = state.sourceData
+      files = [...state.sources.keys()]
+      modules = state.modules
+      if (lockfile) lockData = state.lockData
+    }
   }
 
   const data = brotliCompressSync(serialized, brotliOptions())
@@ -615,7 +654,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     mkdirSync(dirname(lockAbs), { recursive: true })
     writeFileSync(lockAbs, lockData)
   }
-  const fromDir = outermostDir(files, resolve(cwd))
+  // npm bundles came from a tarball, not a local directory; label the source
+  // with the resolved package spec instead of a meaningless temp-dir path.
+  const fromDir = npmLabel ?? outermostDir(files, resolve(cwd))
   const dest = output ?? '<stdout>'
   // Count packages: every non-empty bucket, with the project's own source (the
   // "." workspace bucket) counting as one package alongside each dependency.
