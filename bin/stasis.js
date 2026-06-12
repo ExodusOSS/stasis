@@ -25,6 +25,7 @@ function usage(prefix = '') {
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=path/to/out.stasis.code.br] path/to/file.(js|ts) ...
  stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.(sh|bash) ...
  stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.rs ...
+ stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis prune [path/to/project]
  stasis audit path/to/file ...
 `.trim())
@@ -170,6 +171,25 @@ if (command === '-v' || command === '--version') {
     scope: values.scope,
     lockfile: values.lockfile,
   })
+} else if (command === 'extract') {
+  const flags = []
+  const valueFlags = new Set(['--output', '-o'])
+  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
+    flags.push(argv.shift())
+  }
+  const options = {
+    output: { type: 'string', short: 'o' },
+  }
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
+  if (argv.length === 0) usage('Nothing to extract: no bundle file given')
+  if (argv.length > 1) usage('Error: extract takes exactly one bundle file')
+  const { extractCommand } = await import('../src/cmd/extract.js')
+  extractCommand({ cwd: process.cwd(), bundleFile: argv[0], output: values.output })
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')
   const root = argv[0] ? resolve(argv[0]) : process.cwd()
