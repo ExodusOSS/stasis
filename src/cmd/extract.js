@@ -30,7 +30,16 @@ export function lockfileFromBundle(bundle) {
     }
     modules.set(dir, { name, version, files: hashed })
   }
-  return new Lockfile({ config: bundle.config, entries: bundle.entries, modules })
+  // Carry the bundle's resolution map across so the derived lockfile attests
+  // resolutions too (parseCode already validated the paths) -- without it the
+  // lockfile would be a legacy bytes-only one, and a later frozen run against
+  // the same bundle would skip the resolution cross-check.
+  return new Lockfile({
+    config: bundle.config,
+    entries: bundle.entries,
+    modules,
+    imports: bundle.imports,
+  })
 }
 
 // Extract a brotli-compressed stasis code bundle (`stasis.code.br`) back onto

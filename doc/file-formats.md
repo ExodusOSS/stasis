@@ -55,6 +55,9 @@ key, they must match. Only `scope` is persisted into the lockfile/bundle
       "version": "1.15.0",
       "files": { "index.js": "sha512-…", "package.json": "sha512-…" }
     }
+  },
+  "imports": {
+    "node, import": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } }
   }
 }
 ```
@@ -68,6 +71,11 @@ key, they must match. Only `scope` is persisted into the lockfile/bundle
 - Each module record's `name`/`version` come from the owning `package.json`.
   `files` maps package-dir-relative paths to SRI digests
   (`sha512-<base64(sha512(bytes))>`).
+- `imports` records the observed resolutions in the same shape as the
+  bundle's `imports` map (conditions → parent file → specifier → resolved
+  project-relative path), so the lockfile attests not just file bytes but
+  which file each specifier resolves to. Lockfiles written before this field
+  existed omit it; such lockfiles attest bytes only.
 - File and module maps are sorted by the project's `sortPaths` rule
   (files-in-dir before sub-dirs; `*` first, `node_modules` last).
 
@@ -121,6 +129,19 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
 - When a `stasis.lock.json` is loaded alongside, the bundle's `entries`,
   module/source dirs, `name`/`version`, and per-module file lists must
   match. Each loaded source is hash-verified against the lockfile.
+- When the lockfile records `imports`, every resolution edge in the
+  bundle must land on the file the lockfile attests for that
+  (parent, specifier). The conditions key is matched exactly first; on a
+  miss — e.g. a static bundle's `"*"` edges checked against a runtime
+  lockfile's precise condition sets, or vice versa — the edge passes only
+  when every condition set the lockfile records for that parent+specifier
+  agrees on the same target. Unknown or inconsistently-attested edges are
+  fatal. This closes the redirect hole where a tampered bundle points a
+  specifier at a *different* hash-valid file, while still letting a
+  `stasis bundle` artifact validate against a runtime-generated lockfile
+  when their graphs coincide. Lockfiles without `imports` skip the check
+  (a warning is printed in `bundle = load` mode); regenerate the lockfile
+  to enable it.
 - In `bundle = load` mode with `scope = full`, entry-point resolutions
   are checked against `entries`.
 

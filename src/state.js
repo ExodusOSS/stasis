@@ -47,6 +47,13 @@ export class State {
   config
   root
 
+  // Resolutions attested by the loaded lockfile (conditions -> parent ->
+  // specifier -> file), or null when no lockfile was loaded / it predates
+  // resolution attestation. Kept separate from this.imports (the live
+  // observed/bundle-served map): the lockfile may attest a superset of what a
+  // given run observes or a given bundle carries.
+  #lockImports = null
+
   // options.preload (boolean) -- mark this instance as the unique preload State, exposed via
   // State.preload. Only one preload State may exist at a time. Non-preload States can be
   // constructed freely (e.g. a bundler plugin that emits a sidecar bundle in a process that
@@ -129,6 +136,7 @@ export class State {
               noupsert(this.hashes, join(dir, name), hash)
             }
           }
+          this.#lockImports = lockfile.imports
           lockfileLoaded = true
         }
 
@@ -189,6 +197,47 @@ export class State {
         for (const rel of Object.keys(info.files)) {
           assert.ok(Object.hasOwn(lockModule.files, rel), `bundle file ${dir}/${rel} missing in lockfile`)
         }
+      }
+      // Resolutions: every edge the bundle could serve must land on the file
+      // the lockfile attests for that (parent, specifier) -- the final
+      // resolution is what matters, not how the edge is keyed. Source hashes
+      // alone don't close this hole: a tampered bundle could redirect a
+      // specifier to a *different* hash-valid file. The conditions key is
+      // matched exactly first; on a miss the edge is accepted only when every
+      // condition set the lockfile records for that (parent, specifier)
+      // agrees on the same target -- this lets a static `stasis bundle`
+      // artifact (edges under '*') validate against a runtime-generated
+      // lockfile (precise condition sets), and vice versa, while a wildcard
+      // claim over a condition-divergent attestation stays fatal: either
+      // target would be served under conditions where the other is the
+      // attested resolution. Unknown edges are fatal too. The lockfile may
+      // attest a superset (same stance as the file lists above). Lockfiles
+      // that predate resolution attestation (imports === null) skip the
+      // check -- regenerate with lock=replace.
+      if (this.#lockImports !== null) {
+        for (const [conditions, byParent] of bundle.imports) {
+          const lockByParent = this.#lockImports.get(conditions)
+          for (const [parent, specifiers] of byParent) {
+            const lockSpecifiers = lockByParent?.get(parent)
+            for (const [specifier, file] of specifiers) {
+              const edge = `'${specifier}' from ${parent} (${conditions})`
+              let attested = lockSpecifiers?.get(specifier)
+              if (attested === undefined) {
+                const targets = new Set()
+                for (const [, lockParents] of this.#lockImports) {
+                  const target = lockParents.get(parent)?.get(specifier)
+                  if (target !== undefined) targets.add(target)
+                }
+                assert.ok(targets.size > 0, `bundle resolution ${edge} is not attested by the lockfile`)
+                assert.ok(targets.size === 1, `bundle resolution ${edge} is attested inconsistently across condition sets in the lockfile`)
+                ;[attested] = targets
+              }
+              assert.equal(file, attested, `bundle resolution ${edge} mismatches the lockfile`)
+            }
+          }
+        }
+      } else if (bundle.imports.size > 0 && this.config.loadBundle) {
+        console.warn('[stasis] Warning: lockfile does not attest resolutions; bundle import map is trusted as-is. Regenerate the lockfile to enable this check.')
       }
     } else {
       if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
@@ -436,11 +485,37 @@ export class State {
     return { url, format }
   }
 
+  // Union of the lockfile-attested resolutions and the live map (observed at
+  // runtime and/or carried over from a loaded bundle), so a partial lock=add
+  // run extends the recorded resolutions without dropping edges it didn't
+  // reach. Conflicting targets for the same edge are fatal (add semantics,
+  // same as hashes).
+  #mergedImports() {
+    const merged = new Map()
+    const mergeIn = (imports) => {
+      for (const [conditions, byParent] of imports) {
+        if (!merged.has(conditions)) merged.set(conditions, new Map())
+        const mergedParents = merged.get(conditions)
+        for (const [parent, specifiers] of byParent) {
+          if (!mergedParents.has(parent)) mergedParents.set(parent, new Map())
+          const mergedSpecifiers = mergedParents.get(parent)
+          for (const [specifier, file] of specifiers) {
+            noupsert(mergedSpecifiers, specifier, file)
+          }
+        }
+      }
+    }
+    if (this.#lockImports) mergeIn(this.#lockImports)
+    mergeIn(this.imports)
+    return merged
+  }
+
   get lockData() {
     return new Lockfile({
       config: this.config.values,
       entries: this.entries,
       modules: this.modules,
+      imports: this.#mergedImports(),
     }).serialize()
   }
 

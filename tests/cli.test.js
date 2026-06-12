@@ -894,6 +894,197 @@ test('run --bundle=load rejects an entry not listed in the bundle entries', with
   t.assert.match(load.stderr, /ERR_ASSERTION|Unknown entry/)
 }))
 
+test('run --lock=add records resolutions in the lockfile imports map', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.imports, 'lockfile must record imports')
+  const buckets = Object.values(lock.imports)
+  t.assert.equal(buckets.length, 1)
+  t.assert.deepEqual(buckets[0], { 'src/entry.js': { './hello.js': 'src/hello.js' } })
+}))
+
+test('run --lock=frozen --bundle=load rejects a bundle resolution redirected to another attested file', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Redirect './hello.js' to the entry itself: every served byte still matches
+  // a lockfile hash, only the resolution differs -- the hash checks alone
+  // would let this through.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  let redirected = false
+  for (const byParent of Object.values(decoded.imports)) {
+    if (byParent['src/entry.js']?.['./hello.js']) {
+      byParent['src/entry.js']['./hello.js'] = 'src/entry.js'
+      redirected = true
+    }
+  }
+  t.assert.ok(redirected, 'bundle must contain the edge to tamper with')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /mismatches the lockfile/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'tampered resolution must not execute')
+}))
+
+test('run --lock=frozen --bundle=load rejects a bundle resolution not attested by the lockfile', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Inject an edge for a (parent, specifier) the lockfile has never seen.
+  // Even an edge the run never follows must be attested.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.imports['attacker-conditions'] = { 'src/entry.js': { './shadow.js': 'src/hello.js' } }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /not attested by the lockfile/)
+}))
+
+test('run --lock=frozen --bundle=load rejects a redirected resolution under a foreign conditions key', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Same (parent, specifier) the lockfile attests, but redirected AND moved to
+  // a conditions key the lockfile doesn't have: the cross-key fallback must
+  // still compare the final resolution, so relabeling the bucket is no escape.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.imports['attacker-conditions'] = { 'src/entry.js': { './hello.js': 'src/entry.js' } }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /mismatches the lockfile/)
+}))
+
+test('run --lock=frozen --bundle=load accepts a static bundle (wildcard conditions) against a runtime lockfile', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'static.br')
+
+  // `stasis bundle` keys edges under '*'; the committed lockfile records the
+  // precise runtime condition set. The final resolutions agree, so the pair
+  // must validate -- it's the resolved file that's attested, not the key.
+  const b = run(['bundle', `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(b.status, 0, `bundle stderr: ${b.stderr}`)
+
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+test('run --lock=frozen --bundle=load rejects a wildcard resolution over a condition-divergent attestation', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Lockfile attests two different targets for the same (parent, specifier)
+  // under different condition sets (dual-package style). A wildcard edge
+  // over-claims there: either target would be served under conditions where
+  // the other is the attested resolution, so the cross-key fallback must
+  // refuse to pick one.
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  lock.imports['other, conditions'] = { 'src/entry.js': { './hello.js': 'src/entry.js' } }
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.imports = { '*': { 'src/entry.js': { './hello.js': 'src/hello.js' } } }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /attested inconsistently/)
+}))
+
+test('run --lock=frozen --bundle=load tolerates a legacy lockfile without imports, with a warning', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Strip `imports` to simulate a lockfile that predates resolution attestation.
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  delete lock.imports
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'hello, world\n')
+  t.assert.match(load.stderr, /lockfile does not attest resolutions/)
+}))
+
+test('parseCode rejects a bundle with an import edge escaping the project root', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  for (const byParent of Object.values(decoded.imports)) {
+    if (byParent['src/entry.js']) byParent['src/entry.js']['./hello.js'] = '../outside.js'
+  }
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+}))
+
 test('parseCode rejects a v1 full-scope bundle with empty entries', withTmp((t, tmp) => {
   // A tampered bundle with entries=[] would otherwise let assertEntry skip (it
   // short-circuits on empty for v0+no-lockfile compat). Reject at parse time.

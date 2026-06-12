@@ -16,5 +16,12 @@
       }
     }
   },
-  "modules": {}
+  "modules": {},
+  "imports": {
+    "node, import, module-sync, node-addons": {
+      "src/entry.js": {
+        "./hello.js": "src/hello.js"
+      }
+    }
+  }
 }

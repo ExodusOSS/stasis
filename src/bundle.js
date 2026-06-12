@@ -3,7 +3,9 @@ import {
   fileMapToObject,
   fileSetToObject,
   fromEntries,
+  isPlainObject,
   objectToMaps,
+  posixPathEscapes,
   sortPaths,
   splitNodeModulesPath,
 } from './util.js'
@@ -72,7 +74,7 @@ export class Bundle {
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
     assert(json.formats)
-    assert(json.imports)
+    assert(isPlainObject(json.imports))
 
     const modules = new Map()
     let entries = new Set()
@@ -121,13 +123,30 @@ export class Bundle {
       }
     }
 
+    // Resolution edges name project-relative files on both sides; getImport
+    // resolves the target against the project root, so a path that escapes the
+    // root (including a mid-path `a/../../x`) must be rejected here rather than
+    // pulling an out-of-tree file in at load time.
+    const imports = objectToMaps(json.imports)
+    for (const [, byParent] of imports) {
+      assert(byParent instanceof Map)
+      for (const [parent, specifiers] of byParent) {
+        assert(!posixPathEscapes(parent))
+        assert(specifiers instanceof Map)
+        for (const [, file] of specifiers) {
+          assert(typeof file === 'string')
+          assert(!posixPathEscapes(file))
+        }
+      }
+    }
+
     return new Bundle({
       version: json.version,
       config: json.config,
       entries,
       modules,
       formats: new Map(Object.entries(json.formats)),
-      imports: objectToMaps(json.imports),
+      imports,
     })
   }
 

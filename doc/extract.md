@@ -22,8 +22,8 @@ directory.
 
 The lockfile is derived from the bundle's own contents: each file's recorded
 UTF-8 bytes are hashed (sha512) into the same SRI digest `stasis run` would
-record, and the bundle's `entries`, package dirs, and `name`/`version` metadata
-are carried across verbatim. The extracted tree therefore validates against the
+record, and the bundle's `entries`, package dirs, `name`/`version` metadata,
+and `imports` (resolution map) are carried across verbatim. The extracted tree therefore validates against the
 lockfile out of the box — `stasis prune` works directly against the extracted
 `node_modules`; a `stasis run --lock=frozen` additionally needs the project's
 `package.json` files, which are only present if the bundle recorded them.

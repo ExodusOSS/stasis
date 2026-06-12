@@ -36,6 +36,95 @@ test('Lockfile round-trip preserves structure', (t) => {
   t.assert.equal(first, second)
 })
 
+test('Lockfile round-trip preserves imports and a legacy lockfile stays without them', (t) => {
+  const withImports = JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    entries: ['src/a.js'],
+    sources: {
+      '.': { name: 'x', version: '1.0.0', files: { 'src/a.js': 'sha512-aaa' } },
+    },
+    modules: {},
+    imports: {
+      'node, import': { 'src/a.js': { './b.js': 'src/b.js' } },
+    },
+  })
+  const parsed = Lockfile.parse(withImports)
+  t.assert.equal(parsed.imports.get('node, import').get('src/a.js').get('./b.js'), 'src/b.js')
+  const first = parsed.serialize()
+  const second = Lockfile.parse(first).serialize()
+  t.assert.equal(first, second)
+  t.assert.ok(JSON.parse(first).imports, 'imports must survive serialization')
+
+  // A legacy lockfile (no imports key) parses to imports === null and
+  // round-trips without gaining the key.
+  const legacy = JSON.stringify({
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-bbb' } } },
+  })
+  const legacyParsed = Lockfile.parse(legacy)
+  t.assert.equal(legacyParsed.imports, null)
+  t.assert.equal(JSON.parse(legacyParsed.serialize()).imports, undefined)
+})
+
+test('Lockfile.parse rejects imports whose paths escape the project root', (t) => {
+  const base = {
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
+  }
+  const escapingTarget = JSON.stringify({
+    ...base,
+    imports: { '*': { 'src/a.js': { './b.js': '../outside.js' } } },
+  })
+  t.assert.throws(() => Lockfile.parse(escapingTarget))
+  // A mid-path `..` that pops above the root is rejected too: plain
+  // startsWith('..') would have let this through.
+  const midPathTarget = JSON.stringify({
+    ...base,
+    imports: { '*': { 'src/a.js': { './b.js': 'a/../../outside.js' } } },
+  })
+  t.assert.throws(() => Lockfile.parse(midPathTarget))
+  const escapingParent = JSON.stringify({
+    ...base,
+    imports: { '*': { '../outside.js': { './b.js': 'src/b.js' } } },
+  })
+  t.assert.throws(() => Lockfile.parse(escapingParent))
+  const nonStringTarget = JSON.stringify({
+    ...base,
+    imports: { '*': { 'src/a.js': { './b.js': 42 } } },
+  })
+  t.assert.throws(() => Lockfile.parse(nonStringTarget))
+})
+
+test('Bundle.parseCode rejects imports whose paths escape the project root', (t) => {
+  const base = {
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'x' } } },
+    formats: {},
+  }
+  const escapingTarget = JSON.stringify({
+    ...base,
+    imports: { '*': { 'src/a.js': { './b.js': '../outside.js' } } },
+  })
+  t.assert.throws(() => Bundle.parseCode(escapingTarget))
+  const midPathTarget = JSON.stringify({
+    ...base,
+    imports: { '*': { 'src/a.js': { './b.js': 'a/../../outside.js' } } },
+  })
+  t.assert.throws(() => Bundle.parseCode(midPathTarget))
+  const escapingParent = JSON.stringify({
+    ...base,
+    imports: { '*': { '../outside.js': { './b.js': 'src/b.js' } } },
+  })
+  t.assert.throws(() => Bundle.parseCode(escapingParent))
+  // An array `imports` (malformed shape) is rejected, matching Lockfile.parse.
+  const arrayImports = JSON.stringify({ ...base, imports: [] })
+  t.assert.throws(() => Bundle.parseCode(arrayImports))
+})
+
 test('Bundle.serializeCode round-trip preserves entries, modules, formats, imports', (t) => {
   const bundle = new Bundle({
     config: { scope: 'full' },

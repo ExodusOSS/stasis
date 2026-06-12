@@ -102,7 +102,10 @@ export class Config {
     // the lockfile and we cross-check it on load; otherwise the bundle is itself
     // authoritative -- lock=none with no lockfile on disk, or lock=ignore with a lockfile
     // deliberately bypassed.
-    // WARNING: lockfile attests only to source BYTES, not bundle metadata.
+    // WARNING: the lockfile attests source bytes, entries, module identity, and
+    // (when it records `imports`) resolutions. Formats are still unattested; see
+    // the TODO in src/loader.js. Lockfiles predating resolution attestation
+    // cover bytes only.
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
     }

@@ -1,4 +1,4 @@
-import { assert, fileSetToObject, fromEntries, sortPaths } from './util.js'
+import { assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -12,12 +12,18 @@ export class Lockfile {
   config
   entries
   modules
+  // Recorded resolutions, mirroring the bundle's `imports` shape:
+  // conditions key -> parent file -> specifier -> resolved file. `null` (not an
+  // empty Map) when the lockfile predates resolution attestation -- consumers
+  // use that to tell "attests no resolutions" apart from "doesn't attest them".
+  imports
 
-  constructor({ config = { scope: 'full' }, entries, modules } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, imports } = {}) {
     assert(['node_modules', 'full'].includes(config.scope))
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
+    this.imports = imports ?? null
   }
 
   static parse(text) {
@@ -55,7 +61,29 @@ export class Lockfile {
       }
     }
 
-    return new Lockfile({ config: json.config, entries, modules })
+    let imports = null
+    if (json.imports !== undefined) {
+      assert(isPlainObject(json.imports))
+      imports = new Map()
+      for (const [conditions, byParent] of Object.entries(json.imports)) {
+        assert(isPlainObject(byParent))
+        const parents = new Map()
+        for (const [parent, specifiers] of Object.entries(byParent)) {
+          assert(!posixPathEscapes(parent))
+          assert(isPlainObject(specifiers))
+          const specs = new Map()
+          for (const [specifier, file] of Object.entries(specifiers)) {
+            assert(typeof file === 'string')
+            assert(!posixPathEscapes(file))
+            specs.set(specifier, file)
+          }
+          parents.set(parent, specs)
+        }
+        imports.set(conditions, parents)
+      }
+    }
+
+    return new Lockfile({ config: json.config, entries, modules, imports })
   }
 
   serialize() {
@@ -75,6 +103,9 @@ export class Lockfile {
     const store = { version: this.version, config: this.config }
     if (this.config.scope === 'full') Object.assign(store, { entries, sources: fromEntries(sources) })
     Object.assign(store, { modules: fromEntries(modules) })
+    // Legacy lockfiles (imports === null) round-trip without the key, so
+    // parse-serialize of an old file stays byte-stable.
+    if (this.imports !== null) Object.assign(store, { imports: fileMapToObject(this.imports) })
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 }

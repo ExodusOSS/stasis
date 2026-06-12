@@ -109,6 +109,10 @@ test('extractCommand writes a stasis.lock.json that is consistent with the extra
       t.assert.equal(hash, sha512integrity(readFileSync(join(outDir, file))))
     }
   }
+  // The bundle's resolution map is carried across, so the derived lockfile
+  // attests resolutions, not just bytes.
+  t.assert.deepEqual(lock.imports, bundle.imports)
+  t.assert.ok(lock.imports.size > 0, 'fixture bundle must have resolution edges to make this meaningful')
 }))
 
 test('extractCommand round-trips a scope=full bundle with workspace sources + node_modules buckets', withTmp(async (t, tmp) => {

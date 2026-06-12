@@ -11,5 +11,13 @@
         "index.js": "sha512-52E85RLYK5DnVBcWjE7MSUZ7gnHxjFJOJp3inn/Cmhmls0lqCD7iOx9lV42umAL+FPFu68V7GPyEFhaWdK8wVg=="
       }
     }
+  },
+  "imports": {
+    "node, import, module-sync, node-addons": {
+      "src/entry.js": {
+        "fake-esm-pkg": "node_modules/fake-esm-pkg/index.js",
+        "./helper.js": "src/helper.js"
+      }
+    }
   }
 }

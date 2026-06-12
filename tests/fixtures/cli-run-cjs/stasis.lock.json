@@ -16,5 +16,12 @@
       }
     }
   },
-  "modules": {}
+  "modules": {},
+  "imports": {
+    "require, node, node-addons, module-sync": {
+      "src/entry.cjs": {
+        "./hello.cjs": "src/hello.cjs"
+      }
+    }
+  }
 }

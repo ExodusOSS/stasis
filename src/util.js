@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs'
-import { isAbsolute, join, relative } from 'node:path'
+import { isAbsolute, join, posix, relative } from 'node:path'
 import { constants as zlibConstants } from 'node:zlib'
 
 const sep = '/'
@@ -66,6 +66,15 @@ export const fileMapToObject = (map) => fromEntries(
 export const objectToMaps = (obj) => new Map(
   Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
+
+// True when a POSIX, project-relative path escapes the root once normalized:
+// a leading `..`, an absolute path, or a mid-path `..` that pops above the
+// root (`a/../../x`). Plain `startsWith('..')` only catches the leading case,
+// so it's not enough for paths that later get resolved against the root.
+export function posixPathEscapes(path) {
+  const normalized = posix.normalize(path)
+  return normalized === '..' || normalized.startsWith('../') || posix.isAbsolute(normalized)
+}
 
 export function splitNodeModulesPath(path) {
   const marker = 'node_modules/'

@@ -30,5 +30,13 @@
         "index.js": "sha512-Gs7VspnGD8yxeCA/ImI3ip2n2sosjP1bZzD+jRgx30/4fjIOO9JyZKxh4qp9Yp44xtd2Kh/TAhNjn5yTbOYfEQ=="
       }
     }
+  },
+  "imports": {
+    "node, import, module-sync, node-addons": {
+      "src/entry.js": {
+        "fake-cjs-pkg": "node_modules/fake-cjs-pkg/index.js",
+        "fake-esm-pkg": "node_modules/fake-esm-pkg/index.js"
+      }
+    }
   }
 }
