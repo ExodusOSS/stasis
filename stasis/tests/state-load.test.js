@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { State } from '../src/state.js'
+import { State } from '@exodus/stasis-core/state'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'state-load')
 const state = new State(root)

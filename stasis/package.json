@@ -23,7 +23,6 @@
     "src/bundle.js",
     "src/cmd/bundle.js",
     "src/cmd/extract.js",
-    "src/config.js",
     "src/esbuild.js",
     "src/loader.js",
     "src/loader-mock.js",
@@ -35,8 +34,6 @@
     "src/mock.js",
     "src/prune.js",
     "src/scan.js",
-    "src/state.js",
-    "src/util.js",
     "src/webpack.js"
   ],
   "engines": {

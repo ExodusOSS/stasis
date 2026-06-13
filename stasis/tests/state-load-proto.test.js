@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { State } from '../src/state.js'
+import { State } from '@exodus/stasis-core/state'
 
 // The fixture lockfile contains literal `"__proto__"` JSON keys under both
 // modules['node_modules/widget'].files AND sources['.'].files. JSON.parse turns

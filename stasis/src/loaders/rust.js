@@ -17,7 +17,7 @@ import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 
-import { assertRealPathWithinBase } from '../util.js'
+import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
 
 // `mod foo;` / `pub mod foo;` / `pub(crate) mod foo;` — external module
 // declarations only. Inline `mod foo { ... }` is intentionally NOT matched.

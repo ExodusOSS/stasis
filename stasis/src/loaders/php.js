@@ -36,7 +36,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
-import { assertRealPathWithinBase } from '../util.js'
+import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
 
 // Max files read concurrently per wave, to avoid EMFILE on large directory globs.
 const READ_CONCURRENCY = 64

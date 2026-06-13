@@ -5,8 +5,8 @@ import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
 import { scan } from '../scan.js'
-import { State } from '../state.js'
-import { brotliOptions, splitNodeModulesPath } from '../util.js'
+import { State } from '@exodus/stasis-core/state'
+import { brotliOptions, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,

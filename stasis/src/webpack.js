@@ -2,7 +2,7 @@ import assert from 'node:assert'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { State } from './state.js'
+import { State } from '@exodus/stasis-core/state'
 
 const state = State.instance
 assert.ok(state, 'Stasis preload is not active')

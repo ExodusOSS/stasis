@@ -13,7 +13,7 @@ import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 
-import { assertRealPathWithinBase } from '../util.js'
+import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
 
 // The capture class excludes `` ` ``, `(`, `)` (on top of whitespace, quotes,
 // `;`, `&`, `|`, `#`) so a reference inside a command substitution —

@@ -10,7 +10,7 @@ import { rm, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as esbuild from 'esbuild'
 
-import { State } from '../src/state.js'
+import { State } from '@exodus/stasis-core/state'
 
 const entries = process.argv.slice(2)
 if (entries.length === 0) {

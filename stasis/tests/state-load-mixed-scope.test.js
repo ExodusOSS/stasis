@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { State } from '../src/state.js'
+import { State } from '@exodus/stasis-core/state'
 import { Lockfile } from '../src/lockfile.js'
 
 // Cross-scope load: lockfile carries scope=full (with `entries` + `sources`),

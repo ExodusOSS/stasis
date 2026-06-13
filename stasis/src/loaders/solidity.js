@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
-import { assertRealPathWithinBase } from '../util.js'
+import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
 
 const SOL_IMPORT_RE = /import\s[^"']*["']([^"']+)["']/gu
 
