@@ -761,6 +761,25 @@ test('run --lock=add --bundle=add still writes the capture when the program exit
   t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')), 'a non-zero exit must not block the lockfile write')
 }))
 
+test('run --lock=add persists the clean capture when the run aborts for a non-verification reason', withTmp((t, tmp) => {
+  // Boundary of the verification-based gate: an abort that does NOT originate in a stasis
+  // check (here an uncaught module-not-found, thrown by Node's resolver before addImport)
+  // does not taint, so the cleanly captured files are still written. This is the deliberate
+  // trade-off of gating on the verification rather than the exit code; a partial lockfile
+  // here is harmless (its recorded hashes are accurate, and a later lock=frozen run fails
+  // closed on anything missing). Pinned so exit-code gating can't be silently reinstated.
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeFileSync(join(tmp, 'src', 'entry.js'), "import { greet } from './hello.js'\nconsole.log(greet('world'))\nawait import('./does-not-exist.js')\n")
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0) // the missing import aborts the run
+  t.assert.equal(r.stdout, 'hello, world\n')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  t.assert.ok(existsSync(lockPath), 'a non-verification abort still persists the clean capture')
+  const parsed = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  t.assert.ok(parsed.sources['.'].files['src/hello.js'], 'cleanly-captured files are recorded')
+}))
+
 test('run --lock=ignore --bundle=frozen ignores the lockfile and verifies against the bundle', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true }) // keeps the committed stasis.lock.json
   const bundlePath = join(tmp, 'snapshot.br')

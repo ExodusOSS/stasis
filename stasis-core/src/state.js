@@ -200,6 +200,11 @@ export class State {
           }
           this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.resources = bundle.sources
+          // The frozen check for these (addFile's isBinary branch) only fires for callers
+          // that add binary files -- bundler plugins, not the `stasis run` loader, which
+          // covers code imports only (see hooks.js). So under `stasis run` a resources
+          // bundle is required-to-exist and parsed, but its bytes aren't verified against
+          // disk; resource attestation is a build-time (plugin) concern.
           if (this.config.frozenBundle) this.#bundleResources = new Set(bundle.sources.keys())
         }
       }
