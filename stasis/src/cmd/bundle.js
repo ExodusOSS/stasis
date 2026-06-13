@@ -579,12 +579,18 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
   return state.sourceBundle
 }
 
+// Where `stasis bundle` writes when no --output is given: stasis.code.br, the
+// same name `stasis run --bundle=load` discovers by default, so the two commands
+// round-trip with no flags. A file (not stdout) is the common case; pass
+// --output=- to stream the raw brotli bytes to stdout.
+const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
+
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
-// stasis bundle (matching the on-disk format of `stasis.code.br`). When
-// `output` is provided, writes to that path; otherwise writes to stdout.
-// Prints a one-line `[stasis] Bundled <n> files in <p> packages from <dir> to
-// <dest>` summary to stderr so it doesn't interleave with the binary output on
-// stdout.
+// stasis bundle (matching the on-disk format of `stasis.code.br`). Writes to
+// `output` when given, to stasis.code.br in `cwd` by default, or to stdout
+// when `output` is `-`. Prints a one-line `[stasis] Bundled <n> files in <p>
+// packages from <dir> to <dest>` summary to stderr so it doesn't interleave
+// with binary output written to stdout.
 //
 // Dispatch by extension: all entries must be one language — .sol (Solidity),
 // .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static scan), .sh/.bash
@@ -616,12 +622,15 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   const modules = bundle.modules
 
   const data = brotliCompressSync(serialized, brotliOptions())
-  if (output) {
-    const outAbs = resolve(cwd, output)
+  // Default to writing stasis.code.br in cwd; `-` is the conventional opt-in
+  // for streaming the raw brotli bytes to stdout (e.g. to pipe somewhere else).
+  const target = output ?? DEFAULT_BUNDLE_FILE
+  if (target === '-') {
+    process.stdout.write(data)
+  } else {
+    const outAbs = resolve(cwd, target)
     mkdirSync(dirname(outAbs), { recursive: true })
     writeFileSync(outAbs, data)
-  } else {
-    process.stdout.write(data)
   }
   if (lockData) {
     const lockAbs = resolve(cwd, lockfile)
@@ -629,7 +638,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     writeFileSync(lockAbs, lockData)
   }
   const fromDir = outermostDir(files, resolve(cwd))
-  const dest = output ?? '<stdout>'
+  const dest = target === '-' ? '<stdout>' : target
   // Count packages: every non-empty bucket, with the project's own source (the
   // "." workspace bucket) counting as one package alongside each dependency.
   const packages = [...modules.values()].filter((m) => Object.keys(m.files).length > 0).length

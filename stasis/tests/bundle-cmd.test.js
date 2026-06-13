@@ -373,14 +373,32 @@ test('CLI: bundle exits non-zero and writes no output when there are unresolved 
   t.assert.ok(!existsSync(outPath), 'output file must not be written when bundling fails')
 }))
 
-test('CLI: bundle writes a brotli-compressed Bundle to stdout when no -o is given', (t) => {
+test('CLI: bundle writes a brotli-compressed Bundle to stasis.code.br by default when no -o is given', withTmp((t, tmp) => {
+  // Copy the fixture into a temp dir so the default-named artifact lands there
+  // (and never pollutes the repo's fixtures).
+  cpSync(join(fixtures, 'basic'), tmp, { recursive: true })
+  const r = runCli(['bundle', 'src/A.sol'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const buf = readFileSync(join(tmp, 'stasis.code.br'))
+  t.assert.notEqual(buf[0], 0x7b, 'output must be brotli, not JSON')
+  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
+  t.assert.deepEqual(
+    Object.keys(parsed.modules.get('.').files).toSorted(),
+    ['src/A.sol', 'src/B.sol'],
+  )
+}))
+
+test('CLI: bundle writes a brotli-compressed Bundle to stdout with --output=-', (t) => {
   // Capture stdout as binary; spawnSync's encoding option here is 'buffer'.
-  const r = spawnSync(process.execPath, [cli, 'bundle', 'src/A.sol'], {
+  // --output=- writes nothing to disk, so running in the read-only fixture is safe.
+  const r = spawnSync(process.execPath, [cli, 'bundle', '--output=-', 'src/A.sol'], {
     cwd: join(fixtures, 'basic'),
     env: cleanEnv,
   })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr.toString('utf8')}`)
   t.assert.notEqual(r.stdout[0], 0x7b, 'stdout must be brotli, not JSON')
+  t.assert.ok(!existsSync(join(fixtures, 'basic', 'stasis.code.br')), '--output=- must not write a file')
   const parsed = Bundle.parseCode(brotliDecompressSync(r.stdout).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
   t.assert.deepEqual(
@@ -436,8 +454,15 @@ test('CLI: bundle prints a summary line to stderr with the file count, outermost
   t.assert.match(r.stderr, new RegExp(`\\[stasis\\] Bundled 2 files in 1 package from src to ${outPath.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'))
 }))
 
-test('CLI: bundle summary falls back to <stdout> when no -o is given', (t) => {
-  const r = spawnSync(process.execPath, [cli, 'bundle', 'src/A.sol'], {
+test('CLI: bundle summary names stasis.code.br as the destination when no -o is given', withTmp((t, tmp) => {
+  cpSync(join(fixtures, 'basic'), tmp, { recursive: true })
+  const r = runCli(['bundle', 'src/A.sol'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /\[stasis\] Bundled 2 files in 1 package from src to stasis\.code\.br/)
+}))
+
+test('CLI: bundle summary falls back to <stdout> with --output=-', (t) => {
+  const r = spawnSync(process.execPath, [cli, 'bundle', '--output=-', 'src/A.sol'], {
     cwd: join(fixtures, 'basic'),
     env: cleanEnv,
   })
