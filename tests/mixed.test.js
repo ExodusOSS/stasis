@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,6 +54,23 @@ test('run --lock=frozen replays the mixed program from the committed lockfile', 
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, expectedOut)
 })
+
+test('run --lock=frozen rejects a dependency resolution redirected on disk to another attested file', withTmp((t, tmp) => {
+  cpSync(fixture, tmp, { recursive: true })
+  // Point fake-esm-pkg's legacy `main` at the other (also attested) package.
+  // Every byte that loads still hash-matches the lockfile -- package.json is
+  // not hash-attested -- so only the resolution cross-check can catch this.
+  const pkgPath = join(tmp, 'node_modules', 'fake-esm-pkg', 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  pkg.main = '../fake-cjs-pkg/index.js'
+  writeFileSync(pkgPath, JSON.stringify(pkg) + '\n')
+
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /observed resolution .* mismatches the lockfile/)
+  // The check aborts at resolve time, before load, so no module code runs.
+  t.assert.doesNotMatch(r.stdout, /hello from/, 'no module code may execute when a resolution is rejected')
+}))
 
 test('run --bundle=add records module and commonjs formats side by side', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')

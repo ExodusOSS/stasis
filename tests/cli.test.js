@@ -1038,6 +1038,69 @@ test('run --lock=frozen --bundle=load rejects a wildcard resolution over a condi
   t.assert.match(r.stderr, /attested inconsistently/)
 }))
 
+test('run --lock=frozen --dependencies rejects a node_modules resolution redirected to a workspace file', withTmp((t, tmp) => {
+  cpSync(nmFixture, tmp, { recursive: true })
+  // node_modules scope pins dependency bytes, but package.json (which drives
+  // resolution) is not hash-attested: point fake-esm-pkg's legacy `main` at a
+  // workspace file. The lockfile-attested edge for 'fake-esm-pkg' must win.
+  const pkgPath = join(tmp, 'node_modules', 'fake-esm-pkg', 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  pkg.main = '../../src/helper.js'
+  writeFileSync(pkgPath, JSON.stringify(pkg) + '\n')
+
+  const r = run(['run', '--lock=frozen', '--dependencies', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /observed resolution .* mismatches the lockfile/)
+}))
+
+test('run --lock=frozen --dependencies tolerates new workspace imports of pinned dependencies', withTmp((t, tmp) => {
+  cpSync(nmFixture, tmp, { recursive: true })
+  // The workspace is unattested in node_modules scope: a refactor may route
+  // the same pinned dependency through a new workspace file. New (unattested)
+  // edges from workspace parents must be tolerated; the attested
+  // './helper.js' edge still has to resolve to the recorded file.
+  writeFileSync(join(tmp, 'src', 'extra.js'), "export { greet } from 'fake-esm-pkg'\n")
+  writeFileSync(
+    join(tmp, 'src', 'entry.js'),
+    "import { greet } from './extra.js'\nimport { who } from './helper.js'\n\nconsole.log(greet(who))\n"
+  )
+
+  const r = run(['run', '--lock=frozen', '--dependencies', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+}))
+
+test('run --lock=frozen (full scope) rejects an observed edge the lockfile does not attest', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  // Drop the entry -> hello.js edge from the lockfile's imports but keep every
+  // file hash intact. entry.js loads (its bytes still match), then resolving
+  // './hello.js' produces an edge the lockfile no longer attests. In full
+  // scope unknown edges are fatal (the attested file set is closed), so this
+  // must abort -- distinct from a byte-hash failure.
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  lock.imports = {}
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /observed resolution .* is not attested by the lockfile/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'no module code may execute when an edge is unattested')
+}))
+
+test('run --lock=frozen warns but proceeds when a legacy lockfile lacks imports (disk run)', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  delete lock.imports
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /lockfile does not attest resolutions/)
+}))
+
 test('run --lock=frozen --bundle=load tolerates a legacy lockfile without imports, with a warning', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')

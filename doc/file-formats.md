@@ -74,8 +74,15 @@ key, they must match. Only `scope` is persisted into the lockfile/bundle
 - `imports` records the observed resolutions in the same shape as the
   bundle's `imports` map (conditions → parent file → specifier → resolved
   project-relative path), so the lockfile attests not just file bytes but
-  which file each specifier resolves to. Lockfiles written before this field
-  existed omit it; such lockfiles attest bytes only.
+  which file each specifier resolves to. In `lock = frozen` runs the
+  resolutions observed from disk are checked against it: a resolution that
+  diverges from the recorded target is fatal (byte hashes can't see a
+  specifier redirected to a *different* attested file, e.g. via an
+  unattested `package.json` `main`); an edge the lockfile doesn't record is
+  fatal in `scope = full` and tolerated for workspace parents in
+  `scope = node_modules`, where the workspace is deliberately unattested.
+  Lockfiles written before this field existed omit it; such lockfiles attest
+  bytes only (frozen runs warn about this).
 - File and module maps are sorted by the project's `sortPaths` rule
   (files-in-dir before sub-dirs; `*` first, `node_modules` last).
 
@@ -140,8 +147,7 @@ Brotli-compressed JSON, written when `bundle = add | replace`, read when
   specifier at a *different* hash-valid file, while still letting a
   `stasis bundle` artifact validate against a runtime-generated lockfile
   when their graphs coincide. Lockfiles without `imports` skip the check
-  (a warning is printed in `bundle = load` mode); regenerate the lockfile
-  to enable it.
+  (`lock = frozen` warns about it); regenerate the lockfile to enable it.
 - In `bundle = load` mode with `scope = full`, entry-point resolutions
   are checked against `entries`.
 

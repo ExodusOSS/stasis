@@ -137,6 +137,12 @@ export class State {
             }
           }
           this.#lockImports = lockfile.imports
+          // Frozen promises verification, but a lockfile predating resolution
+          // attestation can only vouch for bytes -- resolutions (from a bundle
+          // OR observed on disk) go unchecked until it's regenerated.
+          if (this.config.frozen && this.#lockImports === null) {
+            console.warn('[stasis] Warning: lockfile does not attest resolutions; they are trusted as-is. Regenerate the lockfile to enable this check.')
+          }
           lockfileLoaded = true
         }
 
@@ -199,45 +205,20 @@ export class State {
         }
       }
       // Resolutions: every edge the bundle could serve must land on the file
-      // the lockfile attests for that (parent, specifier) -- the final
-      // resolution is what matters, not how the edge is keyed. Source hashes
+      // the lockfile attests for that (parent, specifier) -- source hashes
       // alone don't close this hole: a tampered bundle could redirect a
-      // specifier to a *different* hash-valid file. The conditions key is
-      // matched exactly first; on a miss the edge is accepted only when every
-      // condition set the lockfile records for that (parent, specifier)
-      // agrees on the same target -- this lets a static `stasis bundle`
-      // artifact (edges under '*') validate against a runtime-generated
-      // lockfile (precise condition sets), and vice versa, while a wildcard
-      // claim over a condition-divergent attestation stays fatal: either
-      // target would be served under conditions where the other is the
-      // attested resolution. Unknown edges are fatal too. The lockfile may
-      // attest a superset (same stance as the file lists above). Lockfiles
-      // that predate resolution attestation (imports === null) skip the
-      // check -- regenerate with lock=replace.
+      // specifier to a *different* hash-valid file. Unknown edges are fatal.
+      // The lockfile may attest a superset (same stance as the file lists
+      // above). Lockfiles that predate resolution attestation
+      // (imports === null) skip the check -- regenerate with lock=replace.
       if (this.#lockImports !== null) {
         for (const [conditions, byParent] of bundle.imports) {
-          const lockByParent = this.#lockImports.get(conditions)
           for (const [parent, specifiers] of byParent) {
-            const lockSpecifiers = lockByParent?.get(parent)
             for (const [specifier, file] of specifiers) {
-              const edge = `'${specifier}' from ${parent} (${conditions})`
-              let attested = lockSpecifiers?.get(specifier)
-              if (attested === undefined) {
-                const targets = new Set()
-                for (const [, lockParents] of this.#lockImports) {
-                  const target = lockParents.get(parent)?.get(specifier)
-                  if (target !== undefined) targets.add(target)
-                }
-                assert.ok(targets.size > 0, `bundle resolution ${edge} is not attested by the lockfile`)
-                assert.ok(targets.size === 1, `bundle resolution ${edge} is attested inconsistently across condition sets in the lockfile`)
-                ;[attested] = targets
-              }
-              assert.equal(file, attested, `bundle resolution ${edge} mismatches the lockfile`)
+              this.#assertAttestedResolution(conditions, parent, specifier, file, { what: 'bundle' })
             }
           }
         }
-      } else if (bundle.imports.size > 0 && this.config.loadBundle) {
-        console.warn('[stasis] Warning: lockfile does not attest resolutions; bundle import map is trusted as-is. Regenerate the lockfile to enable this check.')
       }
     } else {
       if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
@@ -254,6 +235,33 @@ export class State {
         }
       }
     }
+  }
+
+  // Verify one resolution edge against the lockfile-attested map. The final
+  // resolution is what matters, not how the edge is keyed: the conditions key
+  // is matched exactly first; on a miss the edge is accepted only when every
+  // condition set the lockfile records for that (parent, specifier) agrees on
+  // the same target -- this lets a static `stasis bundle` artifact (edges
+  // under '*') validate against a runtime-generated lockfile (precise
+  // condition sets), and vice versa, while a claim over a condition-divergent
+  // attestation stays fatal: either target would be served under conditions
+  // where the other is the attested resolution. Unknown edges are fatal
+  // unless the caller opts out (see addImport's node_modules-scope carve-out).
+  #assertAttestedResolution(conditions, parent, specifier, file, { what, tolerateUnknown = false }) {
+    const edge = `'${specifier}' from ${parent} (${conditions})`
+    let attested = this.#lockImports.get(conditions)?.get(parent)?.get(specifier)
+    if (attested === undefined) {
+      const targets = new Set()
+      for (const [, lockParents] of this.#lockImports) {
+        const target = lockParents.get(parent)?.get(specifier)
+        if (target !== undefined) targets.add(target)
+      }
+      if (targets.size === 0 && tolerateUnknown) return
+      assert.ok(targets.size > 0, `${what} resolution ${edge} is not attested by the lockfile`)
+      assert.ok(targets.size === 1, `${what} resolution ${edge} is attested inconsistently across condition sets in the lockfile`)
+      ;[attested] = targets
+    }
+    assert.equal(file, attested, `${what} resolution ${edge} mismatches the lockfile`)
   }
 
   assertEntry(url) {
@@ -441,6 +449,20 @@ export class State {
     const parent = this.relative(this.absolute(parentURL))
     const file = this.relative(this.absolute(url))
     const key = this.#conditionsKey(conditions, importAttributes)
+
+    // Frozen runs verify resolutions observed from disk against the lockfile,
+    // mirroring the bundle-side check: byte hashes can't see a resolution
+    // redirected to a *different* attested file (e.g. via an unattested
+    // package.json `main` or a symlink). An edge the lockfile attests must
+    // match in every scope. Unknown edges are fatal in full scope (the
+    // attested file set is closed, so the traversed edge set should be too),
+    // but tolerated for workspace parents in node_modules scope -- the
+    // workspace is deliberately unattested there, so changed workspace code
+    // may legitimately introduce new edges, including into pinned packages.
+    if (this.config.frozen && this.#lockImports !== null) {
+      const tolerateUnknown = !this.config.full && !parent.includes('node_modules')
+      this.#assertAttestedResolution(key, parent, specifier, file, { what: 'observed', tolerateUnknown })
+    }
 
     if (!this.imports.has(key)) this.imports.set(key, new Map())
     const imports = this.imports.get(key)
