@@ -3,10 +3,22 @@ import { test } from 'node:test'
 import { Bundle } from '@exodus/stasis/bundle'
 import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
 import { Lockfile } from '@exodus/stasis/lockfile'
+import { StasisEsbuild } from '@exodus/stasis/esbuild'
+import { StasisWebpack } from '@exodus/stasis/webpack'
+import { StasisEsbuild as CoreEsbuild } from '@exodus/stasis-core/esbuild'
+import { StasisWebpack as CoreWebpack } from '@exodus/stasis-core/webpack'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
   t.assert.equal(Bundle.VERSION, 1)
+})
+
+test('@exodus/stasis/{esbuild,webpack} re-export the stasis-core plugins', (t) => {
+  t.assert.equal(typeof StasisEsbuild, 'function')
+  t.assert.equal(typeof StasisWebpack, 'function')
+  // The public-package entry is a thin re-export of the stasis-core implementation.
+  t.assert.equal(StasisEsbuild, CoreEsbuild)
+  t.assert.equal(StasisWebpack, CoreWebpack)
 })
 
 test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API', (t) => {

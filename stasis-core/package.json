@@ -12,19 +12,23 @@
     "./lockfile": "./src/lockfile.js",
     "./util": "./src/util.js",
     "./state.util": "./src/state.util.js",
-    "./prune": "./src/prune.js"
+    "./prune": "./src/prune.js",
+    "./esbuild": "./src/esbuild.js",
+    "./webpack": "./src/webpack.js"
   },
   "files": [
     "bin/stasis-core.js",
     "src/bundle.js",
     "src/config.js",
+    "src/esbuild.js",
     "src/hooks.js",
     "src/loader.js",
     "src/lockfile.js",
     "src/prune.js",
     "src/state.js",
     "src/state.util.js",
-    "src/util.js"
+    "src/util.js",
+    "src/webpack.js"
   ],
   "engines": {
     "node": ">=24.14.0"
