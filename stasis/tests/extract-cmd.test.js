@@ -48,8 +48,7 @@ const runCli = (args, opts = {}) => {
 }
 
 // Build a real brotli code bundle at `out` from the given fixture + entries.
-// Uses the Solidity bundler, which extracts imports without needing oxc-parser
-// (only the JS scanner does).
+// Uses the Solidity bundler (no JS scan involved).
 const buildBundle = async (cwd, entries, out, extra = {}) => {
   await bundleCommand({ cwd, entries, output: out, ...extra })
   return Bundle.parseCode(brotliDecompressSync(readFileSync(out)).toString('utf8'))
