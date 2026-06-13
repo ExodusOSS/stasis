@@ -1106,7 +1106,11 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
     { encoding: 'utf-8', env: { ...cleanEnv, NODE_PATH: '' }, cwd: proj },
   )
   t.assert.notEqual(r.status, 0, 'must exit non-zero when the parser is missing')
-  t.assert.match(r.stderr, /oxc-parser dependency/)
+  // getParser() no longer wraps the failure in a custom message (oxc-parser is a
+  // regular dep now); a missing parser surfaces as Node's MODULE_NOT_FOUND, which
+  // still names oxc-parser. The point of the test stands: it must fail loudly, not
+  // silently bundle just the entry.
+  t.assert.match(r.stderr, /oxc-parser/)
   t.assert.doesNotMatch(r.stderr, /Bundled \d+ files/, 'must not pretend a bundle was produced')
   t.assert.ok(!existsSync(outPath), 'no bundle must be written without a parser')
 }))

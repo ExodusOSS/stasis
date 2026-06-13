@@ -15,7 +15,7 @@ importers:
   stasis:
     dependencies:
       '@exodus/stasis-core':
-        specifier: workspace:^
+        specifier: 1.0.0-alpha.3
         version: link:../stasis-core
       oxc-parser:
         specifier: ^0.94.0

@@ -15,23 +15,15 @@ import assert from 'node:assert/strict'
 // files oxc's recovered AST still yields the edges (Node's module wrapper
 // accepts code oxc rejects, e.g. top-level `return`), while module files keep
 // no edges -- a missed static edge is a hole consumers can't enumerate.
-// The parser (oxc-parser) is loaded lazily; it's a regular dependency of @exodus/stasis.
+// oxc-parser (a regular dependency) is loaded lazily -- non-JS bundlers never
+// call getParser(), so they don't pay to load the native parser.
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
 
 let _parser
 function getParser() {
-  if (_parser) return _parser
-  const req = createRequire(import.meta.url)
-  try {
-    _parser = req('oxc-parser')
-  } catch (cause) {
-    throw new Error(
-      'stasis scan requires the oxc-parser dependency. Install it: `pnpm add oxc-parser` (or `npm i oxc-parser`).',
-      { cause }
-    )
-  }
+  _parser ??= createRequire(import.meta.url)('oxc-parser')
   return _parser
 }
 
@@ -195,11 +187,10 @@ export class Scan {
     const declared = formatForFile(file)
     const src = readFileSync(file, 'utf8')
 
-    // Resolve the parser OUTSIDE the per-file try: a missing oxc-parser peer
-    // is an environment error, not a property of this file. Swallowing it
-    // here turned every file into a silent zero-edge leaf -- the original
-    // "bundles just the entry, exit 0" failure -- instead of surfacing the
-    // actionable install hint from getParser().
+    // Resolve the parser OUTSIDE the per-file try: a missing oxc-parser is an
+    // environment error, not a property of this file. Swallowing it here turned
+    // every file into a silent zero-edge leaf -- the original "bundles just the
+    // entry, exit 0" failure -- instead of letting getParser()'s failure surface.
     const parser = getParser()
     let parsed
     try {

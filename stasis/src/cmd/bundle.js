@@ -383,8 +383,8 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
 // reading reachable file contents from disk -- no user code is ever loaded or
 // executed. TypeScript files behave exactly like JS ones: sources are stored
 // verbatim with Node's type-stripping formats recorded, and Node strips the
-// types at load time. The bundle shape matches what `src/loader.js` records
-// at runtime, so the result loads via `stasis run --bundle=load`
+// types at load time. The bundle shape matches what @exodus/stasis-core/hooks
+// records at runtime, so the result loads via `stasis run --bundle=load`
 // interchangeably with a runtime-produced one.
 //
 // Refuses to write when the bundle is guaranteed broken (or silently divergent
@@ -502,7 +502,7 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
   // Use a non-preload State to materialise the bundle: addFile bucketizes by
   // package.json + records hashes/sources/formats, and addImport replays the
   // per-edge import map. State's serializeCode then emits the same v1 layout
-  // the runtime loader writes — see src/loader.js for the matching pair.
+  // the runtime loader writes — see @exodus/stasis-core/hooks for the matching pair.
   //
   // bundle=replace skips reading any pre-existing stasis.code.br on disk;
   // bundle=add would merge it, leaking stale formats/imports entries for

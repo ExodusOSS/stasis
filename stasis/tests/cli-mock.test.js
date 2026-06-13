@@ -70,7 +70,7 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   t.assert.match(r.stderr, /mock: true/)
 
   // JS-mock fs layer: the destructured `import { writeFileSync }` snapshot in
-  // user code resolves to the mock (loader.js refreshed the ESM wrapper via
+  // user code resolves to the mock (loader-mock.js refreshed the ESM wrapper via
   // syncBuiltinESMExports after mock mutated the CJS object). --permission is
   // still on as defense in depth -- it would also deny the same write.
   t.assert.match(r.stdout, /fs-destructured blocked ERR_STASIS_MOCK_BLOCKED/)

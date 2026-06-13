@@ -104,7 +104,7 @@ export class Config {
     // deliberately bypassed.
     // WARNING: the lockfile attests source bytes, entries, module identity, and
     // (when it records `imports`) resolutions. Formats are still unattested; see
-    // the TODO in src/loader.js. Lockfiles predating resolution attestation
+    // the TODO in src/hooks.js. Lockfiles predating resolution attestation
     // cover bytes only.
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
