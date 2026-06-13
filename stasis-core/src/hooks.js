@@ -14,22 +14,29 @@ const NON_EXECUTABLE_FORMATS = new Set(['solidity', 'php', 'bash', 'rust'])
 
 let state
 let saved = false
+// Set when stasis's own capture/verification rejects something (see the hooks around
+// addFile/addImport below). Distinct from "the run exited non-zero": a clean capture is
+// allowed to exit non-zero for its own reasons and still be persisted.
+let aborted = false
 
 function initState(root) {
   state = new State(root, { preload: true })
 
-  // Persist the lockfile/bundle only on a clean exit. A non-zero exit code means the
-  // run aborted -- a frozen check rejected drifted bytes/resolutions/formats, or user
-  // code threw -- and the state may be partially populated: addFile records a file's
-  // hash (and lock=add/replace would serialize it) *before* a later byte-vs-bundle
-  // check can reject a tampered file. Writing that would bake the very drift the run
-  // refused to execute into the lockfile/bundle, so the next lock=frozen run would
-  // accept it -- turning a detected, fail-closed rejection into a durable poisoning.
-  // beforeExit only fires on a natural drain (never on process.exit()/uncaught throw),
-  // so a non-zero code there means the user set it deliberately; the exit handler sees
-  // the real code (1 for an uncaught throw). Either way, only a clean run is written.
-  const save = (code) => {
-    if (saved || (typeof code === 'number' && code !== 0)) return
+  // Persist the lockfile/bundle on exit UNLESS a stasis verification rejected something.
+  // We deliberately do NOT gate on the exit code: a clean capture that exits non-zero for
+  // its own reasons -- a server running its own SIGINT shutdown and exiting 130, or any
+  // script that returns non-zero -- must still persist what it captured. The hazard is
+  // narrower: addFile records a file's hash (which lock=add/replace then serializes)
+  // *before* a later check -- e.g. the frozen bundle's byte/format/resolution check, or a
+  // lock=add conflict against an existing lockfile -- can reject it. Writing that would
+  // bake the rejected drift into the lockfile/bundle, so a subsequent lock=frozen run
+  // would accept it. So we skip the write only when `aborted` is set, which the hooks do
+  // whenever addFile/addImport throws -- covering a frozen rejection even if user code
+  // swallows it (try/catch around a dynamic import), plus the pre-existing partial-write
+  // on any capture throw. Unhandled signals (SIGINT/SIGTERM with no handler) bypass exit
+  // hooks entirely; servers own that behavior and we don't change it.
+  const save = () => {
+    if (saved || aborted) return
     saved = true
     state.write()
   }
@@ -93,7 +100,16 @@ function load(url, context, nextLoad) {
   }
 
   assert.equal(saved, false)
-  state.addFile(url, { source, format, isEntry })
+  // A throw from addFile -- a frozen byte/format mismatch, an unattested file, a lock=add
+  // conflict against an existing lockfile, ... -- means stasis rejected this capture. Flag
+  // it so save() persists nothing, even if user code swallows the rejection (a try/catch
+  // around a dynamic import) and the process then exits cleanly.
+  try {
+    state.addFile(url, { source, format, isEntry })
+  } catch (err) {
+    aborted = true
+    throw err
+  }
 
   return result
 }
@@ -150,7 +166,16 @@ function resolve(specifier, context, nextResolve) {
 
   assert.equal(res.importAttributes, undefined) // unsupported yet
   if (parentURL) assert.ok(state)
-  if (state) state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
+  // As in load(): a rejected resolution (frozen redirect mismatch, conflict, ...) must keep
+  // the captured state from being written, swallowed or not.
+  if (state) {
+    try {
+      state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
+    } catch (err) {
+      aborted = true
+      throw err
+    }
+  }
   return res
 }
 

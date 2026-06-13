@@ -691,7 +691,9 @@ test('run --lock=add --bundle=frozen does not persist a lockfile when a tamper i
   const bundlePath = seedFrozenBundle(t, tmp) // removes the committed lockfile, seeds the bundle
   // Tamper a tracked file. The frozen run must reject it (fail-closed execution) AND must
   // not write a lockfile baking in the tampered hash -- otherwise a later lock=frozen run
-  // would trust the poisoned lockfile and execute the very drift this run refused.
+  // would trust the poisoned lockfile and execute the very drift this run refused. The
+  // write is suppressed because addFile's frozen check throws (not because the exit code
+  // is non-zero), so the suppression is on the verification, not the exit status.
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `PWNED ${n}`\n')
   const r = run(
     ['run', '--lock=add', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
@@ -700,6 +702,63 @@ test('run --lock=add --bundle=frozen does not persist a lockfile when a tamper i
   t.assert.notEqual(r.status, 0)
   t.assert.doesNotMatch(r.stdout, /PWNED/, 'the tampered code must not run')
   t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')), 'an aborted frozen run must not persist a (poisoned) lockfile')
+}))
+
+test('run --lock=replace --bundle=frozen does not persist a lockfile when a tamper is detected', withTmp((t, tmp) => {
+  // lock=replace always rewrites and needs no pre-existing lockfile, so it hits the
+  // poisoning path independently of the lock=add bootstrap above.
+  const bundlePath = seedFrozenBundle(t, tmp)
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `PWNED ${n}`\n')
+  const r = run(
+    ['run', '--lock=replace', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.doesNotMatch(r.stdout, /PWNED/, 'the tampered code must not run')
+  t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')), 'lock=replace must not write a poisoned lockfile on a detected tamper')
+}))
+
+test('run --lock=add --bundle=frozen persists nothing when a frozen rejection is swallowed and the run exits clean', withTmp((t, tmp) => {
+  // The suppression is keyed on the verification, not the exit code: even if user code
+  // catches the frozen rejection and the process exits 0, the captured (tampered) state
+  // must not be written -- otherwise a swallowed mismatch poisons a later lock=frozen run.
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  // Entry dynamically imports hello.js and swallows any failure; build the bundle from it.
+  writeFileSync(join(tmp, 'src', 'entry.js'), "try { await import('./hello.js') } catch {}\nconsole.log('survived')\n")
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  // Tamper hello.js: the dynamic import's frozen byte-check throws, the entry swallows it, exit 0.
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `PWNED ${n}`\n')
+  const r = run(
+    ['run', '--lock=add', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`) // the import error was swallowed
+  t.assert.match(r.stdout, /survived/)
+  t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')), 'a swallowed frozen rejection must not persist a poisoned lockfile')
+}))
+
+test('run --lock=add --bundle=add still writes the capture when the program exits non-zero', withTmp((t, tmp) => {
+  // A clean capture that exits non-zero for its own reasons (a server's SIGINT shutdown, a
+  // CLI reporting failures) must still persist what it captured -- the write is gated on
+  // stasis's own verification, not the program's exit code.
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  writeFileSync(join(tmp, 'src', 'entry.js'), "import { greet } from './hello.js'\nconsole.log(greet('world'))\nprocess.exit(3)\n")
+  const r = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 3, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.ok(existsSync(bundlePath), 'a non-zero exit must not block the bundle write')
+  t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')), 'a non-zero exit must not block the lockfile write')
 }))
 
 test('run --lock=ignore --bundle=frozen ignores the lockfile and verifies against the bundle', withTmp((t, tmp) => {
