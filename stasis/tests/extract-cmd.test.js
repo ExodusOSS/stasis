@@ -12,7 +12,7 @@ import { Lockfile } from '../src/lockfile.js'
 import { buildSolidityBundle, bundleCommand } from '../src/cmd/bundle.js'
 import { extractCommand, lockfileFromBundle } from '../src/cmd/extract.js'
 import { prune } from '../src/prune.js'
-import { sha512integrity } from '../src/state.util.js'
+import { sha512integrity } from '@exodus/stasis-core/state.util'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'bin', 'stasis.js')

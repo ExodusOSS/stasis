@@ -36,7 +36,6 @@
     "src/prune.js",
     "src/scan.js",
     "src/state.js",
-    "src/state.util.js",
     "src/util.js",
     "src/webpack.js"
   ],

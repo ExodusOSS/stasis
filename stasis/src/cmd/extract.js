@@ -4,7 +4,7 @@ import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '../bundle.js'
 import { Lockfile } from '../lockfile.js'
-import { sha512integrity } from '../state.util.js'
+import { sha512integrity } from '@exodus/stasis-core/state.util'
 
 const FILE_LOCK = 'stasis.lock.json'
 
