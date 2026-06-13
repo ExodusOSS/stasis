@@ -35,7 +35,7 @@ Both can be run in full scope (default) or just in `node_modules` scope.
 | Import edges | ✅ | ❌ | ❌ | ❌ | 🔍 Implicit | 🔍 Implicit |
 | Constrained to related code | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
 
-_Lockfiles (pm/pnpm/etc) not mentioned - they are like "tarball" column, but also require network access, install step and are not self-contained._
+_Lockfiles (npm/pnpm/etc) not mentioned - they are like "tarball" column, but also require network access, install step and are not self-contained._
 
 ## Commands
 
