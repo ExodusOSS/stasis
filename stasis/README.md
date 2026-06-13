@@ -32,7 +32,7 @@ Both can be run in full scope (default) or just in `node_modules` scope.
 | Runnable | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Contains original sources | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
 | Sources match runtime | ✅ | ➖ | ❌ Deps can misreport | ➖ | ✅ | ✅ |
-| Records dependency versions | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Dependency versions | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Import edges | ✅ | ❌ | ❌ | ❌ | 🔍 Implicit | 🔍 Implicit |
 | Constrained to related code | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
 
