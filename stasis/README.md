@@ -40,7 +40,23 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 
 ## Commands
 
-... TODO: document
+| Command | What it does |
+| - | - |
+| `stasis run --lock=add app.js` | build just a lockfile |
+| `stasis run --lock=frozen app.js` | verify disk against the lockfile |
+| `stasis run --bundle=add app.js` | build just a bundle |
+| `stasis run --bundle=frozen app.js` | verify disk against the bundle alone (self-attesting) |
+| `stasis run --bundle=load app.js` | run from the bundle alone |
+| `stasis run --lock=add --bundle=add app.js` | build a lockfile and bundle together |
+| `stasis run --lock=frozen --bundle=load app.js` | run from the bundle, verified against the lockfile |
+| `stasis run --lock=add --bundle=add --mock app.js` | build without the app's side effects (network, fs writes) |
+| `stasis bundle src/index.js` | build a bundle statically, without executing it |
+| `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |
+| `stasis prune` | trim `node_modules` to the lockfile, verifying the rest |
+| `stasis audit stasis.lock.json` | report npm advisories for a lockfile's dependencies |
+| `stasis audit app.stasis.code.br` | report npm advisories for a bundle's dependencies |
+
+Lock/bundle modes appear in the table above (omit a flag to skip that artifact); `--dependencies` limits to `node_modules` scope and `--mock` captures with side effects denied. The zero-dependency `@exodus/stasis-core` CLI provides `run` and `prune` only.
 
 ## License
 
