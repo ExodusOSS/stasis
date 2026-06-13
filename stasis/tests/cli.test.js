@@ -687,6 +687,72 @@ test('run --dependencies --bundle=frozen tolerates a changed workspace file (una
   t.assert.equal(r.stdout, 'hello, frozen\n', 'the edited workspace file runs; only node_modules is frozen')
 }))
 
+test('run --lock=add --bundle=frozen does not persist a lockfile when a tamper is detected', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp) // removes the committed lockfile, seeds the bundle
+  // Tamper a tracked file. The frozen run must reject it (fail-closed execution) AND must
+  // not write a lockfile baking in the tampered hash -- otherwise a later lock=frozen run
+  // would trust the poisoned lockfile and execute the very drift this run refused.
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `PWNED ${n}`\n')
+  const r = run(
+    ['run', '--lock=add', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.doesNotMatch(r.stdout, /PWNED/, 'the tampered code must not run')
+  t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')), 'an aborted frozen run must not persist a (poisoned) lockfile')
+}))
+
+test('run --lock=ignore --bundle=frozen ignores the lockfile and verifies against the bundle', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true }) // keeps the committed stasis.lock.json
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+
+  const r = run(
+    ['run', '--lock=ignore', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /lock: 'ignore'/)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore, 'lock=ignore must not rewrite the lockfile')
+}))
+
+test('run --bundle=frozen rejects an observed resolution the bundle never recorded', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp)
+  // Strip the bundle's recorded resolutions. The resolver still observes entry->hello.js
+  // from disk, but it is no longer attested -> fatal in full scope (the unknown-edge branch,
+  // distinct from a redirect that mismatches a recorded edge).
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.imports = {}
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /is not attested by the frozen bundle/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'no module code may run when an edge is unattested')
+}))
+
+test('run --lock=frozen fails closed with no stasis files at all (no silent skip)', withTmp((t, tmp) => {
+  // Mirror of the bundle=frozen regression: the lock=frozen existence check now lives
+  // after the discovery loop, so it fires even with no stasis files on disk. In
+  // node_modules scope the workspace entry is outside the attested zone, so a missing
+  // lockfile here once let it run unverified.
+  cpSync(nmFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  rmSync(join(tmp, 'stasis.config.json'))
+  const r = run(['run', '--lock=frozen', '--dependencies', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /No lockfile, but attempting to run in frozen mode/)
+  t.assert.equal(r.stdout, '', 'nothing may run when the lockfile is absent')
+}))
+
 test('run --bundle=add creates intermediate directories for --bundle-file', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'nested', 'deeper', 'out.br')
   const save = run(

@@ -109,12 +109,14 @@ lockfile/bundle `config` block.
 
 Brotli-compressed JSON, written when `bundle = add | replace`, read when
 `bundle = add | load | frozen`. `bundle = add | load` requires a sibling
-`stasis.lock.json` unless `lock = none | replace`; `bundle = frozen` is
-self-attesting and requires no lockfile. In `bundle = frozen` runs the bundle
+`stasis.lock.json` unless `lock = none | ignore | replace`; `bundle = frozen`
+is self-attesting and requires no lockfile. In `bundle = frozen` runs the bundle
 is loaded read-only (never rewritten) and each file/resolution/format observed
 from disk is verified against it, the same closed-set checks `lock = frozen`
 applies from the lockfile — an unrecorded file, a byte/format mismatch, or a
-resolution redirected to a different recorded file is fatal.
+resolution redirected to a different recorded file is fatal. A run that aborts
+(any non-zero exit, including a rejected frozen check) writes nothing, so a
+detected mismatch can never be persisted into the lockfile or bundle.
 
 ```json
 {

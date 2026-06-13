@@ -18,8 +18,18 @@ let saved = false
 function initState(root) {
   state = new State(root, { preload: true })
 
-  const save = () => {
-    if (saved) return
+  // Persist the lockfile/bundle only on a clean exit. A non-zero exit code means the
+  // run aborted -- a frozen check rejected drifted bytes/resolutions/formats, or user
+  // code threw -- and the state may be partially populated: addFile records a file's
+  // hash (and lock=add/replace would serialize it) *before* a later byte-vs-bundle
+  // check can reject a tampered file. Writing that would bake the very drift the run
+  // refused to execute into the lockfile/bundle, so the next lock=frozen run would
+  // accept it -- turning a detected, fail-closed rejection into a durable poisoning.
+  // beforeExit only fires on a natural drain (never on process.exit()/uncaught throw),
+  // so a non-zero code there means the user set it deliberately; the exit handler sees
+  // the real code (1 for an uncaught throw). Either way, only a clean run is written.
+  const save = (code) => {
+    if (saved || (typeof code === 'number' && code !== 0)) return
     saved = true
     state.write()
   }
