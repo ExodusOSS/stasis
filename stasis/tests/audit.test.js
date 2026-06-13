@@ -305,6 +305,29 @@ test('audit() POSTs grouped versions to the npm bulk endpoint and joins rows', w
   }
 ))
 
+test('audit() collects from a brotli bundle and POSTs its node_modules versions', withFetch(
+  () => new Response(JSON.stringify({
+    foo: [{ id: 1, severity: 'critical', title: 'bug', url: 'https://x', vulnerable_versions: '<3' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  async (t, calls) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const bundle = writeBundle(tmp)
+      const report = await audit([bundle])
+      t.assert.equal(calls.length, 1)
+      t.assert.equal(calls[0].url, 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk')
+      t.assert.equal(calls[0].opts.method, 'POST')
+      const body = JSON.parse(calls[0].opts.body)
+      t.assert.deepEqual(body, { baz: ['0.0.1'], foo: ['2.0.0'] }, 'workspace top-pkg must not be sent')
+      t.assert.equal(report.rows.length, 1)
+      t.assert.equal(report.rows[0].severity, 'critical')
+      t.assert.equal(report.rows[0].installed, '2.0.0')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+))
+
 test('audit() wraps non-2xx npm responses in a helpful error', withFetch(
   () => new Response('boom', { status: 503, statusText: 'Service Unavailable' }),
   async (t) => {
