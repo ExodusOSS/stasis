@@ -58,6 +58,7 @@ lockfile/bundle `config` block.
     "node_modules/@exodus/bytes": {
       "name": "@exodus/bytes",
       "version": "1.15.0",
+      "ecosystem": "npm",
       "files": { "index.js": "sha512-…", "package.json": "sha512-…" }
     }
   },
@@ -80,6 +81,18 @@ lockfile/bundle `config` block.
 - Each module record's `name`/`version` come from the owning `package.json`.
   `files` maps package-dir-relative paths to SRI digests
   (`sha512-<base64(sha512(bytes))>`).
+- Dependency records carry an `ecosystem` (next to `name`/`version`) naming the
+  package ecosystem they were installed from, using the SBOM/Package-URL `type`
+  vocabulary where one exists: `npm` (`node_modules`), `composer` (Composer
+  `vendor/…`), `cargo` (Rust `cargo vendor` crates), `github` (`forge install`
+  git submodules from github.com), and `soldeer` (the Foundry-native Solidity
+  package manager — no purl type exists, so this is a descriptive value).
+  `ecosystem` reflects where the package physically resolved, not the bundle's
+  language — a Solidity or Bash import pulled out of `node_modules` is an npm
+  package, so it's tagged `npm`. The workspace/top-level buckets (`sources`,
+  keyed `"."` or a workspace dir) are first-party code, not dependencies, so
+  they omit `ecosystem`. Lockfiles/bundles written before this field existed
+  simply lack it, and are still accepted on load.
 - `imports` records the observed resolutions in the same shape as the
   bundle's `imports` map (conditions → parent file → specifier → resolved
   project-relative path), so the lockfile attests not just file bytes but
@@ -136,6 +149,7 @@ reporting failures) still persists what it cleanly captured.
     "node_modules/@exodus/bytes": {
       "name": "@exodus/bytes",
       "version": "1.15.0",
+      "ecosystem": "npm",
       "files": { "index.js": "..." }
     }
   },
@@ -209,6 +223,17 @@ target escapes the bundle root are refused), bucketized by the nearest
 `vendor/composer/installed.json`). With no such manifest above a file the
 workspace bucket gets a placeholder identity
 (`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
+Dependency buckets carry an `ecosystem` like any other bundle, attributed by
+the install layout each file resolves out of. A dep under `node_modules` is an
+npm package whatever the language (so Solidity and Bash deps that resolve there
+are `npm`). Beyond that, the Solidity bundler recognises Soldeer's
+`dependencies/<name>-<version>/` layout (`soldeer`, name/version from the dir)
+and `forge install` git submodules under `lib/<dir>/` (`github`, named
+`owner/repo` from the github.com URL in `.gitmodules`); the Rust bundler
+follows `use <crate>` into `cargo vendor`'s `vendor/<crate>/` directory and
+tags those `cargo` (name/version from each crate's `Cargo.toml`). A git
+submodule with no `package.json`/`branch`, or a Soldeer dir with no version
+suffix, falls back to version `0.0.0`. The workspace bucket has none.
 
 What counts as a fatal unresolved reference differs by language: Solidity
 requires every `import` to resolve; PHP requires every literal
@@ -235,7 +260,7 @@ Brotli-compressed JSON. Same write/read gating as `stasis.code.br`.
     ".": { "name": "...", "version": "...", "files": { "asset.bin": "<base64>" } }
   },
   "modules": {
-    "node_modules/foo": { "name": "foo", "version": "...", "files": { "asset.bin": "<base64>" } }
+    "node_modules/foo": { "name": "foo", "version": "...", "ecosystem": "npm", "files": { "asset.bin": "<base64>" } }
   }
 }
 ```

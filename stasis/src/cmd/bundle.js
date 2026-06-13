@@ -33,7 +33,6 @@ const RUST_EXTS = new Set(['.rs'])
 const SOLIDITY_WORKSPACE_NAME = 'solidity-bundle'
 const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
-
 const BASH_WORKSPACE_NAME = 'bash-bundle'
 const BASH_WORKSPACE_VERSION = '0.0.0'
 const BASH_FORMAT = 'bash'
@@ -103,6 +102,132 @@ export function outermostDir(paths, cwd) {
   return rel === '' ? '.' : rel
 }
 
+function readJson(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+// Split a Soldeer dependency dir name (`<name>-<version>`) into its parts, e.g.
+// `@openzeppelin-contracts-5.0.2` -> { name: '@openzeppelin-contracts',
+// version: '5.0.2' }. Soldeer encodes the version into the directory name, so
+// that's the authoritative identity for a Soldeer package. Falls back to
+// version 0.0.0 when the dir doesn't end in a semver (every bucket must attest
+// a version).
+function parseSoldeerDir(seg) {
+  const m = /^(.+)-(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)$/u.exec(seg)
+  return m ? { name: m[1], version: m[2] } : { name: seg, version: '0.0.0' }
+}
+
+// Extract `owner/repo` from a github.com remote (https, ssh, or scp-style),
+// dropping a trailing `.git`. Returns null for non-github hosts.
+function githubSlug(url) {
+  const m = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/iu.exec(url)
+  return m ? `${m[1]}/${m[2]}` : null
+}
+
+// Parse `.gitmodules` into Map<submodulePath, { name, branch }>, keeping only
+// github.com submodules (the ones we can attribute as `github`). `.gitmodules`
+// is git-config INI: `[submodule "<n>"]` sections with `path`/`url`/`branch`.
+function parseGithubSubmodules(baseDir) {
+  const byPath = new Map()
+  const text = readFileSyncOrNull(join(baseDir, '.gitmodules'))
+  if (!text) return byPath
+  let cur = null
+  const flush = () => {
+    if (cur?.path && cur?.url) {
+      const name = githubSlug(cur.url)
+      if (name) byPath.set(cur.path.replace(/\/+$/u, ''), { name, branch: cur.branch })
+    }
+    cur = null
+  }
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line.startsWith('[')) {
+      flush()
+      cur = line.startsWith('[submodule') ? {} : null
+      continue
+    }
+    if (!cur) continue
+    const eq = line.indexOf('=')
+    if (eq === -1) continue
+    const key = line.slice(0, eq).trim()
+    if (key === 'path' || key === 'url' || key === 'branch') cur[key] = line.slice(eq + 1).trim()
+  }
+  flush()
+  return byPath
+}
+
+function readFileSyncOrNull(file) {
+  try {
+    return readFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+// Classify a bundled Solidity file into its dependency bucket. Solidity installs
+// deps three ways, each its own ecosystem: npm (`node_modules`, left to the
+// shared bucketizer), Soldeer (`dependencies/<name>-<version>/` → `soldeer`),
+// and `forge install` git submodules (`lib/<dir>/`, when `.gitmodules` records a
+// github.com URL → `github`, per SBOM/Package-URL `pkg:github/owner/repo`).
+// Returns { bucketDir, name, version, ecosystem } for a Soldeer/github dep, or
+// null to defer to the package.json/node_modules/workspace logic.
+function makeSolidityClassifier(baseDir) {
+  const submodules = parseGithubSubmodules(baseDir)
+  return (path) => {
+    if (path.startsWith('dependencies/')) {
+      const seg = path.slice('dependencies/'.length).split('/')[0]
+      if (seg) {
+        const { name, version } = parseSoldeerDir(seg)
+        return { bucketDir: `dependencies/${seg}`, name, version, ecosystem: 'soldeer' }
+      }
+    }
+    for (const [sub, { name, branch }] of submodules) {
+      if (path === sub || path.startsWith(`${sub}/`)) {
+        const pkg = readJson(join(baseDir, sub, 'package.json'))
+        return { bucketDir: sub, name, version: pkg?.version ?? branch ?? '0.0.0', ecosystem: 'github' }
+      }
+    }
+    return null
+  }
+}
+
+// Minimal Cargo.toml reader: pull `name`/`version` from the `[package]` table.
+// A full TOML parse isn't warranted — those two string keys are all we need to
+// identify a vendored crate. Returns null when there's no readable package name.
+function parseCargoToml(file) {
+  const text = readFileSyncOrNull(file)
+  if (!text) return null
+  const at = text.search(/^\[package\]\s*$/mu)
+  let body = text
+  if (at !== -1) {
+    const rest = text.slice(at)
+    const next = rest.slice(1).search(/^\[/mu) // start of the table after [package]
+    body = next === -1 ? rest : rest.slice(0, next + 1)
+  }
+  const name = /^\s*name\s*=\s*"([^"]+)"/mu.exec(body)?.[1]
+  const version = /^\s*version\s*=\s*"([^"]+)"/mu.exec(body)?.[1]
+  return name ? { name, version: version ?? '0.0.0' } : null
+}
+
+// Classify a bundled Rust file. `cargo vendor` copies external crates in-tree
+// under `vendor/<dir>/`; each is its own crate with a Cargo.toml, so bucket it
+// under `vendor/<dir>` and tag it `cargo` (Package-URL `pkg:cargo/<name>`). The
+// workspace's own code and path/workspace members defer to the workspace logic.
+function makeRustClassifier(baseDir) {
+  return (path) => {
+    if (!path.startsWith('vendor/')) return null
+    const dir = path.slice('vendor/'.length).split('/')[0]
+    if (!dir) return null
+    const bucketDir = `vendor/${dir}`
+    const pkg = parseCargoToml(join(baseDir, bucketDir, 'Cargo.toml'))
+    return pkg ? { bucketDir, name: pkg.name, version: pkg.version, ecosystem: 'cargo' } : null
+  }
+}
+
 // Assemble a scope=full code Bundle from a collected source set and its
 // resolution graph. Shared by every non-JS bundler (Solidity/Bash/Rust): the
 // language-specific work (collecting files, resolving the graph, deciding what
@@ -120,16 +245,41 @@ export function outermostDir(paths, cwd) {
 //
 // Unlike the wildcard "*" JS bundles use, these formats don't vary by Node
 // resolution condition, so every edge lands under the one `conditionKey`.
+//
+// Dependency buckets (those under node_modules) are tagged `ecosystem: 'npm'`:
+// node_modules is npm's install layout, so that's where the package came from,
+// regardless of the bundle's language — a Solidity or Bash import resolved out
+// of node_modules is an npm package all the same. This mirrors State's own
+// node_modules tagging (see stasis-core state.js) and lets consumers tell deps
+// apart from the workspace's own packages; the workspace/`.` bucket carries no
+// ecosystem. (PHP's Composer `vendor/` deps are tagged `composer` separately, by
+// the PHP bucketizer.)
+//
+// `classifyDep(path)` is an optional language-specific hook: when it returns a
+// { bucketDir, name, version, ecosystem } record the file is placed there
+// directly, which is how non-node_modules ecosystems are attributed (e.g.
+// Solidity's Soldeer `dependencies/` and github submodules). Returning null (or
+// omitting the hook) defers to the node_modules/package.json/workspace logic.
 function assembleCodeBundle({
-  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, conditionKey,
+  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, conditionKey, classifyDep,
 }) {
   const modules = new Map()
-  const ensureBucket = (dir, name, version) => {
-    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
+  const ensureBucket = (dir, name, version, bucketEcosystem) => {
+    if (!modules.has(dir)) {
+      modules.set(dir, bucketEcosystem === undefined
+        ? { name, version, files: Object.create(null) }
+        : { name, version, ecosystem: bucketEcosystem, files: Object.create(null) })
+    }
     return modules.get(dir)
   }
 
   for (const [path, content] of sources) {
+    const dep = classifyDep?.(path)
+    if (dep) {
+      ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem)
+        .files[path.slice(dep.bucketDir.length + 1)] = content
+      continue
+    }
     const meta = findPackageMetadata(baseDir, path)
     const inNodeModules = splitNodeModulesPath(path) !== null
     if (meta) {
@@ -137,7 +287,8 @@ function assembleCodeBundle({
         throw new Error(`No package.json with name+version found for ${path}`)
       }
       const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
-      ensureBucket(meta.pkgDir, meta.name, meta.version).files[rel] = content
+      const bucketEcosystem = meta.pkgDir.includes('node_modules') ? 'npm' : undefined
+      ensureBucket(meta.pkgDir, meta.name, meta.version, bucketEcosystem).files[rel] = content
     } else {
       if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
       ensureBucket('.', workspaceName, workspaceVersion).files[path] = content
@@ -203,6 +354,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     workspaceVersion: SOLIDITY_WORKSPACE_VERSION,
     format: SOLIDITY_FORMAT,
     conditionKey: 'solidity',
+    classifyDep: makeSolidityClassifier(baseDir),
   })
 }
 
@@ -303,6 +455,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
     workspaceVersion: RUST_WORKSPACE_VERSION,
     format: RUST_FORMAT,
     conditionKey: 'rust',
+    classifyDep: makeRustClassifier(baseDir),
   })
 }
 
