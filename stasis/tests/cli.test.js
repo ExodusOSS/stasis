@@ -1,5 +1,5 @@
 import { test } from 'node:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -779,6 +779,62 @@ test('run --lock=add persists the clean capture when the run aborts for a non-ve
   const parsed = JSON.parse(readFileSync(lockPath, 'utf-8'))
   t.assert.ok(parsed.sources['.'].files['src/hello.js'], 'cleanly-captured files are recorded')
 }))
+
+// Ctrl-C on a long-running server: a server installs its own SIGINT handler and exits
+// (cleanly or non-zero) on shutdown -- that abort is the program's choice, not a
+// lockfile/frozen verification failure, so the captured bundle/lockfile must still be
+// persisted. Driven as a real subprocess that we signal once it's up. We drive the run-time
+// loader directly (`node --import @exodus/stasis-core/loader` -- exactly what `stasis run`
+// spawns) rather than through the CLI, so the signalled process IS the one that writes:
+// `close` fires only after its own SIGINT handler exited and the loader's save() ran, with
+// no parent/child process-group race.
+const captureSigintServer = async (t, exitCode) => {
+  const loader = fileURLToPath(import.meta.resolve('@exodus/stasis-core/loader'))
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-sigint-'))
+  try {
+    cpSync(runFixture, tmp, { recursive: true })
+    rmSync(join(tmp, 'stasis.lock.json'))
+    const bundlePath = join(tmp, 'snapshot.br')
+    // A "server": imports a dep (captured at startup), installs its own SIGINT handler that
+    // exits with the given code, signals readiness, then stays alive on a timer.
+    writeFileSync(join(tmp, 'src', 'entry.js'),
+      "import { greet } from './hello.js'\n" +
+      `process.on('SIGINT', () => process.exit(${exitCode}))\n` +
+      "void greet('world')\n" +
+      "console.error('SERVER_READY')\n" +
+      "setInterval(() => {}, 1e6)\n"
+    )
+    const env = {
+      ...cleanEnv,
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+      EXODUS_STASIS_SCOPE: 'full',
+    }
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['--import', loader, 'src/entry.js'], { cwd: tmp, env, stdio: ['ignore', 'ignore', 'pipe'] })
+      let err = ''
+      let signalled = false
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`server never became ready; stderr: ${err}`)) }, 20000)
+      child.stderr.on('data', (d) => {
+        err += d
+        if (!signalled && err.includes('SERVER_READY')) { signalled = true; child.kill('SIGINT') } // Ctrl-C
+      })
+      child.on('error', (e) => { clearTimeout(timer); reject(e) })
+      child.on('close', (c) => { clearTimeout(timer); resolve(c) })
+    })
+    t.assert.equal(code, exitCode, "the server's own SIGINT handler controls the exit code")
+    t.assert.ok(existsSync(bundlePath), 'a SIGINT-ed server must still persist its captured bundle')
+    const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+    t.assert.ok(decoded.sources['.'].files['src/hello.js'], 'the dep imported before shutdown is captured')
+    t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')), 'the lockfile is persisted too')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+test('run: a server SIGINT-ed to exit 0 still persists its captured bundle', (t) => captureSigintServer(t, 0))
+test('run: a server SIGINT-ed to exit non-zero still persists its captured bundle', (t) => captureSigintServer(t, 130))
 
 test('run --lock=ignore --bundle=frozen ignores the lockfile and verifies against the bundle', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true }) // keeps the committed stasis.lock.json

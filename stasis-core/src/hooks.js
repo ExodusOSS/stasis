@@ -25,16 +25,21 @@ function initState(root) {
   // Persist the lockfile/bundle on exit UNLESS a stasis verification rejected something.
   // We deliberately do NOT gate on the exit code: a clean capture that exits non-zero for
   // its own reasons -- a server running its own SIGINT shutdown and exiting 130, or any
-  // script that returns non-zero -- must still persist what it captured. The hazard is
-  // narrower: addFile records a file's hash (which lock=add/replace then serializes)
-  // *before* a later check -- e.g. the frozen bundle's byte/format/resolution check, or a
-  // lock=add conflict against an existing lockfile -- can reject it. Writing that would
-  // bake the rejected drift into the lockfile/bundle, so a subsequent lock=frozen run
-  // would accept it. So we skip the write only when `aborted` is set, which the hooks do
-  // whenever addFile/addImport throws -- covering a frozen rejection even if user code
-  // swallows it (try/catch around a dynamic import), plus the pre-existing partial-write
-  // on any capture throw. Unhandled signals (SIGINT/SIGTERM with no handler) bypass exit
-  // hooks entirely; servers own that behavior and we don't change it.
+  // script that returns non-zero -- must still persist what it captured. The hazard we
+  // guard is narrower: addFile records a file's hash (which lock=add/replace then
+  // serializes) *before* a later check -- the frozen bundle's byte/format/resolution
+  // check, or a lock=add conflict against an existing lockfile -- can reject it. Writing
+  // that would bake the rejected drift into the lockfile/bundle, so a subsequent
+  // lock=frozen run would accept it. So we skip the write only when `aborted` is set, which
+  // the hooks set whenever addFile/addImport throws -- catching a stasis rejection even if
+  // user code swallows it (try/catch around a dynamic import) and exits 0.
+  //
+  // An abort that does NOT originate in addFile/addImport -- an uncaught module-not-found
+  // (thrown by Node's resolver), or a user error after a partial-but-clean capture -- does
+  // not taint, so the files captured so far ARE still written. That is intentional and
+  // safe: those recorded hashes are accurate (nothing drifted is baked in), and a later
+  // lock=frozen run fails closed on anything missing. Unhandled signals (SIGINT/SIGTERM
+  // with no handler) bypass exit hooks entirely; servers own that behavior, we don't touch it.
   const save = () => {
     if (saved || aborted) return
     saved = true
