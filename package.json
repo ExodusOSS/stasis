@@ -1,54 +1,16 @@
 {
-  "name": "@exodus/stasis",
-  "version": "1.0.0-alpha.3",
-  "description": "File-level source bundles and lockfiles",
+  "name": "@exodus/stasis-workspace",
+  "version": "0.0.0",
+  "description": "Workspace root for @exodus/stasis and @exodus/stasis-core",
+  "private": true,
   "type": "module",
-  "exports": {
-    "./esbuild": "./src/esbuild.js",
-    "./webpack": "./src/webpack.js",
-    "./loader": "./src/loader.js",
-    "./mock": "./src/mock.js",
-    "./bundle": "./src/bundle.js",
-    "./cmd/bundle": "./src/cmd/bundle.js",
-    "./lockfile": "./src/lockfile.js",
-    "./prune": "./src/prune.js",
-    "./logo.svg": "./logo.svg"
-  },
-  "files": [
-    "bin/stasis.js",
-    "logo.svg",
-    "src/apis/npm/index.js",
-    "src/apis/npm/semver.cjs",
-    "src/audit.js",
-    "src/bundle.js",
-    "src/cmd/bundle.js",
-    "src/cmd/extract.js",
-    "src/config.js",
-    "src/esbuild.js",
-    "src/loader.js",
-    "src/loaders/bash.js",
-    "src/loaders/rust.js",
-    "src/loaders/solidity.js",
-    "src/loaders/php.js",
-    "src/lockfile.js",
-    "src/mock.js",
-    "src/prune.js",
-    "src/scan.js",
-    "src/state.js",
-    "src/state.util.js",
-    "src/util.js",
-    "src/webpack.js"
-  ],
   "engines": {
     "node": ">=24.14.0"
   },
-  "bin": {
-    "stasis": "bin/stasis.js"
-  },
   "scripts": {
     "lint": "oxlint",
-    "test": "node --run test:coherence",
-    "test:coherence": "node --test"
+    "test": "pnpm -r run test",
+    "test:coherence": "pnpm -r run test:coherence"
   },
   "repository": {
     "type": "git",
@@ -56,25 +18,8 @@
   },
   "author": "Exodus Movement, Inc.",
   "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/ExodusOSS/stasis/issues"
-  },
-  "homepage": "https://github.com/ExodusOSS/stasis#readme",
-  "peerDependencies": {
-    "oxc-parser": "*"
-  },
-  "peerDependenciesMeta": {
-    "oxc-parser": {
-      "optional": true
-    }
-  },
   "devDependencies": {
-    "@exodus/bytes": "^1.15.0",
-    "esbuild": "^0.27.3",
-    "oxc-parser": "^0.94.0",
-    "oxlint": "^1.52.0",
-    "string-replace-loader": "^2.3.0",
-    "webpack": "^4.47.0"
+    "oxlint": "^1.52.0"
   },
   "packageManager": "pnpm@10.33.4+sha512.1c67b3b359b2d408119ba1ed289f34b8fc3c6873412bec6fd264fbdc82489e510fcbecb9ce9d22dae7f3b76269d8441046014bdca53b9979cd7a561ad631b800"
 }

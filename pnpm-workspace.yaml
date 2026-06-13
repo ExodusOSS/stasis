@@ -1,4 +1,8 @@
 
+packages:
+  - stasis
+  - stasis-core
+
 allowBuilds:
   esbuild: false
 
