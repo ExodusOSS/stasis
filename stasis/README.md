@@ -25,6 +25,17 @@ See [file formats](https://github.com/ExodusOSS/stasis/blob/main/doc/file-format
 
 Both can be run in full scope (default) or just in `node_modules` scope.
 
+## Why a separate bundle format?
+
+| | Stasis | JS bundlers | Sourcemaps | SEA | source + deps tarball | Containers |
+| - | - | - | - | - | - | - |
+| Runnable | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Contains original sources | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
+| Reported sources match runtime | ✅ | ➖ | ❌ | ➖ | ✅ | ✅ |
+| Import edges | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Constrained to related code | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+
+
 ## Commands
 
 ... TODO: document
