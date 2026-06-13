@@ -180,6 +180,41 @@ test('loadConfig bundle=none', (t) => {
   t.assert.equal(c.ignoreBundle, false)
 })
 
+test('loadConfig bundle=frozen -> frozenBundle, bundle truthy, never writes/loads/replaces', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'none', bundle: 'frozen' }))
+  t.assert.equal(c.bundleMode, 'frozen')
+  t.assert.equal(c.frozenBundle, true)
+  t.assert.equal(c.bundle, true) // content is in play (addFile records + verifies)
+  t.assert.equal(c.writeBundle, false) // frozen never rewrites the bundle
+  t.assert.equal(c.loadBundle, false) // reads from disk, doesn't serve bundle bytes
+  t.assert.equal(c.replaceBundle, false)
+  t.assert.equal(c.ignoreBundle, false)
+})
+
+test('loadConfig bundle=frozen needs no lockfile: composes with lock=none', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'none', bundle: 'frozen' }))
+  t.assert.equal(c.lock, 'none')
+  t.assert.equal(c.useLockfile, false)
+  t.assert.equal(c.frozenBundle, true)
+})
+
+test('loadConfig bundle=frozen composes with every lock mode (unlike load)', (t) => {
+  for (const lock of ['none', 'ignore', 'add', 'replace', 'frozen']) {
+    const c = new Config()
+    c.loadConfig(json({ lock, bundle: 'frozen' }))
+    t.assert.equal(c.frozenBundle, true)
+    t.assert.equal(c.lock, lock)
+  }
+})
+
+test('json reflects bundle=frozen', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'none', bundle: 'frozen' }))
+  t.assert.deepEqual(JSON.parse(c.json), { scope: 'full', lock: 'none', bundle: 'frozen' })
+})
+
 test('loadConfig debug=true', (t) => {
   const c = new Config()
   c.loadConfig(json({ debug: true }))
@@ -268,6 +303,14 @@ test('Config(options) sets bundle and exposes bundleMode', (t) => {
   t.assert.equal(c.bundle, true)
 })
 
+test('Config(options) sets bundle=frozen and exposes frozenBundle', (t) => {
+  const c = new Config({ lock: 'none', bundle: 'frozen' })
+  t.assert.equal(c.bundleMode, 'frozen')
+  t.assert.equal(c.frozenBundle, true)
+  t.assert.equal(c.bundle, true)
+  t.assert.equal(c.writeBundle, false)
+})
+
 test('Config(options) sets bundleFile', (t) => {
   const c = new Config({ bundleFile: '/tmp/snapshot.br' })
   t.assert.equal(c.bundleFile, '/tmp/snapshot.br')
@@ -312,7 +355,7 @@ test('Config(options) enforces bundle=load requires frozen|none|ignore lock', (t
 
 test('Config(options) enforces lock=none requires a bundle', (t) => {
   t.assert.throws(() => new Config({ lock: 'none' }), /lock=none requires bundle/)
-  for (const bundle of ['add', 'replace', 'load', 'ignore']) {
+  for (const bundle of ['add', 'replace', 'load', 'frozen', 'ignore']) {
     t.assert.ok(new Config({ lock: 'none', bundle }))
   }
 })
@@ -377,6 +420,10 @@ test('validatePluginOptions accepts every supported key', () => {
     bundleFile: '/tmp/x.br',
     debug: true,
   })
+})
+
+test('validatePluginOptions accepts bundle=frozen', () => {
+  validatePluginOptions('Test', { bundle: 'frozen' })
 })
 
 test('validatePluginOptions rejects unknown keys with the label', (t) => {

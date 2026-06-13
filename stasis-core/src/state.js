@@ -10,7 +10,7 @@ import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
-import { brotliOptions, splitNodeModulesPath } from './util.js'
+import { brotliOptions, fileMapToObject, objectToMaps, splitNodeModulesPath } from './util.js'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
 // the destructured `const` captures function values at this module's eval time, so
@@ -58,6 +58,20 @@ export class State {
   // when none was loaded / it predates format attestation. Like #lockImports,
   // kept apart from this.formats (the live observed/bundle-served map).
   #lockFormats = null
+
+  // Files, resolutions, and formats attested by a frozen bundle (bundle=frozen),
+  // or null when no frozen bundle was loaded. A frozen bundle plays the same
+  // read-only attestation role a frozen lockfile does, but anchored in the
+  // bundle's own bytes -- so bundle=frozen needs no sibling lockfile. The byte
+  // check itself is the noupsert of observed disk content into this.sources/
+  // this.resources (both pre-seeded from the bundle); these sets/maps close the
+  // attested set so a file, resolution, or format the bundle never recorded is
+  // rejected. Kept separate from the live this.sources/this.imports/this.formats,
+  // which addFile/addImport mutate.
+  #bundleSources = null
+  #bundleResources = null
+  #bundleImports = null
+  #bundleFormats = null
 
   // options.preload (boolean) -- mark this instance as the unique preload State, exposed via
   // State.preload. Only one preload State may exist at a time. Non-preload States can be
@@ -112,10 +126,10 @@ export class State {
         if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
           throw new Error(`Unexpected ${join(rootDir, FILE_LOCK)} with config.lock = 'none'`)
         }
-        if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
+        if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
           throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
         }
-        if (resources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle) {
+        if (resources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
           throw new Error(`Unexpected ${join(rootDir, FILE_RESOURCES)} with config.bundle = 'none'`)
         }
 
@@ -124,6 +138,9 @@ export class State {
         }
 
         if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
+        // Frozen bundle requires the code bundle to be present: it is the attestation
+        // we verify disk against (mirrors the lockfile requirement above).
+        if (this.config.frozenBundle) assert.ok(sources, 'No bundle, but attempting to run in frozen bundle mode')
         let lockfileLoaded = false
         if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
           const lockfile = Lockfile.parse(lock)
@@ -156,16 +173,25 @@ export class State {
           lockfileLoaded = true
         }
 
-        if (sources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
+        if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
           const bundle = Bundle.parseCode(brotliDecompressSync(sources).toString('utf-8'))
           assert.equal(bundle.config.scope, this.config.scope)
           this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.sources = bundle.sources
           this.formats = bundle.formats
           this.imports = bundle.imports
+          if (this.config.frozenBundle) {
+            // Snapshot the attested set before addFile/addImport mutate the live
+            // maps. imports is deep-cloned (this.imports shares bundle.imports's
+            // nested Maps, which addImport extends) so the attestation stays fixed;
+            // formats is a flat file->string map, so a shallow copy suffices.
+            this.#bundleSources = new Set(bundle.sources.keys())
+            this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
+            this.#bundleFormats = new Map(bundle.formats)
+          }
         }
 
-        if (resources && (this.config.writeBundle || this.config.loadBundle) && !this.config.replaceBundle) {
+        if (resources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
           const bundle = Bundle.parseResources(brotliDecompressSync(resources).toString('utf-8'))
           // v0 resource bundles didn't record scope; only enforce on v1 where it's reliable.
           if (bundle.version === Bundle.VERSION) {
@@ -173,6 +199,7 @@ export class State {
           }
           this.#mergeBundleMetadata(bundle, { lockfileLoaded })
           this.resources = bundle.sources
+          if (this.config.frozenBundle) this.#bundleResources = new Set(bundle.sources.keys())
         }
       }
     }
@@ -225,7 +252,7 @@ export class State {
         for (const [conditions, byParent] of bundle.imports) {
           for (const [parent, specifiers] of byParent) {
             for (const [specifier, file] of specifiers) {
-              this.#assertAttestedResolution(conditions, parent, specifier, file, { what: 'bundle' })
+              this.#assertAttestedResolution(this.#lockImports, conditions, parent, specifier, file, { what: 'bundle', source: 'lockfile' })
             }
           }
         }
@@ -239,7 +266,7 @@ export class State {
       // fatal here (it can only mean a forged entry).
       if (this.#lockFormats !== null) {
         for (const [file, format] of bundle.formats) {
-          this.#assertAttestedFormat(file, format, { what: 'bundle' })
+          this.#assertAttestedFormat(this.#lockFormats, file, format, { what: 'bundle', source: 'lockfile' })
         }
       }
     } else {
@@ -259,42 +286,43 @@ export class State {
     }
   }
 
-  // Verify one resolution edge against the lockfile-attested map. The final
-  // resolution is what matters, not how the edge is keyed: the conditions key
-  // is matched exactly first; on a miss the edge is accepted only when every
-  // condition set the lockfile records for that (parent, specifier) agrees on
-  // the same target -- this lets a static `stasis bundle` artifact (edges
-  // under '*') validate against a runtime-generated lockfile (precise
-  // condition sets), and vice versa, while a claim over a condition-divergent
-  // attestation stays fatal: either target would be served under conditions
-  // where the other is the attested resolution. Unknown edges are fatal
-  // unless the caller opts out (see addImport's node_modules-scope carve-out).
-  #assertAttestedResolution(conditions, parent, specifier, file, { what, tolerateUnknown = false }) {
+  // Verify one resolution edge against an attestation map (`source`: a loaded
+  // lockfile, or a frozen bundle's own recorded imports). The final resolution
+  // is what matters, not how the edge is keyed: the conditions key is matched
+  // exactly first; on a miss the edge is accepted only when every condition set
+  // the attestation records for that (parent, specifier) agrees on the same
+  // target -- this lets a static `stasis bundle` artifact (edges under '*')
+  // validate against a runtime-generated attestation (precise condition sets),
+  // and vice versa, while a claim over a condition-divergent attestation stays
+  // fatal: either target would be served under conditions where the other is
+  // the attested resolution. Unknown edges are fatal unless the caller opts out
+  // (see addImport's node_modules-scope carve-out).
+  #assertAttestedResolution(attestation, conditions, parent, specifier, file, { what, source = 'lockfile', tolerateUnknown = false }) {
     const edge = `'${specifier}' from ${parent} (${conditions})`
-    let attested = this.#lockImports.get(conditions)?.get(parent)?.get(specifier)
+    let attested = attestation.get(conditions)?.get(parent)?.get(specifier)
     if (attested === undefined) {
       const targets = new Set()
-      for (const [, lockParents] of this.#lockImports) {
-        const target = lockParents.get(parent)?.get(specifier)
+      for (const [, parents] of attestation) {
+        const target = parents.get(parent)?.get(specifier)
         if (target !== undefined) targets.add(target)
       }
       if (targets.size === 0 && tolerateUnknown) return
-      assert.ok(targets.size > 0, `${what} resolution ${edge} is not attested by the lockfile`)
-      assert.ok(targets.size === 1, `${what} resolution ${edge} is attested inconsistently across condition sets in the lockfile`)
+      assert.ok(targets.size > 0, `${what} resolution ${edge} is not attested by the ${source}`)
+      assert.ok(targets.size === 1, `${what} resolution ${edge} is attested inconsistently across condition sets in the ${source}`)
       ;[attested] = targets
     }
-    assert.equal(file, attested, `${what} resolution ${edge} mismatches the lockfile`)
+    assert.equal(file, attested, `${what} resolution ${edge} mismatches the ${source}`)
   }
 
-  // Verify one file's loader format against the lockfile-attested map. Callers
-  // only invoke this for files that must be attested (the lockfile is a
-  // superset of any bundle, and on the disk path the call is gated to the
-  // hash-attested zone), so an unattested file means a forged/extra entry and
-  // is fatal.
-  #assertAttestedFormat(file, format, { what }) {
-    const attested = this.#lockFormats.get(file)
-    assert.ok(attested !== undefined, `${what} format for ${file} is not attested by the lockfile`)
-    assert.equal(format, attested, `${what} format for ${file} mismatches the lockfile`)
+  // Verify one file's loader format against an attestation map (`source`: a
+  // loaded lockfile, or a frozen bundle's own recorded formats). Callers only
+  // invoke this for files that must be attested (the attestation is a superset
+  // of any bundle, and on the disk path the call is gated to the hash-attested
+  // zone), so an unattested file means a forged/extra entry and is fatal.
+  #assertAttestedFormat(attestation, file, format, { what, source = 'lockfile' }) {
+    const attested = attestation.get(file)
+    assert.ok(attested !== undefined, `${what} format for ${file} is not attested by the ${source}`)
+    assert.equal(format, attested, `${what} format for ${file} mismatches the ${source}`)
   }
 
   assertEntry(url) {
@@ -438,17 +466,32 @@ export class State {
       assert.ok(Object.hasOwn(module.files, rel))
     }
 
-    // Frozen runs verify the format observed on disk against the lockfile, the
-    // way addImport verifies resolutions: the on-disk format is derived from
-    // the file extension + nearest package.json `type`, and `type` is usually
-    // not itself hash-attested, so flipping it recategorizes a hash-valid file
+    // Frozen bundle: the observed bytes are checked against the bundle by the
+    // noupsert into this.sources/this.resources below (both pre-seeded from the
+    // bundle); here we close the set, rejecting a file the bundle never recorded
+    // (mirrors the lockfile membership check above, anchored in the bundle). The
+    // scope carve-out matches the lockfile's: node_modules scope doesn't attest
+    // workspace files, so they aren't required to be in the bundle.
+    if (this.config.frozenBundle && inAttestedZone) {
+      const attested = isBinary ? this.#bundleResources : this.#bundleSources
+      assert.ok(attested?.has(file), `File not attested by the frozen bundle: ${file}`)
+    }
+
+    // Frozen runs verify the format observed on disk against the attestation, the
+    // way addImport verifies resolutions: the on-disk format is derived from the
+    // file extension + nearest package.json `type`, and `type` is usually not
+    // itself hash-attested, so flipping it recategorizes a hash-valid file
     // (commonjs<->module, or .js<->module-typescript) with no hash mismatch.
-    // Gated to the same attested zone as the hash check above (the
-    // node_modules-scope workspace is deliberately unattested, like its bytes);
-    // files with no derived format (binary resources) are skipped via
+    // Checked against the lockfile and/or the frozen bundle, each anchored in its
+    // own recorded formats. Gated to the same attested zone as the hash check
+    // above (the node_modules-scope workspace is deliberately unattested, like
+    // its bytes); files with no derived format (binary resources) are skipped via
     // `format != null`.
     if (this.config.frozen && this.#lockFormats !== null && format != null && inAttestedZone) {
-      this.#assertAttestedFormat(file, format, { what: 'observed' })
+      this.#assertAttestedFormat(this.#lockFormats, file, format, { what: 'observed', source: 'lockfile' })
+    }
+    if (this.config.frozenBundle && this.#bundleFormats !== null && format != null && inAttestedZone) {
+      this.#assertAttestedFormat(this.#bundleFormats, file, format, { what: 'observed', source: 'frozen bundle' })
     }
 
     if (!Object.hasOwn(module.files, rel)) module.files[rel] = integrity
@@ -506,9 +549,15 @@ export class State {
     // but tolerated for workspace parents in node_modules scope -- the
     // workspace is deliberately unattested there, so changed workspace code
     // may legitimately introduce new edges, including into pinned packages.
+    const tolerateUnknown = !this.config.full && !parent.includes('node_modules')
     if (this.config.frozen && this.#lockImports !== null) {
-      const tolerateUnknown = !this.config.full && !parent.includes('node_modules')
-      this.#assertAttestedResolution(key, parent, specifier, file, { what: 'observed', tolerateUnknown })
+      this.#assertAttestedResolution(this.#lockImports, key, parent, specifier, file, { what: 'observed', source: 'lockfile', tolerateUnknown })
+    }
+    // A frozen bundle attests resolutions the same way (every code bundle carries
+    // an `imports` map, so #bundleImports is never null once one is loaded). Same
+    // redirect protection and node_modules-scope carve-out, anchored in the bundle.
+    if (this.config.frozenBundle && this.#bundleImports !== null) {
+      this.#assertAttestedResolution(this.#bundleImports, key, parent, specifier, file, { what: 'observed', source: 'frozen bundle', tolerateUnknown })
     }
 
     if (!this.imports.has(key)) this.imports.set(key, new Map())

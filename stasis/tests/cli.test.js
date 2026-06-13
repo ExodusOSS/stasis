@@ -99,7 +99,8 @@ test('run rejects --bundle=load with --lock=replace', (t) => {
 test('run rejects --lock=none without a bundle', (t) => {
   const r = run(['run', '--lock=none', 'a.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--lock=none requires --bundle/)
+  // frozen is now listed among the bundle modes that satisfy lock=none
+  t.assert.match(r.stderr, /--lock=none requires --bundle=\(add\|replace\|load\|frozen\|ignore\)/)
 })
 
 test('run --lock=add executes the entry and rewrites the lockfile idempotently', (t) => {
@@ -439,6 +440,166 @@ test('run --lock=frozen --bundle=add round-trips through --bundle=load', withTmp
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'hello, world\n')
+}))
+
+// --- bundle=frozen: the bundle as a read-only attestation that operates like a
+// lockfile. It needs no sibling lockfile (lock=none here): each file is read from
+// disk and verified against the bundle's own recorded bytes/resolutions/formats,
+// the bundle is never rewritten, and any drift fails closed. seedFrozenBundle
+// builds a bundle into tmp and removes the committed lockfile so lock=none holds.
+const seedFrozenBundle = (t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json')) // bundle=frozen is self-sufficient; lock=none
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  return bundlePath
+}
+
+test('run --lock=none --bundle=frozen runs the entry, verifying disk against the bundle', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp)
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /bundle: 'frozen'/)
+}))
+
+test('run --bundle=frozen does not rewrite the bundle', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp)
+  const before = readFileSync(bundlePath)
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.deepEqual(readFileSync(bundlePath), before, 'bundle=frozen must not rewrite the bundle')
+}))
+
+test('run --bundle=frozen rejects a source file changed on disk', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp)
+  // change a tracked file: its bytes no longer match the frozen bundle
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+  t.assert.doesNotMatch(r.stdout, /bonjour/, 'the changed code must not run')
+}))
+
+test('run --bundle=frozen rejects a brand new file the bundle never recorded', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp)
+  writeFileSync(join(tmp, 'src', 'fresh.js'), "console.log('fresh')\n")
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/fresh.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /not attested by the frozen bundle/)
+  t.assert.doesNotMatch(r.stdout, /fresh/, 'an unattested entry must not run')
+}))
+
+test('run --bundle=frozen rejects an on-disk format flip (tampered package.json type)', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp)
+  // entry.js is attested as `module` in the bundle's formats. Flipping the
+  // workspace package.json `type` makes Node treat the same hash-valid bytes as
+  // commonjs -- `type` is not itself hash-attested, so only the format
+  // cross-check against the frozen bundle can catch this.
+  const pkgPath = join(tmp, 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  pkg.type = 'commonjs'
+  writeFileSync(pkgPath, JSON.stringify(pkg, undefined, 2) + '\n')
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /observed format for .* mismatches the frozen bundle/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'no code may run when a format is rejected')
+}))
+
+test('run --bundle=frozen rejects a tampered bundle whose recorded bytes diverge from disk', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp)
+  // Tamper the bundle (not disk): swap hello.js's recorded source. The on-disk
+  // file still holds the original bytes, so the noupsert against the bundle-seeded
+  // sources must reject the divergence -- the frozen bundle is not trusted blindly.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.sources['.'].files['src/hello.js'] = 'export const greet = (n) => `pwned, ${n}`\n'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+  t.assert.doesNotMatch(r.stdout, /pwned/, 'tampered bundle bytes must not run')
+}))
+
+test('run --bundle=frozen fails with a clear error when the bundle file is missing', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  // stasis.config.json is still present, so discovery runs and the existence check fires early
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${join(tmp, 'missing.br')}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /No bundle, but attempting to run in frozen bundle mode/)
+}))
+
+test('run --lock=frozen --bundle=frozen verifies against both, without rewriting either', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  // Build the bundle while keeping the committed lockfile (lock=add round-trips it).
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+  const bundleBefore = readFileSync(bundlePath)
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /lock: 'frozen'/)
+  t.assert.match(r.stderr, /bundle: 'frozen'/)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore, 'lock=frozen must not rewrite the lockfile')
+  t.assert.deepEqual(readFileSync(bundlePath), bundleBefore, 'bundle=frozen must not rewrite the bundle')
+}))
+
+test('run --lock=replace --bundle=frozen writes the lockfile but leaves the frozen bundle untouched', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  const bundleBefore = readFileSync(bundlePath)
+
+  // A writing lock mode composes with a frozen bundle: lock=replace builds a fresh
+  // lockfile from the run while bundle=frozen verifies disk against the bundle and
+  // never rewrites it.
+  const r = run(
+    ['run', '--lock=replace', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')), 'lock=replace must write a lockfile')
+  t.assert.deepEqual(readFileSync(bundlePath), bundleBefore, 'bundle=frozen must not rewrite the bundle')
 }))
 
 test('run --bundle=add creates intermediate directories for --bundle-file', withTmp((t, tmp) => {

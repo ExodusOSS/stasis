@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 
 const VALID_SCOPE = new Set(['node_modules', 'full'])
 const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])
-const VALID_BUNDLE = new Set(['none', 'ignore', 'add', 'replace', 'load'])
+const VALID_BUNDLE = new Set(['none', 'ignore', 'add', 'replace', 'load', 'frozen'])
 
 const envDebugBool = (value) => Boolean(value && value !== '0')
 
@@ -103,15 +103,19 @@ export class Config {
     // authoritative -- lock=none with no lockfile on disk, or lock=ignore with a lockfile
     // deliberately bypassed.
     // WARNING: the lockfile attests source bytes, entries, module identity, and
-    // (when it records `imports`) resolutions. Formats are still unattested; see
-    // the TODO in src/hooks.js. Lockfiles predating resolution attestation
-    // cover bytes only.
+    // (when it records them) resolutions and loader formats. Lockfiles predating
+    // a given attestation cover only what they recorded (bytes at minimum).
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
     }
 
+    // bundle=frozen places no constraint on lock: unlike load it never *serves* the
+    // bundle's bytes, it reads each file from disk and verifies it against the bundle's
+    // own recorded bytes/resolutions/formats (the bundle is itself the trust root, so it
+    // needs no sibling lockfile -- it "operates as a lockfile"). It composes with any lock
+    // mode, and satisfies the lock=none "a non-none bundle is required" rule below.
     if (this.#lock === 'none' && this.#bundle === 'none') {
-      throw new RangeError('lock=none requires bundle=(add|replace|load|ignore)')
+      throw new RangeError('lock=none requires bundle=(add|replace|load|frozen|ignore)')
     }
   }
 
@@ -181,6 +185,15 @@ export class Config {
 
   get loadBundle() {
     return this.#bundle === 'load'
+  }
+
+  // bundle=frozen: the bundle is a read-only attestation, like a frozen lockfile.
+  // It is loaded (its bytes/resolutions/entries/modules become the attested set) but
+  // never rewritten, and every file/resolution observed from disk is checked against
+  // it. Distinct from load (which serves bytes from the bundle instead of reading disk)
+  // and from add (which loads-then-rewrites and tolerates new files).
+  get frozenBundle() {
+    return this.#bundle === 'frozen'
   }
 
   get full() {

@@ -75,6 +75,19 @@ test('run executes an entry under a frozen lockfile via the core loader', (t) =>
   t.assert.match(r.stderr, /\[stasis-core\] Running stasis with config:/)
 })
 
+test('run --lock=none --bundle=frozen verifies a built bundle via the core loader', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json')) // frozen bundle needs no sibling lockfile
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const r = run(['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /bundle: 'frozen'/)
+}))
+
 test('run does not support --mock (tooling-only flag)', (t) => {
   const r = run(['run', '--lock=none', '--bundle=add', '--bundle-file=/tmp/x.br', '--mock', 'a.js'])
   t.assert.notEqual(r.status, 0)
