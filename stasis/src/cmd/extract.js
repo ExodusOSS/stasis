@@ -23,12 +23,16 @@ const FILE_LOCK = 'stasis.lock.json'
 // `stasis prune` recomputes when validating it.
 export function lockfileFromBundle(bundle) {
   const modules = new Map()
-  for (const [dir, { name, version, files }] of bundle.modules) {
+  for (const [dir, { name, version, origin, files }] of bundle.modules) {
     const hashed = Object.create(null)
     for (const [rel, content] of Object.entries(files)) {
       hashed[rel] = sha512integrity(content)
     }
-    modules.set(dir, { name, version, files: hashed })
+    // Carry the dependency `origin` across so the derived lockfile records the
+    // same ecosystem tag the bundle did.
+    modules.set(dir, origin === undefined
+      ? { name, version, files: hashed }
+      : { name, version, origin, files: hashed })
   }
   // Carry the bundle's resolution + format maps across so the derived lockfile
   // attests them too (parseCode already validated the paths) -- without them

@@ -2,8 +2,12 @@ import { assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, p
 
 const VERSION = 0
 
-const normalize = ({ name, version, files }) =>
-  ({ name, version, files: fromEntries(Object.entries(files)) })
+const normalize = ({ name, version, origin, files }) => {
+  // `origin` (when present) names the package ecosystem a dependency came from
+  // (`npm`, `composer`, `soldeer`); the workspace/top-level buckets omit it.
+  assert(origin === undefined || typeof origin === 'string')
+  return { name, version, ...(origin === undefined ? {} : { origin }), files: fromEntries(Object.entries(files)) }
+}
 
 export class Lockfile {
   static VERSION = VERSION
@@ -107,12 +111,12 @@ export class Lockfile {
     const entries = fileSetToObject(this.entries)
     const modules = []
     const sources = []
-    for (const [dir, { name, version, files }] of this.modules) {
+    for (const [dir, { name, version, origin, files }] of this.modules) {
       const inNodeModules = dir.includes('node_modules')
       if (inNodeModules) assert(name && version && files)
       const type = inNodeModules ? modules : sources
       const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
-      type.push([dir, { name, version, files: sorted }])
+      type.push([dir, { name, version, ...(origin === undefined ? {} : { origin }), files: sorted }])
     }
     modules.sort((a, b) => sortPaths(a[0], b[0]))
     sources.sort((a, b) => sortPaths(a[0], b[0]))

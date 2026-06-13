@@ -58,6 +58,7 @@ lockfile/bundle `config` block.
     "node_modules/@exodus/bytes": {
       "name": "@exodus/bytes",
       "version": "1.15.0",
+      "origin": "npm",
       "files": { "index.js": "sha512-…", "package.json": "sha512-…" }
     }
   },
@@ -80,6 +81,15 @@ lockfile/bundle `config` block.
 - Each module record's `name`/`version` come from the owning `package.json`.
   `files` maps package-dir-relative paths to SRI digests
   (`sha512-<base64(sha512(bytes))>`).
+- Dependency records carry an `origin` (next to `name`/`version`) naming the
+  package ecosystem they were installed from: `npm` for `node_modules` packages
+  and `composer` for Composer `vendor/…` packages. `origin` reflects where the
+  package physically resolved, not the bundle's language — a Solidity or Bash
+  import pulled out of `node_modules` is an npm package, so it's tagged `npm`.
+  The workspace/top-level buckets (`sources`, keyed `"."` or a workspace dir)
+  are first-party code, not dependencies, so they omit `origin`.
+  Lockfiles/bundles written before this field existed simply lack it, and are
+  still accepted on load.
 - `imports` records the observed resolutions in the same shape as the
   bundle's `imports` map (conditions → parent file → specifier → resolved
   project-relative path), so the lockfile attests not just file bytes but
@@ -136,6 +146,7 @@ reporting failures) still persists what it cleanly captured.
     "node_modules/@exodus/bytes": {
       "name": "@exodus/bytes",
       "version": "1.15.0",
+      "origin": "npm",
       "files": { "index.js": "..." }
     }
   },
@@ -209,6 +220,10 @@ target escapes the bundle root are refused), bucketized by the nearest
 `vendor/composer/installed.json`). With no such manifest above a file the
 workspace bucket gets a placeholder identity
 (`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
+Dependency buckets carry an `origin` like any other bundle. These bundlers
+resolve their dependencies out of `node_modules`, so those buckets are tagged
+`npm` — including Solidity and Bash deps, which are ordinary npm packages that
+happen to ship `.sol`/`.sh` files. The workspace bucket has none.
 
 What counts as a fatal unresolved reference differs by language: Solidity
 requires every `import` to resolve; PHP requires every literal
@@ -235,7 +250,7 @@ Brotli-compressed JSON. Same write/read gating as `stasis.code.br`.
     ".": { "name": "...", "version": "...", "files": { "asset.bin": "<base64>" } }
   },
   "modules": {
-    "node_modules/foo": { "name": "foo", "version": "...", "files": { "asset.bin": "<base64>" } }
+    "node_modules/foo": { "name": "foo", "version": "...", "origin": "npm", "files": { "asset.bin": "<base64>" } }
   }
 }
 ```

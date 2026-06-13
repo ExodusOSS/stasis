@@ -722,8 +722,12 @@ export function bucketizePhpSources(baseDir, sources, fallbackName, fallbackVers
   const installed = loadInstalledVersions(baseDir, vendorDir)
 
   const modules = new Map()
-  const ensureBucket = (dir, name, version) => {
-    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
+  const ensureBucket = (dir, name, version, origin) => {
+    if (!modules.has(dir)) {
+      modules.set(dir, origin === undefined
+        ? { name, version, files: Object.create(null) }
+        : { name, version, origin, files: Object.create(null) })
+    }
     return modules.get(dir)
   }
 
@@ -731,7 +735,11 @@ export function bucketizePhpSources(baseDir, sources, fallbackName, fallbackVers
     const pkg = findComposerPackage(baseDir, path, installed, fallbackVersion)
     if (pkg) {
       const rel = pkg.pkgDir === '.' ? path : path.slice(pkg.pkgDir.length + 1)
-      ensureBucket(pkg.pkgDir, pkg.name, pkg.version).files[rel] = content
+      // Anything below the root composer package is an installed Composer
+      // dependency (vendor/<vendor>/<pkg>); tag it `composer`. The root "."
+      // bucket is the workspace's own code and stays origin-less.
+      const origin = pkg.pkgDir === '.' ? undefined : 'composer'
+      ensureBucket(pkg.pkgDir, pkg.name, pkg.version, origin).files[rel] = content
     } else {
       ensureBucket('.', fallbackName, fallbackVersion).files[path] = content
     }

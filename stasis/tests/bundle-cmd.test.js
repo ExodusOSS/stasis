@@ -113,22 +113,28 @@ test('buildSolidityBundle places node_modules files in per-package modules bucke
     ['.', 'node_modules/@oz/contracts', 'node_modules/foo'],
   )
 
-  // Workspace bucket: name+version from the project's own package.json.
+  // Workspace bucket: name+version from the project's own package.json, and
+  // no `origin` — it's the top-level code, not a dependency.
   const workspace = bundle.modules.get('.')
   t.assert.equal(workspace.name, 'my-app')
   t.assert.equal(workspace.version, '0.1.0')
+  t.assert.equal(workspace.origin, undefined)
   t.assert.deepEqual(Object.keys(workspace.files), ['src/A.sol'])
 
-  // Unscoped node_modules package.
+  // Unscoped node_modules package: a dependency. It resolves out of
+  // node_modules — npm's install layout — so its origin is `npm`, not anything
+  // Solidity-specific.
   const foo = bundle.modules.get('node_modules/foo')
   t.assert.equal(foo.name, 'foo')
   t.assert.equal(foo.version, '1.2.3')
+  t.assert.equal(foo.origin, 'npm')
   t.assert.deepEqual(Object.keys(foo.files), ['X.sol'])
 
   // Scoped node_modules package; rel path preserves the deep subdir.
   const oz = bundle.modules.get('node_modules/@oz/contracts')
   t.assert.equal(oz.name, '@oz/contracts')
   t.assert.equal(oz.version, '5.0.0')
+  t.assert.equal(oz.origin, 'npm')
   t.assert.deepEqual(Object.keys(oz.files), ['utils/Math.sol'])
 
   // Resolutions still use the full project-relative paths, regardless

@@ -33,7 +33,6 @@ const RUST_EXTS = new Set(['.rs'])
 const SOLIDITY_WORKSPACE_NAME = 'solidity-bundle'
 const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
-
 const BASH_WORKSPACE_NAME = 'bash-bundle'
 const BASH_WORKSPACE_VERSION = '0.0.0'
 const BASH_FORMAT = 'bash'
@@ -120,12 +119,25 @@ export function outermostDir(paths, cwd) {
 //
 // Unlike the wildcard "*" JS bundles use, these formats don't vary by Node
 // resolution condition, so every edge lands under the one `conditionKey`.
+//
+// Dependency buckets (those under node_modules) are tagged `origin: 'npm'`:
+// node_modules is npm's install layout, so that's where the package came from,
+// regardless of the bundle's language — a Solidity or Bash import resolved out
+// of node_modules is an npm package all the same. This mirrors State's own
+// node_modules tagging (see stasis-core state.js) and lets consumers tell deps
+// apart from the workspace's own packages; the workspace/`.` bucket carries no
+// origin. (PHP's Composer `vendor/` deps are tagged `composer` separately, by
+// the PHP bucketizer.)
 function assembleCodeBundle({
   baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, conditionKey,
 }) {
   const modules = new Map()
-  const ensureBucket = (dir, name, version) => {
-    if (!modules.has(dir)) modules.set(dir, { name, version, files: Object.create(null) })
+  const ensureBucket = (dir, name, version, bucketOrigin) => {
+    if (!modules.has(dir)) {
+      modules.set(dir, bucketOrigin === undefined
+        ? { name, version, files: Object.create(null) }
+        : { name, version, origin: bucketOrigin, files: Object.create(null) })
+    }
     return modules.get(dir)
   }
 
@@ -137,7 +149,8 @@ function assembleCodeBundle({
         throw new Error(`No package.json with name+version found for ${path}`)
       }
       const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
-      ensureBucket(meta.pkgDir, meta.name, meta.version).files[rel] = content
+      const bucketOrigin = meta.pkgDir.includes('node_modules') ? 'npm' : undefined
+      ensureBucket(meta.pkgDir, meta.name, meta.version, bucketOrigin).files[rel] = content
     } else {
       if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
       ensureBucket('.', workspaceName, workspaceVersion).files[path] = content

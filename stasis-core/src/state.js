@@ -295,7 +295,9 @@ export class State {
           assert.equal(info.name, existing.name, `bundle ${dir} name mismatch`)
           assert.equal(info.version, existing.version, `bundle ${dir} version mismatch`)
         } else {
-          this.modules.set(dir, { name: info.name, version: info.version, files: Object.create(null) })
+          this.modules.set(dir, info.origin === undefined
+            ? { name: info.name, version: info.version, files: Object.create(null) }
+            : { name: info.name, version: info.version, origin: info.origin, files: Object.create(null) })
         }
       }
     }
@@ -454,7 +456,15 @@ export class State {
     assert.equal(basename(pkg), 'package.json')
     const dir = dirname(pkg)
     if (nmRoot) assert.equal(dir, nmRoot)
-    if (!this.modules.has(dir)) this.modules.set(dir, { name, version, files: Object.create(null) })
+    if (!this.modules.has(dir)) {
+      // node_modules buckets are installed dependencies; tag them with the `npm`
+      // origin so consumers can tell deps from the workspace's own packages
+      // without re-deriving it from the path. Workspace/top-level buckets (the
+      // scope=full `sources`) carry no origin.
+      this.modules.set(dir, nmRoot
+        ? { name, version, origin: 'npm', files: Object.create(null) }
+        : { name, version, files: Object.create(null) })
+    }
     const module = this.modules.get(dir)
     assert.equal(module.name, name)
     assert.equal(module.version, version)
@@ -677,7 +687,9 @@ export class State {
         if (content !== undefined) files[rel] = content
       }
       if (Object.keys(files).length > 0) {
-        modules.set(dir, { name: info.name, version: info.version, files })
+        modules.set(dir, info.origin === undefined
+          ? { name: info.name, version: info.version, files }
+          : { name: info.name, version: info.version, origin: info.origin, files })
       }
     }
     return modules
