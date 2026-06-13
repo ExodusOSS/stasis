@@ -72,6 +72,36 @@ test('run --lock=frozen rejects a dependency resolution redirected on disk to an
   t.assert.doesNotMatch(r.stdout, /hello from/, 'no module code may execute when a resolution is rejected')
 }))
 
+test('run --bundle=frozen rejects a dependency resolution redirected on disk to another attested file', withTmp((t, tmp) => {
+  cpSync(fixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json')) // frozen bundle is self-attesting; lock=none
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, expectedOut)
+
+  // Point fake-esm-pkg's legacy `main` at the other (also attested) package. Every byte
+  // that loads still matches the bundle -- package.json is not byte-attested -- so only
+  // the bundle's recorded resolution edge can catch the redirect (the byte/format checks
+  // can't see a specifier pointed at a *different* attested file).
+  const pkgPath = join(tmp, 'node_modules', 'fake-esm-pkg', 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  pkg.main = '../fake-cjs-pkg/index.js'
+  writeFileSync(pkgPath, JSON.stringify(pkg) + '\n')
+
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /observed resolution .* mismatches the frozen bundle/)
+  // The check aborts at resolve time, before load, so no module code runs.
+  t.assert.doesNotMatch(r.stdout, /hello from/, 'no module code may execute when a resolution is rejected')
+}))
+
 test('run --bundle=add records module and commonjs formats side by side', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(

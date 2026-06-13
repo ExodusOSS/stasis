@@ -602,6 +602,91 @@ test('run --lock=replace --bundle=frozen writes the lockfile but leaves the froz
   t.assert.deepEqual(readFileSync(bundlePath), bundleBefore, 'bundle=frozen must not rewrite the bundle')
 }))
 
+test('run --lock=add --bundle=frozen bootstraps a lockfile from the verified run, without a pre-existing one', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenBundle(t, tmp) // removes the committed lockfile
+  const bundleBefore = readFileSync(bundlePath)
+  t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')), 'precondition: no lockfile on disk')
+
+  // A self-attesting frozen bundle needs no sibling lockfile, so lock=add can write a
+  // fresh one from the run (verified against the bundle) instead of demanding one exist.
+  const r = run(
+    ['run', '--lock=add', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')), 'lock=add must bootstrap a lockfile')
+  t.assert.deepEqual(readFileSync(bundlePath), bundleBefore, 'bundle=frozen must not rewrite the bundle')
+}))
+
+test('run --bundle=frozen fails closed with no stasis files at all (no silent skip)', withTmp((t, tmp) => {
+  // Regression: the bundle-existence check must fire even when the project has no
+  // stasis.config.json/lock/etc. In node_modules scope the workspace entry is outside
+  // the attested zone, so a missing bundle here once let it run unverified.
+  cpSync(nmFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  rmSync(join(tmp, 'stasis.config.json'))
+  const r = run(
+    ['run', '--lock=none', '--dependencies', '--bundle=frozen', `--bundle-file=${join(tmp, 'missing.br')}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /No bundle, but attempting to run in frozen bundle mode/)
+  t.assert.equal(r.stdout, '', 'nothing may run when the frozen bundle is absent')
+}))
+
+// node_modules-scope frozen bundle: only node_modules sources are attested; the
+// workspace is deliberately outside the attested zone (same carve-out as lock=frozen).
+const seedFrozenNmBundle = (t, tmp) => {
+  cpSync(nmFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json')) // self-attesting; lock=none
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=none', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'hello, world\n')
+  return bundlePath
+}
+
+test('run --dependencies --bundle=frozen verifies node_modules against the bundle', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenNmBundle(t, tmp)
+  const r = run(
+    ['run', '--lock=none', '--dependencies', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /scope: 'node_modules'/)
+  t.assert.match(r.stderr, /bundle: 'frozen'/)
+}))
+
+test('run --dependencies --bundle=frozen rejects a tampered node_modules file (attested zone)', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenNmBundle(t, tmp)
+  writeFileSync(join(tmp, 'node_modules', 'fake-esm-pkg', 'index.js'), 'export const greet = (w) => `pwned, ${w}`\n')
+  const r = run(
+    ['run', '--lock=none', '--dependencies', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /ERR_ASSERTION/)
+  t.assert.doesNotMatch(r.stdout, /pwned/, 'a tampered dependency must not run')
+}))
+
+test('run --dependencies --bundle=frozen tolerates a changed workspace file (unattested zone)', withTmp((t, tmp) => {
+  const bundlePath = seedFrozenNmBundle(t, tmp)
+  // In node_modules scope the workspace is not attested by the bundle, so editing a
+  // workspace file is allowed -- only node_modules drift is frozen. Mirrors lock=frozen.
+  writeFileSync(join(tmp, 'src', 'helper.js'), "export const who = 'frozen'\n")
+  const r = run(
+    ['run', '--lock=none', '--dependencies', '--bundle=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, frozen\n', 'the edited workspace file runs; only node_modules is frozen')
+}))
+
 test('run --bundle=add creates intermediate directories for --bundle-file', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'nested', 'deeper', 'out.br')
   const save = run(

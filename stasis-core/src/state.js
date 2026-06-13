@@ -110,6 +110,7 @@ export class State {
     this.root = potentialRoots.at(-1)
 
     let loaded = false
+    let lockfileLoaded = false
     for (const rootDir of potentialRoots) {
       const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8')
       const lock = readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
@@ -133,15 +134,15 @@ export class State {
           throw new Error(`Unexpected ${join(rootDir, FILE_RESOURCES)} with config.bundle = 'none'`)
         }
 
-        if (sources && !lock && this.config.useLockfile && !this.config.replaceLockfile) {
+        // A frozen bundle is self-attesting -- it verifies disk against the bundle's
+        // own bytes, so (unlike load/add) it needs no sibling lockfile and is exempt
+        // from this "a lockfile is required before a bundle's sources can be trusted"
+        // guard. This is what lets bundle=frozen compose with lock=add (bootstrapping a
+        // fresh lockfile from the verified run) without a pre-existing lockfile.
+        if (sources && !lock && this.config.useLockfile && !this.config.replaceLockfile && !this.config.frozenBundle) {
           throw new Error('stasis.lock.json missing, can not use sources')
         }
 
-        if (this.config.frozen) assert.ok(lock, 'No lockfile, but attempting to run in frozen mode')
-        // Frozen bundle requires the code bundle to be present: it is the attestation
-        // we verify disk against (mirrors the lockfile requirement above).
-        if (this.config.frozenBundle) assert.ok(sources, 'No bundle, but attempting to run in frozen bundle mode')
-        let lockfileLoaded = false
         if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
           const lockfile = Lockfile.parse(lock)
           if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
@@ -203,6 +204,15 @@ export class State {
         }
       }
     }
+
+    // Frozen modes must have actually loaded their attestation. Asserting here --
+    // after the discovery loop -- rather than only inside it closes a fail-open: with
+    // no stasis files on disk at all the loop body never runs, so a per-rootDir guard
+    // would never fire, and in node_modules scope the workspace entry sits outside the
+    // attested zone (its bytes/format/resolutions aren't checked), letting it execute
+    // unverified. A frozen run with nothing to verify against must fail closed instead.
+    if (this.config.frozen) assert.ok(lockfileLoaded, 'No lockfile, but attempting to run in frozen mode')
+    if (this.config.frozenBundle) assert.ok(this.#bundleSources !== null, 'No bundle, but attempting to run in frozen bundle mode')
 
     // Register only after every fallible step succeeds, so a thrown error during config
     // discovery / lockfile / bundle parsing leaves the static registry untouched.
