@@ -1,6 +1,6 @@
-// Test harness: runs an esbuild build with the StasisEsbuild plugin against the cwd as
-// the project root, then writes stasis state. Driven by tests/esbuild.test.js via
-// spawnSync, so each test gets a fresh State per process.
+// Test harness: runs a webpack build with the StasisWebpack plugin against the cwd
+// as the project root, then writes stasis state. Driven by tests/webpack.test.js
+// via spawnSync, so each test gets a fresh State per process.
 //
 // Important: by default this helper constructs a preload State first (mirroring the
 // plugin's options onto it) so the plugin's resolvePluginState call lands in the
@@ -10,7 +10,7 @@
 // the standalone / noop / hard-throw paths, set STASIS_TEST_PRELOAD=0 in the test's
 // env so no preload is constructed.
 //
-// Usage: node tests/esbuild-run.helper.js <entry> [<entry>...]
+// Usage: node tests/webpack-run.helper.js <entry>
 // STASIS_TEST_PLUGIN_OPTIONS (JSON)  -- routes through the plugin's options.
 // STASIS_TEST_PRELOAD_OPTIONS (JSON) -- overrides what the preload sees; without it
 //                                       the helper mirrors the plugin's options. Use
@@ -21,13 +21,14 @@
 import { resolve, join } from 'node:path'
 import { rm, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import * as esbuild from 'esbuild'
+import { promisify } from 'node:util'
+import webpack from 'webpack'
 
 import { State } from '@exodus/stasis-core/state'
 
 const entries = process.argv.slice(2)
-if (entries.length === 0) {
-  console.error('Usage: esbuild-run.helper.js <entry> [...]')
+if (entries.length !== 1) {
+  console.error('Usage: webpack-run.helper.js <entry>')
   process.exit(2)
 }
 
@@ -47,20 +48,23 @@ if (sourceForPreload) {
 const preloadDisabled = process.env.STASIS_TEST_PRELOAD === '0'
 const _preload = preloadDisabled ? undefined : new State(process.cwd(), preloadOptions)
 
-const { StasisEsbuild } = await import('../src/esbuild.js')
+const { StasisWebpack } = await import('../src/webpack.js')
 
-const dist = await mkdtemp(join(tmpdir(), 'stasis-esbuild-test-'))
+const dist = await mkdtemp(join(tmpdir(), 'stasis-webpack-test-'))
 try {
-  await esbuild.build({
-    entryPoints: entries.map((e) => resolve(process.cwd(), e)),
-    bundle: true,
-    outdir: dist,
-    platform: 'node',
-    format: 'esm',
-    write: false,
-    logLevel: 'silent',
-    plugins: [new StasisEsbuild(pluginOptions)],
+  const compiler = webpack({
+    mode: 'none',
+    target: 'node',
+    entry: resolve(process.cwd(), entries[0]),
+    output: { path: dist, filename: 'bundle.js' },
+    plugins: [new StasisWebpack(pluginOptions)],
   })
+
+  const stats = await promisify(compiler.run.bind(compiler))()
+  if (stats.hasErrors()) {
+    console.error(stats.toString({ colors: false, errors: true, errorDetails: true }))
+    process.exit(1)
+  }
 } finally {
   await rm(dist, { recursive: true, force: true })
 }

@@ -1,0 +1,31 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.js"
+  ],
+  "sources": {
+    ".": {
+      "name": "stasis-webpack-full",
+      "version": "0.0.0",
+      "files": {
+        "src/entry.js": "sha512-74gA0f5+Uqhf0KJpROP9WFRpkLTLeaS5Q/T8iCnCaYENRAKD9UaO3Xa6zOUfdpiBZyOJ3h0FWIXh4hbj283pug==",
+        "src/hello.js": "sha512-chNfEB6cB7TTvAEXZqqJvliSvxptmmAKsXmWEHsROiFtJeAxtqceKe+un0s94cxUKIN/9MVeAYY746eNU/ufEA=="
+      }
+    }
+  },
+  "modules": {},
+  "imports": {
+    "*": {
+      "src/entry.js": {
+        "./hello": "src/hello.js"
+      }
+    }
+  },
+  "formats": {
+    "src/entry.js": "commonjs",
+    "src/hello.js": "commonjs"
+  }
+}
