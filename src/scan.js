@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 // files oxc's recovered AST still yields the edges (Node's module wrapper
 // accepts code oxc rejects, e.g. top-level `return`), while module files keep
 // no edges -- a missed static edge is a hole consumers can't enumerate.
-// The parser (oxc-parser) is loaded lazily as an optional peer dependency.
+// The parser (oxc-parser) is loaded lazily; it's a regular dependency of @exodus/stasis.
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
@@ -28,7 +28,7 @@ function getParser() {
     _parser = req('oxc-parser')
   } catch (cause) {
     throw new Error(
-      'stasis scan requires the oxc-parser peer dependency. Install it: `pnpm add oxc-parser` (or `npm i oxc-parser`).',
+      'stasis scan requires the oxc-parser dependency. Install it: `pnpm add oxc-parser` (or `npm i oxc-parser`).',
       { cause }
     )
   }

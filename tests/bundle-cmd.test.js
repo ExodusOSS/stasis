@@ -1074,18 +1074,25 @@ test('CLI: bundle (JS) fails closed when an edge resolves to a file a source bun
   t.assert.ok(!existsSync(outPath))
 }))
 
-test('CLI: bundle (JS) fails loudly when the oxc-parser peer dependency is missing', withTmp((t, tmp) => {
-  // The original bug report's root cause: stasis installed without its
-  // optional oxc-parser peer. getParser()'s throw was caught by the per-file
-  // parse handler, so every file scanned as a silent zero-edge leaf -- the CLI
-  // bundled just the entry and exited 0 with no warning at all. The setup
-  // error must propagate with its install hint instead. Exercised against a
-  // copy of stasis with no node_modules in scope, so the lazy peer lookup
+test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', withTmp((t, tmp) => {
+  // The original bug report's root cause: stasis installed without oxc-parser.
+  // getParser()'s throw was caught by the per-file parse handler, so every file
+  // scanned as a silent zero-edge leaf -- the CLI bundled just the entry and
+  // exited 0 with no warning at all. The setup error must propagate with its
+  // install hint instead. Exercised against a copy of stasis whose node_modules
+  // carries only the zero-dep @exodus/stasis-core (so the moved-module shims
+  // resolve and the bundle command loads) but no oxc-parser, so the lazy lookup
   // (createRequire from src/scan.js) genuinely misses.
   const stasisCopy = join(tmp, 'stasis')
   mkdirSync(stasisCopy)
   for (const entry of ['bin', 'src']) cpSync(join(here, '..', entry), join(stasisCopy, entry), { recursive: true })
   cpSync(join(here, '..', 'package.json'), join(stasisCopy, 'package.json'))
+  // Vendor the zero-dep core so the `@exodus/stasis-core/*` shims resolve;
+  // oxc-parser is deliberately left out of this tree.
+  const coreDest = join(stasisCopy, 'node_modules', '@exodus', 'stasis-core')
+  mkdirSync(coreDest, { recursive: true })
+  for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis-core', entry), join(coreDest, entry), { recursive: true })
+  cpSync(join(here, '..', 'stasis-core', 'package.json'), join(coreDest, 'package.json'))
   const proj = join(tmp, 'proj')
   mkdirSync(proj)
   jsProject(proj, { 'file.mjs': 'export * from "@noble/ciphers/_arx.js"\n' })
@@ -1095,11 +1102,11 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser peer dependency is missi
     process.execPath,
     [join(stasisCopy, 'bin', 'stasis.js'), 'bundle', `--output=${outPath}`, 'file.mjs'],
     // NODE_PATH could expose an oxc-parser from elsewhere; blank it so the
-    // lazy peer lookup genuinely misses regardless of the host environment.
+    // lazy lookup genuinely misses regardless of the host environment.
     { encoding: 'utf-8', env: { ...cleanEnv, NODE_PATH: '' }, cwd: proj },
   )
-  t.assert.notEqual(r.status, 0, 'must exit non-zero when the parser peer is missing')
-  t.assert.match(r.stderr, /oxc-parser peer dependency/)
+  t.assert.notEqual(r.status, 0, 'must exit non-zero when the parser is missing')
+  t.assert.match(r.stderr, /oxc-parser dependency/)
   t.assert.doesNotMatch(r.stderr, /Bundled \d+ files/, 'must not pretend a bundle was produced')
   t.assert.ok(!existsSync(outPath), 'no bundle must be written without a parser')
 }))

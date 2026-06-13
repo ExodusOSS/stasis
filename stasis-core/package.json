@@ -1,0 +1,44 @@
+{
+  "name": "@exodus/stasis-core",
+  "version": "1.0.0-alpha.3",
+  "description": "Zero-dependency stasis runtime: run file-level source bundles and lockfiles, and prune",
+  "type": "module",
+  "exports": {
+    "./loader": "./src/loader.js",
+    "./state": "./src/state.js",
+    "./config": "./src/config.js",
+    "./bundle": "./src/bundle.js",
+    "./lockfile": "./src/lockfile.js",
+    "./util": "./src/util.js",
+    "./state.util": "./src/state.util.js",
+    "./prune": "./src/prune.js"
+  },
+  "files": [
+    "bin/stasis-core.js",
+    "src/bundle.js",
+    "src/config.js",
+    "src/loader.js",
+    "src/lockfile.js",
+    "src/prune.js",
+    "src/state.js",
+    "src/state.util.js",
+    "src/util.js"
+  ],
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "bin": {
+    "stasis-core": "bin/stasis-core.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ExodusOSS/stasis.git",
+    "directory": "stasis-core"
+  },
+  "author": "Exodus Movement, Inc.",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ExodusOSS/stasis/issues"
+  },
+  "homepage": "https://github.com/ExodusOSS/stasis#readme"
+}

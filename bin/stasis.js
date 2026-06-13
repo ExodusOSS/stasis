@@ -79,14 +79,15 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
-  setEnv('EXODUS_STASIS_MOCK', values.mock ? '1' : '')
+  setEnv('EXODUS_STASIS_PRELOAD', values.mock ? import.meta.resolve('../src/mock.js') : '')
   // --mock: capture imports by running user code with side-effects denied,
   // fail-closed. Node's permission system blocks fs writes, child processes,
   // worker threads, native addons (no --allow-addons -- addons would bypass
   // the whole model), and the inspector. Network and timers have no
-  // --allow-* counterparts, so src/mock.js neutralizes them in JS; loader.js
-  // imports mock.js dynamically after stasis's own destructured fs bindings
-  // are captured but before registerHooks runs, so the mock's
+  // --allow-* counterparts, so src/mock.js neutralizes them in JS. The
+  // run-time loader (now in @exodus/stasis-core) imports the module named by
+  // EXODUS_STASIS_PRELOAD after stasis's own destructured fs bindings are
+  // captured but before registerHooks runs, so the mock's
   // syncBuiltinESMExports() refresh propagates to user-code ESM imports
   // without touching stasis's snapshots. Reads stay open (--allow-fs-read=*)
   // so node_modules resolution works; reads aren't a side effect. Writes are
@@ -125,7 +126,7 @@ if (command === '-v' || command === '--version') {
     // doesn't allow native addons to actually load (--allow-addons still off).
     nodeArgs.push('--conditions=node-addons')
   }
-  nodeArgs.push('--import', import.meta.resolve('../src/loader.js'))
+  nodeArgs.push('--import', import.meta.resolve('@exodus/stasis-core/loader'))
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code] = await once(child, 'close')
   process.exitCode = code

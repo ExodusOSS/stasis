@@ -60,18 +60,13 @@
     "url": "https://github.com/ExodusOSS/stasis/issues"
   },
   "homepage": "https://github.com/ExodusOSS/stasis#readme",
-  "peerDependencies": {
-    "oxc-parser": "*"
-  },
-  "peerDependenciesMeta": {
-    "oxc-parser": {
-      "optional": true
-    }
+  "dependencies": {
+    "@exodus/stasis-core": "workspace:^",
+    "oxc-parser": "^0.94.0"
   },
   "devDependencies": {
     "@exodus/bytes": "^1.15.0",
     "esbuild": "^0.27.3",
-    "oxc-parser": "^0.94.0",
     "oxlint": "^1.52.0",
     "string-replace-loader": "^2.3.0",
     "webpack": "^4.47.0"
