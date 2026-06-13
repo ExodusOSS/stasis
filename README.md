@@ -3,7 +3,7 @@
 
 | Package | Location |
 | - | - |
-| `@exodus/stasis` | [stasis/](stasis/) |
-| `@exodus/stasis-core` | [stasis-core/](stasis-core/) |
+| `@exodus/stasis` | [stasis](stasis/) |
+| `@exodus/stasis-core` | [stasis-core](stasis-core/) |
 
 </div>
