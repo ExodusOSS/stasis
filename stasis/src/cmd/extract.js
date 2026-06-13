@@ -30,15 +30,16 @@ export function lockfileFromBundle(bundle) {
     }
     modules.set(dir, { name, version, files: hashed })
   }
-  // Carry the bundle's resolution map across so the derived lockfile attests
-  // resolutions too (parseCode already validated the paths) -- without it the
-  // lockfile would be a legacy bytes-only one, and a later frozen run against
-  // the same bundle would skip the resolution cross-check.
+  // Carry the bundle's resolution + format maps across so the derived lockfile
+  // attests them too (parseCode already validated the paths) -- without them
+  // the lockfile would be a legacy bytes-only one, and a later frozen run
+  // against the same bundle would skip the resolution/format cross-checks.
   return new Lockfile({
     config: bundle.config,
     entries: bundle.entries,
     modules,
     imports: bundle.imports,
+    formats: bundle.formats,
   })
 }
 

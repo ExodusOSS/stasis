@@ -58,6 +58,10 @@ key, they must match. Only `scope` is persisted into the lockfile/bundle
   },
   "imports": {
     "node, import": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } }
+  },
+  "formats": {
+    "src/index.js": "module",
+    "node_modules/@exodus/bytes/index.js": "commonjs"
   }
 }
 ```
@@ -82,7 +86,17 @@ key, they must match. Only `scope` is persisted into the lockfile/bundle
   fatal in `scope = full` and tolerated for workspace parents in
   `scope = node_modules`, where the workspace is deliberately unattested.
   Lockfiles written before this field existed omit it; such lockfiles attest
-  bytes only (frozen runs warn about this).
+  resolutions only as far as they were recorded (frozen runs warn about this).
+- `formats` records each file's Node loader format (`module`, `commonjs`,
+  `json`, `module-typescript`, `commonjs-typescript`) in the same shape as the
+  bundle's `formats` map. The loader picks module-vs-commonjs and (for the
+  `*-typescript` formats) whether type-shaped syntax is stripped purely from
+  this value, so attesting it stops a tampered bundle — or a flipped, un-pinned
+  `package.json` `type` on disk — from running hash-valid bytes under a
+  different format. Checked the same way as `imports`: a mismatch is fatal, and
+  on disk only the attested zone is enforced (`node_modules` files in
+  `node_modules` scope, everything in `full`). Lockfiles predating this field
+  omit it and attest formats not at all (frozen runs warn).
 - File and module maps are sorted by the project's `sortPaths` rule
   (files-in-dir before sub-dirs; `*` first, `node_modules` last).
 

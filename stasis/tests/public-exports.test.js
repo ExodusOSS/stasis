@@ -68,6 +68,46 @@ test('Lockfile round-trip preserves imports and a legacy lockfile stays without 
   t.assert.equal(JSON.parse(legacyParsed.serialize()).imports, undefined)
 })
 
+test('Lockfile round-trip preserves formats and a legacy lockfile stays without them', (t) => {
+  const withFormats = JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    entries: ['src/a.js'],
+    sources: { '.': { name: 'x', version: '1.0.0', files: { 'src/a.js': 'sha512-aaa' } } },
+    modules: {},
+    formats: { 'src/a.js': 'module' },
+  })
+  const parsed = Lockfile.parse(withFormats)
+  t.assert.equal(parsed.formats.get('src/a.js'), 'module')
+  const first = parsed.serialize()
+  const second = Lockfile.parse(first).serialize()
+  t.assert.equal(first, second)
+  t.assert.deepEqual(JSON.parse(first).formats, { 'src/a.js': 'module' })
+
+  // A legacy lockfile (no formats key) parses to formats === null and
+  // round-trips without gaining the key.
+  const legacy = JSON.stringify({
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-bbb' } } },
+  })
+  const legacyParsed = Lockfile.parse(legacy)
+  t.assert.equal(legacyParsed.formats, null)
+  t.assert.equal(JSON.parse(legacyParsed.serialize()).formats, undefined)
+})
+
+test('Lockfile.parse rejects malformed formats (escaping path / non-string value)', (t) => {
+  const base = {
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
+  }
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { '../evil.js': 'module' } })))
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { 'a/../../evil.js': 'module' } })))
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { 'src/a.js': 42 } })))
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: [] })))
+})
+
 test('Lockfile.parse rejects imports whose paths escape the project root', (t) => {
   const base = {
     version: 0,

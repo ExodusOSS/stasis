@@ -17,13 +17,19 @@ export class Lockfile {
   // empty Map) when the lockfile predates resolution attestation -- consumers
   // use that to tell "attests no resolutions" apart from "doesn't attest them".
   imports
+  // Recorded loader formats: project-relative file -> Node format string
+  // (module/commonjs/json/{module,commonjs}-typescript), mirroring the bundle's
+  // `formats` map. `null` when the lockfile predates format attestation, same
+  // "attests none" vs "doesn't attest" distinction as `imports`.
+  formats
 
-  constructor({ config = { scope: 'full' }, entries, modules, imports } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, imports, formats } = {}) {
     assert(['node_modules', 'full'].includes(config.scope))
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
     this.imports = imports ?? null
+    this.formats = formats ?? null
   }
 
   static parse(text) {
@@ -83,7 +89,18 @@ export class Lockfile {
       }
     }
 
-    return new Lockfile({ config: json.config, entries, modules, imports })
+    let formats = null
+    if (json.formats !== undefined) {
+      assert(isPlainObject(json.formats))
+      formats = new Map()
+      for (const [file, format] of Object.entries(json.formats)) {
+        assert(!posixPathEscapes(file))
+        assert(typeof format === 'string')
+        formats.set(file, format)
+      }
+    }
+
+    return new Lockfile({ config: json.config, entries, modules, imports, formats })
   }
 
   serialize() {
@@ -103,9 +120,10 @@ export class Lockfile {
     const store = { version: this.version, config: this.config }
     if (this.config.scope === 'full') Object.assign(store, { entries, sources: fromEntries(sources) })
     Object.assign(store, { modules: fromEntries(modules) })
-    // Legacy lockfiles (imports === null) round-trip without the key, so
-    // parse-serialize of an old file stays byte-stable.
+    // Legacy lockfiles (imports/formats === null) round-trip without the key,
+    // so parse-serialize of an old file stays byte-stable.
     if (this.imports !== null) Object.assign(store, { imports: fileMapToObject(this.imports) })
+    if (this.formats !== null) Object.assign(store, { formats: fileMapToObject(this.formats) })
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 }

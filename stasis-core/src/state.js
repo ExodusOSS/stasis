@@ -54,6 +54,11 @@ export class State {
   // given run observes or a given bundle carries.
   #lockImports = null
 
+  // Loader formats attested by the loaded lockfile (file -> format), or null
+  // when none was loaded / it predates format attestation. Like #lockImports,
+  // kept apart from this.formats (the live observed/bundle-served map).
+  #lockFormats = null
+
   // options.preload (boolean) -- mark this instance as the unique preload State, exposed via
   // State.preload. Only one preload State may exist at a time. Non-preload States can be
   // constructed freely (e.g. a bundler plugin that emits a sidecar bundle in a process that
@@ -137,11 +142,16 @@ export class State {
             }
           }
           this.#lockImports = lockfile.imports
+          this.#lockFormats = lockfile.formats
           // Frozen promises verification, but a lockfile predating resolution
-          // attestation can only vouch for bytes -- resolutions (from a bundle
-          // OR observed on disk) go unchecked until it's regenerated.
+          // or format attestation can only vouch for bytes -- those metadata
+          // (from a bundle OR observed on disk) go unchecked until it's
+          // regenerated.
           if (this.config.frozen && this.#lockImports === null) {
             console.warn('[stasis] Warning: lockfile does not attest resolutions; they are trusted as-is. Regenerate the lockfile to enable this check.')
+          }
+          if (this.config.frozen && this.#lockFormats === null) {
+            console.warn('[stasis] Warning: lockfile does not attest formats; they are trusted as-is. Regenerate the lockfile to enable this check.')
           }
           lockfileLoaded = true
         }
@@ -220,6 +230,18 @@ export class State {
           }
         }
       }
+      // Formats: the loader picks module<->commonjs and (for *-typescript)
+      // whether Node strips type syntax purely from this map, so a tampered
+      // bundle can change how hash-valid bytes parse/run without touching a
+      // hash. Every format the bundle declares must match the lockfile's. A
+      // code bundle only carries text files, all of which are formatted, and
+      // the lockfile is a superset of the bundle, so an unattested format is
+      // fatal here (it can only mean a forged entry).
+      if (this.#lockFormats !== null) {
+        for (const [file, format] of bundle.formats) {
+          this.#assertAttestedFormat(file, format, { what: 'bundle' })
+        }
+      }
     } else {
       if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
       for (const [dir, info] of bundle.modules) {
@@ -262,6 +284,17 @@ export class State {
       ;[attested] = targets
     }
     assert.equal(file, attested, `${what} resolution ${edge} mismatches the lockfile`)
+  }
+
+  // Verify one file's loader format against the lockfile-attested map. Callers
+  // only invoke this for files that must be attested (the lockfile is a
+  // superset of any bundle, and on the disk path the call is gated to the
+  // hash-attested zone), so an unattested file means a forged/extra entry and
+  // is fatal.
+  #assertAttestedFormat(file, format, { what }) {
+    const attested = this.#lockFormats.get(file)
+    assert.ok(attested !== undefined, `${what} format for ${file} is not attested by the lockfile`)
+    assert.equal(format, attested, `${what} format for ${file} mismatches the lockfile`)
   }
 
   assertEntry(url) {
@@ -400,8 +433,22 @@ export class State {
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
 
-    if (this.config.frozen && (dir.includes('node_modules') || this.config.full)) {
+    const inAttestedZone = dir.includes('node_modules') || this.config.full
+    if (this.config.frozen && inAttestedZone) {
       assert.ok(Object.hasOwn(module.files, rel))
+    }
+
+    // Frozen runs verify the format observed on disk against the lockfile, the
+    // way addImport verifies resolutions: the on-disk format is derived from
+    // the file extension + nearest package.json `type`, and `type` is usually
+    // not itself hash-attested, so flipping it recategorizes a hash-valid file
+    // (commonjs<->module, or .js<->module-typescript) with no hash mismatch.
+    // Gated to the same attested zone as the hash check above (the
+    // node_modules-scope workspace is deliberately unattested, like its bytes);
+    // files with no derived format (binary resources) are skipped via
+    // `format != null`.
+    if (this.config.frozen && this.#lockFormats !== null && format != null && inAttestedZone) {
+      this.#assertAttestedFormat(file, format, { what: 'observed' })
     }
 
     if (!Object.hasOwn(module.files, rel)) module.files[rel] = integrity
@@ -532,12 +579,23 @@ export class State {
     return merged
   }
 
+  // Union of lockfile-attested and observed/bundle-served formats, same
+  // append-only stance as #mergedImports: conflicting formats for one file are
+  // fatal (noupsert).
+  #mergedFormats() {
+    const merged = new Map()
+    if (this.#lockFormats) for (const [file, format] of this.#lockFormats) merged.set(file, format)
+    for (const [file, format] of this.formats) noupsert(merged, file, format)
+    return merged
+  }
+
   get lockData() {
     return new Lockfile({
       config: this.config.values,
       entries: this.entries,
       modules: this.modules,
       imports: this.#mergedImports(),
+      formats: this.#mergedFormats(),
     }).serialize()
   }
 

@@ -16,5 +16,16 @@
       }
     }
   },
-  "modules": {}
+  "modules": {},
+  "imports": {
+    "*": {
+      "src/entry.js": {
+        "./data.json": "src/data.json"
+      }
+    }
+  },
+  "formats": {
+    "src/data.json": "json",
+    "src/entry.js": "module"
+  }
 }

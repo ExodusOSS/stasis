@@ -19,5 +19,10 @@
         "./helper.js": "src/helper.js"
       }
     }
+  },
+  "formats": {
+    "src/entry.js": "module",
+    "src/helper.js": "module",
+    "node_modules/fake-esm-pkg/index.js": "module"
   }
 }

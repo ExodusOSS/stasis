@@ -47,14 +47,12 @@ function load(url, context, nextLoad) {
     // context.format may be null when the resolve chain didn't set it (e.g. node_modules
     // scope, where non-nm parents go through nextResolve and Node's default doesn't
     // populate format for the load hook). Only cross-check when the chain provided one.
-    // TODO: format here is sourced from the bundle's `formats` map, which the lockfile
-    // does not currently cover; a tampered bundle can flip module<->commonjs for a
-    // hash-valid file. With the *-typescript formats accepted below the stakes are
-    // higher still: flipping a hash-valid .js file to module-typescript makes Node
-    // strip type-argument-shaped syntax (e.g. `f<string>('x')`), changing how the
-    // same bytes parse — not just which module system runs them. Derive format from
-    // extension + module.type (recorded in the lockfile) and reject the bundle's
-    // claim when it disagrees.
+    // The `formats` map this value comes from is attested against the lockfile at State
+    // construction (#mergeBundleMetadata) when a lockfile is loaded -- so a tampered
+    // bundle can't flip module<->commonjs (or a .js file to module-typescript, which
+    // would make Node strip type-argument-shaped syntax like `f<string>('x')`) for a
+    // hash-valid file. Without a lockfile the bundle is self-authoritative for formats
+    // just as it is for bytes (see getFile's hash carve-out).
     if (context.format != null) assert.equal(format, context.format)
     // Non-JS bundles (`stasis bundle` of .sol/.php/.sh/.bash/.rs) tag files with
     // their source language. They're artifacts for external analysis, not

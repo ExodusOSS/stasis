@@ -38,5 +38,10 @@
         "fake-esm-pkg": "node_modules/fake-esm-pkg/index.js"
       }
     }
+  },
+  "formats": {
+    "src/entry.js": "module",
+    "node_modules/fake-cjs-pkg/index.js": "commonjs",
+    "node_modules/fake-esm-pkg/index.js": "module"
   }
 }

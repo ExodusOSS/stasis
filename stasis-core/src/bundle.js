@@ -140,12 +140,21 @@ export class Bundle {
       }
     }
 
+    // Format keys name project-relative files; validate them like the import
+    // paths above so a tampered bundle can't smuggle an escaping path through
+    // (e.g. into a lockfile derived by `stasis extract`).
+    const formats = new Map()
+    for (const [file, format] of Object.entries(json.formats)) {
+      assert(!posixPathEscapes(file))
+      formats.set(file, format)
+    }
+
     return new Bundle({
       version: json.version,
       config: json.config,
       entries,
       modules,
-      formats: new Map(Object.entries(json.formats)),
+      formats,
       imports,
     })
   }

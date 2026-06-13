@@ -23,5 +23,9 @@
         "./hello.js": "src/hello.js"
       }
     }
+  },
+  "formats": {
+    "src/entry.js": "module",
+    "src/hello.js": "module"
   }
 }

@@ -908,6 +908,121 @@ test('run --lock=add records resolutions in the lockfile imports map', withTmp((
   t.assert.deepEqual(buckets[0], { 'src/entry.js': { './hello.js': 'src/hello.js' } })
 }))
 
+test('run --lock=add records loader formats in the lockfile formats map', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.deepEqual(lock.formats, { 'src/entry.js': 'module', 'src/hello.js': 'module' })
+}))
+
+test('run --lock=frozen rejects an on-disk format flip (tampered package.json type)', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  // entry.js is attested as `module`. Flipping the workspace package.json's
+  // `type` makes Node resolve the same hash-valid .js bytes as commonjs --
+  // package.json `type` is not itself hash-attested, so only the format
+  // cross-check can catch this. The same bytes would run under a different
+  // module system (this `.js` would lose ESM semantics).
+  const pkgPath = join(tmp, 'package.json')
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  pkg.type = 'commonjs'
+  writeFileSync(pkgPath, JSON.stringify(pkg, undefined, 2) + '\n')
+
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /observed format for .* mismatches the lockfile/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'no module code may execute when a format is rejected')
+}))
+
+test('run --lock=frozen --bundle=load rejects a bundle that flips a hash-valid file format', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Flip hello.js's format module -> commonjs in the bundle. Bytes still match
+  // the lockfile hash; only the loader format the file runs under changes.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.formats['src/hello.js'], 'module')
+  decoded.formats['src/hello.js'] = 'commonjs'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /bundle format for src\/hello\.js mismatches the lockfile/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'tampered-format file must not execute')
+}))
+
+test('run --lock=frozen --bundle=load rejects a bundle that flips a .js file to module-typescript', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // The scariest flip: module -> module-typescript makes Node strip
+  // type-shaped syntax from the SAME bytes (`f<string>('x')` becomes a call,
+  // not two comparisons), changing how the file parses -- not just which
+  // module system runs it. Must be rejected, like any other format mismatch.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.formats['src/hello.js'] = 'module-typescript'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /bundle format for src\/hello\.js mismatches the lockfile/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'tampered-format file must not execute')
+}))
+
+test('run --lock=frozen --dependencies does not enforce a workspace file format (unattested zone)', withTmp((t, tmp) => {
+  cpSync(nmFixture, tmp, { recursive: true })
+  // In node_modules scope the workspace is deliberately unattested (its bytes
+  // aren't frozen-checked either), so the format check must be gated out for
+  // workspace files. Make the lockfile disagree with disk on the workspace
+  // entry's format; disk still loads it correctly, and the run must succeed --
+  // a regression that over-enforced the workspace zone would fail here.
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  t.assert.equal(lock.formats['src/entry.js'], 'module')
+  lock.formats['src/entry.js'] = 'commonjs'
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  const r = run(['run', '--lock=frozen', '--dependencies', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+}))
+
+test('run --lock=frozen warns but proceeds when a legacy lockfile lacks formats', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  // A lockfile with imports but no formats (predating format attestation):
+  // the formats check is skipped, with a warning, and the run still works.
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  delete lock.formats
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'hello, world\n')
+  t.assert.match(r.stderr, /lockfile does not attest formats/)
+}))
+
 test('run --lock=frozen --bundle=load rejects a bundle resolution redirected to another attested file', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')

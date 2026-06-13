@@ -23,5 +23,9 @@
         "./hello.cjs": "src/hello.cjs"
       }
     }
+  },
+  "formats": {
+    "src/entry.cjs": "commonjs",
+    "src/hello.cjs": "commonjs"
   }
 }
