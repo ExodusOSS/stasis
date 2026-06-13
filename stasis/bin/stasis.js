@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=path/to/out.stasis.code.br] path/to/file.sol ...
  stasis bundle [--output=path/to/out.stasis.code.br] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=path/to/out.stasis.code.br] path/to/file.(js|ts) ...
@@ -72,10 +72,10 @@ if (command === '-v' || command === '--version') {
   const bundle = values.bundle
   const bundleFile = values['bundle-file'] ? resolve(values['bundle-file']) : ''
   const debug = values.debug ? '1' : ''
-  if (!['none', 'ignore', 'add', 'replace', 'load'].includes(bundle)) usage('Error: invalid --bundle value')
-  if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|ignore)')
+  if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
+  if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load requires --lock=(frozen|none|ignore)')
-  if (lock === 'none' && bundle === 'none') usage('Error: --lock=none requires --bundle=(add|replace|load|ignore)')
+  if (lock === 'none' && bundle === 'none') usage('Error: --lock=none requires --bundle=(add|replace|load|frozen|ignore)')
   if (values.mock && bundle === 'load') usage('Error: --mock is for capturing imports while building a bundle; not compatible with --bundle=load')
   console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)

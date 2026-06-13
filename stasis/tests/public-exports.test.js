@@ -165,6 +165,21 @@ test('Bundle.parseCode rejects imports whose paths escape the project root', (t)
   t.assert.throws(() => Bundle.parseCode(arrayImports))
 })
 
+test('Bundle.parseCode rejects a non-object formats (malformed shape)', (t) => {
+  // formats is attested under frozen bundles, so a non-plain-object value is rejected at
+  // parse time -- mirroring `imports` above and Lockfile.parse's `formats` check, rather
+  // than the weaker truthiness test that let an array/number through.
+  const base = {
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'x' } } },
+    imports: {},
+  }
+  t.assert.throws(() => Bundle.parseCode(JSON.stringify({ ...base, formats: [] })))
+  t.assert.throws(() => Bundle.parseCode(JSON.stringify({ ...base, formats: 5 })))
+  t.assert.ok(Bundle.parseCode(JSON.stringify({ ...base, formats: {} })))
+})
+
 test('Bundle.serializeCode round-trip preserves entries, modules, formats, imports', (t) => {
   const bundle = new Bundle({
     config: { scope: 'full' },

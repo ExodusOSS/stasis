@@ -73,7 +73,7 @@ export class Bundle {
     const json = JSON.parse(text)
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
-    assert(json.formats)
+    assert(isPlainObject(json.formats))
     assert(isPlainObject(json.imports))
 
     const modules = new Map()
