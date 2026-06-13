@@ -1,4 +1,4 @@
-# <img src="/stasis/logo.svg" alt="" width="39" height="39" valign="bottom" /> `@exodus/stasis`
+# <img src="/stasis/logo.svg" alt="" width="39" height="39" valign="bottom" /> `@exodus/stasis-core`
 
 A minimal subset of `@exodus/stasis` with just `run` and `prune` commands.
 
