@@ -239,3 +239,30 @@ test('node_modules-scope bundle excludes a workspace source symlinked into node_
   t.assert.ok(!parsed.modules['packages/lib'], 'the workspace source is not bundled in node_modules scope')
   t.assert.equal(parsed.sources, undefined, 'node_modules scope writes no sources')
 })
+
+test('inNodeModules classifies a real dependency in, a symlinked workspace source out', (t) => {
+  const tmp = workspaceLinkTree(t, { scope: 'node_modules', bundle: 'add' })
+  const st = new State(tmp)
+  const dep = pathToFileURL(join(tmp, 'node_modules', 'dep', 'index.js')).toString()
+  const wsp = pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString()
+  // the loader hooks gate on this: a real dep is served from the bundle, while a
+  // workspace source linked into node_modules is read from disk / resolved by Node.
+  t.assert.equal(st.inNodeModules(dep), true)
+  t.assert.equal(st.inNodeModules(wsp), false)
+})
+
+test('getImport reads an edge recorded under a symlinked workspace parent (canonical round-trip)', (t) => {
+  const tmp = workspaceLinkTree(t, { scope: 'full', bundle: 'add' })
+  writeFileSync(join(tmp, 'packages', 'lib', 'util.js'), 'export const u = 1\n')
+  const st = new State(tmp)
+  const parentSym = pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString()
+  const childSym = pathToFileURL(join(tmp, 'node_modules', 'lib', 'util.js')).toString()
+  st.addFile(parentSym, { format: 'module' })
+  st.addFile(childSym, { format: 'module' })
+  st.addImport(parentSym, './util.js', childSym, { format: 'module' })
+
+  // looked up through the SAME node_modules symlink parent: addImport and getImport
+  // both canonicalize, so the edge resolves to the real workspace-source path.
+  const got = st.getImport(parentSym, './util.js')
+  t.assert.equal(got.url, pathToFileURL(join(tmp, 'packages', 'lib', 'util.js')).toString())
+})

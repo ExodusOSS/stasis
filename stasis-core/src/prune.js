@@ -298,7 +298,11 @@ function discoverNodeModulesDirs(root) {
       if (entry.name.startsWith('.')) continue // .git, .pnpm-* state, other dotdirs
       const full = join(dir, entry.name)
       if (entry.name === 'node_modules') {
-        if (entry.isDirectory()) found.push(full) // a real node_modules to prune
+        // Only a real node_modules dir is a prune target. A package whose
+        // node_modules is itself a symlink is skipped here (not a real pnpm
+        // layout); if the lockfile records files under it, prune fails closed
+        // ("missing on disk") rather than walking through the link.
+        if (entry.isDirectory()) found.push(full)
         continue // don't descend; prune walks node_modules internals itself
       }
       if (entry.isDirectory()) stack.push(full) // a workspace source dir: keep looking

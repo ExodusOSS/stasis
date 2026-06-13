@@ -712,3 +712,30 @@ test('pnpm workspace: refuses a symlink whose target escapes the workspace root'
   t.assert.throws(() => prune({ root }), /symlink escapes the workspace/u)
   t.assert.ok(existsSync(join(external, 'secret.txt')))
 })
+
+test('pnpm workspace: validates the .pnpm store and leaves public/package store symlinks', (t) => {
+  const root = buildProject(t, {
+    'node_modules/.pnpm/dep@1.0.0/node_modules/dep': {
+      name: 'dep',
+      version: '1.0.0',
+      tracked: { 'index.js': '1\n' },
+      untracked: { 'junk.js': 'x\n' },
+    },
+  }, { workspace: true })
+  // the root public symlink and a workspace package, both linking the dep from the store
+  symlinkSync('.pnpm/dep@1.0.0/node_modules/dep', join(root, 'node_modules/dep'), 'dir')
+  mkdirSync(join(root, 'packages/app/node_modules'), { recursive: true })
+  writeFileSync(join(root, 'packages/app/package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
+  symlinkSync('../../../node_modules/.pnpm/dep@1.0.0/node_modules/dep', join(root, 'packages/app/node_modules/dep'), 'dir')
+
+  const { removed, validated } = prune({ root })
+  // the real store bytes are validated and store cruft is pruned
+  t.assert.ok(validated.includes('node_modules/.pnpm/dep@1.0.0/node_modules/dep/index.js'))
+  t.assert.ok(removed.includes('node_modules/.pnpm/dep@1.0.0/node_modules/dep/junk.js'))
+  // the public and package symlinks into the store (internal to the workspace) are left
+  t.assert.ok(lstatSync(join(root, 'node_modules/dep')).isSymbolicLink())
+  t.assert.ok(lstatSync(join(root, 'packages/app/node_modules/dep')).isSymbolicLink())
+  t.assert.strictEqual(readFileSync(join(root, 'node_modules/dep/index.js'), 'utf8'), '1\n')
+  // the workspace source package.json (outside any node_modules) is untouched
+  t.assert.ok(existsSync(join(root, 'packages/app/package.json')))
+})

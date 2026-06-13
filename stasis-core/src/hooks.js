@@ -60,9 +60,13 @@ function load(url, context, nextLoad) {
   }
 
   if (state && state.config.loadBundle) {
-    // node_modules scope only bundles node_modules sources; non-tracked files are read
-    // from disk through Node's default loader (state.getFile is never called for them).
-    if (!state.config.full && !url.includes('/node_modules/')) {
+    // node_modules scope only bundles node_modules deps; everything else -- app/workspace
+    // sources, including a workspace package symlinked into node_modules (its real path is
+    // not under node_modules, so inNodeModules() is false) -- is read from disk via Node's
+    // default loader. Gate on the canonical classification, not a raw '/node_modules/'
+    // substring: otherwise such a symlink URL would be routed to state.getFile and crash,
+    // since the file is a source deliberately omitted from the node_modules-scope bundle.
+    if (!state.config.full && !state.inNodeModules(url)) {
       return nextLoad(url, context)
     }
     const { source, format } = state.getFile(url)
@@ -146,8 +150,11 @@ function resolve(specifier, context, nextResolve) {
     // node_modules scope defers resolution of non-nm parents to Node. Relative imports
     // between non-nm sources then resolve to local files, and bare specifiers resolve via
     // the on-disk node_modules layout -- but the load() hook still serves the resulting
-    // node_modules target from the bundle, so package contents need not be on disk.
-    if (!state.config.full && !parentURL?.includes('/node_modules/')) {
+    // node_modules target from the bundle, so package contents need not be on disk. A
+    // workspace source linked into node_modules is a non-nm parent (its canonical path is
+    // outside node_modules), so it too is deferred -- hence inNodeModules() rather than a
+    // raw '/node_modules/' substring on parentURL.
+    if (!state.config.full && !(parentURL && state.inNodeModules(parentURL))) {
       return nextResolve(specifier)
     }
     // Bare specifier with a parent is the regular ESM import: look up the recorded

@@ -407,6 +407,24 @@ export class State {
     return this.relative(this.#canonical(url).absolute)
   }
 
+  // True when `url` resolves (through any workspace symlink) to a file under
+  // node_modules -- i.e. a bundled dependency -- as opposed to a workspace source
+  // linked into node_modules (which #canonical records as a source). The loader
+  // hooks gate on this rather than a raw `/node_modules/` substring, so a
+  // symlinked workspace source is read from disk / resolved by Node instead of
+  // being served from a node_modules-scope bundle that deliberately omits it.
+  // Tolerant: a URL it can't canonicalize (non-file, outside root) is treated as
+  // not-a-dependency, so the hook falls back to Node's default handling.
+  inNodeModules(url) {
+    let file
+    try {
+      file = this.#canonicalFile(url)
+    } catch {
+      return false
+    }
+    return splitNodeModulesPath(file) !== null
+  }
+
   addFile(url, { source, format, isEntry, isBinary } = {}) {
     // Canonicalize first: a workspace source linked into node_modules is recorded
     // under its real (non-node_modules) path so it classifies as a source.
@@ -619,7 +637,7 @@ export class State {
 
   getImport(parentURL, specifier, { conditions = '*', importAttributes } = {}) {
     if (conditions !== '*') assert.ok(Array.isArray(conditions))
-    const parent = this.relative(this.absolute(parentURL))
+    const parent = this.#canonicalFile(parentURL)
     const key = this.#conditionsKey(conditions, importAttributes)
     // Statically-built bundles (e.g. `stasis bundle src/entry.js`) resolve edges
     // offline and store them under the wildcard '*' key, since they can't
