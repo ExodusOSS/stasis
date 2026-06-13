@@ -1,9 +1,9 @@
 <p align="center"><img src="/stasis/logo.svg" alt="" width="128" height="128"/></p>
 <div align="center">
 
-| Package | Readme |
+| Package | Location |
 | - | - |
-| `@exodus/stasis` | [stasis/README.md](stasis/README.md) |
-| `@exodus/stasis-core` | [stasis-core/README.md](stasis-core/README.md) |
+| `@exodus/stasis` | [stasis/](stasis/) |
+| `@exodus/stasis-core` | [stasis-core/](stasis-core/) |
 
 </div>
