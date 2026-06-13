@@ -106,16 +106,17 @@ export class Config {
     // (when it records them) resolutions and loader formats. Lockfiles predating
     // a given attestation cover only what they recorded (bytes at minimum).
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
-      throw new RangeError('bundle=load requires lock=(frozen|none|ignore)')
+      throw new RangeError('bundle=load is incompatible with lock=(add|replace)')
     }
 
     // bundle=frozen places no constraint on lock: unlike load it never *serves* the
     // bundle's bytes, it reads each file from disk and verifies it against the bundle's
     // own recorded bytes/resolutions/formats (the bundle is itself the trust root, so it
     // needs no sibling lockfile -- it "operates as a lockfile"). It composes with any lock
-    // mode, and satisfies the lock=none "a non-none bundle is required" rule below.
+    // mode, and (being a real bundle) satisfies the "needs a lockfile or a bundle" rule
+    // below -- which only rejects leaving both unset.
     if (this.#lock === 'none' && this.#bundle === 'none') {
-      throw new RangeError('lock=none requires bundle=(add|replace|load|frozen|ignore)')
+      throw new RangeError('stasis needs a lockfile or a bundle: set lock or bundle')
     }
   }
 

@@ -66,8 +66,8 @@ if (command === '-v' || command === '--version') {
   const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
-  if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load requires --lock=(frozen|none|ignore)')
-  if (lock === 'none' && bundle === 'none') usage('Error: --lock=none requires --bundle=(add|replace|load|frozen|ignore)')
+  if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
+  if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
   console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)

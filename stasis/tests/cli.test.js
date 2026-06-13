@@ -63,7 +63,7 @@ test('run with no path prints "Nothing to run"', (t) => {
 test('run with no flags defaults --lock=none and hits the bundle-required constraint', (t) => {
   const r = run(['run', 'a.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--lock=none requires --bundle/)
+  t.assert.match(r.stderr, /needs a lockfile or a bundle/)
 })
 
 test('run rejects an invalid --lock value', (t) => {
@@ -87,20 +87,19 @@ test('run rejects --bundle-file without a non-none --bundle', (t) => {
 test('run rejects --bundle=load with --lock=add', (t) => {
   const r = run(['run', '--lock=add', '--bundle=load', '--bundle-file=/tmp/x.br', 'a.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--bundle=load requires --lock=\(frozen\|none\|ignore\)/)
+  t.assert.match(r.stderr, /--bundle=load is incompatible with --lock=\(add\|replace\)/)
 })
 
 test('run rejects --bundle=load with --lock=replace', (t) => {
   const r = run(['run', '--lock=replace', '--bundle=load', '--bundle-file=/tmp/x.br', 'a.js'])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stderr, /--bundle=load requires --lock=\(frozen\|none\|ignore\)/)
+  t.assert.match(r.stderr, /--bundle=load is incompatible with --lock=\(add\|replace\)/)
 })
 
 test('run rejects --lock=none without a bundle', (t) => {
   const r = run(['run', '--lock=none', 'a.js'])
   t.assert.equal(r.status, 1)
-  // frozen is now listed among the bundle modes that satisfy lock=none
-  t.assert.match(r.stderr, /--lock=none requires --bundle=\(add\|replace\|load\|frozen\|ignore\)/)
+  t.assert.match(r.stderr, /stasis needs a lockfile or a bundle: set --lock or --bundle/)
 })
 
 test('run --lock=add executes the entry and rewrites the lockfile idempotently', (t) => {

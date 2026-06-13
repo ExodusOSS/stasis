@@ -346,7 +346,7 @@ test('Config(options) rejects non-boolean debug', (t) => {
 })
 
 test('Config(options) enforces bundle=load requires frozen|none|ignore lock', (t) => {
-  t.assert.throws(() => new Config({ lock: 'add', bundle: 'load' }), /bundle=load requires lock/)
+  t.assert.throws(() => new Config({ lock: 'add', bundle: 'load' }), /bundle=load is incompatible with lock/)
   // valid combinations should not throw
   for (const lock of ['frozen', 'none', 'ignore']) {
     t.assert.ok(new Config({ lock, bundle: 'load' }))
@@ -354,7 +354,7 @@ test('Config(options) enforces bundle=load requires frozen|none|ignore lock', (t
 })
 
 test('Config(options) enforces lock=none requires a bundle', (t) => {
-  t.assert.throws(() => new Config({ lock: 'none' }), /lock=none requires bundle/)
+  t.assert.throws(() => new Config({ lock: 'none' }), /needs a lockfile or a bundle/)
   for (const bundle of ['add', 'replace', 'load', 'frozen', 'ignore']) {
     t.assert.ok(new Config({ lock: 'none', bundle }))
   }
