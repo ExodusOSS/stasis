@@ -4,6 +4,6 @@
 | Package | Readme |
 | - | - |
 | `@exodus/stasis` | [stasis/README.md](stasis/README.md) |
-| `@exodus/stasis-core` | [stasis/README.md](stasis-core/README.md) |
+| `@exodus/stasis-core` | [stasis-core/README.md](stasis-core/README.md) |
 
 </div>
