@@ -1,10 +1,11 @@
 {
   "name": "@exodus/stasis-core",
   "version": "1.0.0-alpha.3",
-  "description": "Zero-dependency stasis runtime: run file-level source bundles and lockfiles, and prune",
+  "description": "Zero-dependency stasis runtime",
   "type": "module",
   "exports": {
     "./loader": "./src/loader.js",
+    "./hooks": "./src/hooks.js",
     "./state": "./src/state.js",
     "./config": "./src/config.js",
     "./bundle": "./src/bundle.js",
@@ -17,6 +18,7 @@
     "bin/stasis-core.js",
     "src/bundle.js",
     "src/config.js",
+    "src/hooks.js",
     "src/loader.js",
     "src/lockfile.js",
     "src/prune.js",

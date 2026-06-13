@@ -1,10 +1,11 @@
-// Imported via `--import` *before* `src/loader.js`. The goal is to capture the
-// import graph for a bundle by actually running user code, but with outbound
-// side-effects denied. Pair with Node's `--permission` flag (see bin/stasis.js
-// when run with `--mock`), which fail-closed-denies fs writes, child processes,
-// worker threads, native addons, and the inspector at the runtime boundary.
-// This file covers what `--permission` cannot: there is no `--allow-net`, so
-// the network builtins are neutralized here in JS.
+// Imported by src/loader-mock.js (the `stasis run --mock` entry) after the
+// @exodus/stasis-core hooks lib is evaluated but before its hooks are installed.
+// The goal is to capture the import graph for a bundle by actually running user
+// code, but with outbound side-effects denied. Pair with Node's `--permission`
+// flag (see bin/stasis.js when run with `--mock`), which fail-closed-denies fs
+// writes, child processes, worker threads, native addons, and the inspector at
+// the runtime boundary. This file covers what `--permission` cannot: there is no
+// `--allow-net`, so the network builtins are neutralized here in JS.
 //
 // Design: FAIL CLOSED, WHOLE MODULE.
 //  - We replace *every* callable on each network builtin with a thrower, not a
@@ -192,10 +193,11 @@ if (process.report && typeof process.report.writeReport === 'function') {
 // even *try* to mutate files inside the project's cwd (which is on the
 // --allow-fs-write list so stasis can emit its bundle/lockfile). Reads stay
 // real so node_modules resolution and config discovery keep working. This
-// works because loader.js loads us *after* stasis's own destructured
-// `import { writeFileSync } from 'node:fs'` snapshots, so stasis keeps real
-// fs; the syncBuiltinESMExports() call below then refreshes the node:fs ESM
-// wrapper so the user's subsequent ESM imports see the mocked names.
+// works because loader-mock.js evaluates the core hooks lib *before* importing
+// us, so stasis's own destructured `import { writeFileSync } from 'node:fs'`
+// snapshots are already taken and it keeps real fs; the syncBuiltinESMExports()
+// call below then refreshes the node:fs ESM wrapper so the user's subsequent
+// ESM imports see the mocked names.
 const fs = require('node:fs')
 const fsPromises = require('node:fs/promises')
 const FS_WRITERS = [
