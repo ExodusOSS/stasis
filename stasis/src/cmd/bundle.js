@@ -579,13 +579,15 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
   return state.sourceBundle
 }
 
-// Where `stasis bundle` writes when no --output is given. A file (not stdout)
-// is the common case; pass --output=- to stream the raw brotli bytes to stdout.
-const DEFAULT_BUNDLE_FILE = 'stasis.bundle.br'
+// Where `stasis bundle` writes when no --output is given: stasis.code.br, the
+// same name `stasis run --bundle=load` discovers by default, so the two commands
+// round-trip with no flags. A file (not stdout) is the common case; pass
+// --output=- to stream the raw brotli bytes to stdout.
+const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 
 // Run the bundle CLI command end-to-end. Always produces a brotli-compressed
 // stasis bundle (matching the on-disk format of `stasis.code.br`). Writes to
-// `output` when given, to stasis.bundle.br in `cwd` by default, or to stdout
+// `output` when given, to stasis.code.br in `cwd` by default, or to stdout
 // when `output` is `-`. Prints a one-line `[stasis] Bundled <n> files in <p>
 // packages from <dir> to <dest>` summary to stderr so it doesn't interleave
 // with binary output written to stdout.
@@ -620,7 +622,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   const modules = bundle.modules
 
   const data = brotliCompressSync(serialized, brotliOptions())
-  // Default to writing stasis.bundle.br in cwd; `-` is the conventional opt-in
+  // Default to writing stasis.code.br in cwd; `-` is the conventional opt-in
   // for streaming the raw brotli bytes to stdout (e.g. to pipe somewhere else).
   const target = output ?? DEFAULT_BUNDLE_FILE
   if (target === '-') {
