@@ -18,7 +18,7 @@ import { brotliOptions, fileMapToObject, objectToMaps, splitNodeModulesPath } fr
 // module.syncBuiltinESMExports() to refresh node:fs's ESM wrapper for user code.
 // Direct ESM destructured imports are live bindings and would re-resolve to the
 // mocked names when state.write() fires on beforeExit.
-const { existsSync, mkdirSync, readFileSync, writeFileSync } = fs
+const { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } = fs
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
@@ -345,7 +345,7 @@ export class State {
     // v1 bundles in full scope are required to declare at least one entry at parse time,
     // so this fallback only ever triggers for the legacy path.
     if (this.entries.size === 0) return
-    const file = this.relative(this.absolute(url))
+    const file = this.#canonicalFile(url)
     assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)
   }
 
@@ -377,8 +377,42 @@ export class State {
     return file
   }
 
-  addFile(url, { source, format, isEntry, isBinary } = {}) {
+  // A file reached under node_modules whose REAL path lies outside any
+  // node_modules is a workspace source linked into node_modules (pnpm links a
+  // workspace dependency in via a symlink). Canonicalize such a URL to its real
+  // path so it is recorded/looked up as a *source*, not a dependency -- and thus
+  // excluded from a node_modules-scope bundle. Everything else is returned
+  // untouched: plain sources, real dependencies, and node_modules -> node_modules
+  // links (e.g. pnpm's `.pnpm` store) keep their original path.
+  #canonical(url) {
     const absolute = this.absolute(url)
+    const file = relative(this.root, absolute)
+    if (file.startsWith('..') || !splitNodeModulesPath(file)) return { url, absolute }
+    let real
+    try {
+      real = realpathSync(absolute)
+    } catch {
+      return { url, absolute }
+    }
+    if (real === absolute) return { url, absolute } // not a symlink
+    const realFile = relative(this.root, real)
+    // Outside the root, or still inside some node_modules (a real dependency,
+    // e.g. pnpm's `.pnpm` store): leave the recorded path unchanged.
+    if (realFile.startsWith('..') || splitNodeModulesPath(realFile)) return { url, absolute }
+    return { url: pathToFileURL(real).toString(), absolute: real }
+  }
+
+  // The canonical project-relative path a URL is recorded/looked up under.
+  #canonicalFile(url) {
+    return this.relative(this.#canonical(url).absolute)
+  }
+
+  addFile(url, { source, format, isEntry, isBinary } = {}) {
+    // Canonicalize first: a workspace source linked into node_modules is recorded
+    // under its real (non-node_modules) path so it classifies as a source.
+    const canonical = this.#canonical(url)
+    url = canonical.url
+    const absolute = canonical.absolute
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
 
@@ -524,7 +558,7 @@ export class State {
   }
 
   getFile(url) {
-    const file = this.relative(this.absolute(url))
+    const file = this.#canonicalFile(url)
     const source = this.sources.get(file)
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
     assert.ok(source !== undefined)
@@ -535,7 +569,7 @@ export class State {
   }
 
   getFormat(url) {
-    return this.formats.get(this.relative(this.absolute(url)))
+    return this.formats.get(this.#canonicalFile(url))
   }
 
   // Different conditions / import attributes can yield different URLs/formats for the same parent+specifier
@@ -551,8 +585,8 @@ export class State {
   addImport(parentURL, specifier, url, { conditions = '*', format, importAttributes } = {}) {
     if (conditions !== '*') assert.ok(Array.isArray(conditions))
     assert.ok(parentURL, 'addImport requires a parent (entries go through addFile)')
-    const parent = this.relative(this.absolute(parentURL))
-    const file = this.relative(this.absolute(url))
+    const parent = this.#canonicalFile(parentURL)
+    const file = this.#canonicalFile(url)
     const key = this.#conditionsKey(conditions, importAttributes)
 
     // Frozen runs verify resolutions observed from disk against the lockfile,

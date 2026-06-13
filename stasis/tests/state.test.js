@@ -1,4 +1,6 @@
 import { test } from 'node:test'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -189,4 +191,51 @@ test('sourceData is JSON text in v1 format', (t) => {
   t.assert.equal(parsed.sources['.'].files['src/foo.js'], 'export const a = 1\n')
   t.assert.deepEqual(parsed.modules, {})
   t.assert.equal(parsed.formats['src/foo.js'], 'module')
+})
+
+// A workspace dependency that pnpm links into node_modules (a symlink whose real
+// target is a sibling package's source, outside any node_modules) must be
+// classified as a source, not a dependency -- recorded under its real path.
+function workspaceLinkTree(t, config) {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-wsp-'))
+  t.after(() => rmSync(tmp, { recursive: true, force: true }))
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'root', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify(config))
+  // a real npm dependency
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'index.js'), 'export const d = 1\n')
+  // a workspace package (source) linked into node_modules
+  mkdirSync(join(tmp, 'packages', 'lib'), { recursive: true })
+  writeFileSync(join(tmp, 'packages', 'lib', 'package.json'), JSON.stringify({ name: 'lib', version: '2.0.0' }))
+  writeFileSync(join(tmp, 'packages', 'lib', 'index.js'), 'export const x = 1\n')
+  symlinkSync(join('..', 'packages', 'lib'), join(tmp, 'node_modules', 'lib'), 'dir')
+  return tmp
+}
+
+test('a node_modules symlink to a workspace source is classified as a source, not a dependency', (t) => {
+  const tmp = workspaceLinkTree(t, { scope: 'full' })
+  const st = new State(tmp)
+  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString(), { format: 'module' })
+
+  // recorded under the real workspace path, not the node_modules symlink path
+  t.assert.ok(st.modules.has('packages/lib'), 'recorded as a source under its real path')
+  t.assert.ok(!st.modules.has('node_modules/lib'), 'not bucketed under the node_modules symlink')
+  t.assert.ok(![...st.modules.keys()].some((d) => d.includes('node_modules')), 'no node_modules dependency recorded')
+  const mod = st.modules.get('packages/lib')
+  t.assert.equal(mod.name, 'lib')
+  t.assert.ok(mod.files['index.js'])
+})
+
+test('node_modules-scope bundle excludes a workspace source symlinked into node_modules', (t) => {
+  const tmp = workspaceLinkTree(t, { scope: 'node_modules', bundle: 'add' })
+  const st = new State(tmp)
+  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'dep', 'index.js')).toString(), { format: 'module' })
+  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString(), { format: 'module' })
+
+  const parsed = JSON.parse(st.sourceData)
+  t.assert.ok(parsed.modules['node_modules/dep'], 'the real dependency is bundled')
+  t.assert.ok(!parsed.modules['node_modules/lib'], 'symlink path is not bundled as a dependency')
+  t.assert.ok(!parsed.modules['packages/lib'], 'the workspace source is not bundled in node_modules scope')
+  t.assert.equal(parsed.sources, undefined, 'node_modules scope writes no sources')
 })
