@@ -5,7 +5,7 @@
 Both lockfiles and bundles only include what is actually _used_.\
 Generally about 10x smaller than production-focused `node_modules` install.
 
-Enforcing these allows to focus automated code scanning and alerts only on code that matters,
+Enforcing these lets you focus automated code scanning and alerts only on code that matters,
 and makes the analysis import graph aware.
 
 Ideal workflow: create bundle -> analyze -> ship _that exact bundle_ to production.
@@ -15,7 +15,7 @@ Lockfile can attest the bundle in a readable form, but that's not required - bun
 | Lockfile | Bundle |
 | -------- | ------ |
 | `stasis.lock.json` | `stasis.code.br` |
-| Asserts per-file imports integrity and the import graph | Contains per-file imports code and the import graph |
+| Asserts per-file content integrity and the import graph | Contains per-file content (source) and the import graph |
 | Human-readable | Compressed |
 | Asserts only, files are read from disk | Loads or asserts (can be used as a lockfile)|
 | Modes: `add`, `replace`, `frozen`, `ignore` | Modes: `load`, `add`, `replace`, `frozen`, `ignore` |
@@ -31,10 +31,9 @@ Both can be run in full scope (default) or just in `node_modules` scope.
 | - | - | - | - | - | - | - |
 | Runnable | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Contains original sources | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
-| Reported sources match runtime | ✅ | ➖ | ❌ | ➖ | ✅ | ✅ |
-| Import edges | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Reported sources match runtime | ✅ | ➖ | ❌ Deps can misreport | ➖ | ✅ | ✅ |
+| Import edges | ✅ | ❌ | ❌ | ❌ | 🔍 Implicit | 🔍 Implicit |
 | Constrained to related code | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-
 
 ## Commands
 
