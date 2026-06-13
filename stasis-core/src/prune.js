@@ -266,22 +266,62 @@ function minimalNestedFields(pkg, present) {
   return resolutionFields(pkg, present)
 }
 
-// A symlink is left in place only if its real target stays inside node_modules
-// -- which is prune's entire attestation perimeter: it walks and hashes only
-// node_modules (buildExpected skips non-node_modules dirs), so a link reaching
-// outside it -- even elsewhere under the bundle root, e.g. a workspace package
-// linked in -- would keep bytes prune never walks or attests reachable from the
-// pruned tree, breaking "only attested bytes remain". pnpm's public
-// `node_modules/<pkg>` links into `node_modules/.pnpm/...`, whose real bytes we
-// walk directly there, so the link itself needs no validation or deletion. An
-// escaping link fails closed; because this runs during the planning walk,
-// before any unlink/rewrite, it aborts prune without touching disk. A dangling
-// link points at nothing and can't leak, so it's left as-is.
+const PNPM_WORKSPACE = 'pnpm-workspace.yaml'
+
+// A pnpm workspace root is marked by a pnpm-workspace.yaml. In a workspace,
+// prune covers every package's node_modules (not just the root's) and widens
+// the symlink-containment boundary from node_modules to the whole workspace --
+// a workspace dependency legitimately links to a sibling package's source dir,
+// which lives outside any node_modules but inside the workspace. Outside a
+// workspace the boundary stays at node_modules (a self-contained install must
+// not reach beyond it).
+function isPnpmWorkspaceRoot(root) {
+  return existsSync(join(root, PNPM_WORKSPACE))
+}
+
+// Every node_modules directory in the workspace (the root's and each package's).
+// We don't descend into a node_modules once found -- prune walks its internals
+// itself -- nor into dotdirs (.git, ...), and we never leave `root` (symlinked
+// dirs that aren't node_modules aren't followed).
+function discoverNodeModulesDirs(root) {
+  const found = []
+  const stack = [root]
+  while (stack.length > 0) {
+    const dir = stack.pop()
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue // .git, .pnpm-* state, other dotdirs
+      const full = join(dir, entry.name)
+      if (entry.name === 'node_modules') {
+        if (entry.isDirectory()) found.push(full) // a real node_modules to prune
+        continue // don't descend; prune walks node_modules internals itself
+      }
+      if (entry.isDirectory()) stack.push(full) // a workspace source dir: keep looking
+    }
+  }
+  return found
+}
+
+// A symlink is left in place only if its real target stays inside `boundary`
+// (`label` names it in the error): node_modules for a self-contained install,
+// or the whole workspace when pruning a pnpm workspace. That boundary is prune's
+// containment perimeter -- a link reaching outside it would keep bytes prune
+// never walks reachable from the pruned tree. pnpm's public `node_modules/<pkg>`
+// links into `.pnpm`, whose real bytes are walked directly, so the link needs no
+// validation or deletion; in a workspace a dep also links to a sibling source
+// dir (inside the workspace, outside any node_modules), which is left as-is and
+// not validated. An escaping link fails closed; because this runs during the
+// planning walk, before any unlink/rewrite, it aborts prune without touching
+// disk. A dangling link points at nothing and can't leak, so it's left as-is.
 //
-// (Deliberately NOT the loaders' assertRealPathWithinBase: that bounds at the
-// bundle root and rethrows ENOENT, whereas here the boundary is the narrower
-// node_modules and a dangling link is tolerated.)
-function assertSymlinkInternal(nodeModules, realNodeModules, linkPath) {
+// (Deliberately NOT the loaders' assertRealPathWithinBase: it rethrows ENOENT,
+// whereas here a dangling link is tolerated.)
+function assertSymlinkInternal({ root, realBoundary, label }, linkPath) {
   let real
   try {
     real = realpathSync(linkPath)
@@ -289,28 +329,33 @@ function assertSymlinkInternal(nodeModules, realNodeModules, linkPath) {
     if (err.code === 'ENOENT') return // dangling link
     throw err
   }
-  const rel = relative(realNodeModules, real)
-  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return // inside node_modules
-  throw new Error(
-    `stasis prune: symlink escapes node_modules: ${relative(dirname(nodeModules), linkPath)} -> ${real}`,
-  )
+  const rel = relative(realBoundary, real)
+  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return // inside the boundary
+  throw new Error(`stasis prune: symlink escapes ${label}: ${relative(root, linkPath)} -> ${real}`)
 }
 
-function* walkFiles(nodeModules) {
-  if (!existsSync(nodeModules)) return
-  const realNodeModules = realpathSync(nodeModules)
-  const stack = [nodeModules]
+function* walkFiles(nmRoot, ctx) {
+  if (!existsSync(nmRoot)) return
+  const stack = [nmRoot]
   while (stack.length > 0) {
     const dir = stack.pop()
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name)
       if (entry.isSymbolicLink()) {
-        assertSymlinkInternal(nodeModules, realNodeModules, full)
+        assertSymlinkInternal(ctx, full)
         continue
       }
       if (entry.isDirectory()) stack.push(full)
       else if (entry.isFile()) yield full
     }
+  }
+}
+
+// Walk every node_modules root, tagging each file with the root it came from so
+// deletion and empty-dir pruning stay scoped to that node_modules.
+function* walkAll(nmRoots, ctx) {
+  for (const nmRoot of nmRoots) {
+    for (const full of walkFiles(nmRoot, ctx)) yield { full, nmRoot }
   }
 }
 
@@ -335,7 +380,17 @@ function pruneEmptyDirs(dir, stopAt) {
 export function prune({ root = process.cwd() } = {}) {
   assertGlobalVirtualStoreDisabled()
   root = resolve(root)
-  const nodeModules = join(root, 'node_modules')
+  // In a pnpm workspace, prune every package's node_modules (not just the
+  // root's) and bound symlinks by the whole workspace; otherwise just the root's
+  // node_modules, bounded by node_modules itself.
+  const workspace = isPnpmWorkspaceRoot(root)
+  const nmRoots = workspace ? discoverNodeModulesDirs(root) : [join(root, 'node_modules')]
+  const boundary = workspace ? root : join(root, 'node_modules')
+  const ctx = {
+    root,
+    realBoundary: existsSync(boundary) ? realpathSync(boundary) : boundary,
+    label: workspace ? 'the workspace' : 'node_modules',
+  }
   const lockfile = loadLockfile(root)
   const { expected, knownDirs } = buildExpected(lockfile)
 
@@ -350,7 +405,7 @@ export function prune({ root = process.cwd() } = {}) {
   const seen = new Set()
   const mismatches = []
 
-  for (const full of walkFiles(nodeModules)) {
+  for (const { full, nmRoot } of walkAll(nmRoots, ctx)) {
     const rel = relative(root, full)
     const expectedHash = expected.get(rel)
     if (expectedHash !== undefined) {
@@ -409,13 +464,14 @@ export function prune({ root = process.cwd() } = {}) {
       // pruned like any other untracked file.
     }
 
-    // Defense-in-depth: the path must resolve inside node_modules (no
-    // symlink escape, no `..` traversal) before we queue it for deletion.
+    // Defense-in-depth: the path must resolve inside the node_modules we're
+    // walking (no symlink escape, no `..` traversal) before we queue it for
+    // deletion -- so prune never deletes anything outside a node_modules.
     assert.ok(
-      full === nodeModules || full.startsWith(`${nodeModules}${sep}`),
+      full.startsWith(`${nmRoot}${sep}`),
       `refusing to remove path outside node_modules: ${full}`,
     )
-    toRemove.push(full)
+    toRemove.push({ full, nmRoot })
   }
 
   const missing = []
@@ -449,15 +505,15 @@ export function prune({ root = process.cwd() } = {}) {
   }
 
   const removed = []
-  const touchedDirs = new Set()
-  for (const full of toRemove) {
+  const touchedDirs = new Map() // dir -> the node_modules root under it (prune stops there)
+  for (const { full, nmRoot } of toRemove) {
     unlinkSync(full)
     removed.push(relative(root, full))
-    touchedDirs.add(dirname(full))
+    touchedDirs.set(dirname(full), nmRoot)
   }
 
-  const sortedDirs = [...touchedDirs].toSorted((a, b) => b.length - a.length)
-  for (const d of sortedDirs) pruneEmptyDirs(d, nodeModules)
+  const sortedDirs = [...touchedDirs.keys()].toSorted((a, b) => b.length - a.length)
+  for (const d of sortedDirs) pruneEmptyDirs(d, touchedDirs.get(d))
 
   return { removed, validated, kept, minimized }
 }

@@ -82,6 +82,24 @@ is refused: prune never walks or attests that target, so leaving the link would
 make unattested content reachable from the pruned tree. `prune` aborts during
 planning, before touching disk.
 
+## pnpm workspaces
+
+When run in a pnpm workspace root — detected by the presence of a
+`pnpm-workspace.yaml` — `prune` adjusts:
+
+- It covers **every** package's `node_modules` (each workspace package's, plus
+  the root's), discovered by walking the workspace (it never descends into a
+  `node_modules` while discovering, nor into dotdirs, nor outside the root).
+- The symlink containment boundary widens from `node_modules` to the **whole
+  workspace**. A workspace dependency legitimately links to a sibling package's
+  source directory, which lives outside any `node_modules` but inside the
+  workspace; such a link is left in place and its target is **not**
+  content-validated (workspace sources are first-party, not attested deps). A
+  link whose target escapes the workspace root is still refused.
+- It still only ever deletes files **inside a `node_modules`** — workspace
+  source files are never touched — and never accesses anything outside the
+  workspace root.
+
 `prune` also rejects up front if pnpm's `enableGlobalVirtualStore` is
 turned on (checked via the `npm_config_enable_global_virtual_store` env
 var pnpm exports). With the global virtual store enabled `node_modules`
