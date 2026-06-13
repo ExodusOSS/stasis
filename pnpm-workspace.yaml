@@ -1,5 +1,6 @@
 
 packages:
+  - stasis
   - stasis-core
 
 allowBuilds:

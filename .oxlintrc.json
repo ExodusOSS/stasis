@@ -24,6 +24,6 @@
     "node": true
   },
   "ignorePatterns": [
-    "tests/fixtures/"
+    "**/tests/fixtures/"
   ]
 }

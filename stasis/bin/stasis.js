@@ -59,7 +59,12 @@ if (command === '-v' || command === '--version') {
     mock: { type: 'boolean' },
   }
 
-  const { values } = parseArgs({ args: flags, options })
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
   if (argv.length === 0) usage('Nothing to run: no path to file given')
   if (!['none', 'ignore', 'add', 'replace', 'frozen'].includes(values.lock)) usage('Error: invalid --lock value')
   const lock = values.lock

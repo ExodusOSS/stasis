@@ -11,7 +11,7 @@ import { stripVTControlCharacters } from 'node:util'
 // tooling package). These tests pin that surface; the run-time behaviour itself is
 // the same loader covered by tests/cli.test.js.
 const here = dirname(fileURLToPath(import.meta.url))
-const cli = join(here, '..', 'stasis-core', 'bin', 'stasis-core.js')
+const cli = join(here, '..', '..', 'stasis-core', 'bin', 'stasis-core.js')
 const runFixture = join(here, 'fixtures', 'cli-run')
 const pruneFixture = join(here, 'fixtures', 'prune')
 
