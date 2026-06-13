@@ -2,7 +2,8 @@
 
 *Analyzeable source code bundles with resolutions + fine-grained lockfiles.*
 
-Both lockfiles and bundles only include what is actually _used_: generally about 10x smaller than production-focused `node_modules` install.
+Both lockfiles and bundles only include what is actually _used_.\
+Generally about 10x smaller than production-focused `node_modules` install.
 
 Enforcing these allows to focus automated code scanning and alerts only on code that matters,
 and makes the analysis import graph aware.
