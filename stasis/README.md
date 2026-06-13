@@ -31,7 +31,7 @@ Both can be run in full scope (default) or just in `node_modules` scope.
 | - | - | - | - | - | - | - |
 | Runnable | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Contains original sources | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
-| Reported sources match runtime | ✅ | ➖ | ❌ Deps can misreport | ➖ | ✅ | ✅ |
+| Sources match runtime | ✅ | ➖ | ❌ Deps can misreport | ➖ | ✅ | ✅ |
 | Import edges | ✅ | ❌ | ❌ | ❌ | 🔍 Implicit | 🔍 Implicit |
 | Constrained to related code | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
 
