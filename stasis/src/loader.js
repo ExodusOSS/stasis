@@ -1,6 +1,6 @@
-// The stasis run-time loader lives in @exodus/stasis-core. Importing this module
-// evaluates core's loader (registering Node's module hooks); kept so
-// `@exodus/stasis/loader` (and `node --import @exodus/stasis/loader`) keep
-// working after the core split. core's loader has no exports, so this re-export
-// runs purely for its evaluation side effect.
+// Public-export adapter: backs `@exodus/stasis/loader` (and `node --import
+// @exodus/stasis/loader`). The loader lives in @exodus/stasis-core; importing
+// this evaluates it (registering Node's module hooks) for its side effect.
+// Internal code uses `@exodus/stasis-core/loader` directly, so this file exists
+// only to back the package's `exports` map.
 export * from '@exodus/stasis-core/loader'

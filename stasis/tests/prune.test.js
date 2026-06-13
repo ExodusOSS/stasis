@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { prune } from '../src/prune.js'
+import { prune } from '@exodus/stasis-core/prune'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 const PRUNE_FIXTURE = join(fixtures, 'prune')

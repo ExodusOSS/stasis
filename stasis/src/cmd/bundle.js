@@ -3,7 +3,7 @@ import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'no
 import { fileURLToPath } from 'node:url'
 import { brotliCompressSync } from 'node:zlib'
 
-import { Bundle } from '../bundle.js'
+import { Bundle } from '@exodus/stasis-core/bundle'
 import { scan } from '../scan.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions, splitNodeModulesPath } from '@exodus/stasis-core/util'

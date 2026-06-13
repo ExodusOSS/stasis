@@ -3,8 +3,8 @@ import { brotliDecompressSync } from 'node:zlib'
 
 import { advisories } from './apis/npm/index.js'
 import semver from './apis/npm/semver.cjs'
-import { Bundle } from './bundle.js'
-import { Lockfile } from './lockfile.js'
+import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
 
 function parseFile(file) {
   let buf

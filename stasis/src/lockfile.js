@@ -1,4 +1,4 @@
-// Moved to @exodus/stasis-core; re-exported here so `@exodus/stasis/lockfile`,
-// the tooling, and tests that import it by its original path keep resolving to
-// the same module.
+// Public-export adapter: backs `@exodus/stasis/lockfile`. The implementation lives in
+// @exodus/stasis-core; internal tooling and tests import `@exodus/stasis-core/lockfile`
+// directly, so this file exists only to back the package's `exports` map.
 export * from '@exodus/stasis-core/lockfile'

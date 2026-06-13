@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
-import { Bundle } from '../src/bundle.js'
+import { Bundle } from '@exodus/stasis-core/bundle'
 import {
   buildBashBundle,
   buildBundle,

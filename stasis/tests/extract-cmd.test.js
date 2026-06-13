@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
-import { Bundle } from '../src/bundle.js'
-import { Lockfile } from '../src/lockfile.js'
+import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { buildSolidityBundle, bundleCommand } from '../src/cmd/bundle.js'
 import { extractCommand, lockfileFromBundle } from '../src/cmd/extract.js'
-import { prune } from '../src/prune.js'
+import { prune } from '@exodus/stasis-core/prune'
 import { sha512integrity } from '@exodus/stasis-core/state.util'
 
 const here = dirname(fileURLToPath(import.meta.url))

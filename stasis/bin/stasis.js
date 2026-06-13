@@ -201,7 +201,7 @@ if (command === '-v' || command === '--version') {
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')
   const root = argv[0] ? resolve(argv[0]) : process.cwd()
-  const { prune } = await import('../src/prune.js')
+  const { prune } = await import('@exodus/stasis-core/prune')
   const { removed, validated } = prune({ root })
   console.warn(`[stasis] prune: validated ${validated.length} file(s), removed ${removed.length} file(s)`)
 } else if (command === 'audit') {

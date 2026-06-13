@@ -19,8 +19,13 @@ import assert from 'node:assert/strict'
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
 
-// oxc-parser is a regular dependency of @exodus/stasis, so just require it.
-const parser = createRequire(import.meta.url)('oxc-parser')
+// oxc-parser is a regular dependency, required lazily so non-JS bundlers (which
+// never reach getParser()) don't load the native parser.
+let _parser
+function getParser() {
+  _parser ??= createRequire(import.meta.url)('oxc-parser')
+  return _parser
+}
 
 function packageType(file) {
   const pkg = findPackageJSON(pathToFileURL(file).toString())
@@ -182,6 +187,10 @@ export class Scan {
     const declared = formatForFile(file)
     const src = readFileSync(file, 'utf8')
 
+    // Resolve the parser outside the per-file try below: a missing oxc-parser is
+    // an environment error, not a property of this file, so it must not be
+    // swallowed into a silent zero-edge leaf.
+    const parser = getParser()
     let parsed
     try {
       parsed = parser.parseSync(file, src, {

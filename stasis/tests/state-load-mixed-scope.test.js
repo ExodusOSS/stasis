@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { State } from '@exodus/stasis-core/state'
-import { Lockfile } from '../src/lockfile.js'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
 
 // Cross-scope load: lockfile carries scope=full (with `entries` + `sources`),
 // State runs as scope=node_modules. Only node_modules entries should populate
