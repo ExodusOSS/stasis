@@ -83,8 +83,8 @@ if (command === '-v' || command === '--version') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')
   const root = argv[0] ? resolve(argv[0]) : process.cwd()
   const { prune } = await import('../src/prune.js')
-  const { removed, validated } = prune({ root })
-  console.warn(`[stasis-core] prune: validated ${validated.length} file(s), removed ${removed.length} file(s)`)
+  const { removed, validated, minimized } = prune({ root })
+  console.warn(`[stasis-core] prune: validated ${validated.length} file(s), removed ${removed.length} file(s), minimized ${minimized.length} package.json file(s)`)
 } else {
   usage()
 }
