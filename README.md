@@ -6,4 +6,6 @@
 | `@exodus/stasis` | [stasis](stasis/) |
 | `@exodus/stasis-core` | [stasis-core](stasis-core/) |
 
+See `@exodus/stasis` [Readme](stasis/README.md).
+
 </div>
