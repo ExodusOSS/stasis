@@ -65,12 +65,12 @@ function splitName(ecosystem, name) {
 // CycloneDX both understand — for a package in a known ecosystem, or null when
 // the ecosystem has no purl type. Each path segment is percent-encoded (so an
 // npm scope's `@` becomes `%40`), while the `/` namespace separator and the
-// `@` before the version stay literal, per the purl spec. Composer names are
-// lowercased, as the spec requires.
+// `@` before the version stay literal, per the purl spec. Composer and GitHub
+// names are case-insensitive, so they're lowercased as the spec requires.
 export function buildPurl(ecosystem, rawName, version) {
   if (!PURL_TYPES.has(ecosystem)) return null
   let { group, name } = splitName(ecosystem, rawName)
-  if (ecosystem === 'composer') {
+  if (ecosystem === 'composer' || ecosystem === 'github') {
     group = group?.toLowerCase()
     name = name.toLowerCase()
   }

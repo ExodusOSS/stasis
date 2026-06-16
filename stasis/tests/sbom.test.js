@@ -57,6 +57,9 @@ test('buildPurl lowercases composer vendor/name per the purl spec', (t) => {
 test('buildPurl mints cargo (flat) and github (owner/repo) purls', (t) => {
   t.assert.equal(buildPurl('cargo', 'serde', '1.0.0'), 'pkg:cargo/serde@1.0.0')
   t.assert.equal(buildPurl('github', 'vectorized/solady', '0.1.0'), 'pkg:github/vectorized/solady@0.1.0')
+  // github is case-insensitive, so the purl spec requires lowercasing owner/repo
+  // (forge submodule slugs like this come through verbatim from .gitmodules)
+  t.assert.equal(buildPurl('github', 'OpenZeppelin/openzeppelin-contracts', '5.0.0'), 'pkg:github/openzeppelin/openzeppelin-contracts@5.0.0')
 })
 
 test('buildPurl returns null for ecosystems without a registered purl type', (t) => {

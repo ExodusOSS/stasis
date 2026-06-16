@@ -56,8 +56,8 @@ attributes every dependency to the install layout it actually resolved out of:
 | `soldeer` | — (no purl type) | Solidity Soldeer `dependencies/` |
 
 npm scopes (`@scope/name`), Composer vendors and GitHub owners map to the purl
-namespace and the CycloneDX `group`; Composer names are lowercased per the purl
-spec. `soldeer` has no registered purl type, so those components carry a
+namespace and the CycloneDX `group`; Composer and GitHub names are lowercased
+per the purl spec (both ecosystems are case-insensitive). `soldeer` has no registered purl type, so those components carry a
 name + version but no purl (better than fabricating one). First-party/workspace
 packages are the SBOM's primary component and take their purl ecosystem from the
 project itself. Lockfiles/bundles written before stasis recorded a
