@@ -12,6 +12,7 @@
     "./cmd/bundle": "./src/cmd/bundle.js",
     "./lockfile": "./src/lockfile.js",
     "./prune": "./src/prune.js",
+    "./sbom": "./src/sbom.js",
     "./logo.svg": "./logo.svg"
   },
   "files": [
@@ -23,6 +24,7 @@
     "src/bundle.js",
     "src/cmd/bundle.js",
     "src/cmd/extract.js",
+    "src/cmd/sbom.js",
     "src/esbuild.js",
     "src/loader.js",
     "src/loader-mock.js",
@@ -32,7 +34,9 @@
     "src/loaders/php.js",
     "src/lockfile.js",
     "src/mock.js",
+    "src/parse.js",
     "src/prune.js",
+    "src/sbom.js",
     "src/scan.js",
     "src/webpack.js"
   ],

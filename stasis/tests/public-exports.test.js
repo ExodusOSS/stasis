@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { Bundle } from '@exodus/stasis/bundle'
 import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
 import { Lockfile } from '@exodus/stasis/lockfile'
+import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
@@ -17,6 +18,15 @@ test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API
 test('@exodus/stasis/lockfile exports Lockfile class', (t) => {
   t.assert.equal(typeof Lockfile, 'function')
   t.assert.equal(Lockfile.VERSION, 0)
+})
+
+test('@exodus/stasis/sbom exports the file-free SBOM API', (t) => {
+  for (const fn of [buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx]) {
+    t.assert.equal(typeof fn, 'function')
+  }
+  // Operates on already-parsed artifacts; an empty set still renders both formats.
+  t.assert.equal(toSpdx([]).spdxVersion, 'SPDX-2.3')
+  t.assert.equal(toCyclonedx([]).bomFormat, 'CycloneDX')
 })
 
 test('Lockfile round-trip preserves structure', (t) => {

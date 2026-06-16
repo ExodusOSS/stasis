@@ -29,6 +29,8 @@ function usage(prefix = '') {
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis prune [path/to/project]
  stasis audit path/to/file ...
+ stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
+ (stasis sbom streams to stdout by default; --output=- is explicit stdout)
 `.trim())
   process.exit(1)
 }
@@ -212,6 +214,32 @@ if (command === '-v' || command === '--version') {
   const report = await audit(files)
   printAuditReport(report)
   process.exitCode = report.rows.length === 0 ? 0 : 1
+} else if (command === 'sbom') {
+  const flags = []
+  const valueFlags = new Set(['--format', '--output', '-o'])
+  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
+    flags.push(argv.shift())
+  }
+  const options = {
+    format: { type: 'string' },
+    output: { type: 'string', short: 'o' },
+  }
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
+  if (!values.format) usage('Error: stasis sbom requires --format=(spdx|cyclonedx)')
+  if (!['spdx', 'cyclonedx'].includes(values.format)) usage('Error: --format must be spdx or cyclonedx')
+  if (argv.length === 0) usage('Nothing to export: no lockfile or bundle given')
+  const { sbomCommand } = await import('../src/cmd/sbom.js')
+  sbomCommand({
+    cwd: process.cwd(),
+    files: argv,
+    format: values.format,
+    output: values.output,
+  })
 } else {
   usage()
 }
