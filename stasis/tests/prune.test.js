@@ -14,7 +14,7 @@ const readJson = (root, rel) => JSON.parse(readFileSync(join(root, rel), 'utf8')
 // files are written AND recorded (with their real hash) in the lockfile, so
 // prune keeps+validates them; `untracked` files are written but not recorded,
 // so prune prunes or (for package.json) rewrites them.
-function buildProject(t, modules) {
+function buildProject(t, modules, { workspace = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'stasis-prune-min-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const lockModules = {}
@@ -28,6 +28,9 @@ function buildProject(t, modules) {
     for (const [rel, content] of Object.entries(tracked)) files[rel] = sri(Buffer.from(content))
     lockModules[dir] = { name, version, files }
   }
+  // A pnpm-workspace.yaml marks the root as a workspace; prune detects it by
+  // existence (it discovers the package node_modules by walking, not by parsing).
+  if (workspace) writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n')
   const lock = { version: 0, config: { scope: 'node_modules' }, modules: lockModules }
   writeFileSync(join(root, 'stasis.lock.json'), `${JSON.stringify(lock, undefined, 2)}\n`)
   return root
@@ -649,4 +652,90 @@ test('rewrites a package.json by replacing it, leaving hardlinked store copies u
   t.assert.deepStrictEqual(readJson(root, 'node_modules/pkg/package.json'), { name: 'pkg', version: '1.0.0' })
   // ...but the other hardlink (store inode) is byte-for-byte untouched: replace, not modify
   t.assert.strictEqual(readFileSync(store, 'utf8'), storeBefore)
+})
+
+test('pnpm workspace: prunes every package node_modules, never touches sources outside them', (t) => {
+  const root = buildProject(t, {
+    'node_modules/dep': {
+      name: 'dep',
+      version: '1.0.0',
+      tracked: { 'index.js': '1\n' },
+      untracked: { 'junk.js': 'x\n' },
+    },
+    'packages/app/node_modules/inner': {
+      name: 'inner',
+      version: '1.0.0',
+      tracked: { 'index.js': '2\n' },
+      untracked: { 'junk.js': 'y\n' },
+    },
+  }, { workspace: true })
+  // a workspace source file, outside any node_modules
+  mkdirSync(join(root, 'packages/app/src'), { recursive: true })
+  writeFileSync(join(root, 'packages/app/src/main.js'), 'source\n')
+
+  const { removed, validated } = prune({ root })
+  // both the root's and the package's node_modules are pruned + validated
+  t.assert.ok(removed.includes('node_modules/dep/junk.js'))
+  t.assert.ok(removed.includes('packages/app/node_modules/inner/junk.js'))
+  t.assert.ok(validated.includes('node_modules/dep/index.js'))
+  t.assert.ok(validated.includes('packages/app/node_modules/inner/index.js'))
+  // nothing outside a node_modules is ever deleted, source files survive
+  t.assert.ok(existsSync(join(root, 'packages/app/src/main.js')))
+  t.assert.ok(removed.every((r) => r.includes('node_modules/')))
+})
+
+test('pnpm workspace: allows a symlink to a sibling package inside the workspace', (t) => {
+  const root = buildProject(t, {
+    'node_modules/dep': { name: 'dep', version: '1.0.0', tracked: { 'index.js': '1\n' } },
+  }, { workspace: true })
+  // a workspace package (source, outside any node_modules) linked in from node_modules
+  mkdirSync(join(root, 'packages/lib'), { recursive: true })
+  writeFileSync(join(root, 'packages/lib/index.js'), 'lib\n')
+  mkdirSync(join(root, 'node_modules/@scope'), { recursive: true })
+  symlinkSync('../../packages/lib', join(root, 'node_modules/@scope/lib'), 'dir')
+
+  t.assert.doesNotThrow(() => prune({ root }))
+  // the in-workspace link is left in place and its (unvalidated) target survives
+  t.assert.ok(lstatSync(join(root, 'node_modules/@scope/lib')).isSymbolicLink())
+  t.assert.strictEqual(readFileSync(join(root, 'packages/lib/index.js'), 'utf8'), 'lib\n')
+})
+
+test('pnpm workspace: refuses a symlink whose target escapes the workspace root', (t) => {
+  const root = buildProject(t, {
+    'node_modules/dep': { name: 'dep', version: '1.0.0', tracked: { 'index.js': '1\n' } },
+  }, { workspace: true })
+  const external = mkdtempSync(join(tmpdir(), 'stasis-external-'))
+  t.after(() => rmSync(external, { recursive: true, force: true }))
+  writeFileSync(join(external, 'secret.txt'), 'secret\n')
+  symlinkSync(join(external, 'secret.txt'), join(root, 'node_modules/leak'), 'file')
+
+  t.assert.throws(() => prune({ root }), /symlink escapes the workspace/u)
+  t.assert.ok(existsSync(join(external, 'secret.txt')))
+})
+
+test('pnpm workspace: validates the .pnpm store and leaves public/package store symlinks', (t) => {
+  const root = buildProject(t, {
+    'node_modules/.pnpm/dep@1.0.0/node_modules/dep': {
+      name: 'dep',
+      version: '1.0.0',
+      tracked: { 'index.js': '1\n' },
+      untracked: { 'junk.js': 'x\n' },
+    },
+  }, { workspace: true })
+  // the root public symlink and a workspace package, both linking the dep from the store
+  symlinkSync('.pnpm/dep@1.0.0/node_modules/dep', join(root, 'node_modules/dep'), 'dir')
+  mkdirSync(join(root, 'packages/app/node_modules'), { recursive: true })
+  writeFileSync(join(root, 'packages/app/package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
+  symlinkSync('../../../node_modules/.pnpm/dep@1.0.0/node_modules/dep', join(root, 'packages/app/node_modules/dep'), 'dir')
+
+  const { removed, validated } = prune({ root })
+  // the real store bytes are validated and store cruft is pruned
+  t.assert.ok(validated.includes('node_modules/.pnpm/dep@1.0.0/node_modules/dep/index.js'))
+  t.assert.ok(removed.includes('node_modules/.pnpm/dep@1.0.0/node_modules/dep/junk.js'))
+  // the public and package symlinks into the store (internal to the workspace) are left
+  t.assert.ok(lstatSync(join(root, 'node_modules/dep')).isSymbolicLink())
+  t.assert.ok(lstatSync(join(root, 'packages/app/node_modules/dep')).isSymbolicLink())
+  t.assert.strictEqual(readFileSync(join(root, 'node_modules/dep/index.js'), 'utf8'), '1\n')
+  // the workspace source package.json (outside any node_modules) is untouched
+  t.assert.ok(existsSync(join(root, 'packages/app/package.json')))
 })

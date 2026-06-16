@@ -76,7 +76,13 @@ lockfile/bundle `config` block.
 - `sources` keys are workspace package dirs — `"."` for the top-level
   package, workspace-relative paths for any others (must not contain
   `node_modules`); `modules` keys are dependency dirs (must contain
-  `node_modules`).
+  `node_modules`). Classification is by the file's **real** path: a workspace
+  package that pnpm links into `node_modules` via a symlink whose target lies
+  outside any `node_modules` is recorded as a **source** under its real path
+  (so it is omitted from a `node_modules`-scope bundle), not as a dependency
+  under the symlink path. (A lockfile produced before this rule that recorded
+  such a file under `node_modules/<dep>/…` must be regenerated — `lock = frozen`
+  would otherwise flag the moved path as a resolution mismatch.)
 - Each module record's `name`/`version` come from the owning `package.json`.
   `files` maps package-dir-relative paths to SRI digests
   (`sha512-<base64(sha512(bytes))>`).
