@@ -118,6 +118,26 @@ test('collectComponents keeps the same name at different versions', withTmp((t, 
   t.assert.deepEqual(foos.map((c) => c.version), ['1.2.3', '2.0.0'])
 }))
 
+test('collectComponents classifies a package as workspace if any input is first-party (order-independent)', withTmp((t, tmp) => {
+  // shared@1.0.0 is the workspace root in one file and a vendored dependency in
+  // the other; the resulting scope must not depend on argument order.
+  const ws = join(tmp, 'ws.json')
+  writeFileSync(ws, JSON.stringify({
+    version: 0, config: { scope: 'full' }, entries: ['i.js'],
+    sources: { '.': { name: 'shared', version: '1.0.0', files: { 'i.js': 'sha512-a' } } },
+    modules: {},
+  }))
+  const dep = join(tmp, 'dep.json')
+  writeFileSync(dep, JSON.stringify({
+    version: 0, config: { scope: 'full' }, entries: ['i.js'],
+    sources: { '.': { name: 'other', version: '9.9.9', files: { 'i.js': 'sha512-b' } } },
+    modules: { 'node_modules/shared': { name: 'shared', version: '1.0.0', files: { 'index.js': 'sha512-c' } } },
+  }))
+  const scopeOf = (files) => collectComponents(files).find((c) => c.name === 'shared').scope
+  t.assert.equal(scopeOf([ws, dep]), 'workspace')
+  t.assert.equal(scopeOf([dep, ws]), 'workspace', 'argument order must not change the classification')
+}))
+
 test('collectComponents treats a PHP bundle as composer and vendor pkgs as dependencies', withTmp((t, tmp) => {
   // PHP vendor packages live outside node_modules (`vendor/<vendor>/<pkg>`), so
   // classification must lean on the composer ecosystem, not the path.
@@ -196,6 +216,21 @@ test('toSpdx omits externalRefs when there is no purl', (t) => {
   t.assert.equal(doc.packages[0].externalRefs, undefined)
 })
 
+test('toSpdx with several workspace roots DESCRIBES each root and emits no DEPENDS_ON', (t) => {
+  // No single subject (a monorepo / several inputs): each first-party root is
+  // DESCRIBED; dependencies are listed but carry no relationship edges.
+  const doc = toSpdx([
+    { name: 'app-a', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app-a@1.0.0' },
+    { name: 'app-b', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app-b@1.0.0' },
+    { name: 'dep', version: '2.0.0', scope: 'dependency', ecosystem: 'npm', purl: 'pkg:npm/dep@2.0.0' },
+  ], fixed)
+  t.assert.equal(doc.name, 'stasis-sbom')
+  const describes = doc.relationships.filter((r) => r.relationshipType === 'DESCRIBES')
+  t.assert.deepEqual(describes.map((r) => r.relatedSpdxElement).toSorted(), ['SPDXRef-Package-0', 'SPDXRef-Package-1'])
+  t.assert.ok(describes.every((r) => r.spdxElementId === 'SPDXRef-DOCUMENT'))
+  t.assert.equal(doc.relationships.filter((r) => r.relationshipType === 'DEPENDS_ON').length, 0)
+})
+
 // ── toCyclonedx ──────────────────────────────────────────────────────────────
 
 test('toCyclonedx sets the root as metadata.component and lists deps with a flat dependency graph', withTmp((t, tmp) => {
@@ -205,9 +240,9 @@ test('toCyclonedx sets the root as metadata.component and lists deps with a flat
   t.assert.equal(doc.serialNumber, 'urn:uuid:00000000-0000-4000-8000-000000000000')
   t.assert.equal(doc.version, 1)
   t.assert.equal(doc.metadata.timestamp, '2026-01-02T03:04:05Z')
-  t.assert.deepEqual(doc.metadata.tools, [
-    { vendor: 'Exodus Movement, Inc.', name: '@exodus/stasis', version: '1.0.0-alpha.3' },
-  ])
+  t.assert.deepEqual(doc.metadata.tools, {
+    components: [{ type: 'application', publisher: 'Exodus Movement, Inc.', name: '@exodus/stasis', version: '1.0.0-alpha.3' }],
+  })
 
   t.assert.equal(doc.metadata.component.type, 'application')
   t.assert.equal(doc.metadata.component.name, 'top-pkg')
@@ -234,6 +269,16 @@ test('toCyclonedx without a single root omits metadata.component and dependencie
   t.assert.equal(doc.metadata.component, undefined)
   t.assert.equal(doc.dependencies, undefined)
   t.assert.equal(doc.components.length, 1)
+})
+
+test('toCyclonedx with several workspace roots lists them all as components, no primary', (t) => {
+  const doc = toCyclonedx([
+    { name: 'app-a', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app-a@1.0.0' },
+    { name: 'app-b', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app-b@1.0.0' },
+  ], fixed)
+  t.assert.equal(doc.metadata.component, undefined)
+  t.assert.equal(doc.dependencies, undefined)
+  t.assert.deepEqual(doc.components.map((c) => c.name).toSorted(), ['app-a', 'app-b'])
 })
 
 // ── generateSbom ─────────────────────────────────────────────────────────────
