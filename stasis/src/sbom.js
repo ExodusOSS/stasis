@@ -1,23 +1,35 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
-
 import semver from './apis/npm/semver.cjs'
-import { parseFile } from './parse.js'
 import pkg from '../package.json' with { type: 'json' }
+
+// `@exodus/stasis/sbom` — derive an SPDX 2.3 or CycloneDX 1.5 Software Bill of
+// Materials from already-parsed stasis artifacts (`Bundle`/`Lockfile`
+// instances). This module is deliberately free of file/transport concerns: it
+// never reads disk and never touches brotli (`node:zlib`), so it can run
+// wherever an artifact instance can be handed to it. The CLI glue that reads
+// `stasis.code.br`/`stasis.lock.json` off disk (and so pulls in brotli) lives
+// in `src/cmd/sbom.js`.
 
 // Identity stamped into every generated SBOM's tool/creator metadata. The tool
 // name is the published package name, per the command's spec.
 const DEFAULT_TOOL = { name: '@exodus/stasis', version: pkg.version, vendor: 'Exodus Movement, Inc.' }
 
-// Map a stasis artifact to the package ecosystem its names/versions come from.
-// Only PHP bundles (whose files are tagged with the `php` loader format) carry
-// Composer package identities; everything else — JS/TS bundles, lockfiles, and
-// the Solidity/Rust/Bash source bundles, which all bucket by `package.json` —
-// uses npm-style names. Used to build the right purl type and to classify
-// dependency vs. workspace buckets (see `classifyScope`).
-function detectEcosystem(parsed) {
-  const formats = parsed.formats
+// Per-call UUID/timestamp without importing node:crypto — Web Crypto is global
+// in modern Node, keeping this module dependency-light.
+const newUuid = () => globalThis.crypto.randomUUID()
+
+// purl `type`s we know how to mint. A dependency whose recorded ecosystem has
+// no registered purl type (`soldeer`) gets no purl — better than a fabricated
+// one — while npm/composer/cargo/github all map to official types.
+const PURL_TYPES = new Set(['npm', 'composer', 'cargo', 'github'])
+
+// Infer a whole artifact's ecosystem from its loader formats. Used for the
+// first-party/workspace buckets (which never carry the per-dependency
+// `ecosystem` field) and as the fallback for older artifacts that predate the
+// field entirely. PHP bundles tag files with the `php` format and map to
+// Composer; everything else (JS/TS, and the Solidity/Rust/Bash source bundles,
+// which all bucket by `package.json`) uses npm-style names.
+function detectEcosystem(artifact) {
+  const formats = artifact.formats
   if (formats && typeof formats.values === 'function') {
     for (const format of formats.values()) {
       if (format === 'php') return 'composer'
@@ -26,27 +38,23 @@ function detectEcosystem(parsed) {
   return 'npm'
 }
 
-// A module bucket is the workspace root/first-party code or an installed
-// dependency. The "." bucket is always the root. For npm artifacts a
-// dependency lives under `node_modules`; sibling first-party packages (a JS
-// monorepo) stay workspace. Composer bundles store vendor packages outside
-// `node_modules` (`vendor/<vendor>/<pkg>`), so any non-root bucket there is a
-// dependency.
+// Legacy scope classification for artifacts predating the per-dependency
+// `ecosystem` field: the "." bucket and other non-`node_modules` dirs are
+// first-party, except in a Composer bundle where vendor packages live outside
+// `node_modules`.
 function classifyScope(ecosystem, dir) {
   if (dir === '.') return 'workspace'
   if (ecosystem === 'composer') return 'dependency'
   return dir.includes('node_modules') ? 'dependency' : 'workspace'
 }
 
-// Split a package name into its purl/CycloneDX namespace (group) and bare name:
-// npm scopes (`@scope/name` → `@scope` + `name`) and Composer vendors
-// (`vendor/name` → `vendor` + `name`). Unscoped names have no group.
+// Split a package name into its purl/CycloneDX namespace (group) and bare name.
+// npm scopes (`@scope/name`), Composer vendors and GitHub owners (`a/b`) all use
+// the segment before the first slash; cargo crates and bare names have none.
 function splitName(ecosystem, name) {
-  if (ecosystem === 'npm' && name.startsWith('@') && name.includes('/')) {
-    const slash = name.indexOf('/')
-    return { group: name.slice(0, slash), name: name.slice(slash + 1) }
-  }
-  if (ecosystem === 'composer' && name.includes('/')) {
+  const namespaced = ecosystem === 'composer' || ecosystem === 'github' ||
+    (ecosystem === 'npm' && name.startsWith('@'))
+  if (namespaced && name.includes('/')) {
     const slash = name.indexOf('/')
     return { group: name.slice(0, slash), name: name.slice(slash + 1) }
   }
@@ -60,7 +68,7 @@ function splitName(ecosystem, name) {
 // `@` before the version stay literal, per the purl spec. Composer names are
 // lowercased, as the spec requires.
 export function buildPurl(ecosystem, rawName, version) {
-  if (ecosystem !== 'npm' && ecosystem !== 'composer') return null
+  if (!PURL_TYPES.has(ecosystem)) return null
   let { group, name } = splitName(ecosystem, rawName)
   if (ecosystem === 'composer') {
     group = group?.toLowerCase()
@@ -80,29 +88,50 @@ function compareComponents(a, b) {
 }
 
 // Collect the deduplicated, sorted set of packages recorded across one or more
-// stasis lockfiles/bundles. Unlike `stasis audit` (which inventories only
-// installed dependencies to query the registry), an SBOM is the *full* bill of
-// materials, so first-party/workspace packages are included too — tagged
-// `scope: 'workspace'` vs. `'dependency'` so the formatters can pick a primary
-// component. Buckets without a name+version (legacy v0 bundles record neither)
-// are skipped: there is nothing to attest. Dedup is by ecosystem+name+version;
-// a package seen as first-party in any input is treated as workspace regardless
-// of the argument order, so the output doesn't depend on how files are listed.
-export function collectComponents(files) {
+// already-parsed stasis artifacts (`Bundle`/`Lockfile` instances). Unlike
+// `stasis audit` (which inventories only installed dependencies to query the
+// registry), an SBOM is the *full* bill of materials, so first-party/workspace
+// packages are included too — tagged `scope: 'workspace'` vs. `'dependency'` so
+// the formatters can pick a primary component. Buckets without a name+version
+// (legacy v0 bundles record neither) are skipped: there is nothing to attest.
+//
+// Each dependency's `ecosystem` (npm/composer/cargo/github/soldeer) comes from
+// the per-bucket field newer artifacts record; older artifacts predate it, so
+// we fall back to inferring it from the file's loader formats and install path.
+// Dedup is by ecosystem+name+version; a package seen as first-party in any
+// artifact stays workspace regardless of argument order, so the output doesn't
+// depend on how the artifacts are listed.
+export function collectComponents(artifacts) {
   const seen = new Map()
-  for (const file of files) {
-    const parsed = parseFile(file)
-    const ecosystem = detectEcosystem(parsed)
-    for (const [dir, { name, version }] of parsed.modules) {
+  for (const artifact of artifacts) {
+    const records = [...artifact.modules]
+    // The per-dependency `ecosystem` field cleanly separates deps (tagged) from
+    // first-party buckets (untagged). If no bucket carries it, the artifact
+    // predates the field and we use the format/path heuristic for everything.
+    const tagged = records.some(([, m]) => m.ecosystem !== undefined)
+    const fileEcosystem = detectEcosystem(artifact)
+    for (const [dir, { name, version, ecosystem }] of records) {
       if (!name || !version) continue
-      const scope = classifyScope(ecosystem, dir)
-      const key = `${ecosystem} ${name} ${version}`
+      let scope, eco
+      if (ecosystem !== undefined) {
+        scope = 'dependency'
+        eco = ecosystem
+      } else if (tagged) {
+        // Untagged bucket in a modern artifact: first-party workspace code. Its
+        // purl ecosystem is inferred (npm, or composer for a PHP project).
+        scope = 'workspace'
+        eco = fileEcosystem
+      } else {
+        scope = classifyScope(fileEcosystem, dir)
+        eco = fileEcosystem
+      }
+      const key = `${eco} ${name} ${version}`
       const existing = seen.get(key)
       if (existing) {
         if (scope === 'workspace') existing.scope = 'workspace'
         continue
       }
-      seen.set(key, { name, version, scope, ecosystem, purl: buildPurl(ecosystem, name, version) })
+      seen.set(key, { name, version, scope, ecosystem: eco, purl: buildPurl(eco, name, version) })
     }
   }
   return [...seen.values()].toSorted(compareComponents)
@@ -133,7 +162,7 @@ const bomRef = (c) => c.purl ?? `${c.ecosystem}:${c.name}@${c.version}`
 // installed dependency (a flat graph — every package in a lockfile/bundle is a
 // transitive dependency of the root). With no single primary the document
 // DESCRIBES the workspace packages, or every package when there are none.
-export function toSpdx(components, { tool = DEFAULT_TOOL, now = new Date(), uuid = randomUUID() } = {}) {
+export function toSpdx(components, { tool = DEFAULT_TOOL, now = new Date(), uuid = newUuid() } = {}) {
   const { primary, rest } = selectPrimary(components)
   const ordered = primary ? [primary, ...rest] : components
   const ids = new Map(ordered.map((c, i) => [c, `SPDXRef-Package-${i}`]))
@@ -185,7 +214,7 @@ export function toSpdx(components, { tool = DEFAULT_TOOL, now = new Date(), uuid
 // components. The primary (workspace root) becomes `metadata.component`; the
 // rest are listed in `components`, with a flat `dependencies` edge from the
 // primary to each installed dependency.
-export function toCyclonedx(components, { tool = DEFAULT_TOOL, now = new Date(), uuid = randomUUID() } = {}) {
+export function toCyclonedx(components, { tool = DEFAULT_TOOL, now = new Date(), uuid = newUuid() } = {}) {
   const { primary, rest } = selectPrimary(components)
   const toComponent = (c) => {
     const { group, name } = splitName(c.ecosystem, c.name)
@@ -220,35 +249,18 @@ export function toCyclonedx(components, { tool = DEFAULT_TOOL, now = new Date(),
   return doc
 }
 
+// Dispatch to the requested format. `components` is the output of
+// `collectComponents`; `options` accepts `{ tool, now, uuid }` for custom
+// tool identity / deterministic output.
 export function generateSbom(format, components, options) {
   if (format === 'spdx') return toSpdx(components, options)
   if (format === 'cyclonedx') return toCyclonedx(components, options)
-  throw new Error(`sbom: --format must be spdx or cyclonedx, got ${format}`)
+  throw new Error(`sbom: format must be spdx or cyclonedx, got ${format}`)
 }
 
-// Run the sbom CLI command end-to-end: read the given lockfiles/bundles, build
-// an SBOM in the requested `format` (spdx | cyclonedx), and write the
-// pretty-printed JSON to `output` (a file, or stdout when `output` is `-` or
-// unset). The one-line summary goes to stderr so it never corrupts a document
-// streamed to stdout. `now`/`uuid` are injectable for deterministic output.
-export function sbomCommand({ cwd = process.cwd(), files, format, output, now, uuid } = {}) {
-  if (!Array.isArray(files) || files.length === 0) {
-    throw new Error('sbom: at least one lockfile or bundle is required')
-  }
-  const components = collectComponents(files.map((f) => resolve(cwd, f)))
-  const doc = generateSbom(format, components, { now, uuid })
-  const text = JSON.stringify(doc, undefined, 2) + '\n'
-
-  const target = output ?? '-'
-  if (target === '-') {
-    process.stdout.write(text)
-  } else {
-    const outAbs = resolve(cwd, target)
-    mkdirSync(dirname(outAbs), { recursive: true })
-    writeFileSync(outAbs, text)
-  }
-  const dest = target === '-' ? '<stdout>' : target
-  const n = components.length
-  console.warn(`[stasis] Wrote ${format} SBOM with ${n} component${n === 1 ? '' : 's'} to ${dest}`)
-  return { components, doc }
+// Convenience one-shot: collect the components from already-parsed artifacts and
+// render them in `format`. Equivalent to
+// `generateSbom(format, collectComponents(artifacts), options)`.
+export function sbom(format, artifacts, options) {
+  return generateSbom(format, collectComponents(artifacts), options)
 }

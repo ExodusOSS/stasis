@@ -44,18 +44,52 @@ they contribute nothing.
 
 Each component carries a [purl](https://github.com/package-url/purl-spec) — the
 cross-format identifier both SPDX (`externalRefs`) and CycloneDX (`purl`)
-understand — derived from the artifact's ecosystem:
+understand — built from the `ecosystem` each dependency records. Stasis
+attributes every dependency to the install layout it actually resolved out of:
 
-| Artifact | Ecosystem | purl |
+| Ecosystem | purl | Where it comes from |
 | --- | --- | --- |
-| Lockfiles, JS/TS bundles, Solidity/Rust/Bash bundles | npm (names come from `package.json`) | `pkg:npm/<name>@<version>` |
-| PHP bundles (files tagged with the `php` loader format) | Composer | `pkg:composer/<vendor>/<name>@<version>` |
+| `npm` | `pkg:npm/<name>@<version>` | `node_modules`, whatever the bundle language |
+| `composer` | `pkg:composer/<vendor>/<name>@<version>` | PHP Composer `vendor/` |
+| `cargo` | `pkg:cargo/<name>@<version>` | Rust crates vendored by `cargo vendor` |
+| `github` | `pkg:github/<owner>/<repo>@<version>` | Solidity `forge install` git submodules |
+| `soldeer` | — (no purl type) | Solidity Soldeer `dependencies/` |
 
-npm scopes (`@scope/name`) and Composer vendors (`vendor/name`) map to the
-purl namespace and the CycloneDX `group`; Composer names are lowercased per the
-purl spec. The Solidity/Rust/Bash source bundles bucket by `package.json` like a
-JS bundle, so their real dependencies get correct npm purls; the synthetic
-workspace placeholder (e.g. `rust-bundle@0.0.0`) is just the primary component.
+npm scopes (`@scope/name`), Composer vendors and GitHub owners map to the purl
+namespace and the CycloneDX `group`; Composer names are lowercased per the purl
+spec. `soldeer` has no registered purl type, so those components carry a
+name + version but no purl (better than fabricating one). First-party/workspace
+packages are the SBOM's primary component and take their purl ecosystem from the
+project itself. Lockfiles/bundles written before stasis recorded a
+per-dependency `ecosystem` fall back to npm (or Composer for a PHP bundle).
+
+## Programmatic API (`@exodus/stasis/sbom`)
+
+SBOM generation is also a library, exported as `@exodus/stasis/sbom`. It
+operates on already-parsed `@exodus/stasis-core` `Bundle`/`Lockfile` instances,
+pulls in **no brotli** (`node:zlib`), and never touches disk — the caller
+supplies the artifacts — so it stays light enough to use anywhere:
+
+```js
+import { Bundle } from '@exodus/stasis-core/bundle'
+import { collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
+
+const bundle = Bundle.parseCode(json) // you read/decompress the artifact yourself
+const doc = sbom('cyclonedx', [bundle]) // → a CycloneDX document (plain object)
+
+// …or step by step:
+const components = collectComponents([bundle])
+const spdx = toSpdx(components, { now, uuid, tool })
+```
+
+- `collectComponents(artifacts)` — dedup + classify packages across instances.
+- `toSpdx` / `toCyclonedx` / `generateSbom(format, …)` — render a document object.
+- `sbom(format, artifacts, opts)` — the one-shot of the two above.
+- `buildPurl(ecosystem, name, version)` — the purl helper.
+- `opts` is `{ tool, now, uuid }`, for custom tool identity / deterministic output.
+
+The `stasis sbom` CLI is the thin file-reading/-writing wrapper around this API
+— it is the layer that brings in brotli, to read `.br` bundles off disk.
 
 ## Notes
 

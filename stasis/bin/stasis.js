@@ -233,7 +233,7 @@ if (command === '-v' || command === '--version') {
   if (!values.format) usage('Error: stasis sbom requires --format=(spdx|cyclonedx)')
   if (!['spdx', 'cyclonedx'].includes(values.format)) usage('Error: --format must be spdx or cyclonedx')
   if (argv.length === 0) usage('Nothing to export: no lockfile or bundle given')
-  const { sbomCommand } = await import('../src/sbom.js')
+  const { sbomCommand } = await import('../src/cmd/sbom.js')
   sbomCommand({
     cwd: process.cwd(),
     files: argv,

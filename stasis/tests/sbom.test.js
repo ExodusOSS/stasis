@@ -2,60 +2,38 @@ import { test } from 'node:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { brotliCompressSync } from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { stripVTControlCharacters } from 'node:util'
 
-import {
-  buildPurl,
-  collectComponents,
-  generateSbom,
-  sbomCommand,
-  toCyclonedx,
-  toSpdx,
-} from '../src/sbom.js'
+import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
+import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '../src/sbom.js'
+import { sbomCommand } from '../src/cmd/sbom.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'bin', 'stasis.js')
 
-const withTmp = (fn) => (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'stasis-sbom-'))
-  try {
-    return fn(t, dir)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+// The `@exodus/stasis/sbom` API operates on already-parsed artifacts, so build
+// Lockfile/Bundle instances straight from JSON — no disk, no brotli.
+const lockOf = (obj) => Lockfile.parse(JSON.stringify(obj))
+const codeOf = (obj) => Bundle.parseCode(JSON.stringify(obj))
+
+// A scope=full lockfile object: one workspace root + two node_modules deps (one
+// scoped). Legacy shape — no per-dependency `ecosystem` field.
+const LOCK = {
+  version: 0,
+  config: { scope: 'full' },
+  entries: ['src/entry.js'],
+  sources: { '.': { name: 'top-pkg', version: '1.0.0', files: { 'src/entry.js': 'sha512-x' } } },
+  modules: {
+    'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y' } },
+    'node_modules/@scope/bar': { name: '@scope/bar', version: '4.5.6', files: { 'index.js': 'sha512-z' } },
+  },
 }
 
-// A scope=full lockfile: one workspace root (".") plus two node_modules deps,
-// one of them scoped.
-const writeLock = (dir, name = 'stasis.lock.json', extra = {}) => {
-  const path = join(dir, name)
-  const lock = {
-    version: 0,
-    config: { scope: 'full' },
-    entries: ['src/entry.js'],
-    sources: {
-      '.': { name: 'top-pkg', version: '1.0.0', files: { 'src/entry.js': 'sha512-x' } },
-    },
-    modules: {
-      'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y' } },
-      'node_modules/@scope/bar': { name: '@scope/bar', version: '4.5.6', files: { 'index.js': 'sha512-z' } },
-    },
-    ...extra,
-  }
-  writeFileSync(path, JSON.stringify(lock))
-  return path
-}
-
-const writeBundle = (dir, json, name = 'snapshot.br') => {
-  const path = join(dir, name)
-  writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(json))))
-  return path
-}
-
-// Deterministic generation options so structural assertions can also check the
+// Deterministic generation options so structural assertions can also pin the
 // timestamp/namespace shape without depending on the wall clock.
 const fixed = { now: new Date('2026-01-02T03:04:05.678Z'), uuid: '00000000-0000-4000-8000-000000000000' }
 
@@ -76,72 +54,92 @@ test('buildPurl lowercases composer vendor/name per the purl spec', (t) => {
   t.assert.equal(buildPurl('composer', 'Monolog/Monolog', '3.5.0'), 'pkg:composer/monolog/monolog@3.5.0')
 })
 
-test('buildPurl returns null for ecosystems without a purl type', (t) => {
-  t.assert.equal(buildPurl('cargo', 'serde', '1.0.0'), null)
+test('buildPurl mints cargo (flat) and github (owner/repo) purls', (t) => {
+  t.assert.equal(buildPurl('cargo', 'serde', '1.0.0'), 'pkg:cargo/serde@1.0.0')
+  t.assert.equal(buildPurl('github', 'vectorized/solady', '0.1.0'), 'pkg:github/vectorized/solady@0.1.0')
+})
+
+test('buildPurl returns null for ecosystems without a registered purl type', (t) => {
+  t.assert.equal(buildPurl('soldeer', 'solmate', '6.8.0'), null)
+  t.assert.equal(buildPurl('unknown', 'x', '1.0.0'), null)
 })
 
 // ── collectComponents ────────────────────────────────────────────────────────
 
-test('collectComponents includes workspace and dependency packages (unlike audit)', withTmp((t, tmp) => {
-  const components = collectComponents([writeLock(tmp)])
-  t.assert.deepEqual(components, [
+test('collectComponents includes workspace and dependency packages (unlike audit)', (t) => {
+  t.assert.deepEqual(collectComponents([lockOf(LOCK)]), [
     { name: '@scope/bar', version: '4.5.6', scope: 'dependency', ecosystem: 'npm', purl: 'pkg:npm/%40scope/bar@4.5.6' },
     { name: 'foo', version: '1.2.3', scope: 'dependency', ecosystem: 'npm', purl: 'pkg:npm/foo@1.2.3' },
     { name: 'top-pkg', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/top-pkg@1.0.0' },
   ])
-}))
+})
 
-test('collectComponents skips buckets without name+version (legacy v0 bundle)', withTmp((t, tmp) => {
-  const file = writeBundle(tmp, {
+test('collectComponents uses the per-dependency ecosystem field for purls and scope', (t) => {
+  // A modern artifact tags each dependency bucket with its ecosystem; vendor/
+  // soldeer/github/cargo deps live outside node_modules but are still deps.
+  const tagged = {
     version: 0,
     config: { scope: 'full' },
-    formats: {},
-    imports: {},
-    sources: { 'node_modules/foo/index.js': 'x' },
-  })
-  t.assert.deepEqual(collectComponents([file]), [])
-}))
+    entries: ['src/i.js'],
+    sources: {
+      '.': { name: 'app', version: '1.0.0', files: { 'src/i.js': 'sha512-a' } },
+      'vendor/acme/lib': { name: 'acme/lib', version: '1.4.2', ecosystem: 'composer', files: { 'C.php': 'sha512-b' } },
+      'dependencies/solmate-6.8.0': { name: 'solmate', version: '6.8.0', ecosystem: 'soldeer', files: { 'T.sol': 'sha512-c' } },
+      'lib/solady': { name: 'vectorized/solady', version: '0.1.0', ecosystem: 'github', files: { 'S.sol': 'sha512-d' } },
+      'vendor/cool-lib': { name: 'cool-lib', version: '0.2.0', ecosystem: 'cargo', files: { 'lib.rs': 'sha512-e' } },
+    },
+    modules: {
+      'node_modules/npmdep': { name: 'npmdep', version: '2.0.0', ecosystem: 'npm', files: { 'i.js': 'sha512-f' } },
+    },
+  }
+  const byName = Object.fromEntries(collectComponents([lockOf(tagged)]).map((c) => [c.name, c]))
+  // workspace root: untagged, ecosystem inferred (npm), still a purl
+  t.assert.deepEqual(byName.app, { name: 'app', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app@1.0.0' })
+  t.assert.equal(byName['acme/lib'].purl, 'pkg:composer/acme/lib@1.4.2')
+  t.assert.equal(byName['acme/lib'].scope, 'dependency')
+  t.assert.equal(byName['vectorized/solady'].purl, 'pkg:github/vectorized/solady@0.1.0')
+  t.assert.equal(byName['cool-lib'].purl, 'pkg:cargo/cool-lib@0.2.0')
+  t.assert.equal(byName.npmdep.purl, 'pkg:npm/npmdep@2.0.0')
+  // soldeer has no purl type → no purl, but still classified as a dependency
+  t.assert.equal(byName.solmate.purl, null)
+  t.assert.equal(byName.solmate.scope, 'dependency')
+})
 
-test('collectComponents dedupes by ecosystem+name+version across files', withTmp((t, tmp) => {
-  const a = writeLock(tmp, 'a.json')
-  const b = writeLock(tmp, 'b.json')
-  const components = collectComponents([a, b])
-  t.assert.equal(components.length, 3)
-}))
+test('collectComponents skips buckets without name+version (legacy v0 bundle)', (t) => {
+  const v0 = { version: 0, config: { scope: 'full' }, formats: {}, imports: {}, sources: { 'node_modules/foo/index.js': 'x' } }
+  t.assert.deepEqual(collectComponents([codeOf(v0)]), [])
+})
 
-test('collectComponents keeps the same name at different versions', withTmp((t, tmp) => {
-  const a = writeLock(tmp, 'a.json')
-  const b = writeLock(tmp, 'b.json', {
-    modules: { 'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': 'sha512-y' } } },
-  })
-  const foos = collectComponents([a, b]).filter((c) => c.name === 'foo')
+test('collectComponents dedupes by ecosystem+name+version across artifacts', (t) => {
+  t.assert.equal(collectComponents([lockOf(LOCK), lockOf(LOCK)]).length, 3)
+})
+
+test('collectComponents keeps the same name at different versions', (t) => {
+  const other = { ...LOCK, modules: { 'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': 'sha512-y' } } } }
+  const foos = collectComponents([lockOf(LOCK), lockOf(other)]).filter((c) => c.name === 'foo')
   t.assert.deepEqual(foos.map((c) => c.version), ['1.2.3', '2.0.0'])
-}))
+})
 
-test('collectComponents classifies a package as workspace if any input is first-party (order-independent)', withTmp((t, tmp) => {
-  // shared@1.0.0 is the workspace root in one file and a vendored dependency in
-  // the other; the resulting scope must not depend on argument order.
-  const ws = join(tmp, 'ws.json')
-  writeFileSync(ws, JSON.stringify({
+test('collectComponents classifies a package as workspace if any input is first-party (order-independent)', (t) => {
+  // shared@1.0.0 is the workspace root in one artifact and a vendored dependency
+  // in the other; the resulting scope must not depend on argument order.
+  const ws = lockOf({
     version: 0, config: { scope: 'full' }, entries: ['i.js'],
     sources: { '.': { name: 'shared', version: '1.0.0', files: { 'i.js': 'sha512-a' } } },
     modules: {},
-  }))
-  const dep = join(tmp, 'dep.json')
-  writeFileSync(dep, JSON.stringify({
+  })
+  const dep = lockOf({
     version: 0, config: { scope: 'full' }, entries: ['i.js'],
     sources: { '.': { name: 'other', version: '9.9.9', files: { 'i.js': 'sha512-b' } } },
     modules: { 'node_modules/shared': { name: 'shared', version: '1.0.0', files: { 'index.js': 'sha512-c' } } },
-  }))
-  const scopeOf = (files) => collectComponents(files).find((c) => c.name === 'shared').scope
+  })
+  const scopeOf = (artifacts) => collectComponents(artifacts).find((c) => c.name === 'shared').scope
   t.assert.equal(scopeOf([ws, dep]), 'workspace')
   t.assert.equal(scopeOf([dep, ws]), 'workspace', 'argument order must not change the classification')
-}))
+})
 
-test('collectComponents treats a PHP bundle as composer and vendor pkgs as dependencies', withTmp((t, tmp) => {
-  // PHP vendor packages live outside node_modules (`vendor/<vendor>/<pkg>`), so
-  // classification must lean on the composer ecosystem, not the path.
-  const file = writeBundle(tmp, {
+test('collectComponents treats a legacy PHP bundle (php format, no ecosystem field) as composer', (t) => {
+  const php = codeOf({
     version: 1,
     config: { scope: 'full' },
     entries: ['index.php'],
@@ -153,17 +151,16 @@ test('collectComponents treats a PHP bundle as composer and vendor pkgs as depen
     formats: { 'index.php': 'php', 'vendor/monolog/monolog/src/Logger.php': 'php' },
     imports: {},
   })
-  const components = collectComponents([file])
-  t.assert.deepEqual(components, [
+  t.assert.deepEqual(collectComponents([php]), [
     { name: 'acme/app', version: '1.0.0', scope: 'workspace', ecosystem: 'composer', purl: 'pkg:composer/acme/app@1.0.0' },
     { name: 'monolog/monolog', version: '3.5.0', scope: 'dependency', ecosystem: 'composer', purl: 'pkg:composer/monolog/monolog@3.5.0' },
   ])
-}))
+})
 
 // ── toSpdx ───────────────────────────────────────────────────────────────────
 
-test('toSpdx DESCRIBES the single workspace root and the root DEPENDS_ON each dependency', withTmp((t, tmp) => {
-  const doc = toSpdx(collectComponents([writeLock(tmp)]), fixed)
+test('toSpdx DESCRIBES the single workspace root and the root DEPENDS_ON each dependency', (t) => {
+  const doc = toSpdx(collectComponents([lockOf(LOCK)]), fixed)
   t.assert.equal(doc.spdxVersion, 'SPDX-2.3')
   t.assert.equal(doc.dataLicense, 'CC0-1.0')
   t.assert.equal(doc.SPDXID, 'SPDXRef-DOCUMENT')
@@ -175,7 +172,6 @@ test('toSpdx DESCRIBES the single workspace root and the root DEPENDS_ON each de
   ])
   t.assert.ok(doc.documentNamespace.includes('00000000-0000-4000-8000-000000000000'))
 
-  // primary first, with its purl as an external ref
   const root = doc.packages.find((p) => p.name === 'top-pkg')
   t.assert.equal(root.primaryPackagePurpose, 'APPLICATION')
   t.assert.equal(root.externalRefs[0].referenceLocator, 'pkg:npm/top-pkg@1.0.0')
@@ -190,35 +186,33 @@ test('toSpdx DESCRIBES the single workspace root and the root DEPENDS_ON each de
   const dependsOn = doc.relationships.filter((r) => r.relationshipType === 'DEPENDS_ON')
   t.assert.equal(dependsOn.length, 2)
   t.assert.ok(dependsOn.every((r) => r.spdxElementId === root.SPDXID))
-}))
+})
 
-test('toSpdx with no single root (node_modules-only) DESCRIBES every package, no DEPENDS_ON', withTmp((t, tmp) => {
-  const file = writeBundle(tmp, {
+test('toSpdx with no single root (node_modules-only) DESCRIBES every package, no DEPENDS_ON', (t) => {
+  const components = collectComponents([codeOf({
     version: 1,
     config: { scope: 'node_modules' },
     modules: {
-      'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'x' } },
-      'node_modules/bar': { name: 'bar', version: '2.0.0', files: { 'index.js': 'y' } },
+      'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'index.js': 'x' } },
+      'node_modules/bar': { name: 'bar', version: '2.0.0', ecosystem: 'npm', files: { 'index.js': 'y' } },
     },
     formats: {},
     imports: {},
-  })
-  const doc = toSpdx(collectComponents([file]), fixed)
+  })])
+  const doc = toSpdx(components, fixed)
   t.assert.equal(doc.name, 'stasis-sbom')
   t.assert.equal(doc.relationships.filter((r) => r.relationshipType === 'DEPENDS_ON').length, 0)
   const describes = doc.relationships.filter((r) => r.relationshipType === 'DESCRIBES')
   t.assert.equal(describes.length, 2)
   t.assert.ok(describes.every((r) => r.spdxElementId === 'SPDXRef-DOCUMENT'))
-}))
+})
 
 test('toSpdx omits externalRefs when there is no purl', (t) => {
-  const doc = toSpdx([{ name: 'x', version: '1.0.0', scope: 'dependency', ecosystem: 'cargo', purl: null }], fixed)
+  const doc = toSpdx([{ name: 'solmate', version: '6.8.0', scope: 'dependency', ecosystem: 'soldeer', purl: null }], fixed)
   t.assert.equal(doc.packages[0].externalRefs, undefined)
 })
 
 test('toSpdx with several workspace roots DESCRIBES each root and emits no DEPENDS_ON', (t) => {
-  // No single subject (a monorepo / several inputs): each first-party root is
-  // DESCRIBED; dependencies are listed but carry no relationship edges.
   const doc = toSpdx([
     { name: 'app-a', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app-a@1.0.0' },
     { name: 'app-b', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app-b@1.0.0' },
@@ -233,8 +227,8 @@ test('toSpdx with several workspace roots DESCRIBES each root and emits no DEPEN
 
 // ── toCyclonedx ──────────────────────────────────────────────────────────────
 
-test('toCyclonedx sets the root as metadata.component and lists deps with a flat dependency graph', withTmp((t, tmp) => {
-  const doc = toCyclonedx(collectComponents([writeLock(tmp)]), fixed)
+test('toCyclonedx sets the root as metadata.component and lists deps with a flat dependency graph', (t) => {
+  const doc = toCyclonedx(collectComponents([lockOf(LOCK)]), fixed)
   t.assert.equal(doc.bomFormat, 'CycloneDX')
   t.assert.equal(doc.specVersion, '1.5')
   t.assert.equal(doc.serialNumber, 'urn:uuid:00000000-0000-4000-8000-000000000000')
@@ -248,7 +242,6 @@ test('toCyclonedx sets the root as metadata.component and lists deps with a flat
   t.assert.equal(doc.metadata.component.name, 'top-pkg')
   t.assert.equal(doc.metadata.component.purl, 'pkg:npm/top-pkg@1.0.0')
 
-  // scoped dep splits into group + name
   const scoped = doc.components.find((c) => c.purl === 'pkg:npm/%40scope/bar@4.5.6')
   t.assert.equal(scoped.group, '@scope')
   t.assert.equal(scoped.name, 'bar')
@@ -260,7 +253,7 @@ test('toCyclonedx sets the root as metadata.component and lists deps with a flat
     'pkg:npm/%40scope/bar@4.5.6',
     'pkg:npm/foo@1.2.3',
   ])
-}))
+})
 
 test('toCyclonedx without a single root omits metadata.component and dependencies', (t) => {
   const doc = toCyclonedx([
@@ -281,19 +274,64 @@ test('toCyclonedx with several workspace roots lists them all as components, no 
   t.assert.deepEqual(doc.components.map((c) => c.name).toSorted(), ['app-a', 'app-b'])
 })
 
-// ── generateSbom ─────────────────────────────────────────────────────────────
+test('toCyclonedx bom-ref falls back to ecosystem:name@version when a dep has no purl', (t) => {
+  const doc = toCyclonedx([
+    { name: 'app', version: '1.0.0', scope: 'workspace', ecosystem: 'npm', purl: 'pkg:npm/app@1.0.0' },
+    { name: 'solmate', version: '6.8.0', scope: 'dependency', ecosystem: 'soldeer', purl: null },
+  ], fixed)
+  const dep = doc.components[0]
+  t.assert.equal(dep['bom-ref'], 'soldeer:solmate@6.8.0')
+  t.assert.equal(dep.purl, undefined)
+  t.assert.deepEqual(doc.dependencies[0].dependsOn, ['soldeer:solmate@6.8.0'])
+})
+
+// ── generateSbom / sbom ──────────────────────────────────────────────────────
 
 test('generateSbom dispatches on format and rejects unknown ones', (t) => {
   t.assert.equal(generateSbom('spdx', []).spdxVersion, 'SPDX-2.3')
   t.assert.equal(generateSbom('cyclonedx', []).bomFormat, 'CycloneDX')
-  t.assert.throws(() => generateSbom('syft', []), /--format must be spdx or cyclonedx/)
+  t.assert.throws(() => generateSbom('syft', []), /must be spdx or cyclonedx/)
 })
 
-// ── sbomCommand (programmatic) ───────────────────────────────────────────────
+test('sbom() composes collectComponents + generateSbom over artifacts', (t) => {
+  const doc = sbom('cyclonedx', [lockOf(LOCK)], fixed)
+  t.assert.equal(doc.bomFormat, 'CycloneDX')
+  t.assert.equal(doc.metadata.component.name, 'top-pkg')
+  t.assert.equal(doc.components.length, 2)
+})
+
+// ── the @exodus/stasis/sbom API must stay free of brotli ─────────────────────
+
+test('importing @exodus/stasis/sbom does not pull in brotli (node:zlib)', (t) => {
+  // The API operates on already-parsed Bundle/Lockfile instances; only the CLI
+  // glue (src/cmd/sbom.js) reads .br files and so loads zlib.
+  const url = pathToFileURL(join(here, '..', 'src', 'sbom.js')).href
+  const probe = `await import(${JSON.stringify(url)}); process.stdout.write(JSON.stringify(process.moduleLoadList.filter((m) => /zlib/u.test(m))))`
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { encoding: 'utf8' })
+  t.assert.equal(r.status, 0, r.stderr)
+  t.assert.deepEqual(JSON.parse(r.stdout), [], 'the sbom API must not load node:zlib')
+})
+
+// ── sbomCommand (CLI glue, reads/writes files) ───────────────────────────────
+
+const withTmp = (fn) => (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-sbom-'))
+  try {
+    return fn(t, dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const writeLockFile = (dir, obj = LOCK, name = 'stasis.lock.json') => {
+  const p = join(dir, name)
+  writeFileSync(p, JSON.stringify(obj))
+  return p
+}
 
 test('sbomCommand writes a pretty-printed document to --output', withTmp((t, tmp) => {
   const out = join(tmp, 'nested', 'sbom.json')
-  const { components } = sbomCommand({ files: [writeLock(tmp)], format: 'spdx', output: out, ...fixed })
+  const { components } = sbomCommand({ files: [writeLockFile(tmp)], format: 'spdx', output: out, ...fixed })
   t.assert.equal(components.length, 3)
   const text = readFileSync(out, 'utf8')
   t.assert.ok(text.endsWith('\n'))
@@ -341,7 +379,7 @@ test('sbom with --format but no files prints usage', (t) => {
 })
 
 test('sbom --format=spdx streams a valid SPDX document to stdout', withTmp((t, tmp) => {
-  const r = runCli(['sbom', '--format=spdx', writeLock(tmp)])
+  const r = runCli(['sbom', '--format=spdx', writeLockFile(tmp)])
   t.assert.equal(r.status, 0)
   const doc = JSON.parse(r.stdout)
   t.assert.equal(doc.spdxVersion, 'SPDX-2.3')
@@ -350,18 +388,29 @@ test('sbom --format=spdx streams a valid SPDX document to stdout', withTmp((t, t
   t.assert.match(r.stderr, /\[stasis] Wrote spdx SBOM with 3 components to <stdout>/)
 }))
 
-test('sbom --format=cyclonedx streams a valid CycloneDX document to stdout', withTmp((t, tmp) => {
-  const r = runCli(['sbom', '--format=cyclonedx', writeLock(tmp)])
+test('sbom --format=cyclonedx reads a brotli bundle and streams a valid document', withTmp((t, tmp) => {
+  const bundle = {
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['src/entry.js'],
+    sources: { '.': { name: 'app', version: '9.9.9', files: { 'src/entry.js': 'export const x = 1\n' } } },
+    modules: { 'node_modules/foo': { name: 'foo', version: '2.0.0', ecosystem: 'npm', files: { 'index.js': 'export const f = 1\n' } } },
+    formats: { 'node_modules/foo/index.js': 'module' },
+    imports: {},
+  }
+  const path = join(tmp, 'snapshot.br')
+  writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(bundle))))
+  const r = runCli(['sbom', '--format=cyclonedx', path])
   t.assert.equal(r.status, 0)
   const doc = JSON.parse(r.stdout)
   t.assert.equal(doc.bomFormat, 'CycloneDX')
-  t.assert.equal(doc.metadata.component.name, 'top-pkg')
-  t.assert.equal(doc.components.length, 2)
+  t.assert.equal(doc.metadata.component.name, 'app')
+  t.assert.deepEqual(doc.components.map((c) => c.purl), ['pkg:npm/foo@2.0.0'])
 }))
 
 test('sbom -o writes the document to a file and keeps stdout clean', withTmp((t, tmp) => {
   const out = join(tmp, 'out.json')
-  const r = runCli(['sbom', '--format=cyclonedx', '-o', out, writeLock(tmp)])
+  const r = runCli(['sbom', '--format=cyclonedx', '-o', out, writeLockFile(tmp)])
   t.assert.equal(r.status, 0)
   t.assert.equal(r.stdout, '')
   t.assert.equal(JSON.parse(readFileSync(out, 'utf8')).bomFormat, 'CycloneDX')
