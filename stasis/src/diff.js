@@ -151,65 +151,83 @@ export function diffArtifacts(left, right, { imports = false, hash } = {}) {
   return result
 }
 
-// The resolution edges an artifact attests, or null when it attests none. A
-// resource bundle has no import graph; a lockfile predating resolution
-// attestation records `imports === null` (distinct from an empty map). A code
-// bundle always carries one (possibly empty).
+// The resolution graph an artifact attests, or null when it attests none. The
+// `kind === 'resources'` guard is load-bearing: a resource bundle carries an
+// *empty* `imports` Map (the constructor default), not null, so the `?? null`
+// fallback alone would wrongly mark it "attests zero edges". A lockfile predating
+// resolution attestation records `imports === null`; a code bundle always carries
+// a (possibly empty) map.
 function attestedImports({ artifact, kind }) {
   if (kind === 'resources') return null
   return artifact.imports ?? null
 }
 
-// Flatten an imports map (conditions -> parent -> specifier -> resolved file)
-// into a flat Map keyed by a collision-free JSON tuple of [conditions, parent,
-// specifier], so the two sides can be compared as edge sets.
-function flattenEdges(imports) {
-  const edges = new Map()
-  for (const [conditions, byParent] of imports) {
+// Collapse an imports map (conditions -> parent -> specifier -> target) to a map
+// of (parent, specifier) -> Set<target>, unioning over every conditions key.
+// We diff at this *resolution* level — "what does this import resolve to?" —
+// rather than at the raw (conditions, parent, specifier) edge key, because the
+// two sides label conditions differently: a statically built bundle records
+// every edge under the wildcard "*", while a runtime lockfile records precise
+// condition sets like "node, import". Keying on conditions would then report a
+// byte-identical resolution as removed (the "*" edge) + added (the precise
+// edge); folding conditions away makes them compare equal. This mirrors how the
+// loader reconciles "*" against precise sets when verifying a resolution
+// (state.js #assertAttestedResolution): the final target is what matters, not
+// how the edge is keyed.
+function resolutionsOf(imports) {
+  const byPair = new Map()
+  for (const [, byParent] of imports) {
     for (const [parent, specifiers] of byParent) {
       for (const [specifier, target] of specifiers) {
-        edges.set(JSON.stringify([conditions, parent, specifier]), { conditions, parent, specifier, target })
+        const key = JSON.stringify([parent, specifier])
+        let entry = byPair.get(key)
+        if (!entry) byPair.set(key, (entry = { parent, specifier, targets: new Set() }))
+        entry.targets.add(target)
       }
     }
   }
-  return edges
+  return byPair
 }
 
 const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
-const cmpEdge = (a, b) => sortPaths(a.parent, b.parent) || cmpStr(a.specifier, b.specifier) || cmpStr(a.conditions, b.conditions)
+const cmpPair = (a, b) => sortPaths(a.parent, b.parent) || cmpStr(a.specifier, b.specifier)
+const sortedTargets = (set) => [...set].toSorted(sortPaths)
+const sameTargets = (a, b) => a.size === b.size && [...a].every((t) => b.has(t))
 
-// Diff the resolution graphs. An edge is keyed by (conditions, parent,
-// specifier); the value is the resolved file. Reports:
-//   added   — an edge only the right artifact records
-//   removed — an edge only the left artifact records
-//   changed — same (conditions, parent, specifier) resolving to a different file
-//             (a redirect — the kind of change a byte/format diff can't see)
-// When either side does not attest imports at all (a resource bundle, or a
-// legacy lockfile), the comparison is skipped and `attested` flags why, rather
-// than reporting one side's whole graph as added/removed.
+// Diff the resolution graphs at the (parent, specifier) level (see
+// `resolutionsOf` for why conditions are folded away). Each side maps a
+// (parent, specifier) to the set of files it resolves to (usually one). Reports:
+//   added   — a (parent, specifier) only the right artifact resolves
+//   removed — a (parent, specifier) only the left artifact resolves
+//   changed — resolved on both sides, but to a different set of targets (a
+//             redirect — the kind of change a byte/format diff can't see)
+// `from`/`to` are sorted arrays of target files. When either side does not
+// attest imports at all (a resource bundle, or a legacy lockfile), the
+// comparison is skipped and `attested` flags why, rather than reporting one
+// side's whole graph as added/removed.
 export function diffImports(left, right) {
   const li = attestedImports(left)
   const ri = attestedImports(right)
   const attested = { left: li !== null, right: ri !== null }
   if (li === null || ri === null) return { attested, added: [], removed: [], changed: [] }
 
-  const L = flattenEdges(li)
-  const R = flattenEdges(ri)
+  const L = resolutionsOf(li)
+  const R = resolutionsOf(ri)
   const added = []
   const removed = []
   const changed = []
   for (const key of new Set([...L.keys(), ...R.keys()])) {
     const l = L.get(key)
     const r = R.get(key)
-    if (l && !r) removed.push({ conditions: l.conditions, parent: l.parent, specifier: l.specifier, from: l.target })
-    else if (!l && r) added.push({ conditions: r.conditions, parent: r.parent, specifier: r.specifier, to: r.target })
-    else if (l.target !== r.target) {
-      changed.push({ conditions: l.conditions, parent: l.parent, specifier: l.specifier, from: l.target, to: r.target })
+    if (l && !r) removed.push({ parent: l.parent, specifier: l.specifier, from: sortedTargets(l.targets) })
+    else if (!l && r) added.push({ parent: r.parent, specifier: r.specifier, to: sortedTargets(r.targets) })
+    else if (!sameTargets(l.targets, r.targets)) {
+      changed.push({ parent: l.parent, specifier: l.specifier, from: sortedTargets(l.targets), to: sortedTargets(r.targets) })
     }
   }
-  added.sort(cmpEdge)
-  removed.sort(cmpEdge)
-  changed.sort(cmpEdge)
+  added.sort(cmpPair)
+  removed.sort(cmpPair)
+  changed.sort(cmpPair)
   return { attested, added, removed, changed }
 }
 
@@ -249,9 +267,10 @@ const moduleLine = (mark, x) => {
   return `  ${mark} ${x.dir}${id ? `  ${id}` : ''} (${x.files} file${plural(x.files)})`
 }
 
-// `parent  'specifier' [conditions]` — conditions are shown only when not the
-// wildcard `*`, to keep the common case uncluttered.
-const edgeLabel = (e) => `${e.parent}  '${e.specifier}'${e.conditions === '*' ? '' : ` [${e.conditions}]`}`
+// `parent  'specifier'` — conditions are folded away (see resolutionsOf), so an
+// edge is identified by the importing file and the specifier it resolved.
+const edgeLabel = (e) => `${e.parent}  '${e.specifier}'`
+const targetList = (files) => files.join(', ')
 
 // Render the `--stat` summary of a diff (module + file change lists with
 // counts, plus the import-edge changes when the diff carries them), in the
@@ -295,9 +314,9 @@ export function formatDiffStat(diff, { left = '(left)', right = '(right)', leftK
       lines.push(`Imports: ${which} resolutions; skipping import diff`)
     } else {
       lines.push(`Imports: ${im.added.length} added, ${im.removed.length} removed, ${im.changed.length} changed`)
-      for (const e of im.removed) lines.push(`  ${REMOVED} ${edgeLabel(e)} -> ${e.from}`)
-      for (const e of im.added) lines.push(`  ${ADDED} ${edgeLabel(e)} -> ${e.to}`)
-      for (const e of im.changed) lines.push(`  ${CHANGED} ${edgeLabel(e)}  ${e.from} -> ${e.to}`)
+      for (const e of im.removed) lines.push(`  ${REMOVED} ${edgeLabel(e)} -> ${targetList(e.from)}`)
+      for (const e of im.added) lines.push(`  ${ADDED} ${edgeLabel(e)} -> ${targetList(e.to)}`)
+      for (const e of im.changed) lines.push(`  ${CHANGED} ${edgeLabel(e)}  ${targetList(e.from)} -> ${targetList(e.to)}`)
     }
   }
 

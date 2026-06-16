@@ -267,11 +267,61 @@ test('diffArtifacts reports added, removed, and redirected import edges', (t) =>
     },
   })
   const { imports } = diffArtifacts(lockOf(left), lockOf(right), { imports: true })
-  t.assert.deepEqual(imports.added, [{ conditions: '*', parent: 'node_modules/foo/index.js', specifier: './fresh.js', to: 'node_modules/foo/fresh.js' }])
-  t.assert.deepEqual(imports.removed, [{ conditions: '*', parent: 'node_modules/foo/index.js', specifier: './gone.js', from: 'node_modules/foo/gone.js' }])
-  t.assert.deepEqual(imports.changed, [{ conditions: '*', parent: 'node_modules/foo/index.js', specifier: './moved.js', from: 'node_modules/foo/old.js', to: 'node_modules/foo/new.js' }])
+  t.assert.deepEqual(imports.added, [{ parent: 'node_modules/foo/index.js', specifier: './fresh.js', to: ['node_modules/foo/fresh.js'] }])
+  t.assert.deepEqual(imports.removed, [{ parent: 'node_modules/foo/index.js', specifier: './gone.js', from: ['node_modules/foo/gone.js'] }])
+  t.assert.deepEqual(imports.changed, [{ parent: 'node_modules/foo/index.js', specifier: './moved.js', from: ['node_modules/foo/old.js'], to: ['node_modules/foo/new.js'] }])
   // a redirect is a real difference even when every file hash is unchanged
   t.assert.equal(hasDifferences(diffArtifacts(lockOf(left), lockOf(right), { imports: true })), true)
+})
+
+test('diffImports reconciles wildcard "*" edges against precise condition sets (no false add/remove)', (t) => {
+  // The fix for the keying wrinkle: a static bundle records edges under "*", a
+  // runtime lockfile under precise conditions. The SAME resolution must compare
+  // equal, not show as removed + added.
+  const wildcard = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/a.js' } } })
+  const precise = importsLock({ 'node, import': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/a.js' } } })
+  const { imports } = diffArtifacts(lockOf(wildcard), lockOf(precise), { imports: true })
+  t.assert.deepEqual(imports, { attested: { left: true, right: true }, added: [], removed: [], changed: [] })
+  t.assert.equal(hasDifferences(diffArtifacts(lockOf(wildcard), lockOf(precise), { imports: true })), false)
+
+  // ...but a genuine redirect under differing conditions is still caught.
+  const redirected = importsLock({ 'node, import': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/b.js' } } })
+  const diff = diffArtifacts(lockOf(wildcard), lockOf(redirected), { imports: true })
+  t.assert.deepEqual(diff.imports.changed, [{ parent: 'node_modules/foo/index.js', specifier: './a.js', from: ['node_modules/foo/a.js'], to: ['node_modules/foo/b.js'] }])
+})
+
+test('diffImports unions targets across conditions for a (parent, specifier)', (t) => {
+  // A specifier resolving to different files under different conditions becomes a
+  // set; identical sets (however keyed) are equal, a differing set is a change.
+  const twoConds = importsLock({
+    'node, import': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/node.js' } },
+    browser: { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/browser.js' } },
+  })
+  const sameUnionOneKey = importsLock({
+    'node, browser': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/node.js' } },
+    'worker': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/browser.js' } },
+  })
+  t.assert.equal(diffArtifacts(lockOf(twoConds), lockOf(sameUnionOneKey), { imports: true }).imports.changed.length, 0)
+
+  const narrower = importsLock({ '*': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/node.js' } } })
+  const diff = diffArtifacts(lockOf(twoConds), lockOf(narrower), { imports: true })
+  t.assert.deepEqual(diff.imports.changed, [{
+    parent: 'node_modules/foo/index.js', specifier: './x.js',
+    from: ['node_modules/foo/browser.js', 'node_modules/foo/node.js'], to: ['node_modules/foo/node.js'],
+  }])
+})
+
+test('diffImports treats a resource bundle as not attesting resolutions', (t) => {
+  // A resource bundle carries an empty imports Map, not null — the kind guard,
+  // not the `?? null` fallback, is what marks it not-attested.
+  const res = resourcesOf({
+    version: 1, config: { scope: 'node_modules' },
+    modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'a.bin': Buffer.from('x').toString('base64') } } },
+  })
+  const withEdges = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/a.js' } } })
+  const diff = diffArtifacts(res, lockOf(withEdges), { imports: true, hash: sha512integrity })
+  t.assert.equal(diff.imports.attested.left, false)
+  t.assert.equal(diff.imports.added.length + diff.imports.removed.length + diff.imports.changed.length, 0)
 })
 
 test('diffArtifacts skips the import diff (without flipping hasDifferences) when a side does not attest imports', (t) => {

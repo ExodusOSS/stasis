@@ -78,19 +78,32 @@ too much like `-` in a terminal).
 
 Both lockfiles and bundles record their **resolution graph** — for each set of
 conditions, which file every `(parent, specifier)` import resolved to. With
-`--imports`, `stasis diff` compares those graphs and reports each edge that was:
+`--imports`, `stasis diff` compares those graphs at the **resolution** level —
+for each `(parent, specifier)`, the set of files it resolves to — and reports
+each one that was:
 
-- **removed** — an edge only the first artifact records;
-- **added** — an edge only the second records;
-- **changed** — the same `(conditions, parent, specifier)` now resolving to a
-  *different* file (a **redirect**).
+- **removed** — a `(parent, specifier)` only the first artifact resolves;
+- **added** — one only the second resolves;
+- **changed** — resolved on both sides but to a *different* file (a **redirect**).
 
 A redirect is a real difference even when every file hash is unchanged — it's
 exactly the "a specifier now points at a different, still-hash-valid file" case
 that a byte-level diff can't see, so `--imports` makes `stasis diff` exit
-non-zero on it. When either side doesn't attest resolutions — a resource bundle,
-or a lockfile written before stasis recorded `imports` — the import diff is
-skipped with a note rather than reporting one side's whole graph as added.
+non-zero on it.
+
+The comparison folds the *conditions* dimension away on purpose. A statically
+built bundle (`stasis bundle`) records every edge under the wildcard `"*"`,
+while a runtime lockfile records precise condition sets like `"node, import"`.
+Diffing by raw edge key would then flag a byte-identical resolution as
+removed-then-added merely because the two sides label conditions differently;
+comparing resolved targets per `(parent, specifier)` instead means a `stasis
+bundle` artifact and a runtime lockfile compare cleanly — only a genuine
+redirect shows. (This mirrors how the loader reconciles `"*"` against precise
+condition sets when it verifies a resolution.)
+
+When either side doesn't attest resolutions — a resource bundle, or a lockfile
+written before stasis recorded `imports` — the import diff is skipped with a
+note rather than reporting one side's whole graph as added.
 
 ## Scope differences
 
