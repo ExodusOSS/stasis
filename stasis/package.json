@@ -32,7 +32,9 @@
     "src/loaders/php.js",
     "src/lockfile.js",
     "src/mock.js",
+    "src/parse.js",
     "src/prune.js",
+    "src/sbom.js",
     "src/scan.js",
     "src/webpack.js"
   ],
