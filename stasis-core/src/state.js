@@ -10,7 +10,8 @@ import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
-import { brotliOptions, fileMapToObject, objectToMaps, splitNodeModulesPath } from './util.js'
+import { brotliOptions } from './brotli.js'
+import { fileMapToObject, objectToMaps, splitNodeModulesPath } from './util.js'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
 // the destructured `const` captures function values at this module's eval time, so

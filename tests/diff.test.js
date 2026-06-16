@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { brotliCompressSync } from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { stripVTControlCharacters } from 'node:util'
@@ -22,6 +22,10 @@ const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 const lockOf = (obj) => ({ artifact: Lockfile.parse(JSON.stringify(obj)), kind: 'lockfile' })
 const codeOf = (obj) => ({ artifact: Bundle.parseCode(JSON.stringify(obj)), kind: 'code' })
 const resourcesOf = (obj) => ({ artifact: Bundle.parseResources(JSON.stringify(obj)), kind: 'resources' })
+
+// The diff API doesn't pull in crypto; the caller injects the hash. Tests that
+// compare a bundle pass the canonical `sha512integrity` here.
+const HASH = { hash: sha512integrity }
 
 // A scope=full lockfile: one workspace root + one node_modules dep.
 const LOCK = {
@@ -44,7 +48,7 @@ test('normalizeArtifact rehashes a code bundle into the SRI digests a lockfile r
     modules: {},
     formats: { 'src/index.js': 'module' },
     imports: {},
-  }))
+  }), HASH)
   t.assert.equal(norm.modules.get('.').files.get('src/index.js'), sha512integrity(src))
 })
 
@@ -55,7 +59,7 @@ test('normalizeArtifact decodes base64 before hashing a resource bundle', (t) =>
     config: { scope: 'full' },
     sources: { '.': { name: 'app', version: '1.0.0', files: { 'asset.bin': raw.toString('base64') } } },
     modules: {},
-  }))
+  }), HASH)
   // Matches sha512 of the raw bytes — what `stasis run` records in the lockfile —
   // not a hash of the base64 text.
   t.assert.equal(norm.modules.get('.').files.get('asset.bin'), sha512integrity(raw))
@@ -71,6 +75,30 @@ test('normalizeArtifact rejects a missing artifact or an unknown kind', (t) => {
   t.assert.throws(() => normalizeArtifact(undefined), /kind/)
   t.assert.throws(() => normalizeArtifact({ artifact: Lockfile.parse(JSON.stringify(LOCK)), kind: 'nope' }), /kind/)
   t.assert.throws(() => normalizeArtifact({ kind: 'lockfile' }), /kind/)
+})
+
+test('normalizeArtifact requires a hash function to compare a bundle, but not a lockfile', (t) => {
+  // A lockfile already holds digests, so it normalizes without a hash...
+  t.assert.ok(normalizeArtifact(lockOf(LOCK)))
+  // ...but a bundle's bytes must be re-hashed, so omitting `hash` is a clear error.
+  const bundle = codeOf({
+    version: 1, config: { scope: 'node_modules' },
+    modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'i.js': 'x' } } },
+    formats: {}, imports: {},
+  })
+  t.assert.throws(() => normalizeArtifact(bundle), /hash/)
+  t.assert.throws(() => diffArtifacts(lockOf(LOCK), bundle), /hash/)
+})
+
+test('the diff API does not load node:zlib or node:crypto', (t) => {
+  // Mirrors the sbom zlib guard: importing `@exodus/stasis/diff` must stay light.
+  // It pulls in neither brotli (brotliOptions lives in its own core module) nor
+  // crypto (the caller injects the hash) — the two import surfaces we trimmed.
+  const url = pathToFileURL(join(here, '..', 'stasis', 'src', 'diff.js')).href
+  const probe = `await import(${JSON.stringify(url)}); process.stdout.write(JSON.stringify(process.moduleLoadList.filter((m) => /zlib|crypto/u.test(m))))`
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { encoding: 'utf8' })
+  t.assert.equal(r.status, 0, r.stderr)
+  t.assert.deepEqual(JSON.parse(r.stdout), [], 'the diff API must not load node:zlib or node:crypto')
 })
 
 // ── diffArtifacts: module level ──────────────────────────────────────────────
@@ -116,7 +144,7 @@ test('diffArtifacts does not report a version change when one side lacks a versi
     sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/i.js': 'sha512-a' } } },
     modules: { 'node_modules/foo': { name: 'foo', version: '9.9.9', files: { 'index.js': sha512integrity('export const x = 1\n') } } },
   }
-  const { modules, files } = diffArtifacts(codeOf(v0), lockOf(lock))
+  const { modules, files } = diffArtifacts(codeOf(v0), lockOf(lock), HASH)
   t.assert.equal(modules.changed.length, 0)
   // foo/index.js content matches across the v0 bundle and the lockfile
   t.assert.equal(files.differing.length, 0)
@@ -171,7 +199,7 @@ test('diffArtifacts compares a lockfile against a code bundle by rehashing the b
     sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/index.js': sha512integrity(same) } } },
     modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'index.js': sha512integrity(changed) } } },
   })
-  const diff = diffArtifacts(lock, bundle)
+  const diff = diffArtifacts(lock, bundle, HASH)
   // src/index.js content is byte-identical → no diff; foo/index.js bytes differ → flagged.
   t.assert.deepEqual(diff.files.differing, ['node_modules/foo/index.js'])
   t.assert.equal(diff.files.added.length + diff.files.removed.length, 0)
@@ -186,6 +214,89 @@ test('diffArtifacts notes scope differences in the result', (t) => {
   t.assert.ok(diff.modules.removed.some((m) => m.dir === '.'))
 })
 
+test('diffArtifacts sorts multi-file buckets by the project sortPaths rule', (t) => {
+  // node_modules sorts last, files-in-dir before sub-dirs — assert the diff output
+  // order matches the rest of the project rather than insertion/JSON order.
+  const left = {
+    version: 0, config: { scope: 'full' }, entries: ['src/i.js'],
+    sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/i.js': 'sha512-x' } } },
+    modules: {},
+  }
+  const right = {
+    version: 0, config: { scope: 'full' }, entries: ['src/i.js'],
+    sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/i.js': 'sha512-x', 'src/z.js': 'sha512-z', 'README.md': 'sha512-r', 'src/lib/a.js': 'sha512-a' } } },
+    modules: {},
+  }
+  const { files } = diffArtifacts(lockOf(left), lockOf(right))
+  t.assert.deepEqual(files.added, ['README.md', 'src/z.js', 'src/lib/a.js'])
+})
+
+// ── diffArtifacts: imports (opt-in) ──────────────────────────────────────────
+
+// Two scope=node_modules lockfiles whose only difference is the resolution graph.
+const importsLock = (edges) => ({
+  version: 0, config: { scope: 'node_modules' },
+  modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } },
+  imports: edges,
+})
+
+test('diffArtifacts only diffs imports when asked', (t) => {
+  const a = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/a.js' } } })
+  const b = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/b.js' } } })
+  t.assert.equal(diffArtifacts(lockOf(a), lockOf(b)).imports, undefined)
+  t.assert.ok(diffArtifacts(lockOf(a), lockOf(b), { imports: true }).imports)
+})
+
+test('diffArtifacts reports added, removed, and redirected import edges', (t) => {
+  const left = importsLock({
+    '*': {
+      'node_modules/foo/index.js': {
+        './keep.js': 'node_modules/foo/keep.js',
+        './gone.js': 'node_modules/foo/gone.js',
+        './moved.js': 'node_modules/foo/old.js',
+      },
+    },
+  })
+  const right = importsLock({
+    '*': {
+      'node_modules/foo/index.js': {
+        './keep.js': 'node_modules/foo/keep.js',
+        './fresh.js': 'node_modules/foo/fresh.js',
+        './moved.js': 'node_modules/foo/new.js',
+      },
+    },
+  })
+  const { imports } = diffArtifacts(lockOf(left), lockOf(right), { imports: true })
+  t.assert.deepEqual(imports.added, [{ conditions: '*', parent: 'node_modules/foo/index.js', specifier: './fresh.js', to: 'node_modules/foo/fresh.js' }])
+  t.assert.deepEqual(imports.removed, [{ conditions: '*', parent: 'node_modules/foo/index.js', specifier: './gone.js', from: 'node_modules/foo/gone.js' }])
+  t.assert.deepEqual(imports.changed, [{ conditions: '*', parent: 'node_modules/foo/index.js', specifier: './moved.js', from: 'node_modules/foo/old.js', to: 'node_modules/foo/new.js' }])
+  // a redirect is a real difference even when every file hash is unchanged
+  t.assert.equal(hasDifferences(diffArtifacts(lockOf(left), lockOf(right), { imports: true })), true)
+})
+
+test('diffArtifacts skips the import diff (without flipping hasDifferences) when a side does not attest imports', (t) => {
+  // A legacy lockfile with no `imports` key parses to imports === null.
+  const legacy = { version: 0, config: { scope: 'node_modules' }, modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } } }
+  const withEdges = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/a.js' } } })
+  const diff = diffArtifacts(lockOf(legacy), lockOf(withEdges), { imports: true })
+  t.assert.deepEqual(diff.imports.attested, { left: false, right: true })
+  t.assert.equal(diff.imports.added.length + diff.imports.removed.length + diff.imports.changed.length, 0)
+  // nothing else differs, and an un-comparable import graph must not invent one
+  t.assert.equal(hasDifferences(diff), false)
+})
+
+test('formatDiffStat renders the imports section and its skip note', (t) => {
+  const a = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/old.js' } } })
+  const b = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/new.js' } } })
+  const out = formatDiffStat(diffArtifacts(lockOf(a), lockOf(b), { imports: true }), { left: 'a', right: 'b', leftKind: 'lockfile', rightKind: 'lockfile' })
+  t.assert.match(out, /Imports: 0 added, 0 removed, 1 changed/)
+  t.assert.match(out, /\* node_modules\/foo\/index\.js {2}'\.\/a\.js' {2}node_modules\/foo\/old\.js -> node_modules\/foo\/new\.js/)
+
+  const legacy = { version: 0, config: { scope: 'node_modules' }, modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } } }
+  const note = formatDiffStat(diffArtifacts(lockOf(legacy), lockOf(a), { imports: true }), { left: 'a', right: 'b' })
+  t.assert.match(note, /Imports: a does not attest resolutions; skipping import diff/)
+})
+
 // ── hasDifferences ───────────────────────────────────────────────────────────
 
 test('hasDifferences is false for identical artifacts and true once anything differs', (t) => {
@@ -196,14 +307,16 @@ test('hasDifferences is false for identical artifacts and true once anything dif
 
 // ── formatDiffStat ───────────────────────────────────────────────────────────
 
-test('formatDiffStat renders module + file changes with the diff markers', (t) => {
+test('formatDiffStat renders module + file changes with the diff markers (* for changed, not ~)', (t) => {
   const bumped = { ...LOCK, modules: { 'node_modules/foo': { name: 'foo', version: '2.0.0', ecosystem: 'npm', files: { 'index.js': 'sha512-FOO2' } } } }
   const out = formatDiffStat(diffArtifacts(lockOf(LOCK), lockOf(bumped)), { left: 'a.lock.json', right: 'b.lock.json', leftKind: 'lockfile', rightKind: 'lockfile' })
   t.assert.match(out, /stasis diff --stat/)
   t.assert.match(out, /- a\.lock\.json \(lockfile, scope=full\)/)
   t.assert.match(out, /\+ b\.lock\.json \(lockfile, scope=full\)/)
-  t.assert.match(out, /~ node_modules\/foo {2}foo 1\.0\.0 -> 2\.0\.0/)
-  t.assert.match(out, /~ node_modules\/foo\/index\.js/)
+  t.assert.match(out, /\* node_modules\/foo {2}foo 1\.0\.0 -> 2\.0\.0/)
+  t.assert.match(out, /\* node_modules\/foo\/index\.js/)
+  // the changed marker must be `*`, never `~` (too close to `-` in a terminal)
+  t.assert.doesNotMatch(out, /~/)
   t.assert.match(out, /Artifacts differ/)
   t.assert.ok(out.endsWith('\n'))
 })
@@ -211,8 +324,18 @@ test('formatDiffStat renders module + file changes with the diff markers', (t) =
 test('formatDiffStat reports no differences for identical artifacts', (t) => {
   const out = formatDiffStat(diffArtifacts(lockOf(LOCK), lockOf(LOCK)), { left: 'a', right: 'a' })
   t.assert.match(out, /Modules: 0 added, 0 removed, 0 changed/)
-  t.assert.match(out, /Files: 0 added, 0 removed, 0 differing/)
+  t.assert.match(out, /Files \(within shared modules\): 0 added, 0 removed, 0 differing/)
   t.assert.match(out, /No differences/)
+})
+
+test('formatDiffStat omits the trailing space for a null-name (v0) added/removed module', (t) => {
+  // A v0 code bundle's workspace bucket has a null name; the module line must not
+  // carry a dangling double space where the name would be.
+  const v0 = { version: 0, config: { scope: 'full' }, formats: {}, imports: {}, sources: { 'src/a.js': 'export const x = 1\n' } }
+  const empty = { version: 0, config: { scope: 'full' }, entries: ['x'], sources: {}, modules: {} }
+  const out = formatDiffStat(diffArtifacts(codeOf(v0), lockOf(empty), HASH))
+  t.assert.match(out, /- \. \(1 file\)/)
+  t.assert.doesNotMatch(out, /- \. {2}\(/)
 })
 
 test('formatDiffStat surfaces a scope-mismatch note', (t) => {
@@ -354,4 +477,54 @@ test('diff --stat reports a missing input file clearly', withTmp((t, tmp) => {
   const r = runCli(['diff', '--stat', p, join(tmp, 'nope.json')])
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /File not found:/)
+}))
+
+test('diff --stat surfaces a clean error for an unparseable operand', withTmp((t, tmp) => {
+  const good = writeLock(tmp, LOCK, 'a.lock.json')
+  const junk = join(tmp, 'junk.json')
+  writeFileSync(junk, JSON.stringify({ hello: 'world' }))
+  const r = runCli(['diff', '--stat', good, junk])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Failed to parse stasis lockfile/)
+}))
+
+test('diff --stat reads two resource bundles (.resources.br) off disk', withTmp((t, tmp) => {
+  // Resource bundles store base64 blobs; the CLI must route them through
+  // parseResources (no formats key) and the diff rehashes the decoded bytes.
+  const asset = (s) => Buffer.from(s).toString('base64')
+  const a = writeBundle(tmp, {
+    version: 1, config: { scope: 'node_modules' },
+    modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'a.bin': asset('one'), 'b.bin': asset('shared') } } },
+  }, 'a.resources.br')
+  const b = writeBundle(tmp, {
+    version: 1, config: { scope: 'node_modules' },
+    modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'a.bin': asset('two'), 'b.bin': asset('shared') } } },
+  }, 'b.resources.br')
+  const r = runCli(['diff', '--stat', a, b])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stdout, /resource bundle/)
+  // a.bin content changed, b.bin identical
+  t.assert.match(r.stdout, /Files \(within shared modules\): 0 added, 0 removed, 1 differing/)
+  t.assert.match(r.stdout, /\* node_modules\/foo\/a\.bin/)
+}))
+
+test('diff --stat --imports reports redirected edges and exits 1 on an import-only change', withTmp((t, tmp) => {
+  // Identical file hashes; only a resolution target moves. Without --imports this
+  // is "No differences"; with it, the redirect is caught.
+  const base = {
+    version: 0, config: { scope: 'node_modules' },
+    modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } },
+  }
+  const a = writeLock(tmp, { ...base, imports: { '*': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/old.js' } } } }, 'a.lock.json')
+  const b = writeLock(tmp, { ...base, imports: { '*': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/new.js' } } } }, 'b.lock.json')
+
+  const without = runCli(['diff', '--stat', a, b])
+  t.assert.equal(without.status, 0)
+  t.assert.match(without.stdout, /No differences/)
+  t.assert.doesNotMatch(without.stdout, /Imports:/)
+
+  const withImports = runCli(['diff', '--stat', '--imports', a, b])
+  t.assert.equal(withImports.status, 1)
+  t.assert.match(withImports.stdout, /Imports: 0 added, 0 removed, 1 changed/)
+  t.assert.match(withImports.stdout, /old\.js -> node_modules\/foo\/new\.js/)
 }))

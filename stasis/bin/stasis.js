@@ -27,7 +27,7 @@ function usage(prefix = '') {
  stasis bundle [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout)
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
- stasis diff --stat path/to/(lockfile|bundle) path/to/(lockfile|bundle)
+ stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
  stasis audit path/to/file ...
  stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
@@ -207,6 +207,7 @@ if (command === '-v' || command === '--version') {
   while (argv.length > 0 && argv[0].startsWith('-')) flags.push(argv.shift())
   const options = {
     stat: { type: 'boolean' },
+    imports: { type: 'boolean' },
   }
   let values
   try {
@@ -219,8 +220,10 @@ if (command === '-v' || command === '--version') {
   // keeps the door open for a future content-level diff without a breaking flag.
   if (!values.stat) usage('Error: stasis diff currently requires --stat')
   if (argv.length !== 2) usage('Error: stasis diff takes exactly two files (lockfile or bundle)')
+  // --imports additionally diffs the resolution graphs (which import edges were
+  // added/removed/redirected); off by default since the edge list is verbose.
   const { diffCommand } = await import('../src/cmd/diff.js')
-  const { differences } = diffCommand({ cwd: process.cwd(), left: argv[0], right: argv[1], stat: true })
+  const { differences } = diffCommand({ cwd: process.cwd(), left: argv[0], right: argv[1], stat: true, imports: values.imports })
   // Exit non-zero when the artifacts differ, so the command composes in CI
   // (e.g. fail a build when a bundle drifts from its lockfile).
   process.exitCode = differences ? 1 : 0

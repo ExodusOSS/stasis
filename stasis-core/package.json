@@ -11,11 +11,13 @@
     "./bundle": "./src/bundle.js",
     "./lockfile": "./src/lockfile.js",
     "./util": "./src/util.js",
+    "./brotli": "./src/brotli.js",
     "./state.util": "./src/state.util.js",
     "./prune": "./src/prune.js"
   },
   "files": [
     "bin/stasis-core.js",
+    "src/brotli.js",
     "src/bundle.js",
     "src/config.js",
     "src/hooks.js",
