@@ -366,16 +366,20 @@ test('bucketizePhpSources groups vendor packages with name+version from composer
   ])
   const modules = bucketizePhpSources(composer, sources, 'php-bundle', '0.0.0')
 
-  // Vendor package: own bucket, name from composer.json, version from installed.json.
+  // Vendor package: own bucket, name from composer.json, version from
+  // installed.json, and the `composer` ecosystem marking it as a dependency.
   const lib = modules.get('vendor/acme/lib')
   t.assert.equal(lib.name, 'acme/lib')
   t.assert.equal(lib.version, '1.4.2')
+  t.assert.equal(lib.ecosystem, 'composer')
   t.assert.deepEqual(Object.keys(lib.files), ['src/Client.php']) // package-relative
 
   // Workspace bucket: root composer.json name; carries everything without a
-  // nearer package (incl. the autoloader glue), keyed project-relative.
+  // nearer package (incl. the autoloader glue), keyed project-relative. No
+  // `ecosystem` — it's the top-level code, not a dependency.
   const root = modules.get('.')
   t.assert.equal(root.name, 'acme/app')
+  t.assert.equal(root.ecosystem, undefined)
   t.assert.deepEqual(
     Object.keys(root.files).toSorted(),
     ['index.php', 'src/Service.php', 'vendor/autoload.php'],

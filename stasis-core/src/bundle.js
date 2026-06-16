@@ -13,8 +13,12 @@ import {
 const VERSION = 1
 const LEGACY_VERSION = 0
 
-const normalize = ({ name, version, files }) =>
-  ({ name, version, files: fromEntries(Object.entries(files)) })
+const normalize = ({ name, version, ecosystem, files }) => {
+  // `ecosystem` (when present) names the package ecosystem a dependency came from
+  // (`npm`, `composer`, `soldeer`); the workspace/top-level buckets omit it.
+  assert(ecosystem === undefined || typeof ecosystem === 'string')
+  return { name, version, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
+}
 
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
@@ -211,13 +215,13 @@ export class Bundle {
   #groupedFromModules() {
     const moduleEntries = []
     const sourceEntries = []
-    for (const [dir, { name, version, files }] of this.modules) {
+    for (const [dir, { name, version, ecosystem, files }] of this.modules) {
       if (Object.keys(files).length === 0) continue
       const inNodeModules = dir.includes('node_modules')
       if (inNodeModules) assert(name && version && files)
       const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
       const target = inNodeModules ? moduleEntries : sourceEntries
-      target.push([dir, { name, version, files: sorted }])
+      target.push([dir, { name, version, ...(ecosystem === undefined ? {} : { ecosystem }), files: sorted }])
     }
     moduleEntries.sort((a, b) => sortPaths(a[0], b[0]))
     sourceEntries.sort((a, b) => sortPaths(a[0], b[0]))

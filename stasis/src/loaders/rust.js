@@ -27,6 +27,19 @@ const MOD_DECL_RE = /^(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/u
 // `crate::path::to::item` references (in `use` or expression position).
 const USE_CRATE_RE = /\bcrate(?:::\w+)+/gu
 
+// `cargo vendor` copies external crates in-tree under this directory; their
+// sources are pulled into the bundle and tagged `cargo` (see cmd/bundle.js).
+const VENDOR_DIR = 'vendor'
+
+// `extern crate foo;` and the leading segment of any `foo::path` use/expr path.
+// The leading segment of a path that ISN'T crate/self/super or a std-family
+// root is a candidate external crate name; resolveVendoredCrate keeps only the
+// ones that actually exist under vendor/. The lead must start lowercase to skip
+// `Type::assoc` associated-item paths (crate names are snake_case by convention).
+const EXTERN_CRATE_RE = /^(?:pub\s+)?extern\s+crate\s+(\w+)\s*;/u
+const PATH_LEAD_RE = /\b([a-z_]\w*)(?:::\w+)+/gu
+const NON_CRATE_LEADS = new Set(['crate', 'self', 'super', 'std', 'core', 'alloc'])
+
 // A `#[cfg(...)]` / `#[cfg_attr(...)]` attribute gates the next item on a build
 // configuration that may be off (e.g. `#[cfg(test)]`).
 const CFG_ATTR_RE = /^#\[\s*cfg(?:_attr)?\b/u
@@ -71,6 +84,44 @@ export function extractCrateUses(content) {
   return [...stripRustComments(content).matchAll(USE_CRATE_RE)].map((m) => m[0])
 }
 
+// Candidate external-crate names referenced by a file: `extern crate <name>;`
+// plus the leading segment of every `<name>::...` path (minus crate/self/super
+// and the std family). Best-effort and deliberately over-inclusive — a lead
+// that doesn't name a real vendored crate is dropped by resolveVendoredCrate.
+export function extractExternalCrates(content) {
+  const stripped = stripRustComments(content)
+  const names = new Set()
+  for (const raw of stripped.split('\n')) {
+    const m = EXTERN_CRATE_RE.exec(raw.trim())
+    if (m) names.add(m[1])
+  }
+  for (const m of stripped.matchAll(PATH_LEAD_RE)) {
+    if (!NON_CRATE_LEADS.has(m[1])) names.add(m[1])
+  }
+  return [...names]
+}
+
+// Resolve an external crate name to its vendored crate-root file
+// (`vendor/<dir>/src/lib.rs`), or null when no such crate is vendored. A Rust
+// `use` name is the crate's lib name (underscores); the on-disk vendor dir uses
+// the package name, which may hyphenate — so try the name as-is and with
+// underscores swapped for hyphens. Existence is checked against `knownSources`
+// (tree mode) or the filesystem under `baseDir` (walk mode).
+export function resolveVendoredCrate(crateName, { knownSources, baseDir, vendorDir = VENDOR_DIR } = {}) {
+  const dirs = crateName.includes('_') ? [crateName, crateName.replaceAll('_', '-')] : [crateName]
+  for (const dir of dirs) {
+    const lib = `${vendorDir}/${dir}/src/lib.rs`
+    if (knownSources) {
+      if (knownSources.has(lib)) return lib
+    } else if (baseDir) {
+      try {
+        if (statSync(join(baseDir, lib)).isFile()) return lib
+      } catch { /* not this spelling — try the next */ }
+    }
+  }
+  return null
+}
+
 // The directory where this file's submodules live, per Rust's path rules:
 //   - crate roots (main.rs/lib.rs) and mod.rs hold submodules as siblings
 //   - any other foo.rs holds them under a foo/ subdirectory
@@ -113,9 +164,13 @@ export function resolveModPath(modName, fromFile, { knownSources, baseDir } = {}
 // collection happens in collectRustFilesFromDisk, which is unaffected).
 const MAX_MODULE_DEPTH = 1000
 
-export function buildModuleTree(sources, resolutions) {
+export function buildModuleTree(sources, resolutions, { vendorDir = null } = {}) {
   const tree = new Map()
   for (const filePath of sources.keys()) {
+    // A vendored crate is its own crate, not part of the project crate rooted
+    // at `crate::` — skip its root so its tree doesn't collide on the `crate`
+    // key (its internal `crate::` edges are left best-effort/unresolved).
+    if (vendorDir && filePath.startsWith(`${vendorDir}/`)) continue
     const name = filePath.includes('/') ? filePath.slice(filePath.lastIndexOf('/') + 1) : filePath
     if (name !== 'main.rs' && name !== 'lib.rs') continue
     const seen = new Set()
@@ -173,14 +228,25 @@ export function buildRustTree(sources) {
     resolutions.set(path, specMap)
   }
 
-  const moduleTree = buildModuleTree(sources, resolutions)
+  const moduleTree = buildModuleTree(sources, resolutions, { vendorDir: VENDOR_DIR })
   for (const [path, content] of sources) {
+    // Vendored crates keep their (file-relative) `mod` edges from above, but
+    // their `crate::`/external `use` edges are dropped rather than mis-resolved
+    // against the project crate's module tree.
+    if (path.startsWith(`${VENDOR_DIR}/`)) continue
     const specMap = resolutions.get(path)
     for (const usePath of extractCrateUses(content)) {
       const resolved = resolveUsePath(usePath, moduleTree)
       if (resolved && resolved !== path && !specMap.has(usePath)) {
         specMap.set(usePath, resolved)
       }
+    }
+    // A `use <crate>::…` of a vendored crate becomes a `use <crate>` edge to
+    // that crate's root, recording the cross-crate dependency in the graph.
+    for (const crate of extractExternalCrates(content)) {
+      const lib = resolveVendoredCrate(crate, { knownSources: sources })
+      const spec = `use ${crate}`
+      if (lib && lib !== path && !specMap.has(spec)) specMap.set(spec, lib)
     }
   }
   return { sources, resolutions, missing }
@@ -224,6 +290,12 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
       for (const { name } of extractModDecls(content)) {
         const resolved = resolveModPath(name, relPath, { baseDir })
         if (resolved && !sources.has(resolved)) next.push(resolved)
+      }
+      // Follow `use <crate>::…` into a vendored crate's root; its own `mod`
+      // edges (read on the next wave) then pull in the rest of the crate.
+      for (const crate of extractExternalCrates(content)) {
+        const lib = resolveVendoredCrate(crate, { baseDir })
+        if (lib && !sources.has(lib)) next.push(lib)
       }
     }
     await processWave(next)

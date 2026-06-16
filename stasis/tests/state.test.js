@@ -66,6 +66,9 @@ test('addFile records the file, hash, source and module info', (t) => {
   t.assert.ok(module)
   t.assert.equal(module.name, 'stasis-test-root')
   t.assert.equal(module.version, '1.0.0')
+  // The workspace/top-level bucket is the project's own code, not a dependency,
+  // so it carries no `ecosystem`.
+  t.assert.equal(module.ecosystem, undefined)
   t.assert.equal(module.files['src/foo.js'], state.hashes.get(rel))
 })
 

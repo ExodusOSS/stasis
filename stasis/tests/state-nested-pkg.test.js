@@ -15,6 +15,8 @@ test('addFile on a file under a nested sub-bucket package.json uses the package 
   t.assert.ok(module, 'package root entry must be present')
   t.assert.equal(module.name, 'widget')
   t.assert.equal(module.version, '1.2.3')
+  // A node_modules bucket is an installed dependency: tagged with the npm ecosystem.
+  t.assert.equal(module.ecosystem, 'npm')
   t.assert.ok(!state.modules.has('node_modules/widget/lib'), 'must not bucket under the nested marker dir')
   t.assert.ok(module.files['lib/util.js'])
 })
@@ -34,6 +36,8 @@ test('addFile walks past a workspace type-only marker to find the project packag
   t.assert.ok(module, 'project root entry must be present')
   t.assert.equal(module.name, 'stasis-state-nested-pkg-fixture')
   t.assert.equal(module.version, '0.0.0')
+  // The workspace/top-level bucket is not a dependency: no `ecosystem`.
+  t.assert.equal(module.ecosystem, undefined)
   t.assert.ok(!state.modules.has('sub'), 'must not bucket under the marker dir')
   t.assert.ok(module.files['sub/foo.cjs'])
 })

@@ -113,22 +113,28 @@ test('buildSolidityBundle places node_modules files in per-package modules bucke
     ['.', 'node_modules/@oz/contracts', 'node_modules/foo'],
   )
 
-  // Workspace bucket: name+version from the project's own package.json.
+  // Workspace bucket: name+version from the project's own package.json, and
+  // no `ecosystem` — it's the top-level code, not a dependency.
   const workspace = bundle.modules.get('.')
   t.assert.equal(workspace.name, 'my-app')
   t.assert.equal(workspace.version, '0.1.0')
+  t.assert.equal(workspace.ecosystem, undefined)
   t.assert.deepEqual(Object.keys(workspace.files), ['src/A.sol'])
 
-  // Unscoped node_modules package.
+  // Unscoped node_modules package: a dependency. It resolves out of
+  // node_modules — npm's install layout — so its ecosystem is `npm`, not anything
+  // Solidity-specific.
   const foo = bundle.modules.get('node_modules/foo')
   t.assert.equal(foo.name, 'foo')
   t.assert.equal(foo.version, '1.2.3')
+  t.assert.equal(foo.ecosystem, 'npm')
   t.assert.deepEqual(Object.keys(foo.files), ['X.sol'])
 
   // Scoped node_modules package; rel path preserves the deep subdir.
   const oz = bundle.modules.get('node_modules/@oz/contracts')
   t.assert.equal(oz.name, '@oz/contracts')
   t.assert.equal(oz.version, '5.0.0')
+  t.assert.equal(oz.ecosystem, 'npm')
   t.assert.deepEqual(Object.keys(oz.files), ['utils/Math.sol'])
 
   // Resolutions still use the full project-relative paths, regardless
@@ -139,6 +145,42 @@ test('buildSolidityBundle places node_modules files in per-package modules bucke
     resolutions.get('@oz/contracts/utils/Math.sol'),
     'node_modules/@oz/contracts/utils/Math.sol',
   )
+})
+
+test('buildSolidityBundle attributes Soldeer deps as `soldeer` and github-submodule libs as `github`', async (t) => {
+  const cwd = join(fixtures, 'with-deps-ecosystems')
+  const bundle = await buildSolidityBundle({
+    cwd,
+    entries: ['src/A.sol'],
+    mappingFile: 'remappings.txt',
+  })
+
+  // Each non-npm dependency lands in its own install-dir bucket, alongside the
+  // workspace "." bucket — none folds into the workspace anymore.
+  t.assert.deepEqual(
+    [...bundle.modules.keys()].toSorted(),
+    ['.', 'dependencies/solmate-6.8.0', 'lib/openzeppelin-contracts'],
+  )
+
+  // Workspace: the entry, no ecosystem.
+  t.assert.equal(bundle.modules.get('.').ecosystem, undefined)
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files), ['src/A.sol'])
+
+  // Soldeer: name/version parsed from the `dependencies/<name>-<version>` dir.
+  const soldeer = bundle.modules.get('dependencies/solmate-6.8.0')
+  t.assert.equal(soldeer.name, 'solmate')
+  t.assert.equal(soldeer.version, '6.8.0')
+  t.assert.equal(soldeer.ecosystem, 'soldeer')
+  t.assert.deepEqual(Object.keys(soldeer.files), ['src/Token.sol'])
+
+  // forge git submodule with a github.com URL in .gitmodules → ecosystem
+  // `github`, named with the Package-URL `owner/repo` slug. No package.json or
+  // branch here, so the version falls back to 0.0.0.
+  const oz = bundle.modules.get('lib/openzeppelin-contracts')
+  t.assert.equal(oz.name, 'OpenZeppelin/openzeppelin-contracts')
+  t.assert.equal(oz.version, '0.0.0')
+  t.assert.equal(oz.ecosystem, 'github')
+  t.assert.deepEqual(Object.keys(oz.files), ['contracts/utils/Math.sol'])
 })
 
 test('buildSolidityBundle resolves @-scoped imports via node_modules with no mapping file', async (t) => {
@@ -1440,9 +1482,35 @@ test('buildRustBundle does not follow inline mods', async (t) => {
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/main.rs', 'src/real.rs'])
 })
 
-test('buildRustBundle does not bundle external crates', async (t) => {
+test('buildRustBundle does not bundle external crates that are not vendored', async (t) => {
   const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'external-crate'), entries: ['src/main.rs'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/local.rs', 'src/main.rs'])
+})
+
+test('buildRustBundle collects a `cargo vendor` crate into its own bucket tagged `cargo`', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'with-vendored-crate'), entries: ['src/main.rs'] })
+
+  t.assert.deepEqual([...bundle.modules.keys()].toSorted(), ['.', 'vendor/cool-lib'])
+
+  // Workspace: the project's own code, no ecosystem.
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.ecosystem, undefined)
+  t.assert.deepEqual(Object.keys(workspace.files).toSorted(), ['src/main.rs', 'src/util.rs'])
+
+  // Vendored crate: reached via `use cool_lib::…` (the on-disk package dir
+  // hyphenates the crate's snake_case lib name), bucketed with name/version from
+  // its Cargo.toml [package], and tagged `cargo`.
+  const crate = bundle.modules.get('vendor/cool-lib')
+  t.assert.equal(crate.name, 'cool-lib')
+  t.assert.equal(crate.version, '0.4.2')
+  t.assert.equal(crate.ecosystem, 'cargo')
+  t.assert.deepEqual(Object.keys(crate.files).toSorted(), ['src/inner.rs', 'src/lib.rs'])
+
+  // The cross-crate dependency is recorded as a `use <crate>` edge to its root.
+  t.assert.equal(
+    bundle.imports.get('rust').get('src/main.rs').get('use cool_lib'),
+    'vendor/cool-lib/src/lib.rs',
+  )
 })
 
 test('buildRustBundle takes the workspace bucket name/version from package.json', async (t) => {
