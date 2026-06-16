@@ -55,6 +55,8 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis prune` | trim `node_modules` to the lockfile, verifying the rest |
 | `stasis audit stasis.lock.json` | report npm advisories for a lockfile's dependencies |
 | `stasis audit app.stasis.code.br` | report npm advisories for a bundle's dependencies |
+| `stasis sbom --format=spdx stasis.lock.json` | export an SPDX SBOM for a lockfile or bundle |
+| `stasis sbom --format=cyclonedx app.stasis.code.br` | export a CycloneDX SBOM for a lockfile or bundle |
 
 Lock/bundle modes appear in the table above (omit a flag to skip that artifact); `--dependencies` limits to `node_modules` scope and `--mock` captures with side effects denied. The zero-dependency `@exodus/stasis-core` CLI provides `run` and `prune` only.
 
