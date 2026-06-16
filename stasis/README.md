@@ -52,6 +52,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --lock=add --bundle=add --mock app.js` | build without the app's side effects (network, fs writes) |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |
+| `stasis diff --stat a.lock.json b.stasis.code.br` | summarize module/file differences between two lockfiles/bundles |
 | `stasis prune` | trim `node_modules` to the lockfile, verifying the rest |
 | `stasis audit stasis.lock.json` | report npm advisories for a lockfile's dependencies |
 | `stasis audit app.stasis.code.br` | report npm advisories for a bundle's dependencies |

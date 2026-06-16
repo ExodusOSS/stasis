@@ -2,6 +2,7 @@ import { test } from 'node:test'
 
 import { Bundle } from '@exodus/stasis/bundle'
 import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
+import { diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact } from '@exodus/stasis/diff'
 import { Lockfile } from '@exodus/stasis/lockfile'
 import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
 
@@ -27,6 +28,18 @@ test('@exodus/stasis/sbom exports the file-free SBOM API', (t) => {
   // Operates on already-parsed artifacts; an empty set still renders both formats.
   t.assert.equal(toSpdx([]).spdxVersion, 'SPDX-2.3')
   t.assert.equal(toCyclonedx([]).bomFormat, 'CycloneDX')
+})
+
+test('@exodus/stasis/diff exports the file-free diff API', (t) => {
+  for (const fn of [diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact]) {
+    t.assert.equal(typeof fn, 'function')
+  }
+  // Operates on already-parsed artifacts: an empty lockfile diffed against
+  // itself has no differences and renders a stat with zero counts.
+  const empty = { artifact: new Lockfile({ config: { scope: 'node_modules' } }), kind: 'lockfile' }
+  const diff = diffArtifacts(empty, empty)
+  t.assert.equal(hasDifferences(diff), false)
+  t.assert.match(formatDiffStat(diff), /No differences/)
 })
 
 test('Lockfile round-trip preserves structure', (t) => {

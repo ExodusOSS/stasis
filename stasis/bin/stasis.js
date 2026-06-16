@@ -27,6 +27,7 @@ function usage(prefix = '') {
  stasis bundle [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout)
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
+ stasis diff --stat path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
  stasis audit path/to/file ...
  stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
@@ -201,6 +202,28 @@ if (command === '-v' || command === '--version') {
   if (argv.length > 1) usage('Error: extract takes exactly one bundle file')
   const { extractCommand } = await import('../src/cmd/extract.js')
   extractCommand({ cwd: process.cwd(), bundleFile: argv[0], output: values.output })
+} else if (command === 'diff') {
+  const flags = []
+  while (argv.length > 0 && argv[0].startsWith('-')) flags.push(argv.shift())
+  const options = {
+    stat: { type: 'boolean' },
+  }
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
+  // --stat is required until full text diffs land: it reports what changed
+  // (modules/files), not the differing content. Reserving bare `stasis diff`
+  // keeps the door open for a future content-level diff without a breaking flag.
+  if (!values.stat) usage('Error: stasis diff currently requires --stat')
+  if (argv.length !== 2) usage('Error: stasis diff takes exactly two files (lockfile or bundle)')
+  const { diffCommand } = await import('../src/cmd/diff.js')
+  const { differences } = diffCommand({ cwd: process.cwd(), left: argv[0], right: argv[1], stat: true })
+  // Exit non-zero when the artifacts differ, so the command composes in CI
+  // (e.g. fail a build when a bundle drifts from its lockfile).
+  process.exitCode = differences ? 1 : 0
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')
   const root = argv[0] ? resolve(argv[0]) : process.cwd()
