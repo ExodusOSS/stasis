@@ -16,7 +16,7 @@ import {
   resolveClassFile,
   resolvePhpDir,
   resolvePhpImport,
-} from '../src/loaders/php.js'
+} from '../stasis/src/loaders/php.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'php-bundle')
 

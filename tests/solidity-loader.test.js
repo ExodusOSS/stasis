@@ -12,7 +12,7 @@ import {
   parseRemappingsFromToml,
   readRemappingsFile,
   resolveSolImport,
-} from '../src/loaders/solidity.js'
+} from '../stasis/src/loaders/solidity.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'solidity-bundle')
 

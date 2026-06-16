@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
-const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'stasis.js')
+const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'stasis', 'bin', 'stasis.js')
 const fixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-effects')
 
 const {

@@ -7,10 +7,10 @@ import { brotliCompressSync } from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { stripVTControlCharacters } from 'node:util'
 
-import { audit, collectPackages, collectPackagesFromFile, flattenAdvisories, formatTable, printAuditReport } from '../src/audit.js'
+import { audit, collectPackages, collectPackagesFromFile, flattenAdvisories, formatTable, printAuditReport } from '../stasis/src/audit.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const cli = join(here, '..', 'bin', 'stasis.js')
+const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 
 const withTmp = (fn) => (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-audit-'))

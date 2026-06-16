@@ -13,7 +13,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const cli = join(here, '..', 'bin', 'stasis.js')
+const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 const fixture = join(here, 'fixtures', 'popular-npm-modules')
 
 // The 10 top-level popular packages bundled by the fixture's src/entry.js.

@@ -9,11 +9,11 @@ import { stripVTControlCharacters } from 'node:util'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
-import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '../src/sbom.js'
-import { sbomCommand } from '../src/cmd/sbom.js'
+import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '../stasis/src/sbom.js'
+import { sbomCommand } from '../stasis/src/cmd/sbom.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const cli = join(here, '..', 'bin', 'stasis.js')
+const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 
 // The `@exodus/stasis/sbom` API operates on already-parsed artifacts, so build
 // Lockfile/Bundle instances straight from JSON — no disk, no brotli.
@@ -308,7 +308,7 @@ test('sbom() composes collectComponents + generateSbom over artifacts', (t) => {
 test('importing @exodus/stasis/sbom does not pull in brotli (node:zlib)', (t) => {
   // The API operates on already-parsed Bundle/Lockfile instances; only the CLI
   // glue (src/cmd/sbom.js) reads .br files and so loads zlib.
-  const url = pathToFileURL(join(here, '..', 'src', 'sbom.js')).href
+  const url = pathToFileURL(join(here, '..', 'stasis', 'src', 'sbom.js')).href
   const probe = `await import(${JSON.stringify(url)}); process.stdout.write(JSON.stringify(process.moduleLoadList.filter((m) => /zlib/u.test(m))))`
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { encoding: 'utf8' })
   t.assert.equal(r.status, 0, r.stderr)

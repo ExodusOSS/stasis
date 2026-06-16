@@ -20,7 +20,7 @@ if (entries.length === 0) {
 
 // Construct State BEFORE importing the plugin: the plugin module reads State.instance at top level.
 const state = new State(process.cwd())
-const { StasisEsbuild } = await import('../src/esbuild.js')
+const { StasisEsbuild } = await import('../stasis/src/esbuild.js')
 
 const dist = await mkdtemp(join(tmpdir(), 'stasis-esbuild-test-'))
 try {

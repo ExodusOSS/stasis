@@ -8,7 +8,7 @@ import {
   extractBashCalls,
   loadBash,
   resolveBashCall,
-} from '../src/loaders/bash.js'
+} from '../stasis/src/loaders/bash.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'bash-bundle')
 

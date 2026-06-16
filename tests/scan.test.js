@@ -6,10 +6,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliDecompressSync } from 'node:zlib'
 
-import { Scan, scan } from '../src/scan.js'
+import { Scan, scan } from '../stasis/src/scan.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const cli = join(here, '..', 'bin', 'stasis.js')
+const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 const cjsFixture = join(here, 'fixtures', 'cli-run-cjs')
 const tsFixture = join(here, 'fixtures', 'cli-run-ts')
 const nmCjsFixture = join(here, 'fixtures', 'cli-run-nm-cjs')
@@ -105,7 +105,7 @@ test('scan does not load the target file (top-level side effects never fire)', (
   const probe = `const { scan } = await import(process.argv[1]); scan([process.argv[2]])`
   const r = spawnSync(
     process.execPath,
-    ['--input-type=module', '-e', probe, join(here, '..', 'src/scan.js'), join(cjsFixture, 'src/entry.cjs')],
+    ['--input-type=module', '-e', probe, join(here, '..', 'stasis', 'src/scan.js'), join(cjsFixture, 'src/entry.cjs')],
     { encoding: 'utf-8' }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)

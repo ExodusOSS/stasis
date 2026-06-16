@@ -9,13 +9,13 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
-import { buildSolidityBundle, bundleCommand } from '../src/cmd/bundle.js'
-import { extractCommand, lockfileFromBundle } from '../src/cmd/extract.js'
+import { buildSolidityBundle, bundleCommand } from '../stasis/src/cmd/bundle.js'
+import { extractCommand, lockfileFromBundle } from '../stasis/src/cmd/extract.js'
 import { prune } from '@exodus/stasis-core/prune'
 import { sha512integrity } from '@exodus/stasis-core/state.util'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const cli = join(here, '..', 'bin', 'stasis.js')
+const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 const fixtures = join(here, 'fixtures')
 const solFixtures = join(fixtures, 'solidity-bundle')
 

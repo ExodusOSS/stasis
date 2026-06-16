@@ -33,5 +33,5 @@ jobs:
       # doesn't pay the network cost (or fail under network outages) on every
       # CI run — the test's before() hook only runs install as a local-dev
       # fallback when node_modules is missing.
-      - run: pnpm -C stasis/tests/fixtures/popular-npm-modules i --frozen-lockfile
+      - run: pnpm -C tests/fixtures/popular-npm-modules i --frozen-lockfile
       - run: node --run test

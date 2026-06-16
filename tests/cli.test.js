@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
-const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'stasis.js')
+const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'stasis', 'bin', 'stasis.js')
 const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run')
 const nmFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm')
 const nmCjsFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm-cjs')

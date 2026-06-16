@@ -12,7 +12,7 @@ import {
   loadRust,
   resolveModPath,
   resolveUsePath,
-} from '../src/loaders/rust.js'
+} from '../stasis/src/loaders/rust.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 

@@ -16,10 +16,10 @@ import {
   buildSolidityBundle,
   bundleCommand,
   outermostDir,
-} from '../src/cmd/bundle.js'
+} from '../stasis/src/cmd/bundle.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const cli = join(here, '..', 'bin', 'stasis.js')
+const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 const fixtures = join(here, 'fixtures', 'solidity-bundle')
 const bashFixtures = join(here, 'fixtures', 'bash-bundle')
 const rustFixtures = join(here, 'fixtures', 'rust-bundle')
@@ -1152,14 +1152,14 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   // (createRequire from src/scan.js) genuinely misses.
   const stasisCopy = join(tmp, 'stasis')
   mkdirSync(stasisCopy)
-  for (const entry of ['bin', 'src']) cpSync(join(here, '..', entry), join(stasisCopy, entry), { recursive: true })
-  cpSync(join(here, '..', 'package.json'), join(stasisCopy, 'package.json'))
+  for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis', entry), join(stasisCopy, entry), { recursive: true })
+  cpSync(join(here, '..', 'stasis', 'package.json'), join(stasisCopy, 'package.json'))
   // Vendor the zero-dep core so the `@exodus/stasis-core/*` shims resolve;
   // oxc-parser is deliberately left out of this tree.
   const coreDest = join(stasisCopy, 'node_modules', '@exodus', 'stasis-core')
   mkdirSync(coreDest, { recursive: true })
-  for (const entry of ['bin', 'src']) cpSync(join(here, '..', '..', 'stasis-core', entry), join(coreDest, entry), { recursive: true })
-  cpSync(join(here, '..', '..', 'stasis-core', 'package.json'), join(coreDest, 'package.json'))
+  for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis-core', entry), join(coreDest, entry), { recursive: true })
+  cpSync(join(here, '..', 'stasis-core', 'package.json'), join(coreDest, 'package.json'))
   const proj = join(tmp, 'proj')
   mkdirSync(proj)
   jsProject(proj, { 'file.mjs': 'export * from "@noble/ciphers/_arx.js"\n' })

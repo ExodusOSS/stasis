@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import { rm } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import webpack from 'webpack'
-import { StasisWebpack } from '../src/webpack.js'
+import { StasisWebpack } from '../stasis/src/webpack.js'
 
 const entry = resolve(import.meta.dirname, 'bytes.test.js')
 const dist = resolve(import.meta.dirname, '../tests.dist/webpack')
