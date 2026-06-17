@@ -4,6 +4,14 @@ const VALID_SCOPE = new Set(['node_modules', 'full'])
 const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])
 const VALID_BUNDLE = new Set(['none', 'ignore', 'add', 'replace', 'load', 'frozen'])
 
+// The defaults Config applies when neither env nor options specify a value.
+// Exported so callers (plugins.js error messages) can reference the same source of
+// truth instead of hardcoding the literal -- a default drift then surfaces at one
+// place, not silently in a user-facing message.
+export const DEFAULT_LOCK = 'add'
+export const DEFAULT_BUNDLE = 'none'
+export const DEFAULT_SCOPE = 'full'
+
 const envDebugBool = (value) => Boolean(value && value !== '0')
 
 const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'debug']
@@ -33,7 +41,10 @@ export function assertOptionsMatchConfig(config, options) {
     if (bundleFile !== undefined) assert.equal(config.bundleFile, bundleFile)
     if (debug !== undefined) assert.equal(config.debug, debug)
   } catch (cause) {
-    throw new Error('Plugin options conflict with active stasis state', { cause })
+    // Re-throw with the underlying assertion message folded into the top-level
+    // text -- a plugin author hitting this gets the offending field's name and
+    // expected/actual values without having to inspect err.cause.
+    throw new Error(`Plugin options conflict with active stasis state: ${cause.message}`, { cause })
   }
 }
 
@@ -80,9 +91,9 @@ export class Config {
       throw new Error('Config options can not override stasis env', { cause })
     }
 
-    this.#scope = this.#env.scope || scope || 'full'
-    this.#lock = this.#env.lock || lock || 'add'
-    this.#bundle = this.#env.bundle || bundle || 'none'
+    this.#scope = this.#env.scope || scope || DEFAULT_SCOPE
+    this.#lock = this.#env.lock || lock || DEFAULT_LOCK
+    this.#bundle = this.#env.bundle || bundle || DEFAULT_BUNDLE
     this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envDebugBool(this.#env.debug) : (debug ?? false)
 

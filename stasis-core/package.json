@@ -13,7 +13,8 @@
     "./util": "./src/util.js",
     "./brotli": "./src/brotli.js",
     "./state.util": "./src/state.util.js",
-    "./prune": "./src/prune.js"
+    "./prune": "./src/prune.js",
+    "./plugins": "./src/plugins.js"
   },
   "files": [
     "bin/stasis-core.js",
@@ -23,6 +24,7 @@
     "src/hooks.js",
     "src/loader.js",
     "src/lockfile.js",
+    "src/plugins.js",
     "src/prune.js",
     "src/state.js",
     "src/state.util.js",

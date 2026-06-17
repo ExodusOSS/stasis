@@ -46,6 +46,25 @@ export class State {
   imports = new Map()
   config
   root
+  #parent
+
+  // For a parent: absolute, normalized bundleFile paths claimed by this State and
+  // all sidecars hanging off it. A new sidecar checks for membership before adding
+  // its own, so two sidecars of the same parent can't silently target the same
+  // file (last-write-wins) and a sidecar can't collide with the parent's bundle.
+  // We resolve() before comparing so './dist/x.br' and 'dist/x.br' don't slip past.
+  // Unused on sidecars.
+  #claimedBundleFiles = new Set()
+
+  // For a parent: the set of sidecar States constructed against it. The unified
+  // lockfile (built by the parent's lockData via #mergedImports/#mergedFormats)
+  // must union the parent's own imports / formats with every sidecar's, otherwise
+  // resolution edges and format attestations a sidecar bundler-plugin observed
+  // (sidecar.addImport / addFile populate sidecar-local this.imports/this.formats)
+  // would never reach the lockfile. Hashes / entries / modules are already shared
+  // by reference; this closes the same gap for imports and formats. Unused on
+  // sidecars themselves.
+  #sidecars = new Set()
 
   // Resolutions attested by the loaded lockfile (conditions -> parent ->
   // specifier -> file), or null when no lockfile was loaded / it predates
@@ -58,6 +77,15 @@ export class State {
   // when none was loaded / it predates format attestation. Like #lockImports,
   // kept apart from this.formats (the live observed/bundle-served map).
   #lockFormats = null
+
+  // True iff this State (or, for a sidecar, its parent) loaded a lockfile from
+  // disk during construction. Drives #mergeBundleMetadata's cross-check-vs-absorb
+  // branch: with a lockfile, the bundle's metadata must agree with the lockfile's
+  // attestations; without one, the bundle's metadata is absorbed as the source of
+  // truth. Sidecars inherit this from the parent at construction time so a sidecar
+  // bundle is cross-checked against the parent's lockfile attestation rather than
+  // silently trusted.
+  #lockfileLoaded = false
 
   // Files, resolutions, and formats attested by a frozen bundle (bundle=frozen),
   // or null when no frozen bundle was loaded. A frozen bundle plays the same
@@ -73,18 +101,111 @@ export class State {
   #bundleImports = null
   #bundleFormats = null
 
-  // options.preload (boolean) -- mark this instance as the unique preload State, exposed via
-  // State.preload. Only one preload State may exist at a time. Non-preload States can be
-  // constructed freely (e.g. a bundler plugin that emits a sidecar bundle in a process that
-  // already has a preload-owned lockfile). All other keys forward to Config.
+  // Options:
+  //   preload (boolean) -- register as the unique preload State (exposed via State.preload).
+  //     Only one preload may exist at a time. The stasis loader is the only real caller.
+  //   parent (State)    -- run as a sidecar of this parent. Sidecar shares the parent's
+  //     hashes/entries/modules (so addFile updates the unified lockfile through them) but
+  //     manages its own sources/formats/imports/resources and emits its own bundle file.
+  //     write() on a sidecar skips the lockfile (parent owns it) and only writes its bundle.
+  //   All other keys forward to Config.
   constructor(root, options = {}) {
-    const { preload: isPreload = false, ...configOptions } = options
+    const { preload: isPreload = false, parent: parentState, ...configOptions } = options
     this.config = new Config(configOptions)
-    // Check the preload-uniqueness invariant up front so two simultaneous preload attempts
-    // can't both pass through the constructor; the actual `preload = this` registration
-    // happens after construction succeeds so a throw in setup can't leave a half-built
-    // preload reference behind.
     if (isPreload) assert.ok(!preload, 'Only one preload Stasis instance is supported')
+    assert.ok(!(isPreload && parentState), 'preload and parent are mutually exclusive')
+
+    if (parentState) {
+      // Sidecar mode: short-circuit the on-disk discovery path. Lockfile data is shared by
+      // reference with the parent; only the sidecar's bundleFile (if any) is parsed here.
+      this.#parent = parentState
+      this.root = parentState.root
+      this.hashes = parentState.hashes
+      this.entries = parentState.entries
+      this.modules = parentState.modules
+      // Inherit the parent's lockfile attestation maps so #mergeBundleMetadata
+      // cross-checks the sidecar bundle against the same attestation the parent
+      // already loaded. Without this the sidecar would silently trust whatever
+      // formats / imports its own bundle declared, opening a hole where a
+      // tampered sidecar bundle could redirect a resolution or flip a format
+      // (commonjs <-> module-typescript) for hash-valid bytes -- the byte check
+      // alone doesn't cover that.
+      this.#lockImports = parentState.#lockImports
+      this.#lockFormats = parentState.#lockFormats
+      this.#lockfileLoaded = parentState.#lockfileLoaded
+      assert.ok(this.config.bundleFile, 'sidecar State requires bundleFile')
+      // Claim the bundleFile path so two write-intent States can't silently target
+      // the same on-disk file (last-write-wins). Normalize via resolve() before
+      // comparing -- raw string equality would let './dist/x.br' and 'dist/x.br'
+      // slip past. Only writing States claim; read-only modes (load / frozen) may
+      // legitimately share a path with the writer that produced the file.
+      if (this.config.writeBundle) {
+        const myBundleFile = resolve(this.config.bundleFile)
+        assert.ok(!parentState.#claimedBundleFiles.has(myBundleFile),
+          `sidecar bundleFile '${this.config.bundleFile}' is already claimed by the parent or an earlier sidecar`)
+        parentState.#claimedBundleFiles.add(myBundleFile)
+      }
+      // frozenBundle MUST go through this branch alongside write/load -- it has its
+      // own attestation snapshot to build, and was previously missed (silently
+      // skipping parsing made the post-construction frozen-bundle invariant
+      // unreachable on the sidecar path).
+      if (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) {
+        const sourcesPath = this.config.bundleFile
+        const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+        if (sources && !this.config.replaceBundle) {
+          const bundle = Bundle.parse(brotliDecompressSync(sources).toString('utf-8'))
+          // Same v0 refusal as the main load path: a v0 bundle has no per-file
+          // formats and no import map, so serving / verifying one through a
+          // sidecar would silently widen trust.
+          assert.equal(bundle.version, Bundle.VERSION,
+            `stasis sidecar requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
+            `Re-bundle with the current stasis or \`bundle=replace\` against a v0-free starting point.`)
+          assert.equal(bundle.config.scope, this.config.scope)
+          // Cross-check the sidecar bundle's metadata against the parent's lockfile
+          // (or absorb if no lockfile was loaded). hashes/entries/modules are shared
+          // with the parent, so #mergeBundleMetadata's writes -- when no lockfile is
+          // loaded -- propagate into the unified attestation.
+          this.#mergeBundleMetadata(bundle, { lockfileLoaded: this.#lockfileLoaded })
+          for (const [file, content] of bundle.sources) {
+            if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
+            else this.sources.set(file, content)
+          }
+          this.formats = bundle.formats
+          this.imports = bundle.imports
+          if (this.config.frozenBundle) {
+            // Same snapshot the main path takes -- closes the attested set so
+            // addFile/addImport reject anything the bundle didn't carry.
+            this.#bundleSources = new Set(this.sources.keys())
+            this.#bundleResources = new Set(this.resources.keys())
+            this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
+            this.#bundleFormats = new Map(bundle.formats)
+          }
+        }
+      }
+      // Mirror the post-discovery invariant from the main path: frozen modes must
+      // have actually loaded their attestation, otherwise the run would fail open.
+      if (this.config.frozenBundle) {
+        assert.ok(this.#bundleSources !== null, 'No bundle, but attempting to run in frozen bundle mode')
+      }
+      // Register with the parent AFTER every fallible step (v0 refusal, scope
+      // equality, #mergeBundleMetadata cross-check, frozenBundle invariant) so a
+      // throw never leaves a dead reference in the parent's #sidecars registry.
+      // Gated on writeBundle: load / frozen sidecars are CONSUMERS -- they read
+      // attestations from their bundle but must not contribute to the parent's
+      // lockfile (the bundle has its own integrity story, and under `lock=add`
+      // with no prior lockfile a load-mode sidecar would otherwise silently make
+      // the bundle's content the lockfile's source of truth). Write-mode sidecars
+      // ARE contributors -- their addImport / addFile observations have to land
+      // in the unified lockfile, otherwise a `lock=frozen` re-run rejects them
+      // as unattested.
+      if (this.config.writeBundle) parentState.#sidecars.add(this)
+      liveStates.add(this)
+      return
+    }
+
+    // Preload-uniqueness invariant must be checked before construction proceeds; the
+    // actual `preload = this` registration happens after construction succeeds so a
+    // throw in setup can't leave a half-built preload reference behind.
     const potentialRoots = []
     let cursor = root
     while (cursor) {
@@ -167,6 +288,7 @@ export class State {
             console.warn('[stasis] Warning: lockfile does not attest formats; they are trusted as-is. Regenerate the lockfile to enable this check.')
           }
           lockfileLoaded = true
+          this.#lockfileLoaded = true
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
@@ -219,6 +341,15 @@ export class State {
 
     // Register only after every fallible step succeeds, so a thrown error during config
     // discovery / lockfile / bundle parsing leaves the static registry untouched.
+    // Seed the bundleFile claim registry with this parent's own bundleFile so a
+    // sidecar of this State can't silently target the same write target. Only
+    // tracked when this parent itself writes; load / frozen / no-bundle modes
+    // don't claim. Normalized so the registry compares on canonical absolute
+    // paths regardless of how callers spelled the relative form.
+    if (this.config.writeBundle && this.config.bundleFile) {
+      this.#claimedBundleFiles.add(resolve(this.config.bundleFile))
+    }
+
     if (isPreload) preload = this
     liveStates.add(this)
   }
@@ -302,7 +433,10 @@ export class State {
         }
       }
     } else {
-      if (bundle.entries.size > 0) this.entries = new Set([...this.entries, ...bundle.entries])
+      // Mutate in place rather than reassigning -- this.entries may be shared by
+      // reference with a sidecar's parent (the unified-lockfile model), and a
+      // reassignment would silently fork the shared set.
+      for (const e of bundle.entries) this.entries.add(e)
       for (const [dir, info] of bundle.modules) {
         if (!info.name || !info.version) continue // partial metadata
         if (this.modules.has(dir)) {
@@ -638,14 +772,17 @@ export class State {
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
     // Resources live in this.resources, code in this.sources. Decode per the format:
     // 'resource:base64' is base64, 'resource' is raw UTF-8, code is raw text.
+    // A missing entry throws with the URL in context so load-mode callers (the
+    // bundler plugins, the run loader) don't have to pre-check existence -- the
+    // single getFile call is the fail-closed gate.
     let source
     if (Bundle.isResourceFormat(format)) {
-      const stored = this.resources.get(file)
-      assert.ok(stored !== undefined)
-      source = format === 'resource:base64' ? Buffer.from(stored, 'base64') : stored
+      source = this.resources.get(file)
+      if (source === undefined) throw new Error(`stasis: file not attested in bundle: ${url}`)
+      if (format === 'resource:base64') source = Buffer.from(source, 'base64')
     } else {
       source = this.sources.get(file)
-      assert.ok(source !== undefined)
+      if (source === undefined) throw new Error(`stasis: file not attested in bundle: ${url}`)
     }
     // Without a lockfile the bundle is self-attesting: hashes would be derived
     // from the same source bytes we'd then verify, which is a tautology.
@@ -759,16 +896,23 @@ export class State {
     }
     if (this.#lockImports) mergeIn(this.#lockImports)
     mergeIn(this.imports)
+    // Union sidecars' imports too: a bundler-plugin's sidecar records the
+    // webpack-graph edges into its own this.imports, and the lockfile must
+    // attest those edges so a frozen run can verify them.
+    for (const sidecar of this.#sidecars) mergeIn(sidecar.imports)
     return merged
   }
 
   // Union of lockfile-attested and observed/bundle-served formats, same
   // append-only stance as #mergedImports: conflicting formats for one file are
-  // fatal (noupsert).
+  // fatal (noupsert). Sidecars' formats are unioned in for the same reason.
   #mergedFormats() {
     const merged = new Map()
     if (this.#lockFormats) for (const [file, format] of this.#lockFormats) merged.set(file, format)
     for (const [file, format] of this.formats) noupsert(merged, file, format)
+    for (const sidecar of this.#sidecars) {
+      for (const [file, format] of sidecar.formats) noupsert(merged, file, format)
+    }
     return merged
   }
 
@@ -832,7 +976,8 @@ export class State {
 
   write() {
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
-    if (this.config.writeLockfile) {
+    // Sidecars never write the lockfile -- the parent owns it. They only emit their bundle.
+    if (this.config.writeLockfile && !this.#parent) {
       writeFileSync(join(this.root, FILE_LOCK), this.lockData)
     }
     if (this.config.writeBundle) {
@@ -840,5 +985,9 @@ export class State {
       mkdirSync(dirname(sourcesPath), { recursive: true })
       writeFileSync(sourcesPath, brotliCompressSync(this.sourceData, brotliOptions()))
     }
+  }
+
+  get parent() {
+    return this.#parent
   }
 }
