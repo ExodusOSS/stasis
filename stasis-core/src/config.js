@@ -14,7 +14,7 @@ export const DEFAULT_SCOPE = 'full'
 
 const envDebugBool = (value) => Boolean(value && value !== '0')
 
-const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'debug']
+const OPTION_KEYS = ['scope', 'lock', 'lockFile', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug']
 
 // Plugins accept the same options as Config but want to validate without constructing one,
 // since constructing State has side effects. Mirror Config's per-field validation.
@@ -22,23 +22,27 @@ export function validatePluginOptions(label, options) {
   const rest = { ...options }
   for (const key of OPTION_KEYS) delete rest[key]
   assert.equal(Object.keys(rest).length, 0, `Unknown ${label} options: ${Object.keys(rest).join(', ')}`)
-  const { scope, lock, bundle, bundleFile, debug } = options
+  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
   if (scope !== undefined) assert.ok(VALID_SCOPE.has(scope), `Invalid scope: ${scope}`)
   if (lock !== undefined) assert.ok(VALID_LOCK.has(lock), `Invalid lock: ${lock}`)
+  if (lockFile !== undefined) assert.equal(typeof lockFile, 'string', 'lockFile must be a string')
   if (bundle !== undefined) assert.ok(VALID_BUNDLE.has(bundle), `Invalid bundle: ${bundle}`)
   if (bundleFile !== undefined) assert.equal(typeof bundleFile, 'string', 'bundleFile must be a string')
+  if (resourcesBundleFile !== undefined) assert.equal(typeof resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
   if (debug !== undefined) assert.equal(typeof debug, 'boolean', 'debug must be a boolean')
 }
 
 // When a plugin runs against a State that already exists (preload path), the active Config
 // is authoritative. Any options the plugin was given must agree with it.
 export function assertOptionsMatchConfig(config, options) {
-  const { scope, lock, bundle, bundleFile, debug } = options
+  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
   try {
     if (scope !== undefined) assert.equal(config.scope, scope)
     if (lock !== undefined) assert.equal(config.lock, lock)
+    if (lockFile !== undefined) assert.equal(config.lockFile, lockFile)
     if (bundle !== undefined) assert.equal(config.bundleMode, bundle)
     if (bundleFile !== undefined) assert.equal(config.bundleFile, bundleFile)
+    if (resourcesBundleFile !== undefined) assert.equal(config.resourcesBundleFile, resourcesBundleFile)
     if (debug !== undefined) assert.equal(config.debug, debug)
   } catch (cause) {
     // Re-throw with the underlying assertion message folded into the top-level
@@ -53,36 +57,46 @@ export class Config {
   #explicit
   #scope
   #lock
+  #lockFile
   #bundle
   #bundleFile
+  #resourcesBundleFile
   #debug
 
-  // Options match the CLI flags (lock/bundle/bundleFile/scope/debug). Env vars take effect at
-  // construction time; if both env and an option are set they must agree. Likewise,
-  // any explicit constructor option is treated as authoritative: a later `loadConfig`
-  // call (which reads stasis.config.json) must agree with it -- the alternative
+  // Options match the CLI flags (lock/lockFile/bundle/bundleFile/resourcesBundleFile/scope/debug).
+  // Env vars take effect at construction time; if both env and an option are set they must
+  // agree. Likewise, any explicit constructor option is treated as authoritative: a later
+  // `loadConfig` call (which reads stasis.config.json) must agree with it -- the alternative
   // (silently overwriting `--scope=full` with the file's `"scope":"node_modules"`)
   // was a footgun the CLI couldn't detect, since the flag was happily accepted
   // and then quietly ignored.
   constructor(options = {}) {
-    const { scope, lock, bundle, bundleFile, debug, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
-    this.#explicit = { scope, lock, bundle, bundleFile, debug }
+    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
       lock: process.env.EXODUS_STASIS_LOCK || undefined,
+      lockFile: process.env.EXODUS_STASIS_LOCK_FILE || undefined,
       bundle: process.env.EXODUS_STASIS_BUNDLE || undefined,
       bundleFile: process.env.EXODUS_STASIS_BUNDLE_FILE || undefined,
+      resourcesBundleFile: process.env.EXODUS_STASIS_RESOURCES_BUNDLE_FILE || undefined,
       debug: process.env.EXODUS_STASIS_DEBUG || undefined,
     }
 
     try {
       if (this.#env.scope !== undefined && scope !== undefined) assert.equal(this.#env.scope, scope)
       if (this.#env.lock !== undefined && lock !== undefined) assert.equal(this.#env.lock, lock)
+      if (this.#env.lockFile !== undefined && lockFile !== undefined) {
+        assert.equal(this.#env.lockFile, lockFile)
+      }
       if (this.#env.bundle !== undefined && bundle !== undefined) assert.equal(this.#env.bundle, bundle)
       if (this.#env.bundleFile !== undefined && bundleFile !== undefined) {
         assert.equal(this.#env.bundleFile, bundleFile)
+      }
+      if (this.#env.resourcesBundleFile !== undefined && resourcesBundleFile !== undefined) {
+        assert.equal(this.#env.resourcesBundleFile, resourcesBundleFile)
       }
       if (this.#env.debug !== undefined && debug !== undefined) {
         assert.equal(envDebugBool(this.#env.debug), debug)
@@ -93,8 +107,10 @@ export class Config {
 
     this.#scope = this.#env.scope || scope || DEFAULT_SCOPE
     this.#lock = this.#env.lock || lock || DEFAULT_LOCK
+    this.#lockFile = this.#env.lockFile || lockFile || undefined
     this.#bundle = this.#env.bundle || bundle || DEFAULT_BUNDLE
     this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
+    this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envDebugBool(this.#env.debug) : (debug ?? false)
 
     this.#checkInvariants()
@@ -108,6 +124,29 @@ export class Config {
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
     if (this.#bundleFile !== undefined) assert.equal(typeof this.#bundleFile, 'string', 'bundleFile must be a string')
+    if (this.#lockFile !== undefined) {
+      assert.equal(typeof this.#lockFile, 'string', 'lockFile must be a string')
+      // lockFile is only meaningful when there IS a lockfile. Lock modes that opt out
+      // (none / ignore) would silently ignore the path -- catch the misconfig explicitly.
+      if (this.#lock === 'none' || this.#lock === 'ignore') {
+        throw new RangeError(`lockFile requires an active lock mode (got lock='${this.#lock}')`)
+      }
+    }
+    if (this.#resourcesBundleFile !== undefined) {
+      assert.equal(typeof this.#resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
+      // The split is only meaningful when there IS a bundle to split. With bundle=none / ignore the
+      // option would be silently inert -- catch the misconfiguration explicitly instead.
+      if (this.#bundle === 'none' || this.#bundle === 'ignore') {
+        throw new RangeError(`resourcesBundleFile requires an active bundle mode (got bundle='${this.#bundle}')`)
+      }
+      // Same-path would collapse the two writes to one file (last-write-wins) or, in load
+      // mode, parse the same bytes twice with conflicting expectations. Normalize before
+      // comparing so './x.br' and 'x.br' don't slip past.
+      if (this.#bundleFile !== undefined) {
+        assert.notEqual(this.#bundleFile, this.#resourcesBundleFile,
+          'resourcesBundleFile must differ from bundleFile')
+      }
+    }
 
     // bundle=load needs a trust root for source bytes: frozen pins each file's sha512 in
     // the lockfile and we cross-check it on load; otherwise the bundle is itself
@@ -165,6 +204,20 @@ export class Config {
 
   get bundleFile() {
     return this.#bundleFile
+  }
+
+  // When set, State reads/writes the lockfile at this exact path instead of
+  // discovering `stasis.lock.json` at the project root. Plugins use this to
+  // run with a lockfile separate from any ambient preload's (truly independent
+  // state); when unset, the default discovery applies.
+  get lockFile() {
+    return this.#lockFile
+  }
+
+  // When set, State.write() emits resources to this file and code-only to bundleFile;
+  // bundle=load reads both. Unset is the default unified-bundle behavior.
+  get resourcesBundleFile() {
+    return this.#resourcesBundleFile
   }
 
   get debug() {

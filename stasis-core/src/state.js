@@ -144,6 +144,14 @@ export class State {
         assert.ok(!parentState.#claimedBundleFiles.has(myBundleFile),
           `sidecar bundleFile '${this.config.bundleFile}' is already claimed by the parent or an earlier sidecar`)
         parentState.#claimedBundleFiles.add(myBundleFile)
+        // Split-bundle: also claim the resources path so a second sidecar can't silently
+        // target the same on-disk file. Same normalization as the bundleFile claim.
+        if (this.config.resourcesBundleFile) {
+          const myResourcesFile = resolve(this.config.resourcesBundleFile)
+          assert.ok(!parentState.#claimedBundleFiles.has(myResourcesFile),
+            `sidecar resourcesBundleFile '${this.config.resourcesBundleFile}' is already claimed by the parent or an earlier sidecar`)
+          parentState.#claimedBundleFiles.add(myResourcesFile)
+        }
       }
       // frozenBundle MUST go through this branch alongside write/load -- it has its
       // own attestation snapshot to build, and was previously missed (silently
@@ -179,6 +187,15 @@ export class State {
             this.#bundleResources = new Set(this.resources.keys())
             this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
             this.#bundleFormats = new Map(bundle.formats)
+          }
+        }
+
+        // Sidecar split-bundle: same shape as the main path's resources-side load.
+        if (this.config.resourcesBundleFile) {
+          const resourcesPath = this.config.resourcesBundleFile
+          const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
+          if (resourcesData && !this.config.replaceBundle) {
+            this.#absorbResourcesBundle(resourcesData, { lockfileLoaded: this.#lockfileLoaded, resourcesPath })
           }
         }
       }
@@ -231,20 +248,34 @@ export class State {
 
     let loaded = false
     let lockfileLoaded = false
+    // When `config.lockFile` is set, the lockfile lives at that explicit path -- not at
+    // join(rootDir, FILE_LOCK) for any candidate rootDir. Suppress the per-rootDir read
+    // for root-detection (so a stale stasis.lock.json at the project root can't shadow
+    // the explicit one), then substitute the explicit content once root-detection has
+    // committed to a rootDir below.
+    const explicitLockPath = this.config.lockFile
     for (const rootDir of potentialRoots) {
       const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8')
-      const lock = readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
+      const lockProbe = explicitLockPath ? null : readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
       const sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
       const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
-      if (config !== null || lock !== null || sources !== null) {
+      if (config !== null || lockProbe !== null || sources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
         loaded = true
         this.root = rootDir
 
         if (config) this.config.loadConfig(config)
 
+        // Resolve the effective lockfile content + path for this run. With an explicit
+        // `config.lockFile`, the lockfile is at that exact path (loaded once, not at a
+        // per-rootDir probe); without one, fall back to `<rootDir>/stasis.lock.json`.
+        const lock = explicitLockPath
+          ? readFileSyncMaybe(dirname(explicitLockPath), basename(explicitLockPath), 'utf-8')
+          : lockProbe
+        const lockPath = explicitLockPath || join(rootDir, FILE_LOCK)
+
         if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
-          throw new Error(`Unexpected ${join(rootDir, FILE_LOCK)} with config.lock = 'none'`)
+          throw new Error(`Unexpected ${lockPath} with config.lock = 'none'`)
         }
         if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
           throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
@@ -327,6 +358,57 @@ export class State {
             this.#bundleFormats = new Map(bundle.formats)
           }
         }
+
+        // Split-bundle layout: when `resourcesBundleFile` is configured, resources
+        // live in a separate file. Load it as a standalone Bundle (entries empty,
+        // imports empty, formats restricted to resource tags) and union into the
+        // state already absorbed from `bundleFile`. The strict-shape asserts catch
+        // a writer that accidentally leaked code into the resources file or a
+        // tampered file claiming entries/imports it shouldn't have.
+        if (this.config.resourcesBundleFile) {
+          const resourcesPath = this.config.resourcesBundleFile
+          const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
+          if (resourcesData && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
+            this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
+          }
+        }
+      }
+    }
+
+    // Explicit lockfile path with no other discovery indicator at any rootDir: the
+    // discovery loop never set `loaded`, so the lockfile branch above never ran. Process
+    // the explicit lockfile here against the already-resolved `this.root` (outermost
+    // package.json) so the run still has its attestation. Inlines the same gates as the
+    // in-loop branch -- a future refactor could merge the two by extracting a helper.
+    if (!loaded && explicitLockPath) {
+      const lock = readFileSyncMaybe(dirname(explicitLockPath), basename(explicitLockPath), 'utf-8')
+      if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
+        throw new Error(`Unexpected ${explicitLockPath} with config.lock = 'none'`)
+      }
+      if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
+        const lockfile = Lockfile.parse(lock)
+        if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
+        const includeSources = lockfile.config.scope === 'full' && this.config.full
+        for (const [dir, info] of lockfile.modules) {
+          if (!dir.includes('node_modules') && !includeSources) continue
+          this.modules.set(dir, info)
+        }
+        if (includeSources) this.entries = lockfile.entries
+        for (const [dir, { files }] of this.modules) {
+          for (const [name, hash] of Object.entries(files)) {
+            noupsert(this.hashes, join(dir, name), hash)
+          }
+        }
+        this.#lockImports = lockfile.imports
+        this.#lockFormats = lockfile.formats
+        if (this.config.frozen && this.#lockImports === null) {
+          console.warn('[stasis] Warning: lockfile does not attest resolutions; they are trusted as-is. Regenerate the lockfile to enable this check.')
+        }
+        if (this.config.frozen && this.#lockFormats === null) {
+          console.warn('[stasis] Warning: lockfile does not attest formats; they are trusted as-is. Regenerate the lockfile to enable this check.')
+        }
+        lockfileLoaded = true
+        this.#lockfileLoaded = true
       }
     }
 
@@ -348,6 +430,9 @@ export class State {
     // paths regardless of how callers spelled the relative form.
     if (this.config.writeBundle && this.config.bundleFile) {
       this.#claimedBundleFiles.add(resolve(this.config.bundleFile))
+    }
+    if (this.config.writeBundle && this.config.resourcesBundleFile) {
+      this.#claimedBundleFiles.add(resolve(this.config.resourcesBundleFile))
     }
 
     if (isPreload) preload = this
@@ -452,6 +537,55 @@ export class State {
             : { name: info.name, version: info.version, ecosystem: info.ecosystem, files: Object.create(null) })
         }
       }
+    }
+  }
+
+  // Load the resources side of a split-bundle layout: a standalone Bundle file
+  // that MUST hold only resource-format files (no entries, no imports, no
+  // code-format declarations). Unions into the state already absorbed from
+  // `bundleFile`, extending this.resources, this.formats, and -- under
+  // frozenBundle -- the attestation snapshots. The shape asserts catch a writer
+  // that leaked code into the resources file or a tampered file claiming
+  // metadata it shouldn't carry.
+  #absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath }) {
+    const bundle = Bundle.parse(brotliDecompressSync(resourcesData).toString('utf-8'))
+    assert.equal(bundle.version, Bundle.VERSION,
+      `stasis run requires a v1 resources bundle; ${resourcesPath} is v${bundle.version}. ` +
+      `Re-bundle with the current stasis or \`bundle=replace\` against a v0-free starting point to upgrade.`)
+    assert.equal(bundle.config.scope, this.config.scope)
+    // Resources file MUST NOT declare resolution edges or entry points -- those
+    // belong to the code bundle. A populated map here means the writer mixed
+    // halves (or the file was tampered with) and serving it would silently widen
+    // trust on the code-bundle side's metadata.
+    assert.equal(bundle.imports.size, 0, `resources bundle ${resourcesPath} must have empty imports`)
+    assert.equal(bundle.entries.size, 0, `resources bundle ${resourcesPath} must have empty entries`)
+    for (const [file, format] of bundle.formats) {
+      assert.ok(Bundle.isResourceFormat(format),
+        `resources bundle ${resourcesPath} declares non-resource format='${format}' for ${file}`)
+    }
+    this.#mergeBundleMetadata(bundle, { lockfileLoaded })
+    for (const [file, content] of bundle.sources) {
+      this.resources.set(file, content)
+    }
+    // Union formats: conflict-free (bundleFile carries code formats, this one carries
+    // resource formats -- the file sets must be disjoint).
+    for (const [file, format] of bundle.formats) {
+      const existing = this.formats.get(file)
+      assert.ok(existing === undefined || existing === format,
+        `format conflict for ${file}: bundleFile declares '${existing}', resourcesBundleFile declares '${format}'`)
+      this.formats.set(file, format)
+    }
+    if (this.config.frozenBundle) {
+      // Extend the frozen snapshot. bundleFile's path may not have populated these
+      // (resources-only deployments are legal -- only the resources file exists),
+      // so initialize lazily; #bundleSources may stay null in that case, which the
+      // post-discovery invariant check accepts because #bundleResources is set.
+      if (this.#bundleResources === null) this.#bundleResources = new Set()
+      if (this.#bundleFormats === null) this.#bundleFormats = new Map()
+      if (this.#bundleImports === null) this.#bundleImports = objectToMaps(fileMapToObject(this.imports))
+      if (this.#bundleSources === null) this.#bundleSources = new Set(this.sources.keys())
+      for (const f of bundle.sources.keys()) this.#bundleResources.add(f)
+      for (const [f, fmt] of bundle.formats) this.#bundleFormats.set(f, fmt)
     }
   }
 
@@ -1011,16 +1145,71 @@ export class State {
     return this.sourceBundle.serialize()
   }
 
+  // Split-bundle counterparts to `sourceBundle` / `sourceData`. Used by `write()`
+  // when `config.resourcesBundleFile` is set so the on-disk layout matches a
+  // bundle=load reader. Each is a standalone v1 Bundle (independently parseable);
+  // metadata is partitioned, not duplicated -- the code half owns entries/imports
+  // and code-format declarations, the resources half owns resource-format
+  // declarations and the resource bytes. Both halves declare their per-dir
+  // module identity (name/version) so each file is verifiable on its own.
+  get codeBundle() {
+    // Resource files don't appear in `this.sources` (addFile routes by format), so
+    // restricting #bundleModules to `this.sources` automatically yields the code-only
+    // view. Formats and modules are filtered to drop resource-only dirs/files.
+    const codeFormats = new Map()
+    for (const [file, format] of this.formats) {
+      if (!Bundle.isResourceFormat(format)) codeFormats.set(file, format)
+    }
+    return new Bundle({
+      config: this.config.values,
+      entries: this.entries,
+      modules: this.#bundleModules(this.sources),
+      formats: codeFormats,
+      imports: this.imports,
+    })
+  }
+
+  get resourcesBundle() {
+    const resourceFormats = new Map()
+    for (const [file, format] of this.formats) {
+      if (Bundle.isResourceFormat(format)) resourceFormats.set(file, format)
+    }
+    return new Bundle({
+      config: this.config.values,
+      // Resources bundle carries no entries / imports -- those belong to the code half.
+      // Bundle.parse accepts an empty entries set when no code is present (the hasCode
+      // check sees only resource-format files and waives the requirement).
+      entries: new Set(),
+      modules: this.#bundleModules(this.resources),
+      formats: resourceFormats,
+      imports: new Map(),
+    })
+  }
+
   write() {
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     // Sidecars never write the lockfile -- the parent owns it. They only emit their bundle.
+    // A "sidecar" here is one sharing the parent's lockfile data structures; an independent
+    // State with its own lockFile path (constructed via the no-parent code path) writes its
+    // own lockfile to `config.lockFile` instead of the rootDir default.
     if (this.config.writeLockfile && !this.#parent) {
-      writeFileSync(join(this.root, FILE_LOCK), this.lockData)
+      const lockPath = this.config.lockFile || join(this.root, FILE_LOCK)
+      mkdirSync(dirname(lockPath), { recursive: true })
+      writeFileSync(lockPath, this.lockData)
     }
     if (this.config.writeBundle) {
       const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
       mkdirSync(dirname(sourcesPath), { recursive: true })
-      writeFileSync(sourcesPath, brotliCompressSync(this.sourceData, brotliOptions()))
+      if (this.config.resourcesBundleFile) {
+        // Split-bundle layout: code-only to bundleFile, resources-only to resourcesBundleFile.
+        // Each is a standalone v1 Bundle (cross-check on load enforces shape).
+        writeFileSync(sourcesPath, brotliCompressSync(this.codeBundle.serialize(), brotliOptions()))
+        const resourcesPath = this.config.resourcesBundleFile
+        mkdirSync(dirname(resourcesPath), { recursive: true })
+        writeFileSync(resourcesPath, brotliCompressSync(this.resourcesBundle.serialize(), brotliOptions()))
+      } else {
+        writeFileSync(sourcesPath, brotliCompressSync(this.sourceData, brotliOptions()))
+      }
     }
   }
 
