@@ -1,4 +1,4 @@
-import { assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -99,7 +99,11 @@ export class Lockfile {
       formats = new Map()
       for (const [file, format] of Object.entries(json.formats)) {
         assert(!posixPathEscapes(file))
-        assert(typeof format === 'string')
+        // KNOWN_FORMATS is stasis-core's full universe of recognized formats.
+        // Rejecting unknowns here -- not at a downstream branch -- means a
+        // tampered or forward-incompatible lockfile fails closed at the schema
+        // boundary, with a message that names the offending value.
+        assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
         formats.set(file, format)
       }
     }

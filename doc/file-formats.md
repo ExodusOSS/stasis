@@ -1,17 +1,20 @@
 # Stasis File Formats
 
-Stasis writes up to four files at the project root, next to `package.json`:
+Stasis writes up to three files at the project root, next to `package.json`:
 
 | File | Purpose | Encoding |
 | --- | --- | --- |
 | `stasis.config.json` | Tool configuration | JSON |
 | `stasis.lock.json` | Per-file integrity lockfile | JSON |
-| `stasis.code.br` | Bundled text sources | Brotli-compressed JSON |
-| `stasis.resources.br` | Bundled binary resources | Brotli-compressed JSON |
+| `stasis.code.br` | Bundled sources **and** resources | Brotli-compressed JSON |
 
-All three stasis-generated files carry an integer `version` field. Lockfiles
-and bundles are independently versioned. Paths are POSIX-style and relative
-to the directory holding the lockfile; none may start with `..`.
+There is no separate resources bundle. A single bundle holds both code and
+resources, distinguished **per file** by its `format` (see below): code files
+carry their loader format, resource files carry `resource` or `resource:base64`.
+
+All stasis-generated files carry an integer `version` field. Lockfiles and
+bundles are independently versioned. Paths are POSIX-style and relative to the
+directory holding the lockfile; none may start with `..`.
 
 ## `stasis.config.json`
 
@@ -111,9 +114,13 @@ lockfile/bundle `config` block.
   `scope = node_modules`, where the workspace is deliberately unattested.
   Lockfiles written before this field existed omit it; such lockfiles attest
   resolutions only as far as they were recorded (frozen runs warn about this).
-- `formats` records each file's Node loader format (`module`, `commonjs`,
-  `json`, `module-typescript`, `commonjs-typescript`) in the same shape as the
-  bundle's `formats` map. The loader picks module-vs-commonjs and (for the
+- `formats` records each file's format in the same shape as the bundle's
+  `formats` map. Code files use a Node loader format (`module`, `commonjs`,
+  `json`, `module-typescript`, `commonjs-typescript`) or a source-language tag
+  (`solidity`, `php`, `bash`, `rust`). Resource files use `resource` (content is
+  raw UTF-8) or `resource:base64` (content is binary, base64-encoded) — this is
+  what distinguishes a resource from code per file, and tells a reader how to
+  decode the bundle payload. The loader picks module-vs-commonjs and (for the
   `*-typescript` formats) whether type-shaped syntax is stripped purely from
   this value, so attesting it stops a tampered bundle — or a flipped, un-pinned
   `package.json` `type` on disk — from running hash-valid bytes under a
@@ -168,15 +175,20 @@ reporting failures) still persists what it cleanly captured.
 ```
 
 - `entries`/`sources`/`modules` mirror the lockfile shape, with `files`
-  recording UTF-8 source bytes instead of SRI digests. `entries` and
+  recording the file's bytes instead of SRI digests. Code and `resource`
+  files store raw UTF-8; `resource:base64` files store base64. `entries` and
   `sources` are present only when `scope = full`; `modules` may be
-  omitted (treated as empty).
-- `formats`: project-relative path → Node loader format (`module`,
-  `commonjs`, `module-typescript`, `commonjs-typescript`, `json`). May be
-  missing per file. TypeScript sources are stored verbatim (types intact);
-  Node strips the types at load time based on the format. Source-language
-  bundles (see below) use a language tag here instead: `solidity`, `php`,
-  `bash`, or `rust`.
+  omitted (treated as empty). A bundle that carries code in `scope = full`
+  must declare at least one entry; a bundle with only resources (no code)
+  may have none.
+- `formats`: project-relative path → format. Code files use a Node loader
+  format (`module`, `commonjs`, `module-typescript`, `commonjs-typescript`,
+  `json`) or a source-language tag (`solidity`, `php`, `bash`, `rust`).
+  Resource files use `resource` (raw UTF-8 payload) or `resource:base64`
+  (base64 payload) — the per-file tag that both marks a file as a resource
+  and says how to decode its bundle bytes. May be missing per file for code
+  whose format Node infers. TypeScript sources are stored verbatim (types
+  intact); Node strips the types at load time based on the format.
 - `imports`: conditions → parent file → specifier → resolved
   project-relative path. The conditions key is either `"*"`, a
   comma-joined list (e.g. `"node, import"`), or — for source-language
@@ -200,9 +212,18 @@ reporting failures) still persists what it cleanly captured.
   are checked against `entries`.
 
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-
-relative path with no `entries`/`modules` — is still accepted on load
-(loses cross-check of module metadata; lockfile-driven integrity checks
-still apply). The bundle is always written as `version: 1`.
+relative path with no `entries`/`modules`/`formats`/`imports` — is still
+accepted by **offline tooling** (`stasis extract`, `stasis diff`,
+`stasis audit`, `stasis sbom`): `Bundle.parse` regroups its flat sources
+by inferred module dir for the metadata those commands need.
+
+**`stasis run` refuses v0 bundles.** A v0 bundle carries no per-file
+`formats` (so resources can't be distinguished from code and the loader
+can't attest module-vs-commonjs) and no `imports` map (so resolution
+edges go unchecked) — serving or verifying one at runtime would silently
+widen the trust boundary. Upgrade with `stasis run --bundle=replace`
+(starts fresh, writes v1) or `stasis bundle` (re-bundles from source).
+The bundle is always written as `version: 1`.
 
 ### Source-language bundles (Solidity / PHP / Bash / Rust)
 
@@ -254,31 +275,46 @@ directive when present); Rust requires every
 unconditional `mod foo;` to resolve (a `#[cfg(...)]`-gated `mod` and all
 `use crate::` edges are best-effort). A missing entry is always fatal.
 
-## `stasis.resources.br`
+## Resources in the bundle
 
-Brotli-compressed JSON. Same write/read gating as `stasis.code.br`.
+Resources (assets like images, fonts, or any non-code file a build references)
+live in the same `stasis.code.br` as code — there is no separate resources
+bundle. Each resource is a file in the usual `sources`/`modules` buckets, tagged
+in `formats` by how its payload is encoded:
+
+- `resource` — the bytes are valid UTF-8 and stored raw (human-readable in the
+  bundle); used for text assets like SVG.
+- `resource:base64` — binary bytes, base64-encoded.
 
 ```json
 {
   "version": 1,
   "config": { "scope": "full" },
+  "entries": ["src/index.js"],
   "sources": {
-    ".": { "name": "...", "version": "...", "files": { "asset.bin": "<base64>" } }
+    ".": { "name": "...", "version": "...", "files": {
+      "src/index.js": "…source…",
+      "src/icon.svg": "<svg>…</svg>",
+      "src/logo.png": "<base64>"
+    } }
   },
-  "modules": {
-    "node_modules/foo": { "name": "foo", "version": "...", "ecosystem": "npm", "files": { "asset.bin": "<base64>" } }
-  }
+  "modules": {},
+  "formats": {
+    "src/index.js": "module",
+    "src/icon.svg": "resource",
+    "src/logo.png": "resource:base64"
+  },
+  "imports": { "*": { "src/index.js": {} } }
 }
 ```
 
-Same structural rules as `stasis.code.br` minus `entries`/`formats`/
-`imports`. Resource bytes are stored base64-encoded. A legacy `version: 0`
-shape with a flat top-level `resources` map is still accepted on load;
-writes are always `version: 1`.
+In the lockfile, a resource is hashed like any other file (sha512 of its raw
+bytes) and carries the same `resource`/`resource:base64` entry in `formats`, so
+a frozen run verifies a copied asset byte-for-byte just as it does code.
 
 ## Discovery
 
 Stasis walks up from the run's cwd looking for `package.json`, stopping at a
-`.git` dir, `pnpm-workspace.yaml`, or `$PROJECT_CWD`. Any of the four files
+`.git` dir, `pnpm-workspace.yaml`, or `$PROJECT_CWD`. Any of the three files
 found in a directory without a sibling `package.json` is fatal, and they may
 only appear in one directory along the path.

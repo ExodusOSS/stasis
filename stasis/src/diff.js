@@ -13,44 +13,50 @@ import { sortPaths } from '@exodus/stasis-core/util'
 // that every artifact reduces to the same "digest space". A lockfile already
 // records each file as an SRI digest (`sha512-…`); a bundle records the file's
 // bytes, so we re-hash those bytes (via the injected `hash`) into the very
-// digest a lockfile would have recorded. Code bundles store UTF-8 source text,
-// resource bundles store base64-encoded blobs, so the hashing path depends on
-// the artifact's kind.
+// digest a lockfile would have recorded. A bundle stores code and 'resource'
+// files as UTF-8 text and 'resource:base64' files as base64 blobs, so the
+// hashing path is decided PER FILE from the bundle's `formats` map -- not
+// from a whole-bundle kind.
 
-const KINDS = new Set(['lockfile', 'code', 'resources'])
+const KINDS = new Set(['lockfile', 'bundle'])
 
 // Reduce one file's recorded value to the SRI digest a lockfile records for it.
-// 'lockfile' values are already digests; 'code' bundle values are UTF-8 source
-// strings; 'resources' bundle values are base64 blobs that must be decoded back
-// to their raw bytes first so the digest matches what `stasis run` wrote. This
+// 'lockfile' values are already digests; a bundle's values are file bytes that
+// must be re-hashed. The encoding is now per-file (one bundle holds both code and
+// resources): a 'resource:base64' file is a base64 blob decoded back to raw bytes
+// first, while code files and raw-UTF-8 'resource' files hash as their string. This
 // is the "rehash the bundle" step that lets a bundle and a lockfile be compared,
 // and the reason a `hash` function is required whenever a bundle is involved.
 // `hash` takes a string or Buffer and returns the SRI digest (e.g. the
 // `sha512integrity` the CLI injects); a lockfile needs none.
-function digestOf(kind, value, hash) {
+function digestOf(kind, format, value, hash) {
   if (kind === 'lockfile') return value
   if (typeof hash !== 'function') {
     throw new Error('diff: a `hash` function is required to compare a bundle (its bytes are re-hashed into a lockfile-style digest)')
   }
-  if (kind === 'resources') return hash(Buffer.from(value, 'base64'))
+  if (format === 'resource:base64') return hash(Buffer.from(value, 'base64'))
   return hash(value)
 }
 
 // Project an artifact onto a uniform shape for diffing: its scope, plus a map of
 // package dir -> { name, version, ecosystem, files: Map<rel, digest> }. `input`
-// is `{ artifact, kind }` where `artifact` is a parsed Bundle/Lockfile and
-// `kind` is one of 'lockfile' | 'code' | 'resources' (see parseFileWithKind).
-// `hash` is the digest function used to re-hash a bundle's bytes; it is only
-// consulted for code/resource bundles (a lockfile already holds digests).
+// is `{ artifact, kind }` where `artifact` is a parsed Bundle/Lockfile and `kind`
+// is 'lockfile' | 'bundle' (see parseFileWithKind). `hash` is the digest function
+// used to re-hash a bundle's bytes; it is only consulted for bundles (a lockfile
+// already holds digests). Per-file encoding is read from the bundle's `formats`.
 export function normalizeArtifact(input, { hash } = {}) {
   const { artifact, kind } = input ?? {}
   if (!artifact || !KINDS.has(kind)) {
-    throw new Error("diff: each input must be { artifact, kind } with kind 'lockfile' | 'code' | 'resources'")
+    throw new Error("diff: each input must be { artifact, kind } with kind 'lockfile' | 'bundle'")
   }
+  const formats = artifact.formats ?? new Map()
   const modules = new Map()
   for (const [dir, { name, version, ecosystem, files }] of artifact.modules) {
     const digests = new Map()
-    for (const [rel, value] of Object.entries(files)) digests.set(rel, digestOf(kind, value, hash))
+    for (const [rel, value] of Object.entries(files)) {
+      const full = dir === '.' ? rel : `${dir}/${rel}`
+      digests.set(rel, digestOf(kind, formats.get(full), value, hash))
+    }
     // v0 bundles record no name/version (null); normalize undefined to null too
     // so module-metadata comparisons have a single "unknown" sentinel.
     modules.set(dir, { name: name ?? null, version: version ?? null, ecosystem: ecosystem ?? null, files: digests })
@@ -87,7 +93,7 @@ const projectPath = (dir, rel) => (dir === '.' ? rel : `${dir}/${rel}`)
 // opt-in because the edge graph is verbose and not always attested.
 //
 // `hash` is the digest function used to re-hash bundle bytes (the CLI passes
-// `sha512integrity`); it is required only when a code/resource bundle is one of
+// `sha512integrity`); it is required only when a bundle is one of
 // the operands — a lockfile↔lockfile diff needs none.
 export function diffArtifacts(left, right, { imports = false, hash } = {}) {
   const L = normalizeArtifact(left, { hash })
@@ -151,14 +157,11 @@ export function diffArtifacts(left, right, { imports = false, hash } = {}) {
   return result
 }
 
-// The resolution graph an artifact attests, or null when it attests none. The
-// `kind === 'resources'` guard is load-bearing: a resource bundle carries an
-// *empty* `imports` Map (the constructor default), not null, so the `?? null`
-// fallback alone would wrongly mark it "attests zero edges". A lockfile predating
-// resolution attestation records `imports === null`; a code bundle always carries
-// a (possibly empty) map.
-function attestedImports({ artifact, kind }) {
-  if (kind === 'resources') return null
+// The resolution graph an artifact attests, or null when it attests none. A
+// unified bundle always carries a (possibly empty) `imports` Map, so it attests
+// its resolution set -- empty for a resources-only bundle. A lockfile predating
+// resolution attestation records `imports === null` and attests none.
+function attestedImports({ artifact }) {
   return artifact.imports ?? null
 }
 
@@ -202,7 +205,7 @@ const sameTargets = (a, b) => a.size === b.size && [...a].every((t) => b.has(t))
 //   changed — resolved on both sides, but to a different set of targets (a
 //             redirect — the kind of change a byte/format diff can't see)
 // `from`/`to` are sorted arrays of target files. When either side does not
-// attest imports at all (a resource bundle, or a legacy lockfile), the
+// attest imports at all (a legacy lockfile predating `imports`), the
 // comparison is skipped and `attested` flags why, rather than reporting one
 // side's whole graph as added/removed.
 export function diffImports(left, right) {
@@ -245,7 +248,7 @@ export function hasDifferences(diff) {
   return n > 0
 }
 
-const KIND_LABEL = { lockfile: 'lockfile', code: 'code bundle', resources: 'resource bundle' }
+const KIND_LABEL = { lockfile: 'lockfile', bundle: 'bundle' }
 const plural = (n) => (n === 1 ? '' : 's')
 const ident = ({ name, version }) => (name ? (version ? `${name}@${version}` : name) : '')
 

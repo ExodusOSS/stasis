@@ -94,18 +94,33 @@ test('addFile rejects an explicit format=commonjs for a .mjs file', (t) => {
   t.assert.throws(() => state.addFile(url, { format: 'commonjs' }))
 })
 
-test('addFile leaves format untouched for an unmapped extension', (t) => {
+test('addFile tags a UTF-8 resource as plain "resource" (no base64)', (t) => {
   const state = new State(root)
-  const url = pathToFileURL(join(root, 'sub', 'asset.bin')).toString()
-  state.addFile(url, { isBinary: true })
-  t.assert.equal(state.formats.get('sub/asset.bin'), undefined)
+  const url = pathToFileURL(join(root, 'sub', 'asset.bin')).toString() // ASCII text
+  state.addFile(url, { resource: true })
+  t.assert.equal(state.formats.get('sub/asset.bin'), 'resource')
 })
 
-test('addFile preserves a caller-provided format for an unmapped extension', (t) => {
+test('addFile tags a binary resource as "resource:base64"', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'blob.bin')).toString() // non-UTF-8 bytes
+  state.addFile(url, { resource: true })
+  t.assert.equal(state.formats.get('sub/blob.bin'), 'resource:base64')
+})
+
+test('legacy isBinary:true is still accepted as a resource alias', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'sub', 'blob.bin')).toString()
+  state.addFile(url, { isBinary: true })
+  t.assert.equal(state.formats.get('sub/blob.bin'), 'resource:base64')
+})
+
+test('addFile rejects a caller-provided format that conflicts with the content-derived resource format', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'sub', 'asset.bin')).toString()
-  state.addFile(url, { isBinary: true, format: 'wasm' })
-  t.assert.equal(state.formats.get('sub/asset.bin'), 'wasm')
+  // Resource formats are content-derived ('resource' / 'resource:base64'); a custom
+  // loader format like 'wasm' can't override that.
+  t.assert.throws(() => state.addFile(url, { resource: true, format: 'wasm' }), /resource format mismatch/)
 })
 
 test('addFile defaults .js format to commonjs when the closest package.json omits type', (t) => {
@@ -141,4 +156,36 @@ test('addFile rejects a package.json type other than module/commonjs', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'invalid-type', 'file.js')).toString()
   t.assert.throws(() => state.addFile(url))
+})
+
+test('getFile round-trips a resource: text stays raw, binary stays base64, both decode back', (t) => {
+  // State stores 'resource' as raw UTF-8 (asset.bin is ASCII) and 'resource:base64'
+  // as base64 (blob.bin is non-UTF-8). getFile must return the original bytes in
+  // both cases -- the very contract `stasis run --bundle=load` (via state.getFile)
+  // relies on when serving a file from the bundle to Node, and the contract
+  // `extract` (also via the lockfile-byte hash) needs to keep its derived
+  // lockfile consistent with what `stasis run` would have recorded.
+  //
+  // The shared fixture's stasis.config.json sets bundle=none, but `getFile` only
+  // makes sense when the bundle is materialized -- enable it via the constructor.
+  // bundle=add + lock=add satisfies Config's invariants without writing anything
+  // (no .write() is called).
+  const state = new State(root, { lock: 'add', bundle: 'add' })
+  const textUrl = pathToFileURL(join(root, 'sub', 'asset.bin')).toString()
+  const binUrl = pathToFileURL(join(root, 'sub', 'blob.bin')).toString()
+  state.addFile(textUrl, { resource: true })
+  state.addFile(binUrl, { resource: true })
+
+  // State's per-format split is the same one bundle=load would do on a parsed bundle.
+  const text = state.getFile(textUrl)
+  t.assert.equal(text.format, 'resource')
+  t.assert.equal(typeof text.source, 'string', 'resource (UTF-8) decodes back to a raw string')
+
+  const bin = state.getFile(binUrl)
+  t.assert.equal(bin.format, 'resource:base64')
+  t.assert.ok(Buffer.isBuffer(bin.source), 'resource:base64 decodes back to a Buffer')
+  // Re-hash must match the lockfile-side digest (sha512 of the raw bytes), which is
+  // what state.hashes recorded at addFile. That's the round-trip the extract command
+  // and the loader's load-mode hash check both rely on.
+  t.assert.ok(state.hashes.get('sub/blob.bin').startsWith('sha512-'))
 })

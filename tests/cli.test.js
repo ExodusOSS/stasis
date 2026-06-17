@@ -1251,7 +1251,12 @@ test('run --bundle=load rejects a v0 bundle whose path-inferred module name disa
   t.assert.match(load.stderr, /ERR_ASSERTION/)
 }))
 
-test('run --bundle=load accepts a v0 legacy bundle (flat sources, no entries/modules)', withTmp((t, tmp) => {
+test('run refuses a v0 legacy bundle (parse still accepts it for offline tools)', withTmp((t, tmp) => {
+  // stasis run requires a v1 bundle: v0 carries no per-file `formats` (so resources
+  // can't be distinguished from code and the loader can't pick module/commonjs) and
+  // no import map (so resolutions go unchecked). Offline tooling (extract / diff /
+  // audit / sbom) still parses v0 -- it has the metadata those commands need -- but
+  // the runtime path refuses it with a message pointing at the upgrade path.
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   // Build a fresh v1 bundle, then downgrade it to the v0 legacy shape on disk
@@ -1275,8 +1280,15 @@ test('run --bundle=load accepts a v0 legacy bundle (flat sources, no entries/mod
     ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
     { cwd: tmp }
   )
-  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
-  t.assert.equal(load.stdout, 'hello, world\n')
+  t.assert.notEqual(load.status, 0, `expected refusal; stdout=${load.stdout} stderr=${load.stderr}`)
+  t.assert.match(load.stderr, /stasis run requires a v1 bundle/)
+  // bundle=replace is the documented upgrade path -- starts fresh, writes v1.
+  const upgrade = run(
+    ['run', '--lock=replace', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(upgrade.status, 0, `upgrade stderr: ${upgrade.stderr}`)
+  t.assert.equal(JSON.parse(brotliDecompressSync(readFileSync(bundlePath))).version, 1)
 }))
 
 test('run --bundle=load rejects a bundle whose entries disagree with the lockfile', withTmp((t, tmp) => {
@@ -1686,7 +1698,7 @@ test('run --lock=frozen --bundle=load tolerates a legacy lockfile without import
   t.assert.match(load.stderr, /lockfile does not attest resolutions/)
 }))
 
-test('parseCode rejects a bundle with an import edge escaping the project root', withTmp((t, tmp) => {
+test('Bundle.parse rejects a bundle with an import edge escaping the project root', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
@@ -1708,7 +1720,7 @@ test('parseCode rejects a bundle with an import edge escaping the project root',
   t.assert.notEqual(r.status, 0)
 }))
 
-test('parseCode rejects a v1 full-scope bundle with empty entries', withTmp((t, tmp) => {
+test('Bundle.parse rejects a v1 full-scope bundle with empty entries', withTmp((t, tmp) => {
   // A tampered bundle with entries=[] would otherwise let assertEntry skip (it
   // short-circuits on empty for v0+no-lockfile compat). Reject at parse time.
   cpSync(runFixture, tmp, { recursive: true })
@@ -1730,4 +1742,122 @@ test('parseCode rejects a v1 full-scope bundle with empty entries', withTmp((t, 
   )
   t.assert.notEqual(load.status, 0)
   t.assert.match(load.stderr, /at least one entry|ERR_ASSERTION/)
+}))
+
+// ── runtime loader executable-format allowlist ─────────────────────────────────
+// stasis run will only ever serve files whose attested format Node's loader can
+// actually execute. Resource assets, source-language bundles, and any unknown
+// format string a tampered/forward-incompatible bundle might smuggle in are
+// refused at load time with a contextual message instead of a bare assertion.
+
+test('run --bundle=load refuses to serve a resource-tagged file as code', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Tamper hello.js's format to a resource tag. Bytes still match the lockfile
+  // hash; the loader must refuse to execute it as JavaScript.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.formats['src/hello.js'] = 'resource'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const r = run(
+    // lock=ignore: skip the lockfile-format cross-check so the run reaches the
+    // loader gate cleanly (the lockfile cross-check would otherwise win first).
+    ['run', '--lock=ignore', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /cannot import a resource file/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'resource-tagged file must not execute')
+}))
+
+test('run --bundle=load refuses to serve a solidity-tagged file', withTmp((t, tmp) => {
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.formats['src/hello.js'] = 'solidity'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const r = run(
+    ['run', '--lock=ignore', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /cannot execute a 'solidity' bundle/)
+}))
+
+test('run --bundle=load refuses a bundle that drops a lockfile-attested resource tag (inverse cross-check)', withTmp((t, tmp) => {
+  // The forward direction (bundle declares format X, lockfile attests Y) is the
+  // classic format-flip and is well covered. The INVERSE -- lockfile attests a
+  // file as a resource, bundle just doesn't tag it -- would otherwise route the
+  // base64 payload through State.sources (the code path). #mergeBundleMetadata's
+  // resource-direction inverse loop catches it as a clean schema-level mismatch.
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  // Build a fresh v1 lockfile + bundle pair.
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Lockfile: rewrite hello.js's format to 'resource:base64' (its hash is bytes-
+  // over-raw which we don't touch -- the cross-check fires before any hash work).
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  lock.formats['src/hello.js'] = 'resource:base64'
+  writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
+  // Bundle: drop hello.js's format entry entirely (the forward loop iterates
+  // bundle.formats, so without an entry there's nothing to cross-check via that
+  // path; only the inverse loop can catch this).
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  delete decoded.formats['src/hello.js']
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /bundle file src\/hello\.js must declare format='resource:base64'/)
+}))
+
+test('run --bundle=load refuses every NON_NODE_SOURCE_LANGUAGE tag (php parallel)', withTmp((t, tmp) => {
+  // The runtime loader's NON_NODE_SOURCE_LANGUAGES set covers solidity / php / bash
+  // / rust as one category, all routed to the same "produced for external analysis"
+  // refusal. The solidity case above exercises one tag; this test exercises a sibling
+  // (php) to catch a regression that drops a tag from the set.
+  cpSync(runFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  decoded.formats['src/hello.js'] = 'php'
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
+  rmSync(join(tmp, 'src'), { recursive: true })
+
+  const r = run(
+    ['run', '--lock=ignore', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /cannot execute a 'php' bundle/)
+  t.assert.doesNotMatch(r.stdout, /hello/, 'php-tagged file must not execute')
 }))

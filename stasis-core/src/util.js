@@ -3,6 +3,29 @@ import { isAbsolute, join, posix, relative } from 'node:path'
 
 const sep = '/'
 
+// The full, finite universe of `format` strings stasis knows. Lockfile and bundle
+// parsers reject any value outside this set so a tampered or forward-incompatible
+// artifact fails closed at the schema boundary, not at a later string compare.
+// Categories:
+//   Executable by Node's loader — module, commonjs, json, *-typescript
+//   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
+//   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
+// Adding a new format is a deliberate schema change: list it here AND extend
+// hooks.js's executable allowlist if Node should serve it from a bundle.
+export const KNOWN_FORMATS = new Set([
+  'module',
+  'commonjs',
+  'json',
+  'module-typescript',
+  'commonjs-typescript',
+  'solidity',
+  'php',
+  'bash',
+  'rust',
+  'resource',
+  'resource:base64',
+])
+
 // Resolve `baseDir/relPath` through symlinks and confirm the real target stays
 // within `realBase` (the caller-resolved real path of baseDir). Throws on a
 // symlink that escapes the bundle root: a crafted in-tree symlink

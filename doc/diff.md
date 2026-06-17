@@ -1,7 +1,7 @@
 # `stasis diff`
 
 `stasis diff` compares two stasis artifacts — lockfiles (`stasis.lock.json`)
-and/or bundles (`stasis.code.br`, `stasis.resources.br`) — and reports what
+and/or bundles (`stasis.code.br`) — and reports what
 changed between them, at both the **module** (package) and the **file** level.
 Either side may be a lockfile or a bundle, in any combination, so a lockfile and
 a bundle can be diffed directly.
@@ -33,9 +33,9 @@ records the file's actual bytes. To compare the two, `stasis diff` re-hashes a
 bundle's bytes into the very digest a lockfile would have recorded, so both
 sides end up in the same digest space:
 
-- a **code bundle** stores UTF-8 source text, hashed directly;
-- a **resource bundle** stores base64-encoded blobs, decoded back to their raw
-  bytes before hashing;
+- a **bundle** stores each file's bytes; they're re-hashed per file by format —
+  code and raw-UTF-8 `resource` files hash their text directly, `resource:base64`
+  files are decoded from base64 first;
 - a **lockfile** already holds the digest, used as-is.
 
 This is what the headline "you can always tell whether a file is the same
@@ -101,8 +101,8 @@ bundle` artifact and a runtime lockfile compare cleanly — only a genuine
 redirect shows. (This mirrors how the loader reconciles `"*"` against precise
 condition sets when it verifies a resolution.)
 
-When either side doesn't attest resolutions — a resource bundle, or a lockfile
-written before stasis recorded `imports` — the import diff is skipped with a
+When either side doesn't attest resolutions — a lockfile written before stasis
+recorded `imports` (a bundle always carries an `imports` map) — the import diff is skipped with a
 note rather than reporting one side's whole graph as added.
 
 ## Scope differences
@@ -135,16 +135,16 @@ import { sha512integrity } from '@exodus/stasis-core/state.util'
 import { diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact } from '@exodus/stasis/diff'
 
 const lock = { artifact: Lockfile.parse(lockText), kind: 'lockfile' }
-const code = { artifact: Bundle.parseCode(bundleJson), kind: 'code' } // you read/decompress it yourself
+const bundle = { artifact: Bundle.parse(bundleJson), kind: 'bundle' } // you read/decompress it yourself
 
 // `hash` is required when a bundle is involved; a lockfile↔lockfile diff omits it.
-const diff = diffArtifacts(lock, code, { hash: sha512integrity, imports: true })
-if (hasDifferences(diff)) console.log(formatDiffStat(diff, { left: 'a', right: 'b', leftKind: 'lockfile', rightKind: 'code' }))
+const diff = diffArtifacts(lock, bundle, { hash: sha512integrity, imports: true })
+if (hasDifferences(diff)) console.log(formatDiffStat(diff, { left: 'a', right: 'b', leftKind: 'lockfile', rightKind: 'bundle' }))
 ```
 
 - `normalizeArtifact({ artifact, kind }, { hash })` — project an artifact onto
-  the shared digest space (`kind` is `'lockfile' | 'code' | 'resources'`;
-  `hash` re-hashes bundle bytes and is required for code/resource bundles).
+  the shared digest space (`kind` is `'lockfile' | 'bundle'`;
+  `hash` re-hashes bundle bytes and is required for bundles).
 - `diffArtifacts(left, right, { hash, imports })` — the structured
   `{ scope, modules, files, imports? }` report (`left` is the baseline;
   `imports` is included only when `imports: true`).

@@ -29,7 +29,7 @@ const RUST_EXTS = new Set(['.rs'])
 
 // Fallback package identity for the workspace bucket when no package.json
 // with a name+version can be found by walking up from any of the bundled
-// files. Bundle.parseCode requires every workspace/module bucket to have
+// files. Bundle.parse requires every workspace/module bucket to have
 // both fields, so we have to attest something.
 const SOLIDITY_WORKSPACE_NAME = 'solidity-bundle'
 const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
@@ -655,7 +655,7 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 
   // Use a non-preload State to materialise the bundle: addFile bucketizes by
   // package.json + records hashes/sources/formats, and addImport replays the
-  // per-edge import map. State's serializeCode then emits the same v1 layout
+  // per-edge import map. State.s `serialize` then emits the same v1 layout
   // the runtime loader writes — see @exodus/stasis-core/hooks for the matching pair.
   //
   // bundle=replace skips reading any pre-existing stasis.code.br on disk;
@@ -714,7 +714,7 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile }) {
 
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory
 // Bundle from a list of entry files, without writing anything to disk
-// (serialize with bundle.serializeCode() to get the JSON that `stasis bundle`
+// (serialize with bundle.serialize() to get the JSON that `stasis bundle`
 // brotli-compresses into stasis.code.br).
 //
 // Dispatch by extension matches the CLI: all entries must be one language —
@@ -771,7 +771,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   } else {
     bundle = await buildBundle({ cwd, entries, mappingFile, scope })
   }
-  const serialized = bundle.serializeCode()
+  const serialized = bundle.serialize()
   const files = [...bundle.sources.keys()]
   const modules = bundle.modules
 

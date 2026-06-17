@@ -1,4 +1,5 @@
 import {
+  KNOWN_FORMATS,
   assert,
   fileMapToObject,
   fileSetToObject,
@@ -23,19 +24,21 @@ const normalize = ({ name, version, ecosystem, files }) => {
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
 
-// Bundle handles the JSON shape of stasis.code.br / stasis.resources.br;
-// callers (State) are responsible for the brotli wrapper around the JSON
-// text. On-disk version:
-//   v0 — legacy flat layout: top-level `sources` (or `resources`) keyed by
-//        project-relative path. No entries/modules metadata.
+// Bundle handles the JSON shape of stasis.code.br; callers (State) are responsible
+// for the brotli wrapper around the JSON text. One unified shape carries both code
+// and resources, distinguished per file by `formats[file]` ('resource' = raw UTF-8
+// payload, 'resource:base64' = base64-encoded; everything else is code). On-disk
+// version:
+//   v0 — legacy flat layout: top-level `sources` keyed by project-relative path.
+//        No entries / modules / formats / imports.
 //   v1 — current layout, mirrors stasis.lock.json: per-package buckets under
 //        `sources` (workspace) and `modules` (node_modules) with name+version+files,
-//        plus `entries`. File payloads carry bytes (UTF-8 source strings or base64
-//        resource blobs) instead of SRI digests.
-// We load both v0 and v1; we always serialize v1. v0 is converted on load to
-// the same in-memory shape — paths are regrouped by package dir via
-// `inferModuleDir` (best-effort, last-wins). name/version stay null since v0
-// records neither, which State uses as a marker to skip metadata cross-checks.
+//        plus `entries`, `formats`, and `imports`.
+// `Bundle.parse` accepts both; offline tooling (stasis extract / diff / audit /
+// sbom) reads v0 -- paths are regrouped by package dir via `inferModuleDir`
+// (best-effort, last-wins); name/version stay null since v0 records neither,
+// which State uses as a marker to skip metadata cross-checks. `stasis run`
+// refuses v0 -- see State's load path. We always serialize v1.
 export class Bundle {
   static VERSION = VERSION
 
@@ -62,7 +65,8 @@ export class Bundle {
   }
 
   // Flat project-relative view of file contents collected from this.modules.
-  // Values are UTF-8 source strings for code bundles, base64 for resource bundles.
+  // Per-file encoding is signalled by `formats[file]`: 'resource:base64' is a
+  // base64 string, everything else (including 'resource') is a raw UTF-8 string.
   get sources() {
     const m = new Map()
     for (const [dir, { files }] of this.modules) {
@@ -73,12 +77,32 @@ export class Bundle {
     return m
   }
 
-  static parseCode(text) {
+  // True for the two resource formats; their bundle content is, respectively, a raw
+  // UTF-8 string ('resource') or a base64 blob ('resource:base64').
+  static isResourceFormat(format) {
+    return format === 'resource' || format === 'resource:base64'
+  }
+
+  // One parser for the unified shape (and legacy v0 code bundles). Resources are just
+  // files tagged 'resource'/'resource:base64' in `formats`; State splits them back out
+  // by consulting the formats map.
+  static parse(text) {
     const json = JSON.parse(text)
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
     assert(isPlainObject(json.formats))
     assert(isPlainObject(json.imports))
+
+    // Validate `formats` early so downstream branches (hasCode, etc.) can consult
+    // the typed Map instead of the raw `json.formats` object -- a missing key like
+    // `__proto__` would otherwise short-circuit on the prototype, and an unknown
+    // tag would only surface late at a string compare.
+    const formats = new Map()
+    for (const [file, format] of Object.entries(json.formats)) {
+      assert(!posixPathEscapes(file))
+      assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
+      formats.set(file, format)
+    }
 
     const modules = new Map()
     let entries = new Set()
@@ -95,18 +119,32 @@ export class Bundle {
         }
       }
       if (full) {
-        assert(Array.isArray(json.entries))
-        // Empty entries in v1 + full would let `state.assertEntry` skip its check
-        // (it short-circuits on entries.size === 0 for v0+no-lockfile compatibility).
-        // Forbid the shape at parse time so tampered bundles can't exploit that path.
-        assert(json.entries.length > 0, 'v1 bundle with scope=full must have at least one entry')
         assert(json.sources && typeof json.sources === 'object')
-        entries = new Set(json.entries)
         for (const [dir, info] of Object.entries(json.sources)) {
           assert(!dir.includes('node_modules'))
           assert(!dir.startsWith('..'))
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
+        }
+        // A bundle that carries code in full scope must declare at least one entry:
+        // empty entries would let `state.assertEntry` skip its check (it short-circuits
+        // on entries.size === 0 for v0+no-lockfile compatibility), which a tampered
+        // bundle could exploit. A resources-only bundle has no code files and thus no
+        // entries -- allowed, since there is nothing for assertEntry to guard.
+        let hasCode = false
+        for (const [dir, { files }] of modules) {
+          for (const rel of Object.keys(files)) {
+            const fp = dir === '.' ? rel : `${dir}/${rel}`
+            if (!Bundle.isResourceFormat(formats.get(fp))) { hasCode = true; break }
+          }
+          if (hasCode) break
+        }
+        if (hasCode) {
+          assert(Array.isArray(json.entries) && json.entries.length > 0,
+            'bundle carrying code in scope=full must have at least one entry')
+          entries = new Set(json.entries)
+        } else {
+          assert(json.entries === undefined || (Array.isArray(json.entries) && json.entries.length === 0))
         }
       } else {
         assert(json.entries === undefined)
@@ -144,15 +182,6 @@ export class Bundle {
       }
     }
 
-    // Format keys name project-relative files; validate them like the import
-    // paths above so a tampered bundle can't smuggle an escaping path through
-    // (e.g. into a lockfile derived by `stasis extract`).
-    const formats = new Map()
-    for (const [file, format] of Object.entries(json.formats)) {
-      assert(!posixPathEscapes(file))
-      formats.set(file, format)
-    }
-
     return new Bundle({
       version: json.version,
       config: json.config,
@@ -161,55 +190,6 @@ export class Bundle {
       formats,
       imports,
     })
-  }
-
-  static parseResources(text) {
-    const json = JSON.parse(text)
-    assert(json.version === VERSION || json.version === LEGACY_VERSION)
-
-    const modules = new Map()
-    let config = { scope: 'full' }
-
-    if (json.version === VERSION) {
-      assert(['node_modules', 'full'].includes(json.config?.scope))
-      config = json.config
-      const full = config.scope === 'full'
-      if (json.modules !== undefined) {
-        assert(typeof json.modules === 'object' && json.modules !== null)
-        for (const [dir, info] of Object.entries(json.modules)) {
-          assert(dir.includes('node_modules'))
-          assert(!dir.startsWith('..'))
-          assert(info?.name && info.version && info.files)
-          modules.set(dir, normalize(info))
-        }
-      }
-      if (full && json.sources !== undefined) {
-        assert(typeof json.sources === 'object' && json.sources !== null)
-        for (const [dir, info] of Object.entries(json.sources)) {
-          assert(!dir.includes('node_modules'))
-          assert(!dir.startsWith('..'))
-          assert(info?.name && info.version && info.files)
-          modules.set(dir, normalize(info))
-        }
-      } else if (!full) {
-        assert(json.sources === undefined)
-      }
-      for (const [, { files }] of modules) {
-        for (const rel of Object.keys(files)) assert(!rel.startsWith('..'))
-      }
-    } else {
-      // v0 legacy: flat resources at top level, regrouped by inferred module dir.
-      assert(json.resources)
-      for (const [path, content] of Object.entries(json.resources)) {
-        assert(!path.startsWith('..'))
-        const { dir, rel, name } = inferModuleDir(path)
-        assert(!dir.startsWith('..') && !rel.startsWith('..'))
-        if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
-        modules.get(dir).files[rel] = content
-      }
-    }
-
-    return new Bundle({ version: json.version, config, modules })
   }
 
   #groupedFromModules() {
@@ -228,7 +208,11 @@ export class Bundle {
     return { modules: fromEntries(moduleEntries), sources: fromEntries(sourceEntries) }
   }
 
-  serializeCode() {
+  // One unified on-disk shape for code AND resources. A file is a resource when its
+  // `formats` entry is 'resource' (raw UTF-8 content) or 'resource:base64' (binary,
+  // base64-encoded); every other format is code carrying a raw UTF-8 source string.
+  // A single bundle can therefore hold both; readers split by consulting `formats`.
+  serialize() {
     const entries = fileSetToObject(this.entries)
     const { modules, sources } = this.#groupedFromModules()
     const formats = fileMapToObject(this.formats)
@@ -236,14 +220,6 @@ export class Bundle {
     const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
-    return JSON.stringify(data, undefined, 2)
-  }
-
-  serializeResources() {
-    const { modules, sources } = this.#groupedFromModules()
-    const data = { version: VERSION, config: this.config }
-    if (this.config.scope === 'full') Object.assign(data, { sources })
-    Object.assign(data, { modules })
     return JSON.stringify(data, undefined, 2)
   }
 }
