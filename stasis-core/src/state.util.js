@@ -18,7 +18,7 @@ export function readFileSyncMaybe(dir, file, encoding) {
 
 export function noupsert(map, key, value) {
   if (map.has(key)) {
-    assert.deepStrictEqual(map.get(key), value)
+    assert.deepStrictEqual(map.get(key), value, `Conflict for ${JSON.stringify(key)}`)
   } else {
     map.set(key, value)
   }
