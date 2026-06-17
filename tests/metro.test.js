@@ -192,10 +192,10 @@ test('bundle=add writes a bundle whose sources match disk', withTmp((t, tmp) => 
   t.assert.equal(decoded.formats['src/entry.js'], 'module')
 }))
 
-test('bundle=load is rejected: Metro transforms in workers, the serializer can only observe', withTmp((t, tmp) => {
-  // bundle=load can't be honored for Metro -- files are read + transformed in
-  // worker processes before serialization, so there is no main-process seam to
-  // serve bundle bytes into. The plugin must fail loudly, not silently no-op.
+test('bundle=load on the serializer is rejected and points at the worker transformer', withTmp((t, tmp) => {
+  // Load can't be served from the serializer (Metro transforms in workers before
+  // serialization); it's handled per-worker by the companion transformer. The plugin
+  // must fail loudly and point there, not silently no-op.
   cpSync(fullFixture, tmp, { recursive: true })
 
   const r = run('src/entry.js', {
@@ -203,7 +203,8 @@ test('bundle=load is rejected: Metro transforms in workers, the serializer can o
     env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full', EXODUS_STASIS_BUNDLE: 'load' },
   })
   t.assert.notEqual(r.status, 0)
-  t.assert.match(r.stderr, /bundle=load is not supported/)
+  t.assert.match(r.stderr, /served by the companion worker transformer/)
+  t.assert.match(r.stderr, /metro-transformer/)
 }))
 
 // ----- node_modules scope -------------------------------------------------------------

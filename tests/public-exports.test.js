@@ -8,9 +8,11 @@ import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx }
 import { StasisEsbuild } from '@exodus/stasis/esbuild'
 import { StasisWebpack } from '@exodus/stasis/webpack'
 import { StasisMetro } from '@exodus/stasis/metro'
+import * as metroTransformer from '@exodus/stasis/metro-transformer'
 import { StasisEsbuild as CoreEsbuild } from '@exodus/stasis-core/esbuild'
 import { StasisWebpack as CoreWebpack } from '@exodus/stasis-core/webpack'
 import { StasisMetro as CoreMetro } from '@exodus/stasis-core/metro'
+import * as coreMetroTransformer from '@exodus/stasis-core/metro-transformer'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
@@ -24,6 +26,13 @@ test('@exodus/stasis/{esbuild,webpack,metro} re-export the stasis-core plugins',
   t.assert.equal(StasisEsbuild, CoreEsbuild)
   t.assert.equal(StasisWebpack, CoreWebpack)
   t.assert.equal(StasisMetro, CoreMetro)
+})
+
+test('@exodus/stasis/metro-transformer re-exports the stasis-core worker transformer', (t) => {
+  t.assert.equal(typeof metroTransformer.transform, 'function')
+  t.assert.equal(typeof metroTransformer.getCacheKey, 'function')
+  t.assert.equal(metroTransformer.transform, coreMetroTransformer.transform)
+  t.assert.equal(metroTransformer.getCacheKey, coreMetroTransformer.getCacheKey)
 })
 
 test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API', (t) => {

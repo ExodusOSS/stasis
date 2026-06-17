@@ -36,14 +36,17 @@ function entrySet(graph) {
 //   captures (mirrors webpack's normalModuleFactory.afterResolve and esbuild's
 //   onResolve/onLoad, which likewise run in the bundler's main process).
 //
-// CAPTURE ONLY -- bundle=load IS NOT SUPPORTED:
-//   The other plugins can serve bundle bytes back into the build because their
-//   bundler reads + transforms files in the same process the bundle lives in
-//   (webpack's inputFileSystem wrapper, esbuild's onLoad). Metro reads and
-//   transforms in workers, before serialization; by the time the serializer sees
-//   a module its on-disk bytes have already been transformed elsewhere. There is
-//   no main-process seam to inject bundle bytes into, so load mode can't be
-//   honored faithfully and is rejected loudly rather than silently ignored.
+// THIS PLUGIN IS THE CAPTURE HALF -- LOAD LIVES IN A SEPARATE TRANSFORMER:
+//   The other plugins serve bundle bytes back into the build because their bundler
+//   reads + transforms files in the same process the bundle lives in (webpack's
+//   inputFileSystem wrapper, esbuild's onLoad). Metro reads + transforms in workers,
+//   before serialization, so the serializer can't inject bytes into the transform.
+//   Load is instead handled per-worker by the companion `./metro-transformer.js`
+//   (wired as Metro's `transformer.transformerPath`): unlike capture, load only ever
+//   READS the immutable bundle and every worker reads the same bytes, so there is no
+//   cross-worker state to merge -- the asymmetry that makes the transformer seam work
+//   for load but not for capture. This serializer therefore REJECTS bundle=load
+//   (capture and load are separate wirings; don't wire this plugin in load mode).
 //   Capture modes (lock/bundle add|replace|frozen, and lock=none/ignore) all work:
 //   they only observe the built graph and the files on disk.
 //
@@ -99,9 +102,10 @@ export class StasisMetro {
     if (!this.#state) return
     if (this.#state.config.loadBundle) {
       throw new Error(
-        'StasisMetro: bundle=load is not supported -- Metro transforms files in worker ' +
-        'processes before serialization, so the plugin can only observe the built graph, ' +
-        'not serve bundle bytes back into the build. Use bundle=add/replace/frozen to capture.'
+        'StasisMetro: bundle=load is served by the companion worker transformer ' +
+        "(transformer.transformerPath = '@exodus/stasis/metro-transformer'), not this serializer " +
+        'plugin -- Metro transforms in workers before serialization. Remove this plugin from your ' +
+        'serializer config in load mode, or use bundle=add/replace/frozen here to capture.'
       )
     }
     this.#capture(graph)

@@ -17,6 +17,7 @@
     "./esbuild": "./src/esbuild.js",
     "./webpack": "./src/webpack.js",
     "./metro": "./src/metro.js",
+    "./metro-transformer": "./src/metro-transformer.js",
     "./plugins": "./src/plugins.js"
   },
   "files": [
@@ -29,6 +30,7 @@
     "src/loader.js",
     "src/lockfile.js",
     "src/metro.js",
+    "src/metro-transformer.js",
     "src/plugins.js",
     "src/prune.js",
     "src/state.js",

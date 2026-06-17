@@ -69,10 +69,14 @@ const dependencies = new Map()
 for (const mod of manifest.modules) {
   const modPath = abs(mod.path)
   const deps = new Map()
+  let depIndex = 0
   for (const [specifier, targetRel] of mod.deps ?? []) {
-    // A null target models an unresolved/virtual edge (no absolutePath).
+    // A null target models an unresolved/virtual edge (no absolutePath). Real Metro
+    // (>=0.72) keys module.dependencies by an OPAQUE hash, not the specifier -- key by a
+    // synthetic non-specifier value so the plugin can't accidentally come to rely on the
+    // key (it must read dep.data.name for the specifier and iterate .values()).
     const absolutePath = targetRel == null ? undefined : abs(targetRel)
-    deps.set(specifier, { absolutePath, data: { name: specifier } })
+    deps.set(`dep${depIndex++}`, { absolutePath, data: { name: specifier } })
   }
   dependencies.set(modPath, {
     path: modPath,
