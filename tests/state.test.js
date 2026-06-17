@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { brotliCompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
 
@@ -109,6 +110,146 @@ test('addImport with conditions array stores under joined key', (t) => {
 test('getImport throws for unknown specifier', (t) => {
   const parentURL = pathToFileURL(fileAbs2).toString()
   t.assert.throws(() => state.getImport(parentURL, './does-not-exist.js'))
+})
+
+// CJS `require(require.resolve('./foo.js'))` (e.g. webpack's loader-runner doing
+// `require(loader.path)`) hands the resolve hook the already-resolved ABSOLUTE
+// path as the specifier. Recorded verbatim it bakes a machine-specific absolute
+// path into the lockfile/bundle as a resolution KEY; it is renormalized to a path
+// relative to the IMPORTING FILE, in both the record (addImport) and the lookup
+// (getImport).
+test('addImport renormalizes an absolute-path specifier relative to the importing file', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString() // src/bar.js
+  const childURL = pathToFileURL(fileAbs).toString()   // src/foo.js
+  // fileAbs is the absolute on-disk path of src/foo.js -- exactly what a CJS
+  // require(require.resolve(...)) passes as the specifier.
+  state.addImport(parentURL, fileAbs, childURL, { conditions: ['require', 'node'] })
+
+  const recorded = state.imports.get('require, node').get('src/bar.js')
+  t.assert.ok(recorded.has('./foo.js'), 'absolute specifier stored as a parent-relative key')
+  t.assert.ok(!recorded.has(fileAbs), 'the machine-specific absolute path is not a key')
+  t.assert.ok(![...recorded.keys()].some((k) => k.startsWith('/')), 'no absolute key recorded')
+
+  // Looked up with the SAME absolute specifier Node passes at load time:
+  // getImport renormalizes identically, so the lookup hits the parent-relative key.
+  const got = state.getImport(parentURL, fileAbs, { conditions: ['require', 'node'] })
+  t.assert.equal(got.url, childURL)
+})
+
+test('absolute-path specifier is renormalized in both the lockfile and the bundle', (t) => {
+  const lockImports = JSON.parse(state.lockData).imports['require, node']['src/bar.js']
+  const bundleImports = JSON.parse(state.sourceData).imports['require, node']['src/bar.js']
+  t.assert.deepEqual(Object.keys(lockImports), ['./foo.js'], 'lockfile key is parent-relative')
+  t.assert.deepEqual(Object.keys(bundleImports), ['./foo.js'], 'bundle key is parent-relative')
+})
+
+test('bare and relative specifiers are left untouched', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  const childURL = pathToFileURL(fileAbs).toString()
+  state.addImport(parentURL, 'left-pad', childURL, { conditions: ['bare-test'] })
+  state.addImport(parentURL, './rel.js', childURL, { conditions: ['bare-test'] })
+
+  const recorded = state.imports.get('bare-test').get('src/bar.js')
+  t.assert.ok(recorded.has('left-pad'), 'bare specifier preserved verbatim')
+  t.assert.ok(recorded.has('./rel.js'), 'relative specifier preserved verbatim')
+})
+
+test('an absolute specifier outside the root is left as-is (no in-root relative form)', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  const childURL = pathToFileURL(fileAbs).toString()
+  // A path that escapes the project root can't be renormalized; record it unchanged.
+  state.addImport(parentURL, '/etc/passwd', childURL, { conditions: ['outside-test'] })
+
+  const recorded = state.imports.get('outside-test').get('src/bar.js')
+  t.assert.ok(recorded.has('/etc/passwd'), 'out-of-root absolute specifier preserved verbatim')
+})
+
+// The real reported shape: loader-runner (under node_modules/.../lib) requires
+// several sibling loaders by absolute path. Each renormalizes to a DISTINCT
+// parent-relative key, which may contain '../' (going up from the importing
+// file) -- that's expected and fine as long as the target stayed inside the root.
+test('in-root absolute specifiers renormalize to distinct ../-prefixed keys (loader-runner shape)', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString() // src/bar.js -> dir src/
+  for (const p of ['node_modules/a-loader/index.js', 'node_modules/b-loader/index.js']) {
+    state.addImport(parentURL, join(root, p), pathToFileURL(join(root, p)).toString(), { conditions: ['loaders'] })
+  }
+  const keys = [...state.imports.get('loaders').get('src/bar.js').keys()]
+  t.assert.deepEqual(keys, ['../node_modules/a-loader/index.js', '../node_modules/b-loader/index.js'])
+  t.assert.ok(!keys.some((k) => k.startsWith('/')), 'no absolute key recorded')
+})
+
+// Keying against the importing file (not the project root) is what keeps the new
+// key collision-free: a bare/root-relative specifier never starts with '.', a
+// parent-relative one always does. So a literal 'lib/dep.js' and an absolute path
+// that points elsewhere coexist as distinct keys -- no noupsert conflict (a
+// root-relative scheme would have collapsed both onto 'lib/dep.js' and thrown).
+test('a literal specifier and a renormalized absolute specifier do not collide', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString() // src/bar.js
+  const intoNm = pathToFileURL(join(root, 'node_modules', 'pkg', 'lib', 'dep.js')).toString()
+  const intoSrc = pathToFileURL(join(root, 'lib', 'dep.js')).toString()
+  state.addImport(parentURL, 'lib/dep.js', intoNm, { conditions: ['collide'] })
+  t.assert.doesNotThrow(() =>
+    state.addImport(parentURL, join(root, 'lib', 'dep.js'), intoSrc, { conditions: ['collide'] }))
+  const keys = [...state.imports.get('collide').get('src/bar.js').keys()].toSorted()
+  t.assert.deepEqual(keys, ['../lib/dep.js', 'lib/dep.js'])
+})
+
+// The intended unification: requiring a file by its absolute path produces the
+// SAME key as importing it relatively, so the two record as one edge (same value,
+// noupsert agrees) rather than two.
+test('an absolute specifier unifies with the relative import of the same file', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString() // src/bar.js
+  const childURL = pathToFileURL(fileAbs).toString()   // src/foo.js
+  state.addImport(parentURL, './foo.js', childURL, { conditions: ['unify'] })
+  t.assert.doesNotThrow(() =>
+    state.addImport(parentURL, fileAbs, childURL, { conditions: ['unify'] }))
+  t.assert.deepEqual([...state.imports.get('unify').get('src/bar.js').keys()], ['./foo.js'])
+})
+
+// Statically-built bundles record edges under the '*' conditions key; a runtime
+// lookup under precise conditions must renormalize the absolute specifier the
+// same way and fall back to '*'.
+test('getImport wildcard fallback resolves an absolute specifier recorded under *', (t) => {
+  const parentURL = pathToFileURL(fileAbs2).toString() // src/bar.js
+  const childURL = pathToFileURL(fileAbs).toString()   // src/foo.js
+  state.addImport(parentURL, fileAbs, childURL, { conditions: '*' }) // recorded under '*' as './foo.js'
+  const got = state.getImport(parentURL, fileAbs, { conditions: ['node'] }) // 'node' misses -> '*' fallback
+  t.assert.equal(got.url, childURL)
+})
+
+// End-to-end through the security-critical path: an absolute-specifier edge
+// captured into a bundle must, on a frozen reload, attest on a re-presented match
+// and fail closed on a redirect -- the resolution check (#assertAttestedResolution)
+// keys on the renormalized specifier on both sides.
+test('a frozen bundle attests an absolute-specifier edge: match passes, redirect fails closed', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-abs-frozen-'))
+  t.after(() => rmSync(tmp, { recursive: true, force: true }))
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'r', version: '1.0.0' }))
+  mkdirSync(join(tmp, 'node_modules', 'fakepkg'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'fakepkg', 'package.json'), JSON.stringify({ name: 'fakepkg', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'fakepkg', 'index.js'), 'module.exports = 1\n')
+  writeFileSync(join(tmp, 'runner.cjs'), 'module.exports = 1\n')
+
+  const parentURL = pathToFileURL(join(tmp, 'runner.cjs')).toString()
+  const childAbs = join(tmp, 'node_modules', 'fakepkg', 'index.js')
+  const childURL = pathToFileURL(childAbs).toString()
+
+  // Capture: require(absolute path) recorded as a parent-relative edge, serialized to a bundle.
+  const cap = new State(tmp, { scope: 'full', bundle: 'add' })
+  cap.addFile(parentURL, { format: 'commonjs', isEntry: true })
+  cap.addFile(childURL, { format: 'commonjs' })
+  cap.addImport(parentURL, childAbs, childURL, { conditions: ['require', 'node'] })
+  writeFileSync(join(tmp, 'stasis.code.br'), brotliCompressSync(cap.sourceData))
+
+  // Frozen reload: the same absolute specifier attests and resolves...
+  const frozen = new State(tmp, { scope: 'full', bundle: 'frozen' })
+  t.assert.doesNotThrow(() =>
+    frozen.addImport(parentURL, childAbs, childURL, { conditions: ['require', 'node'] }))
+  t.assert.equal(frozen.getImport(parentURL, childAbs, { conditions: ['require', 'node'] }).url, childURL)
+
+  // ...but redirecting that same specifier to a different file is rejected.
+  t.assert.throws(() =>
+    frozen.addImport(parentURL, childAbs, parentURL, { conditions: ['require', 'node'] }))
 })
 
 test('addImport keys by importAttributes: same specifier with vs without {type:json} are distinct', (t) => {

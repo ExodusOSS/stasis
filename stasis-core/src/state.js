@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
 import * as fs from 'node:fs'
-import { join, resolve, relative, basename, dirname, extname } from 'node:path'
+import { join, resolve, relative, basename, dirname, extname, isAbsolute } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
@@ -810,11 +810,40 @@ export class State {
     return `${cond} (with: ${JSON.stringify(sorted)})`
   }
 
+  // A require()/import() given an already-resolved ABSOLUTE path arrives at the
+  // resolve hook with that absolute path AS the specifier -- CJS
+  // `require('/repo/node_modules/pkg/index.js')` is the common case (webpack's
+  // loader-runner does `require(loader.path)`). Recorded verbatim, that
+  // machine-specific absolute path becomes a resolution KEY in the lockfile and
+  // bundle: non-portable, and unmatchable on any other machine. Once the target
+  // is confirmed inside the project root, renormalize it to a path relative to
+  // the IMPORTING FILE's directory -- the same shape a hand-written
+  // `require('./x')` / `require('../../pkg/x')` has. The root check is only the
+  // gate; the resulting key may itself contain '../' (going up from the importing
+  // file), which is expected and fine as long as the target stayed inside root.
+  //
+  // Keying against the parent makes the key portable AND collision-free: it is
+  // always '.'-prefixed, so it can never clash with a bare ('pkg') or
+  // root-relative key, and an absolute path naming the same file as a relative
+  // import unifies onto the identical key (same value -> noupsert agrees, no
+  // throw). Bare/relative specifiers and file: URLs (handled separately by the
+  // loader) pass through untouched; an absolute path that escapes the root has no
+  // in-root relative form, so it's left as-is. Applied identically in addImport
+  // (record) and getImport (lookup) so the key written and the key queried agree.
+  #canonicalSpecifier(parentURL, specifier) {
+    if (typeof specifier !== 'string' || !isAbsolute(specifier)) return specifier
+    const fromRoot = relative(this.root, specifier)
+    if (fromRoot === '' || fromRoot.startsWith('..')) return specifier // outside the project root
+    const rel = relative(dirname(fileURLToPath(parentURL)), specifier)
+    return rel.startsWith('.') ? rel : `./${rel}`
+  }
+
   addImport(parentURL, specifier, url, { conditions = '*', format, importAttributes } = {}) {
     if (conditions !== '*') assert.ok(Array.isArray(conditions))
     assert.ok(parentURL, 'addImport requires a parent (entries go through addFile)')
     const parent = this.#canonicalFile(parentURL)
     const file = this.#canonicalFile(url)
+    specifier = this.#canonicalSpecifier(parentURL, specifier)
     const key = this.#conditionsKey(conditions, importAttributes)
 
     // Frozen runs verify resolutions observed from disk against the lockfile,
@@ -847,7 +876,9 @@ export class State {
 
   getImport(parentURL, specifier, { conditions = '*', importAttributes } = {}) {
     if (conditions !== '*') assert.ok(Array.isArray(conditions))
+    assert.ok(parentURL, 'getImport requires a parent') // matches addImport; #canonicalSpecifier needs it
     const parent = this.#canonicalFile(parentURL)
+    specifier = this.#canonicalSpecifier(parentURL, specifier)
     const key = this.#conditionsKey(conditions, importAttributes)
     // Statically-built bundles (e.g. `stasis bundle src/entry.js`) resolve edges
     // offline and store them under the wildcard '*' key, since they can't
