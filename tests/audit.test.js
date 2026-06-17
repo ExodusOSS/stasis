@@ -147,7 +147,7 @@ test('collectPackagesFromFile wraps brotli-valid but JSON-corrupt bundles', with
   t.assert.throws(() => collectPackagesFromFile(file), /Failed to parse stasis bundle/)
 }))
 
-test('collectPackagesFromFile accepts a resource bundle', withTmp((t, tmp) => {
+test('collectPackagesFromFile accepts a bundle carrying only resources', withTmp((t, tmp) => {
   const file = join(tmp, 'resources.br')
   const json = {
     version: 1,
@@ -158,6 +158,9 @@ test('collectPackagesFromFile accepts a resource bundle', withTmp((t, tmp) => {
     modules: {
       'node_modules/lib': { name: 'lib', version: '3.2.1', files: { 'b.bin': 'BBB=' } },
     },
+    // Resources are tagged per-file in the unified bundle; no code => no entries.
+    formats: { 'a.bin': 'resource:base64', 'node_modules/lib/b.bin': 'resource:base64' },
+    imports: {},
   }
   writeFileSync(file, brotliCompressSync(Buffer.from(JSON.stringify(json))))
   t.assert.deepEqual(collectPackagesFromFile(file), [{ name: 'lib', version: '3.2.1' }])

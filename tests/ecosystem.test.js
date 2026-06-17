@@ -66,30 +66,33 @@ test('Bundle code round-trips `ecosystem` for deps and omits it for the workspac
     ]),
   })
 
-  const json = JSON.parse(bundle.serializeCode())
+  const json = JSON.parse(bundle.serialize())
   t.assert.deepEqual(Object.keys(json.modules['node_modules/dep']), ['name', 'version', 'ecosystem', 'files'])
   t.assert.equal(json.modules['node_modules/dep'].ecosystem, 'npm')
   t.assert.ok(!Object.hasOwn(json.sources['.'], 'ecosystem'))
 
-  const parsed = Bundle.parseCode(bundle.serializeCode())
+  const parsed = Bundle.parse(bundle.serialize())
   t.assert.equal(parsed.modules.get('node_modules/dep').ecosystem, 'npm')
   t.assert.equal(parsed.modules.get('.').ecosystem, undefined)
 })
 
-test('Bundle resources round-trips `ecosystem` for deps', (t) => {
+test('Bundle round-trips `ecosystem` for resource deps', (t) => {
+  // Resources live in the unified bundle, tagged by per-file format. ecosystem still
+  // rides on the node_modules bucket and is omitted for the workspace.
   const bundle = new Bundle({
     config: { scope: 'full' },
     modules: new Map([
       ['.', { name: 'app', version: '1.0.0', files: { 'a.bin': 'AAA=' } }],
       ['node_modules/dep', { name: 'dep', version: '2.0.0', ecosystem: 'npm', files: { 'b.bin': 'BBB=' } }],
     ]),
+    formats: new Map([['a.bin', 'resource:base64'], ['node_modules/dep/b.bin', 'resource:base64']]),
   })
 
-  const json = JSON.parse(bundle.serializeResources())
+  const json = JSON.parse(bundle.serialize())
   t.assert.equal(json.modules['node_modules/dep'].ecosystem, 'npm')
   t.assert.ok(!Object.hasOwn(json.sources['.'], 'ecosystem'))
 
-  const parsed = Bundle.parseResources(bundle.serializeResources())
+  const parsed = Bundle.parse(bundle.serialize())
   t.assert.equal(parsed.modules.get('node_modules/dep').ecosystem, 'npm')
   t.assert.equal(parsed.modules.get('.').ecosystem, undefined)
 })
@@ -123,8 +126,8 @@ test('lockfiles/bundles predating `ecosystem` still parse (backward compatible)'
     formats: {},
     imports: {},
   })
-  t.assert.doesNotThrow(() => Bundle.parseCode(bundleText))
-  t.assert.equal(Bundle.parseCode(bundleText).modules.get('node_modules/dep').ecosystem, undefined)
+  t.assert.doesNotThrow(() => Bundle.parse(bundleText))
+  t.assert.equal(Bundle.parse(bundleText).modules.get('node_modules/dep').ecosystem, undefined)
 })
 
 test('a non-string `ecosystem` is rejected at parse time', (t) => {
@@ -142,5 +145,5 @@ test('a non-string `ecosystem` is rejected at parse time', (t) => {
     formats: {},
     imports: {},
   })
-  t.assert.throws(() => Bundle.parseCode(bundleText))
+  t.assert.throws(() => Bundle.parse(bundleText))
 })

@@ -24,7 +24,6 @@ const { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } = fs
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
-const FILE_RESOURCES = 'stasis.resources.br'
 
 function readPackageJSON(pkgAbsolute) {
   const buf = readFileSync(pkgAbsolute)
@@ -94,8 +93,7 @@ export class State {
       } else if (
         existsSync(join(cursor, FILE_CONFIG)) ||
         existsSync(join(cursor, FILE_LOCK)) ||
-        existsSync(join(cursor, FILE_CODE)) ||
-        existsSync(join(cursor, FILE_RESOURCES))) {
+        existsSync(join(cursor, FILE_CODE))) {
         throw new Error('Unexpected stasis config without package.json')
       }
 
@@ -117,8 +115,7 @@ export class State {
       const lock = readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
       const sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
       const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
-      const resources = readFileSyncMaybe(rootDir, FILE_RESOURCES)
-      if (config !== null || lock !== null || sources !== null || resources !== null) {
+      if (config !== null || lock !== null || sources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
         loaded = true
         this.root = rootDir
@@ -130,9 +127,6 @@ export class State {
         }
         if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
           throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
-        }
-        if (resources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
-          throw new Error(`Unexpected ${join(rootDir, FILE_RESOURCES)} with config.bundle = 'none'`)
         }
 
         // A frozen bundle is self-attesting -- it verifies disk against the bundle's
@@ -176,37 +170,40 @@ export class State {
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-          const bundle = Bundle.parseCode(brotliDecompressSync(sources).toString('utf-8'))
+          // One unified bundle carries both code and resources. Split the flat file
+          // view into this.sources (code) and this.resources (resource payloads --
+          // raw UTF-8 for 'resource', base64 for 'resource:base64') by format.
+          const bundle = Bundle.parse(brotliDecompressSync(sources).toString('utf-8'))
+          // `Bundle.parse` accepts v0 for offline tooling (`stasis extract`, `diff`,
+          // `audit`, `sbom`) -- it has the metadata those commands need. The runtime
+          // path is stricter: a v0 bundle has no per-file `formats` attestation
+          // (resources can't be distinguished from code, the loader can't pick
+          // module-vs-commonjs) and no import map (resolution edges go unchecked),
+          // so serving / verifying one under `stasis run` would silently widen the
+          // trust boundary. Refuse it explicitly and point at the upgrade path.
+          assert.equal(bundle.version, Bundle.VERSION,
+            `stasis run requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
+            `Re-bundle with the current stasis (\`stasis bundle\`) or \`stasis run --bundle=replace\` ` +
+            `against a v0-free starting point to upgrade.`)
           assert.equal(bundle.config.scope, this.config.scope)
           this.#mergeBundleMetadata(bundle, { lockfileLoaded })
-          this.sources = bundle.sources
+          for (const [file, content] of bundle.sources) {
+            if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
+            else this.sources.set(file, content)
+          }
           this.formats = bundle.formats
           this.imports = bundle.imports
           if (this.config.frozenBundle) {
-            // Snapshot the attested set before addFile/addImport mutate the live
-            // maps. imports is deep-cloned (this.imports shares bundle.imports's
-            // nested Maps, which addImport extends) so the attestation stays fixed;
-            // formats is a flat file->string map, so a shallow copy suffices.
-            this.#bundleSources = new Set(bundle.sources.keys())
+            // Snapshot the attested sets before addFile/addImport mutate the live maps.
+            // imports is deep-cloned (this.imports shares bundle.imports's nested Maps,
+            // which addImport extends); formats is a flat file->string map, so a shallow
+            // copy suffices. Code and resource file sets are tracked separately to match
+            // addFile's per-kind frozen-bundle membership check.
+            this.#bundleSources = new Set(this.sources.keys())
+            this.#bundleResources = new Set(this.resources.keys())
             this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
             this.#bundleFormats = new Map(bundle.formats)
           }
-        }
-
-        if (resources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-          const bundle = Bundle.parseResources(brotliDecompressSync(resources).toString('utf-8'))
-          // v0 resource bundles didn't record scope; only enforce on v1 where it's reliable.
-          if (bundle.version === Bundle.VERSION) {
-            assert.equal(bundle.config.scope, this.config.scope)
-          }
-          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
-          this.resources = bundle.sources
-          // The frozen check for these (addFile's isBinary branch) only fires for callers
-          // that add binary files -- bundler plugins, not the `stasis run` loader, which
-          // covers code imports only (see hooks.js). So under `stasis run` a resources
-          // bundle is required-to-exist and parsed, but its bytes aren't verified against
-          // disk; resource attestation is a build-time (plugin) concern.
-          if (this.config.frozenBundle) this.#bundleResources = new Set(bundle.sources.keys())
         }
       }
     }
@@ -276,13 +273,32 @@ export class State {
       // Formats: the loader picks module<->commonjs and (for *-typescript)
       // whether Node strips type syntax purely from this map, so a tampered
       // bundle can change how hash-valid bytes parse/run without touching a
-      // hash. Every format the bundle declares must match the lockfile's. A
-      // code bundle only carries text files, all of which are formatted, and
-      // the lockfile is a superset of the bundle, so an unattested format is
-      // fatal here (it can only mean a forged entry).
+      // hash. Every format the bundle declares must match the lockfile's. The
+      // bundle's file set is a subset of the lockfile, so an unattested format
+      // is fatal here (it can only mean a forged entry).
       if (this.#lockFormats !== null) {
         for (const [file, format] of bundle.formats) {
           this.#assertAttestedFormat(this.#lockFormats, file, format, { what: 'bundle', source: 'lockfile' })
+        }
+        // Inverse direction: if the lockfile tags a file the bundle carries as a
+        // resource, the bundle MUST declare the matching resource format. Without
+        // this, a tampered bundle could OMIT the resource tag entirely -- State.load
+        // would then see no resource format, route the base64 payload through
+        // `this.sources` (the code path), and hand it to the loader. Caught at the
+        // loader's NODEJS_FORMATS gate too, but checking here surfaces it as a clean
+        // bundle/lockfile mismatch rather than as an opaque "unknown format" later.
+        // (We don't extend this to code formats: doing so would mean asserting
+        // `formats` is total over `modules`, which is a stronger schema invariant
+        // than the historical "format may be missing per file" contract -- and the
+        // code-format hole is closed by the loader allowlist anyway.)
+        for (const [dir, { files }] of bundle.modules) {
+          for (const rel of Object.keys(files)) {
+            const file = dir === '.' ? rel : `${dir}/${rel}`
+            const lockFormat = this.#lockFormats.get(file)
+            if (!Bundle.isResourceFormat(lockFormat)) continue
+            assert.equal(bundle.formats.get(file), lockFormat,
+              `bundle file ${file} must declare format='${lockFormat}' to match the lockfile`)
+          }
         }
       }
     } else {
@@ -290,8 +306,9 @@ export class State {
       for (const [dir, info] of bundle.modules) {
         if (!info.name || !info.version) continue // partial metadata
         if (this.modules.has(dir)) {
-          // Code and resources bundles both populate `state.modules` when no lockfile
-          // is loaded. They must agree on name/version for the same dir.
+          // A unified bundle populates `state.modules` from both its code and resource
+          // entries; if the same dir is added twice (e.g. legacy duplicated metadata)
+          // they must agree on name/version.
           const existing = this.modules.get(dir)
           assert.equal(info.name, existing.name, `bundle ${dir} name mismatch`)
           assert.equal(info.version, existing.version, `bundle ${dir} version mismatch`)
@@ -428,7 +445,23 @@ export class State {
     return splitNodeModulesPath(file) !== null
   }
 
-  addFile(url, { source, format, isEntry, isBinary } = {}) {
+  // `resource: true` (alias: legacy `isBinary: true`) marks the file as a resource
+  // rather than code. Its format is then derived from the bytes: 'resource' for valid
+  // UTF-8 (stored raw, human-readable in the bundle) or 'resource:base64' for binary
+  // (base64-encoded). Code files keep their inferred loader format.
+  addFile(url, { source, format, isEntry, isBinary, resource } = {}) {
+    const asResource = resource === true || isBinary === true
+    // A resource format must not arrive on the code path: 'resource' /
+    // 'resource:base64' identifies asset payloads, which State stores in
+    // `this.resources` with content-derived encoding (UTF-8 vs base64). A caller
+    // who passes the format string without setting resource:true is asking for
+    // a code file tagged as a resource -- nonsense, and exactly the kind of
+    // accidental misclassification the per-file format design is meant to
+    // catch. The reverse (resource:true with a non-resource format) is rejected
+    // below when the content-derived format is checked against any explicit one.
+    if (!asResource && Bundle.isResourceFormat(format)) {
+      throw new Error(`addFile: format '${format}' requires resource: true`)
+    }
     // Canonicalize first: a workspace source linked into node_modules is recorded
     // under its real (non-node_modules) path so it classifies as a source.
     const canonical = this.#canonical(url)
@@ -442,28 +475,32 @@ export class State {
 
     const closestType = closestPkg.type
     assert.ok(closestType === undefined || closestType === 'module' || closestType === 'commonjs')
-    const extToFormat = {
-      __proto__: null,
-      '.json': 'json',
-      '.mjs': 'module',
-      '.cjs': 'commonjs',
-      '.mts': 'module-typescript',
-      '.cts': 'commonjs-typescript',
-    }
-    if (closestType !== undefined) {
-      extToFormat['.js'] = closestType
-      extToFormat['.ts'] = `${closestType}-typescript`
-    }
-    const inferredFormat = extToFormat[extname(file)]
-    if (inferredFormat !== undefined) {
-      if (format != null) assert.equal(format, inferredFormat)
-      else format = inferredFormat
-    } else if (format == null) {
-      // No `type` in the nearest package.json: Node decides .js/.ts by
-      // module-syntax detection, so either variant is legitimate and the
-      // caller's reported format wins. When no format was provided at all
-      // (e.g. bundler plugins), keep the legacy commonjs default.
-      format = { __proto__: null, '.js': 'commonjs', '.ts': 'commonjs-typescript' }[extname(file)]
+    // Resources don't get a loader format inferred from extension/package type --
+    // their format ('resource' / 'resource:base64') is chosen by content below.
+    if (!asResource) {
+      const extToFormat = {
+        __proto__: null,
+        '.json': 'json',
+        '.mjs': 'module',
+        '.cjs': 'commonjs',
+        '.mts': 'module-typescript',
+        '.cts': 'commonjs-typescript',
+      }
+      if (closestType !== undefined) {
+        extToFormat['.js'] = closestType
+        extToFormat['.ts'] = `${closestType}-typescript`
+      }
+      const inferredFormat = extToFormat[extname(file)]
+      if (inferredFormat !== undefined) {
+        if (format != null) assert.equal(format, inferredFormat)
+        else format = inferredFormat
+      } else if (format == null) {
+        // No `type` in the nearest package.json: Node decides .js/.ts by
+        // module-syntax detection, so either variant is legitimate and the
+        // caller's reported format wins. When no format was provided at all
+        // (e.g. bundler plugins), keep the legacy commonjs default.
+        format = { __proto__: null, '.js': 'commonjs', '.ts': 'commonjs-typescript' }[extname(file)]
+      }
     }
 
     // findPackageJSON may land on a `{"type":"module"}`-style sub-bucket
@@ -527,11 +564,19 @@ export class State {
     } else {
       if (source === undefined || source === null) source = readFileSync(absolute)
       assert.ok(Buffer.isBuffer(source))
-      if (!isBinary) assert.ok(isUtf8(source), `File is not UTF-8: ${file}`)
+      if (!asResource) assert.ok(isUtf8(source), `File is not UTF-8: ${file}`)
     }
 
     const buf = typeof source === 'string' ? Buffer.from(source) : source
     assert.deepStrictEqual(readFileSync(absolute), buf)
+
+    // Resource format is content-driven: raw UTF-8 stays 'resource' (don't base64
+    // bytes that are already text); anything else is 'resource:base64'.
+    if (asResource) {
+      const derived = isUtf8(buf) ? 'resource' : 'resource:base64'
+      if (format != null) assert.equal(format, derived, `resource format mismatch for ${file}`)
+      format = derived
+    }
 
     if (isEntry) this.entries.add(file)
     const integrity = sha512integrity(source)
@@ -551,7 +596,7 @@ export class State {
     // scope carve-out matches the lockfile's: node_modules scope doesn't attest
     // workspace files, so they aren't required to be in the bundle.
     if (this.config.frozenBundle && inAttestedZone) {
-      const attested = isBinary ? this.#bundleResources : this.#bundleSources
+      const attested = asResource ? this.#bundleResources : this.#bundleSources
       assert.ok(attested?.has(file), `File not attested by the frozen bundle: ${file}`)
     }
 
@@ -576,8 +621,10 @@ export class State {
     assert.equal(module.files[rel], integrity)
 
     if (this.config.bundle) {
-      if (isBinary) {
-        noupsert(this.resources, file, buf.toString('base64'))
+      if (asResource) {
+        // 'resource' stores the raw UTF-8 string; 'resource:base64' stores base64.
+        const content = format === 'resource:base64' ? buf.toString('base64') : buf.toString('utf8')
+        noupsert(this.resources, file, content)
       } else {
         noupsert(this.sources, file, typeof source === 'string' ? source : source.toString())
       }
@@ -588,9 +635,18 @@ export class State {
 
   getFile(url) {
     const file = this.#canonicalFile(url)
-    const source = this.sources.get(file)
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
-    assert.ok(source !== undefined)
+    // Resources live in this.resources, code in this.sources. Decode per the format:
+    // 'resource:base64' is base64, 'resource' is raw UTF-8, code is raw text.
+    let source
+    if (Bundle.isResourceFormat(format)) {
+      const stored = this.resources.get(file)
+      assert.ok(stored !== undefined)
+      source = format === 'resource:base64' ? Buffer.from(stored, 'base64') : stored
+    } else {
+      source = this.sources.get(file)
+      assert.ok(source !== undefined)
+    }
     // Without a lockfile the bundle is self-attesting: hashes would be derived
     // from the same source bytes we'd then verify, which is a tautology.
     if (this.config.useLockfile) assert.equal(this.hashes.get(file), sha512integrity(source))
@@ -631,8 +687,8 @@ export class State {
     if (this.config.frozen && this.#lockImports !== null) {
       this.#assertAttestedResolution(this.#lockImports, key, parent, specifier, file, { what: 'observed', source: 'lockfile', tolerateUnknown })
     }
-    // A frozen bundle attests resolutions the same way (every code bundle carries
-    // an `imports` map, so #bundleImports is never null once one is loaded). Same
+    // A frozen bundle attests resolutions the same way (every v1 bundle carries an
+    // `imports` map, so #bundleImports is never null once one is loaded). Same
     // redirect protection and node_modules-scope carve-out, anchored in the bundle.
     if (this.config.frozenBundle && this.#bundleImports !== null) {
       this.#assertAttestedResolution(this.#bundleImports, key, parent, specifier, file, { what: 'observed', source: 'frozen bundle', tolerateUnknown })
@@ -749,24 +805,29 @@ export class State {
   }
 
   get sourceBundle() {
+    // One bundle holds both code and resources; merge the two content maps (their key
+    // sets are disjoint -- a file is either code or a resource) and let `formats` tag
+    // which is which. Resource payloads are already encoded per their format. The
+    // disjointness invariant is enforced upstream in addFile via noupsert on
+    // this.formats (a file's format is either a resource one or not, and cannot
+    // change), so an overlap here would be a real bug -- assert it explicitly at
+    // the merge site so the failure is local, not a silently-clobbered value.
+    const contents = new Map(this.sources)
+    for (const [file, content] of this.resources) {
+      assert.ok(!contents.has(file), `state invariant: file ${file} in both sources and resources`)
+      contents.set(file, content)
+    }
     return new Bundle({
       config: this.config.values,
       entries: this.entries,
-      modules: this.#bundleModules(this.sources),
+      modules: this.#bundleModules(contents),
       formats: this.formats,
       imports: this.imports,
     })
   }
 
   get sourceData() {
-    return this.sourceBundle.serializeCode()
-  }
-
-  get resourceData() {
-    return new Bundle({
-      config: this.config.values,
-      modules: this.#bundleModules(this.resources),
-    }).serializeResources()
+    return this.sourceBundle.serialize()
   }
 
   write() {

@@ -51,10 +51,10 @@ const runCli = (args, opts = {}) => {
 // Uses the Solidity bundler (no JS scan involved).
 const buildBundle = async (cwd, entries, out, extra = {}) => {
   await bundleCommand({ cwd, entries, output: out, ...extra })
-  return Bundle.parseCode(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  return Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
 }
 
-// Hand-craft an on-disk bundle from raw JSON, bypassing Bundle.serializeCode --
+// Hand-craft an on-disk bundle from raw JSON, bypassing Bundle.serialize --
 // for malformed/adversarial shapes a real builder would never produce.
 const writeRawBundle = (path, json) => writeFileSync(path, brotliCompressSync(JSON.stringify(json)))
 
@@ -177,7 +177,7 @@ test('extractCommand throws when the bundle file does not exist', withTmp((t, tm
 
 test('extractCommand refuses a bundle whose path escapes the output dir', withTmp((t, tmp) => {
   // Hand-craft a v1 code bundle whose source bucket dir climbs out of the
-  // output dir via mid-path "..". Bundle.parseCode only rejects paths that
+  // output dir via mid-path "..". Bundle.parse only rejects paths that
   // *start* with "..", so this passes parsing; extract must catch it.
   const evil = {
     version: 1,
@@ -419,20 +419,22 @@ test('extractCommand refuses a bundle that contains stasis.lock.json', withTmp((
   t.assert.ok(!existsSync(outDir), 'nothing may be written for a refused bundle')
 }))
 
-test('extractCommand reports a clear error for a file that is not a code bundle', withTmp((t, tmp) => {
-  // A resources bundle has no formats/imports; Bundle.parseCode rejects it via
-  // a message-less assert, which extract must wrap with context.
-  const resources = {
+test('extractCommand reports a clear error for a file that is not a valid stasis bundle', withTmp((t, tmp) => {
+  // A v1 bundle missing the required `formats`/`imports` fields trips Bundle.parse
+  // with a message-less assert; extract must wrap it with context (which file).
+  const malformed = {
     version: 1,
     config: { scope: 'full' },
-    sources: { '.': { name: 'app', version: '0.0.0', files: { 'asset.bin': 'AAAA' } } },
+    entries: ['src/a.js'],
+    sources: { '.': { name: 'app', version: '0.0.0', files: { 'src/a.js': 'export const x = 1\n' } } },
     modules: {},
+    // formats + imports deliberately omitted -- Bundle.parse asserts they are present
   }
-  const bundlePath = join(tmp, 'resources.br')
-  writeRawBundle(bundlePath, resources)
+  const bundlePath = join(tmp, 'malformed.br')
+  writeRawBundle(bundlePath, malformed)
   t.assert.throws(
     () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
-    /not a valid stasis code bundle/,
+    /not a valid stasis bundle/,
   )
 }))
 
@@ -475,3 +477,50 @@ test('CLI: extract accepts the --output= long form', withTmp(async (t, tmp) => {
   t.assert.ok(existsSync(join(outDir, 'src', 'A.sol')))
   t.assert.ok(existsSync(join(outDir, 'stasis.lock.json')))
 }))
+
+test('extractCommand rejects a non-canonical base64 resource (tamper layer below the format tag)', withTmp((t, tmp) => {
+  // The format tag says resource:base64, but the content has non-canonical padding
+  // (or invalid characters Buffer.from would silently drop). assertCanonicalBase64
+  // catches it -- otherwise a tampered bundle could ship an "asset" whose decoded
+  // bytes are attacker-chosen and self-consistently round-trip through extract +
+  // a derived lockfile, even though no honest producer would ever emit them.
+  const malformed = {
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['src/entry.js'],
+    sources: { '.': { name: 'app', version: '0.0.0', files: {
+      'src/entry.js': 'console.log("ok")\n',
+      'src/blob.bin': '!!!not_base64!!!',  // non-canonical: invalid characters
+    } } },
+    modules: {},
+    formats: {
+      'src/entry.js': 'commonjs',
+      'src/blob.bin': 'resource:base64',
+    },
+    imports: {},
+  }
+  const bundlePath = join(tmp, 'lying.br')
+  writeRawBundle(bundlePath, malformed)
+  t.assert.throws(
+    () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
+    /non-canonical base64.*src\/blob\.bin/,
+  )
+}))
+
+test('lockfileFromBundle accepts canonical base64 and produces a hash matching the raw bytes', (t) => {
+  // The honest-producer path: a base64 string that is its own canonical encoding
+  // (no garbage characters, correct padding) round-trips through the assertion
+  // and yields a hash over the DECODED bytes -- the same digest `stasis run`
+  // would have recorded for the raw on-disk file.
+  const raw = Buffer.from([0, 1, 2, 3, 0xff])
+  const b64 = raw.toString('base64')
+  const bundle = new Bundle({
+    config: { scope: 'node_modules' },
+    modules: new Map([
+      ['node_modules/foo', { name: 'foo', version: '1.0.0', files: { 'asset.bin': b64 } }],
+    ]),
+    formats: new Map([['node_modules/foo/asset.bin', 'resource:base64']]),
+  })
+  const lock = lockfileFromBundle(bundle)
+  t.assert.equal(lock.modules.get('node_modules/foo').files['asset.bin'], sha512integrity(raw))
+})

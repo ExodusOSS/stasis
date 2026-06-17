@@ -55,5 +55,6 @@ pnpm-managed `node_modules`). Extract untrusted bundles into a fresh, empty
 directory.
 
 > [!NOTE]
-> `extract` operates on code bundles (`stasis.code.br`). Resource bundles
-> (`stasis.resources.br`) are not handled and are rejected with a clear error.
+> `extract` operates on `stasis.code.br`. Code files are written as their source
+> text; resource files are decoded back to their original bytes (`resource:base64`
+> from base64, `resource` from raw UTF-8) per their `formats` entry.

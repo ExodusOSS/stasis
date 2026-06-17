@@ -18,7 +18,7 @@ const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 // The `@exodus/stasis/sbom` API operates on already-parsed artifacts, so build
 // Lockfile/Bundle instances straight from JSON — no disk, no brotli.
 const lockOf = (obj) => Lockfile.parse(JSON.stringify(obj))
-const codeOf = (obj) => Bundle.parseCode(JSON.stringify(obj))
+const codeOf = (obj) => Bundle.parse(JSON.stringify(obj))
 
 // A scope=full lockfile object: one workspace root + two node_modules deps (one
 // scoped). Legacy shape — no per-dependency `ecosystem` field.

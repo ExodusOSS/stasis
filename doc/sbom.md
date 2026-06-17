@@ -1,8 +1,8 @@
 # `stasis sbom`
 
 `stasis sbom` exports a Software Bill of Materials (SBOM) from one or more
-stasis lockfiles (`stasis.lock.json`) and/or bundles (`stasis.code.br`,
-`stasis.resources.br`). It reads the same artifacts as `stasis audit` and emits
+stasis lockfiles (`stasis.lock.json`) and/or bundles (`stasis.code.br`). It
+reads the same artifacts as `stasis audit` and emits
 the package inventory they record in a standard, tool-agnostic format.
 
 ```sh
@@ -74,7 +74,7 @@ supplies the artifacts — so it stays light enough to use anywhere:
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
 
-const bundle = Bundle.parseCode(json) // you read/decompress the artifact yourself
+const bundle = Bundle.parse(json) // you read/decompress the artifact yourself
 const doc = sbom('cyclonedx', [bundle]) // → a CycloneDX document (plain object)
 
 // …or step by step:

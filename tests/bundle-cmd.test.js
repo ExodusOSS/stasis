@@ -342,14 +342,14 @@ test('outermostDir handles paths that escape cwd (e.g. via a remapping with ../)
   t.assert.equal(outermostDir(['../deps/B.sol'], '/cwd'), '../deps')
 })
 
-test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips through Bundle.parse', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
   const buf = readFileSync(outPath)
   // First byte of plain JSON is '{' (0x7b); brotli output must not start with that.
   t.assert.notEqual(buf[0], 0x7b)
   const text = brotliDecompressSync(buf).toString('utf8')
-  const parsed = Bundle.parseCode(text)
+  const parsed = Bundle.parse(text)
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -423,7 +423,7 @@ test('CLI: bundle writes a brotli-compressed Bundle to stasis.code.br by default
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const buf = readFileSync(join(tmp, 'stasis.code.br'))
   t.assert.notEqual(buf[0], 0x7b, 'output must be brotli, not JSON')
-  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(buf).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -441,7 +441,7 @@ test('CLI: bundle writes a brotli-compressed Bundle to stdout with --output=-', 
   t.assert.equal(r.status, 0, `stderr: ${r.stderr.toString('utf8')}`)
   t.assert.notEqual(r.stdout[0], 0x7b, 'stdout must be brotli, not JSON')
   t.assert.ok(!existsSync(join(fixtures, 'basic', 'stasis.code.br')), '--output=- must not write a file')
-  const parsed = Bundle.parseCode(brotliDecompressSync(r.stdout).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(r.stdout).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -455,7 +455,7 @@ test('CLI: bundle -o writes a brotli-compressed Bundle to the given path', withT
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const buf = readFileSync(outPath)
   t.assert.notEqual(buf[0], 0x7b)
-  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(buf).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.sol'])
 }))
 
@@ -466,7 +466,7 @@ test('CLI: bundle --mapping=remappings.txt resolves @-prefixed imports', withTmp
     { cwd: join(fixtures, 'with-remappings-txt') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['lib/openzeppelin-contracts/contracts/utils/Math.sol', 'src/A.sol'],
@@ -481,7 +481,7 @@ test('CLI: bundle --mapping=foundry.toml resolves @-prefixed imports', withTmp((
     { cwd: join(fixtures, 'with-foundry-toml') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
     ['lib/openzeppelin-contracts/contracts/utils/Math.sol', 'src/A.sol'],
@@ -542,7 +542,7 @@ test('CLI: bundle accepts multiple .sol entries', withTmp((t, tmp) => {
     { cwd: join(fixtures, 'shared') },
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries].toSorted(), ['src/A.sol', 'src/B.sol'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -760,12 +760,12 @@ test('buildPhpBundle throws when an entry file is missing on disk', async (t) =>
   )
 })
 
-test('bundleCommand writes a brotli-compressed PHP Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+test('bundleCommand writes a brotli-compressed PHP Bundle that round-trips through Bundle.parse', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: join(phpFixtures, 'basic'), entries: ['src/A.php'], output: outPath })
   const buf = readFileSync(outPath)
   t.assert.notEqual(buf[0], 0x7b)
-  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(buf).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.php'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -781,7 +781,7 @@ test('CLI: bundle accepts .php entries and writes a Bundle', withTmp((t, tmp) =>
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'src/A.php'], { cwd: join(phpFixtures, 'basic') })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/A.php'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -838,7 +838,7 @@ test('CLI: bundle accepts a .ts entry and records type-stripping formats', withT
   const r = runCli(['bundle', '-o', outPath, 'src/entry.ts'], { cwd: tsFixture })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stderr, /\[stasis\] Bundled 2 files in 1 package from src to /)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/entry.ts'])
   t.assert.deepEqual(
     Object.keys(parsed.modules.get('.').files).toSorted(),
@@ -862,7 +862,7 @@ test('CLI: bundle allows mixing .ts and .js entries (both are JS-family)', withT
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'a.ts', 'b.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries].toSorted(), ['a.ts', 'b.js'])
   t.assert.equal(parsed.formats.get('a.ts'), 'module-typescript')
   t.assert.equal(parsed.formats.get('b.js'), 'module')
@@ -905,7 +905,7 @@ test('CLI: a .ts entry with ESM syntax in a typeless package bundles with the de
   const bundlePath = join(tmp, 'snap.br')
   const build = runCli(['bundle', `--output=${bundlePath}`, 'entry.ts'], { cwd: tmp })
   t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
   t.assert.equal(parsed.formats.get('entry.ts'), 'module-typescript')
   t.assert.equal(parsed.formats.get('hello.ts'), 'module-typescript')
 
@@ -928,7 +928,7 @@ test('CLI: a commonjs-typescript bundle (.ts requiring .cts) runs via --bundle=l
   const bundlePath = join(tmp, 'snap.br')
   const build = runCli(['bundle', `--output=${bundlePath}`, 'entry.ts'], { cwd: tmp })
   t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
   t.assert.equal(parsed.formats.get('entry.ts'), 'commonjs-typescript')
   t.assert.equal(parsed.formats.get('hello.cts'), 'commonjs-typescript')
 
@@ -1387,10 +1387,10 @@ test('CLI: bundle (bash) exits non-zero and writes no output on an unresolved sc
   t.assert.ok(!existsSync(outPath), 'output must not be written when bundling fails')
 }))
 
-test('bundleCommand writes a bash Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+test('bundleCommand writes a bash Bundle that round-trips through Bundle.parse', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'], output: outPath })
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['main.sh'])
   t.assert.deepEqual(Object.keys(parsed.modules.get('.').files).toSorted(), ['lib.sh', 'main.sh'])
   t.assert.equal(parsed.formats.get('main.sh'), 'bash')
@@ -1403,7 +1403,7 @@ test('CLI: bundle writes a brotli-compressed Bundle for a .sh entry', withTmp((t
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const buf = readFileSync(outPath)
   t.assert.notEqual(buf[0], 0x7b)
-  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(buf).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['main.sh'])
   t.assert.equal(parsed.imports.get('bash').get('main.sh').get('./lib.sh'), 'lib.sh')
 }))
@@ -1554,10 +1554,10 @@ test('CLI: bundle (rust) exits non-zero and writes no output on an unresolvable 
   t.assert.ok(!existsSync(outPath), 'output must not be written when bundling fails')
 }))
 
-test('bundleCommand writes a rust Bundle that round-trips through Bundle.parseCode', withTmp(async (t, tmp) => {
+test('bundleCommand writes a rust Bundle that round-trips through Bundle.parse', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: join(rustFixtures, 'use-crate'), entries: ['src/main.rs'], output: outPath })
-  const parsed = Bundle.parseCode(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/main.rs'])
   t.assert.deepEqual(Object.keys(parsed.modules.get('.').files).toSorted(), ['src/bar.rs', 'src/foo.rs', 'src/main.rs'])
   t.assert.equal(parsed.formats.get('src/main.rs'), 'rust')
@@ -1570,7 +1570,7 @@ test('CLI: bundle writes a brotli-compressed Bundle for a .rs entry', withTmp((t
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const buf = readFileSync(outPath)
   t.assert.notEqual(buf[0], 0x7b)
-  const parsed = Bundle.parseCode(brotliDecompressSync(buf).toString('utf8'))
+  const parsed = Bundle.parse(brotliDecompressSync(buf).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['src/main.rs'])
   t.assert.equal(parsed.imports.get('rust').get('src/main.rs').get('mod foo'), 'src/foo.rs')
 }))
@@ -1651,7 +1651,7 @@ test('buildBundle dispatches .sol entries to the Solidity builder and returns an
   const bundle = await buildBundle({ cwd, entries: ['src/A.sol'] })
   t.assert.ok(bundle instanceof Bundle)
   const expected = await buildSolidityBundle({ cwd, entries: ['src/A.sol'] })
-  t.assert.equal(bundle.serializeCode(), expected.serializeCode())
+  t.assert.equal(bundle.serialize(), expected.serialize())
 })
 
 test('buildBundle passes the mapping file through to the Solidity builder', async (t) => {
@@ -1699,7 +1699,7 @@ test('buildBundle builds a JS Bundle identical to what bundleCommand writes, wit
   const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: tmp, entries: ['a.js'], output: outPath })
   const written = brotliDecompressSync(readFileSync(outPath)).toString('utf8')
-  t.assert.equal(bundle.serializeCode(), written)
+  t.assert.equal(bundle.serialize(), written)
 }))
 
 test('buildBundle rejects an empty entry list', async (t) => {

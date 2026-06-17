@@ -8,25 +8,53 @@ import { sha512integrity } from '@exodus/stasis-core/state.util'
 
 const FILE_LOCK = 'stasis.lock.json'
 
-// Re-derive a Lockfile from an already-parsed code Bundle. A bundle records the
-// UTF-8 source bytes of every file; a lockfile records their SRI digests. Both
+// Re-derive a Lockfile from an already-parsed Bundle. A bundle records each file's
+// content (UTF-8 source for code / 'resource', base64 for 'resource:base64'); a
+// lockfile records each file's SRI digest -- always taken over the same UTF-8
+// bytes the bundle stored (since the lockfile hashes the lockfile-visible content
+// without decoding). Both
 // share the same per-package bucket shape (name/version/files) plus the
 // entries/config metadata, so the conversion is just "hash each file's bytes"
 // while carrying everything else across verbatim.
 //
-// Requires a v1 bundle: v0 records no package name/version (parseCode infers
+// Requires a v1 bundle: v0 records no package name/version (Bundle.parse infers
 // buckets with null metadata), and Lockfile.serialize must attest both for
 // every node_modules bucket.
 //
 // The digest is taken over the same UTF-8 bytes we write to disk, so it equals
 // what `stasis run --lock=add` would record for the extracted tree and what
 // `stasis prune` recomputes when validating it.
+// Reject a 'resource:base64' content string that isn't canonical base64. Buffer.from
+// silently drops invalid characters and accepts non-canonical padding, so a tampered
+// bundle could ship `XXXX_invalid_chars==` and have the decoded bytes hash to whatever
+// it wanted -- the result would still self-consistently round-trip through `extract`
+// (decode → write → re-hash → match), but the on-disk file would diverge from what
+// any honest producer would have written. Fail closed at the schema-boundary by
+// requiring decode → re-encode to be a fixed point.
+function assertCanonicalBase64(content, file) {
+  const buf = Buffer.from(content, 'base64')
+  if (buf.toString('base64') !== content) {
+    throw new Error(`extract: non-canonical base64 in resource:base64 content for ${file}`)
+  }
+  return buf
+}
+
 export function lockfileFromBundle(bundle) {
   const modules = new Map()
   for (const [dir, { name, version, ecosystem, files }] of bundle.modules) {
     const hashed = Object.create(null)
     for (const [rel, content] of Object.entries(files)) {
-      hashed[rel] = sha512integrity(content)
+      // The lockfile records sha512 of each file's raw on-disk bytes -- the same
+      // hash `stasis run` produces. The bundle stores 'resource:base64' files as
+      // base64 text, so we decode back to the raw bytes before hashing; code and
+      // 'resource' files are stored as raw UTF-8 and hash identically either way
+      // (Node hashes a string as its UTF-8 bytes). assertCanonicalBase64 closes
+      // the lying-tag hole: a non-canonical base64 string is rejected outright.
+      const file = dir === '.' ? rel : `${dir}/${rel}`
+      const bytes = bundle.formats.get(file) === 'resource:base64'
+        ? assertCanonicalBase64(content, file)
+        : content
+      hashed[rel] = sha512integrity(bytes)
     }
     // Carry the dependency `ecosystem` across so the derived lockfile records the
     // same ecosystem tag the bundle did.
@@ -35,7 +63,7 @@ export function lockfileFromBundle(bundle) {
       : { name, version, ecosystem, files: hashed })
   }
   // Carry the bundle's resolution + format maps across so the derived lockfile
-  // attests them too (parseCode already validated the paths) -- without them
+  // attests them too (Bundle.parse already validated the paths) -- without them
   // the lockfile would be a legacy bytes-only one, and a later frozen run
   // against the same bundle would skip the resolution/format cross-checks.
   return new Lockfile({
@@ -63,15 +91,15 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
 
   let bundle
   try {
-    bundle = Bundle.parseCode(brotliDecompressSync(readFileSync(bundleAbs)).toString('utf-8'))
+    bundle = Bundle.parse(brotliDecompressSync(readFileSync(bundleAbs)).toString('utf-8'))
   } catch (cause) {
-    // Bundle.parseCode rejects non-code shapes (e.g. a stasis.resources.br fed
-    // by mistake) with bare message-less asserts; wrap so the user sees which
-    // file failed instead of an empty error.
-    throw new Error(`extract: not a valid stasis code bundle: ${bundleAbs}`, { cause })
+    // Bundle.parse rejects malformed shapes (e.g. a lockfile JSON fed by mistake,
+    // or a brotli blob that isn't a stasis bundle) with bare message-less asserts;
+    // wrap so the user sees which file failed instead of an empty error.
+    throw new Error(`extract: not a valid stasis bundle: ${bundleAbs}`, { cause })
   }
 
-  // v0 legacy bundles record no package name/version (parseCode infers buckets
+  // v0 legacy bundles record no package name/version (Bundle.parse infers buckets
   // with null metadata), so no lockfile can be restored from them:
   // Lockfile.serialize requires both for every node_modules bucket, and a
   // null-metadata workspace entry would be rejected later by State.addFile's
@@ -117,7 +145,14 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
         throw new Error(`extract: bundle contains ${FILE_LOCK}, which would collide with the derived lockfile`)
       }
       targets.add(abs)
-      writes.push([abs, content])
+      // Resources are decoded back to their original bytes: 'resource:base64' from
+      // base64 (rejected if non-canonical -- a tampered bundle can't ship lying
+      // padding/invalid-char base64), 'resource' (and code) is written as the raw
+      // UTF-8 string.
+      const data = bundle.formats.get(file) === 'resource:base64'
+        ? assertCanonicalBase64(content, file)
+        : content
+      writes.push([abs, data])
     }
   }
   // A planned file may not also be needed as a parent directory of another --

@@ -20,8 +20,18 @@ const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 // Lockfile/Bundle instances straight from JSON — no disk, no brotli — and tag
 // each with the kind the CLI's loader would have reported.
 const lockOf = (obj) => ({ artifact: Lockfile.parse(JSON.stringify(obj)), kind: 'lockfile' })
-const codeOf = (obj) => ({ artifact: Bundle.parseCode(JSON.stringify(obj)), kind: 'code' })
-const resourcesOf = (obj) => ({ artifact: Bundle.parseResources(JSON.stringify(obj)), kind: 'resources' })
+const codeOf = (obj) => ({ artifact: Bundle.parse(JSON.stringify(obj)), kind: 'bundle' })
+// A resources bundle is now just a unified bundle whose files are all tagged as
+// base64 resources. Synthesize the formats map so the fixtures stay terse.
+const resourcesOf = ({ config = { scope: 'full' }, sources = {}, modules = {} }) => {
+  const formats = {}
+  for (const [dir, info] of [...Object.entries(sources), ...Object.entries(modules)]) {
+    for (const rel of Object.keys(info.files)) formats[dir === '.' ? rel : `${dir}/${rel}`] = 'resource:base64'
+  }
+  const obj = { version: 1, config, modules, formats, imports: {} }
+  if (config.scope === 'full') obj.sources = sources // node_modules scope must omit sources
+  return { artifact: Bundle.parse(JSON.stringify(obj)), kind: 'bundle' }
+}
 
 // The diff API doesn't pull in crypto; the caller injects the hash. Tests that
 // compare a bundle pass the canonical `sha512integrity` here.
@@ -311,17 +321,20 @@ test('diffImports unions targets across conditions for a (parent, specifier)', (
   }])
 })
 
-test('diffImports treats a resource bundle as not attesting resolutions', (t) => {
-  // A resource bundle carries an empty imports Map, not null — the kind guard,
-  // not the `?? null` fallback, is what marks it not-attested.
+test('a resource-only bundle attests an empty import set (unified format always carries imports)', (t) => {
+  // Collapse removed the separate resources-bundle shape: a unified bundle always
+  // carries an `imports` map (empty for a resources-only bundle), so it attests an
+  // empty resolution set rather than "not attesting" at all. Diffed against a
+  // lockfile that records one edge, that edge surfaces as a single difference.
   const res = resourcesOf({
-    version: 1, config: { scope: 'node_modules' },
+    config: { scope: 'node_modules' },
     modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'a.bin': Buffer.from('x').toString('base64') } } },
   })
   const withEdges = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/a.js' } } })
   const diff = diffArtifacts(res, lockOf(withEdges), { imports: true, hash: sha512integrity })
-  t.assert.equal(diff.imports.attested.left, false)
-  t.assert.equal(diff.imports.added.length + diff.imports.removed.length + diff.imports.changed.length, 0)
+  t.assert.equal(diff.imports.attested.left, true)
+  t.assert.equal(diff.imports.attested.right, true)
+  t.assert.equal(diff.imports.added.length + diff.imports.removed.length + diff.imports.changed.length, 1)
 })
 
 test('diffArtifacts skips the import diff (without flipping hasDifferences) when a side does not attest imports', (t) => {
@@ -518,7 +531,7 @@ test('diff --stat reads a brotli bundle as either operand', withTmp((t, tmp) => 
   }, 'stasis.code.br')
   const r = runCli(['diff', '--stat', lock, bundle])
   t.assert.equal(r.status, 0, r.stderr)
-  t.assert.match(r.stdout, /code bundle/)
+  t.assert.match(r.stdout, /bundle/)
   t.assert.match(r.stdout, /No differences/)
 }))
 
@@ -538,21 +551,24 @@ test('diff --stat surfaces a clean error for an unparseable operand', withTmp((t
   t.assert.match(r.stderr, /Failed to parse stasis lockfile/)
 }))
 
-test('diff --stat reads two resource bundles (.resources.br) off disk', withTmp((t, tmp) => {
-  // Resource bundles store base64 blobs; the CLI must route them through
-  // parseResources (no formats key) and the diff rehashes the decoded bytes.
+test('diff --stat reads two resource-carrying bundles off disk', withTmp((t, tmp) => {
+  // Resources live in the unified bundle, tagged 'resource:base64'; the diff decodes
+  // each base64 blob per its format and rehashes the decoded bytes.
   const asset = (s) => Buffer.from(s).toString('base64')
+  const fmts = { 'node_modules/foo/a.bin': 'resource:base64', 'node_modules/foo/b.bin': 'resource:base64' }
   const a = writeBundle(tmp, {
     version: 1, config: { scope: 'node_modules' },
     modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'a.bin': asset('one'), 'b.bin': asset('shared') } } },
-  }, 'a.resources.br')
+    formats: fmts, imports: {},
+  }, 'a.code.br')
   const b = writeBundle(tmp, {
     version: 1, config: { scope: 'node_modules' },
     modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'a.bin': asset('two'), 'b.bin': asset('shared') } } },
-  }, 'b.resources.br')
+    formats: fmts, imports: {},
+  }, 'b.code.br')
   const r = runCli(['diff', '--stat', a, b])
   t.assert.equal(r.status, 1)
-  t.assert.match(r.stdout, /resource bundle/)
+  t.assert.match(r.stdout, /bundle/)
   // a.bin content changed, b.bin identical
   t.assert.match(r.stdout, /Files \(within shared modules\): 0 added, 0 removed, 1 differing/)
   t.assert.match(r.stdout, /\* node_modules\/foo\/a\.bin/)

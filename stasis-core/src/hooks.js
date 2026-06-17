@@ -8,9 +8,42 @@ import { State } from './state.js'
 
 // Warning: only covers code imports, not file reads
 
-// Formats produced by the non-JS source bundlers (Solidity/PHP/Bash/Rust).
-// These bundles are inspection artifacts, not runnable by Node's module loader.
-const NON_EXECUTABLE_FORMATS = new Set(['solidity', 'php', 'bash', 'rust'])
+// Formats Node's module loader recognizes (and either executes, like `module`/
+// `commonjs`/typescript variants, or imports as data, like `json`). The runtime
+// loader treats this as the trust boundary -- a file served from the bundle whose
+// attested format is outside this allowlist is refused at load time (and earlier
+// at resolve, where applicable) with a contextual message. Adding a tag here
+// means "Node can handle it"; everything else (resource/asset content,
+// source-language bundles, an unknown string from a tampered or newer bundle)
+// fails closed.
+const NODEJS_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript'])
+
+// Per-kind messages for the few categories we recognize; everything else gets a
+// generic "unrecognized format" message. Kept separate from NODEJS_FORMATS so
+// the allowlist stays the single trust gate and the message is just UX.
+const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'bash', 'rust'])
+const RESOURCE_FORMATS = new Set(['resource', 'resource:base64'])
+
+function refuseNonNodeFormat(format, url) {
+  if (NON_NODE_SOURCE_LANGUAGES.has(format)) {
+    throw new Error(
+      `[stasis] cannot execute a '${format}' bundle: ${format} bundles are ` +
+      `produced for external analysis, not for 'stasis run --bundle=load' (${url})`
+    )
+  }
+  if (RESOURCE_FORMATS.has(format)) {
+    throw new Error(
+      `[stasis] cannot import a resource file ('${format}'): asset content is not ` +
+      `executable JavaScript. Read it with fs (or your bundler's asset loader) instead (${url})`
+    )
+  }
+  // Unknown format string: usually a tampered or forward-incompatible bundle.
+  throw new Error(
+    `[stasis] cannot execute '${url}': attested format '${format}' is not a Node loader ` +
+    `format. The bundle may be tampered, produced by a newer stasis, or built for a ` +
+    `non-Node consumer.`
+  )
+}
 
 let state
 let saved = false
@@ -80,16 +113,14 @@ function load(url, context, nextLoad) {
     // hash-valid file. Without a lockfile the bundle is self-authoritative for formats
     // just as it is for bytes (see getFile's hash carve-out).
     if (context.format != null) assert.equal(format, context.format)
-    // Non-JS bundles (`stasis bundle` of .sol/.php/.sh/.bash/.rs) tag files with
-    // their source language. They're artifacts for external analysis, not
-    // executable by Node — surface that clearly instead of an opaque
-    // format assertion if one is ever loaded via `--bundle=load`.
-    if (NON_EXECUTABLE_FORMATS.has(format)) {
-      throw new Error(`[stasis] cannot execute a '${format}' bundle: ${format} bundles are produced for external analysis, not for 'stasis run --bundle=load' (${url})`)
-    }
-    // *-typescript formats are produced by `stasis bundle` for .ts/.cts/.mts
-    // sources; Node's own translators strip the types after this hook returns.
-    assert.ok(['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript'].includes(format))
+    // Trust gate: the loader will only serve a file whose attested format Node
+    // can actually execute. Resource assets (`resource`, `resource:base64`),
+    // source-language bundles (solidity/php/bash/rust), and any unknown string
+    // a tampered or forward-incompatible bundle might smuggle through all fail
+    // closed here with a contextual message -- never as an opaque assertion.
+    // *-typescript formats are in the allowlist: Node's own translators strip
+    // the types after this hook returns.
+    if (!NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
     return { source, format, shortCircuit: true }
   }
 
@@ -164,13 +195,21 @@ function resolve(specifier, context, nextResolve) {
     // doesn't need to exist on disk.
     if (parentURL && !specifier.startsWith('file:')) {
       const { url, format } = state.getImport(parentURL, specifier, { conditions, importAttributes })
+      // Refuse a non-executable target at resolve time too. Catches the same
+      // tampered/asset cases load() catches, just earlier and with the parent
+      // module's URL in the stack trace for easier diagnosis. The load gate
+      // remains the load-bearing one (a sibling resolver could deliver a target
+      // that bypasses this branch); we throw here as a friendlier failure point.
+      if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
       return { url, format, importAttributes: undefined, shortCircuit: true }
     }
     const url = specifier.startsWith('file:')
       ? specifier
       : pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
     if (!parentURL && state.config.full) state.assertEntry(url)
-    return { url, format: state.getFormat(url), importAttributes: undefined, shortCircuit: true }
+    const format = state.getFormat(url)
+    if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
+    return { url, format, importAttributes: undefined, shortCircuit: true }
   }
 
   const res = nextResolve(specifier)
