@@ -6,6 +6,8 @@
   "exports": {
     "./esbuild": "./src/esbuild.js",
     "./webpack": "./src/webpack.js",
+    "./metro": "./src/metro.js",
+    "./metro-transformer": "./src/metro-transformer.js",
     "./loader": "./src/loader.js",
     "./mock": "./src/mock.js",
     "./bundle": "./src/bundle.js",
@@ -36,6 +38,8 @@
     "src/loaders/solidity.js",
     "src/loaders/php.js",
     "src/lockfile.js",
+    "src/metro.js",
+    "src/metro-transformer.js",
     "src/mock.js",
     "src/parse.js",
     "src/prune.js",
