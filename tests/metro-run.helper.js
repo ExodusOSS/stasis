@@ -7,10 +7,11 @@
 // never imports its bundler; it only consumes the module graph Metro hands a
 // serializer. So instead of running a real Metro build, this helper builds a
 // FAITHFUL MOCK of Metro's ReadOnlyGraph from a JSON manifest and feeds it to the
-// plugin exactly as Metro's serializer hook would. The mock mirrors the real shape
-// the plugin reads: `graph.dependencies` (Map<absPath, Module>), `graph.entryPoints`
-// (Set<absPath>), and per-module `path` / `dependencies` (Map<key, { absolutePath,
-// data: { name } }>) / `getSource()` / `output`.
+// plugin exactly as Metro's serializer would. The mock mirrors the real shape the
+// plugin reads: `graph.dependencies` (Map<absPath, Module>), `graph.entryPoints`
+// (Set<absPath>), per-module `path` / `dependencies` (Map<opaqueKey, { absolutePath,
+// data: { name } }>) / `getSource()` / `output`, and the separate `preModules` array
+// the customSerializer receives.
 //
 // Like the webpack/esbuild helpers, a preload State is constructed first (mirroring
 // the plugin's options) so resolvePluginState lands in the reuse path; set
@@ -18,14 +19,15 @@
 //
 // Usage: node tests/metro-run.helper.js <entry> [<entry>...]
 // STASIS_TEST_METRO_GRAPH (JSON, required) -- the module graph manifest:
-//     { "modules": [ { "path": "src/entry.js", "deps": [["./hello.js","src/hello.js"]] }, ... ] }
+//     { "modules": [ { "path": "src/entry.js", "deps": [["./hello.js","src/hello.js"]] }, ... ],
+//       "preModules": [ { "path": "runtime/polyfill.js", "deps": [] }, ... ] }
 //   `path` and each dep target are project-relative and resolved against cwd; each
-//   dep is a [specifier, targetRelativePath] pair. A dep target of null models an
-//   unresolved/virtual edge (absolutePath left undefined).
+//   dep is a [specifier, targetRelativePath] pair (target null = unresolved/virtual edge).
+//   `preModules` (optional) models Metro's prepended polyfills/runtime.
+// STASIS_TEST_METRO_MODE -- 'hook' (default) | 'customSerializer' | 'withStasis'.
 // STASIS_TEST_PLUGIN_OPTIONS (JSON)  -- routes through the plugin's options.
 // STASIS_TEST_PRELOAD_OPTIONS (JSON) -- overrides what the preload sees (sidecar/rule 6).
 // STASIS_TEST_PRELOAD=0              -- disables the preload State entirely.
-// STASIS_TEST_METRO_WRAP=1           -- exercise wrapSerializer() instead of serializerHook.
 
 import { resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
@@ -61,12 +63,11 @@ if (sourceForPreload) {
 const preloadDisabled = process.env.STASIS_TEST_PRELOAD === '0'
 const _preload = preloadDisabled ? undefined : new State(process.cwd(), preloadOptions)
 
-const { StasisMetro } = await import('../stasis/src/metro.js')
+const { StasisMetro, withStasis } = await import('../stasis/src/metro.js')
 
-// Build the Metro-shaped mock graph from the manifest.
+// Build the Metro-shaped mock modules from the manifest.
 const abs = (rel) => resolve(process.cwd(), rel)
-const dependencies = new Map()
-for (const mod of manifest.modules) {
+const buildModule = (mod) => {
   const modPath = abs(mod.path)
   const deps = new Map()
   let depIndex = 0
@@ -78,30 +79,47 @@ for (const mod of manifest.modules) {
     const absolutePath = targetRel == null ? undefined : abs(targetRel)
     deps.set(`dep${depIndex++}`, { absolutePath, data: { name: specifier } })
   }
-  dependencies.set(modPath, {
+  return {
     path: modPath,
     dependencies: deps,
     getSource: () => readFileSync(modPath),
     output: [{ type: 'js/module', data: { code: '/* mock */', lineCount: 1, map: [] } }],
-  })
+  }
 }
+
+const dependencies = new Map()
+for (const mod of manifest.modules) {
+  const m = buildModule(mod)
+  dependencies.set(m.path, m)
+}
+const preModules = (manifest.preModules ?? []).map(buildModule)
 const graph = {
   dependencies,
   entryPoints: new Set(entries.map((e) => abs(e))),
   transformOptions: { platform: 'ios', dev: false, type: 'module' },
 }
-const delta = { added: dependencies, modified: new Map(), deleted: new Set() }
+const delta = { added: dependencies, modified: new Map(), deleted: new Set(), reset: true }
 
+// A mock base serializer (Metro's customSerializer contract): records what it received so
+// tests can confirm delegation + that preModules were forwarded, and returns {code, map}.
+const baseSerializer = (entryPoint, pre, g, _options) =>
+  ({ code: `// stasis base: ${g.dependencies.size} modules, ${pre.length} preModules\n`, map: '' })
+
+const entryAbs = abs(entries[0])
+const mode = process.env.STASIS_TEST_METRO_MODE || 'hook'
 const stasis = new StasisMetro(pluginOptions)
 
-if (process.env.STASIS_TEST_METRO_WRAP === '1') {
-  // wrapSerializer must capture AND delegate to the base serializer for output.
-  const base = (_entryPoint, _preModules, g, _options) => ({ code: `// stasis-wrapped ${g.dependencies.size} modules\n`, map: '' })
-  const customSerializer = stasis.wrapSerializer(base)
-  const out = customSerializer(entries[0] ? abs(entries[0]) : '', [], graph, {})
-  // Surface the base serializer's output so the test can confirm it round-tripped.
+if (mode === 'customSerializer') {
+  const out = stasis.customSerializer(baseSerializer)(entryAbs, preModules, graph, {})
+  process.stdout.write(typeof out === 'string' ? out : out.code)
+} else if (mode === 'withStasis') {
+  // withStasis builds its OWN StasisMetro(pluginOptions) (which reuses the preload) and
+  // wires it onto the config's customSerializer, wrapping the base we provide.
+  const config = withStasis({ serializer: { customSerializer: baseSerializer } }, pluginOptions ?? {})
+  const out = config.serializer.customSerializer(entryAbs, preModules, graph, {})
   process.stdout.write(typeof out === 'string' ? out : out.code)
 } else {
+  // experimentalSerializerHook signature: (graph, delta) -- no preModules.
   stasis.serializerHook(graph, delta)
 }
 

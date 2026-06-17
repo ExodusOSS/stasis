@@ -14,7 +14,7 @@
 
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -479,21 +479,85 @@ test('resources rejects code extensions', withTmp((t, tmp) => {
   t.assert.match(r.stderr, /resources entry 'js' is a code extension/)
 }))
 
-// ----- Metro-specific: serializer wiring + virtual modules ----------------------------
+// ----- Metro-specific: serializer wiring, preModules, virtual modules -----------------
 
-test('wrapSerializer captures the graph and delegates to the base serializer for output', withTmp((t, tmp) => {
+const POLYFILL_GRAPH = {
+  modules: FULL_GRAPH.modules,
+  // Models Metro's prepended runtime/polyfills -- a real on-disk file the customSerializer
+  // receives as `preModules` (created by the tests via writeFileSync).
+  preModules: [{ path: 'runtime/polyfill.js', deps: [] }],
+}
+const writePolyfill = (tmp) => {
+  mkdirSync(join(tmp, 'runtime'))
+  writeFileSync(join(tmp, 'runtime', 'polyfill.js'), 'globalThis.__polyfilled = true\n')
+}
+
+test('customSerializer captures the graph and delegates to the base serializer for output', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   rmSync(join(tmp, 'stasis.lock.json'))
 
   const r = run('src/entry.js', {
     cwd: tmp,
-    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_METRO_WRAP: '1' },
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_METRO_MODE: 'customSerializer' },
   })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   // Base serializer's output round-trips through the wrapper (proves delegation).
-  t.assert.match(r.stdout, /stasis-wrapped 2 modules/)
-  // ...and capture still happened.
+  t.assert.match(r.stdout, /stasis base: 2 modules/)
   const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.sources['.'].files['src/hello.js'].startsWith('sha512-'))
+}))
+
+test('customSerializer captures preModules (polyfills/runtime), not just the app graph', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writePolyfill(tmp)
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_METRO_MODE: 'customSerializer' },
+    graph: POLYFILL_GRAPH,
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /1 preModules/, 'the preModule was forwarded to the base serializer')
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.sources['.'].files['runtime/polyfill.js'].startsWith('sha512-'), 'preModule is hash-attested')
+  t.assert.ok(lock.sources['.'].files['src/entry.js'].startsWith('sha512-'), 'app graph still attested')
+}))
+
+test('serializerHook does not see preModules (documented lower coverage)', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writePolyfill(tmp)
+
+  // Metro never passes preModules to experimentalSerializerHook, so the helper's hook path
+  // doesn't forward them and the polyfill stays unattested -- the tradeoff that makes
+  // withStasis/customSerializer the recommended surface.
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_METRO_MODE: 'hook' },
+    graph: POLYFILL_GRAPH,
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.equal(lock.sources['.'].files['runtime/polyfill.js'], undefined, 'hook path leaves preModules unattested')
+  t.assert.ok(lock.sources['.'].files['src/entry.js'].startsWith('sha512-'), 'app graph still attested')
+}))
+
+test('withStasis wires customSerializer, wraps the existing one, and captures graph + preModules', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writePolyfill(tmp)
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_METRO_MODE: 'withStasis' },
+    graph: POLYFILL_GRAPH,
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  // The existing base customSerializer still produced the bundle output (delegation).
+  t.assert.match(r.stdout, /stasis base: 2 modules, 1 preModules/)
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.sources['.'].files['runtime/polyfill.js'].startsWith('sha512-'), 'preModule attested via withStasis')
   t.assert.ok(lock.sources['.'].files['src/hello.js'].startsWith('sha512-'))
 }))
 
