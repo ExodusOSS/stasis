@@ -114,6 +114,18 @@ export class State {
   #bundleImports = null
   #bundleFormats = null
 
+  // Per-artifact "last serialized" caches: write() compares the freshly serialized
+  // JSON text against the cached one for each output (lockfile / unified bundle /
+  // split code / split resources) and skips both the brotli step and the writeFileSync
+  // when they match. Brotli at quality 11 dominates write cost, and webpack/esbuild
+  // watch-mode rebuilds call write() on every rebuild whether or not the captured
+  // graph actually changed -- this cache makes those no-ops fast. Persistent across
+  // write() calls within one process; null on the first call.
+  #lastLockData = null
+  #lastUnifiedBundle = null
+  #lastCodeBundle = null
+  #lastResourcesBundle = null
+
   // Options:
   //   preload (boolean) -- register as the unique preload State (exposed via State.preload).
   //     Only one preload may exist at a time. The stasis loader is the only real caller.
@@ -1215,23 +1227,46 @@ export class State {
     // A "sidecar" here is one sharing the parent's lockfile data structures; an independent
     // State with its own lockFile path (constructed via the no-parent code path) writes its
     // own lockfile to `config.lockFile` instead of the rootDir default.
+    //
+    // Per-artifact compare-and-skip: each output's serialized text is compared against the
+    // cached previous text and the brotli + writeFileSync are both skipped when they match.
+    // Critical for webpack/esbuild watch-mode rebuilds, where compiler.hooks.done fires on
+    // every rebuild but the captured graph usually doesn't change. Without this, every
+    // rebuild brotli-compresses (quality 11) and rewrites every output.
     if (this.config.writeLockfile && !this.#parent) {
-      const lockPath = this.config.lockFile || join(this.root, FILE_LOCK)
-      mkdirSync(dirname(lockPath), { recursive: true })
-      writeFileSync(lockPath, this.lockData)
+      const lockText = this.lockData
+      if (lockText !== this.#lastLockData) {
+        const lockPath = this.config.lockFile || join(this.root, FILE_LOCK)
+        mkdirSync(dirname(lockPath), { recursive: true })
+        writeFileSync(lockPath, lockText)
+        this.#lastLockData = lockText
+      }
     }
     if (this.config.writeBundle) {
       const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
-      mkdirSync(dirname(sourcesPath), { recursive: true })
       if (this.config.resourcesBundleFile) {
         // Split-bundle layout: code-only to bundleFile, resources-only to resourcesBundleFile.
         // Each is a standalone v1 Bundle (cross-check on load enforces shape).
-        writeFileSync(sourcesPath, brotliCompressSync(this.codeBundle.serialize(), brotliOptions()))
+        const codeText = this.codeBundle.serialize()
+        if (codeText !== this.#lastCodeBundle) {
+          mkdirSync(dirname(sourcesPath), { recursive: true })
+          writeFileSync(sourcesPath, brotliCompressSync(codeText, brotliOptions()))
+          this.#lastCodeBundle = codeText
+        }
         const resourcesPath = this.config.resourcesBundleFile
-        mkdirSync(dirname(resourcesPath), { recursive: true })
-        writeFileSync(resourcesPath, brotliCompressSync(this.resourcesBundle.serialize(), brotliOptions()))
+        const resText = this.resourcesBundle.serialize()
+        if (resText !== this.#lastResourcesBundle) {
+          mkdirSync(dirname(resourcesPath), { recursive: true })
+          writeFileSync(resourcesPath, brotliCompressSync(resText, brotliOptions()))
+          this.#lastResourcesBundle = resText
+        }
       } else {
-        writeFileSync(sourcesPath, brotliCompressSync(this.sourceData, brotliOptions()))
+        const text = this.sourceData
+        if (text !== this.#lastUnifiedBundle) {
+          mkdirSync(dirname(sourcesPath), { recursive: true })
+          writeFileSync(sourcesPath, brotliCompressSync(text, brotliOptions()))
+          this.#lastUnifiedBundle = text
+        }
       }
     }
   }
