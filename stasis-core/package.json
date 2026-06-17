@@ -16,6 +16,7 @@
     "./prune": "./src/prune.js",
     "./esbuild": "./src/esbuild.js",
     "./webpack": "./src/webpack.js",
+    "./metro": "./src/metro.js",
     "./plugins": "./src/plugins.js"
   },
   "files": [
@@ -27,6 +28,7 @@
     "src/hooks.js",
     "src/loader.js",
     "src/lockfile.js",
+    "src/metro.js",
     "src/plugins.js",
     "src/prune.js",
     "src/state.js",
