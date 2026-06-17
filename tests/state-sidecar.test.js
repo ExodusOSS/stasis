@@ -106,6 +106,32 @@ test('sidecar rejects same bundleFile as an earlier sibling sidecar', (t) => {
   )
 })
 
+test('sidecar resourcesBundleFile collides with an earlier sidecar', (t) => {
+  // Sidecars in split-bundle mode claim resourcesBundleFile alongside bundleFile via
+  // the process-wide registry. A second sidecar (or any other live State) targeting
+  // the same resources path is a last-write-wins bug, same as bundleFile.
+  const sharedRes = join(dir, 'shared-res.br')
+  // eslint-disable-next-line no-new
+  new State(dir, { parent, lock: 'add', bundle: 'add', bundleFile: join(dir, 's1.br'), resourcesBundleFile: sharedRes })
+  t.assert.throws(
+    () => new State(dir, { parent, lock: 'add', bundle: 'add', bundleFile: join(dir, 's2.br'), resourcesBundleFile: sharedRes }),
+    /already claimed/
+  )
+})
+
+test('sidecar bundleFile collides with an earlier sibling resourcesBundleFile (cross-kind)', (t) => {
+  // The claim registry is single-namespace: bundleFile and resourcesBundleFile share
+  // the same key space. A sibling that names another sidecar's resources path as ITS
+  // bundleFile (or vice versa) must collide too.
+  const shared = join(dir, 'cross-kind.br')
+  // eslint-disable-next-line no-new
+  new State(dir, { parent, lock: 'add', bundle: 'add', bundleFile: join(dir, 'cx1.br'), resourcesBundleFile: shared })
+  t.assert.throws(
+    () => new State(dir, { parent, lock: 'add', bundle: 'add', bundleFile: shared }),
+    /already claimed/
+  )
+})
+
 test('sidecar bundleFile equality is path-normalized (./x vs x)', (t) => {
   // './foo.br' and 'foo.br' resolve to the same absolute path; the claim
   // registry must treat them as the same file.
@@ -201,6 +227,92 @@ test('resolvePluginState scope mismatch with preload is rejected', (t) => {
     () => resolvePluginState('Test', { scope: 'node_modules' }, dir),
     /scope='node_modules' conflicts with active preload scope='full'/
   )
+})
+
+// --- lockFile (Rule 0: independent vs unified) ------------------------------------
+
+test('resolvePluginState rule 0: lockFile equal to ambient resolves to reuse/sidecar (unified)', (t) => {
+  // Ambient parent above writes to `<dir>/stasis.lock.json` (default path); a plugin
+  // that names that exact path stays in the unified-lockfile branch.
+  const r = resolvePluginState('Test', { bundle: 'add', bundleFile: parentBundle, lockFile: join(dir, 'stasis.lock.json') }, dir)
+  t.assert.equal(r.isNoop, false)
+  t.assert.equal(r.state, parent, 'matched lockFile reuses the preload')
+})
+
+test('resolvePluginState rule 0: lockFile different from ambient builds an independent State', (t) => {
+  // Plugin's lockFile points elsewhere -- the plugin gets its own State with its own
+  // lockfile + bundle, not a sidecar. The independent State doesn't share hashes /
+  // entries / modules with the ambient parent.
+  const r = resolvePluginState('Test', {
+    lock: 'add',
+    lockFile: join(dir, 'independent.lock.json'),
+    bundle: 'add',
+    bundleFile: join(dir, 'independent.br'),
+  }, dir)
+  t.assert.equal(r.isNoop, false)
+  t.assert.notEqual(r.state, parent, 'plugin gets a fresh State')
+  t.assert.equal(r.state.parent, undefined, 'independent: no sidecar parentage')
+  t.assert.notEqual(r.state.hashes, parent.hashes, 'independent: separate hashes')
+  t.assert.notEqual(r.state.entries, parent.entries, 'independent: separate entries')
+  t.assert.notEqual(r.state.modules, parent.modules, 'independent: separate modules')
+})
+
+test('resolvePluginState rule 0: an independent plugin\'s addFile does NOT reach the ambient lockfile', (t) => {
+  // The whole point: when the plugin owns its own lockfile, its observations stay local.
+  const indepBundle = join(dir, 'indep-flow.br')
+  const indepLock = join(dir, 'indep-flow.lock.json')
+  writeFileSync(join(dir, 'indep-only.js'), 'export const z = 9\n')
+  const r = resolvePluginState('Test', {
+    lock: 'add',
+    lockFile: indepLock,
+    bundle: 'add',
+    bundleFile: indepBundle,
+  }, dir)
+  const indep = r.state
+  indep.addFile(pathToFileURL(join(dir, 'indep-only.js')).toString(), { isEntry: true })
+  // Parent hashes must not carry this file -- the plugin's State is fully separate.
+  t.assert.ok(!parent.hashes.has('indep-only.js'), 'ambient lockfile is not contaminated')
+  t.assert.ok(indep.hashes.has('indep-only.js'), 'independent State recorded it locally')
+})
+
+test('resolvePluginState rule 0: lockFile pointing at ambient\'s default path normalizes correctly (./x vs x)', (t) => {
+  // Path normalization: a plugin spelling out `./stasis.lock.json` while ambient uses
+  // the default `<root>/stasis.lock.json` must STILL be unified, not independent.
+  const r = resolvePluginState('Test', {
+    bundle: 'add',
+    bundleFile: parentBundle,
+    lockFile: join(dir, '.', 'stasis.lock.json'),
+  }, dir)
+  t.assert.equal(r.state, parent, 'normalized-equal paths reuse the preload')
+})
+
+test('resolvePluginState rule 0: independent State silently accepts a scope override (no coordination check)', (t) => {
+  // Rule 0 deliberately skips the scope/lock/debug agreement check against the ambient
+  // (plugins.js's comment: "the user has explicitly opted out of unification by
+  // pointing at a different lockfile"). Lock this behavior in -- changing it would
+  // be a substantive design shift the author should have to explicitly own.
+  const r = resolvePluginState('Test', {
+    scope: 'node_modules',
+    lock: 'add',
+    lockFile: join(dir, 'indep-scope.lock.json'),
+    bundle: 'add',
+    bundleFile: join(dir, 'indep-scope.br'),
+  }, dir)
+  t.assert.equal(r.state.config.scope, 'node_modules', 'independent State honors its own scope')
+  t.assert.equal(parent.config.scope, 'full', 'ambient preload scope is unchanged')
+})
+
+test('resolvePluginState rule 0: independent State bundleFile colliding with ambient is rejected', (t) => {
+  // Independent States share the process-wide claim registry with the ambient parent;
+  // a misconfigured plugin pointing its bundleFile at the ambient's must throw, NOT
+  // silently last-write-wins on beforeExit. bundle=replace bypasses the "lockfile
+  // missing, can not use sources" discovery guard so we land on the claim check itself.
+  t.assert.throws(() => resolvePluginState('Test', {
+    lock: 'replace',
+    lockFile: join(dir, 'indep-coll.lock.json'),
+    bundle: 'replace',
+    bundleFile: parentBundle, // same as ambient
+  }, dir), /already claimed/)
 })
 
 // Forge a v0-shaped bundle (legacy flat layout, version: 0). The sidecar's load /

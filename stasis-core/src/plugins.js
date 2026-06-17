@@ -5,9 +5,13 @@
 // only consults State.preload + Config helpers.
 
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 
 import { DEFAULT_LOCK, assertOptionsMatchConfig, validatePluginOptions } from './config.js'
 import { State } from './state.js'
+import { canonicalizePath } from './state.util.js'
+
+const FILE_LOCK = 'stasis.lock.json'
 
 // File extensions whose bytes are JS-shaped code -- the lockfile + Node loader
 // can attest their formats (module/commonjs/json/...) and bundle=load can
@@ -69,6 +73,12 @@ export function classifyExtension(filePath, resources) {
 // { state, isNoop: false } -- plugin should drive the returned State.
 //
 // Rules:
+//  0. Plugin's `lockFile` (resolved to an absolute path) differs from the ambient
+//     preload's effective lockfile path: construct an INDEPENDENT State with its own
+//     lockfile + bundle. No sidecar parentage, no shared hashes/entries/modules, no
+//     coordination check with the preload. This is the "bundler state truly separate
+//     from runtime state" opt-out. When `lockFile` is unset (or points at the same
+//     path as the ambient's), the unified-lockfile rules 1-7 apply.
 //  1. Plugin asking for any lockfile mode other than 'none' / 'ignore' requires a preload.
 //     Without one it's a hard throw -- the lockfile would otherwise only cover the bundled
 //     app and silently miss every dependency the bundler itself pulled in.
@@ -84,7 +94,7 @@ export function classifyExtension(filePath, resources) {
 //     plugins be env-controlled off without throwing on the lock=none/bundle=none invariant).
 export function resolvePluginState(label, options, cwd) {
   validatePluginOptions(label, options)
-  const { scope, lock, bundle, bundleFile, debug } = options
+  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
   const ambient = State.preload
 
   if (!ambient) {
@@ -117,8 +127,28 @@ export function resolvePluginState(label, options, cwd) {
     return { state: new State(cwd, options), isNoop: false }
   }
 
-  // Preload is active. Lockfile rules first.
+  // Preload is active. Decide first whether the plugin asked for an INDEPENDENT lockfile:
+  // a `lockFile` whose absolute path differs from the ambient's effective lockfile path
+  // (its explicit `config.lockFile`, or `<ambient.root>/stasis.lock.json` by default).
+  // When they differ, the plugin runs against a fresh State -- not a sidecar -- so its
+  // observations land in its own lockfile rather than merging into the ambient's. When
+  // they match (including the unset case, which defaults to the ambient's path), the
+  // existing reuse/sidecar logic applies and a single lockfile stays unified.
   const pc = ambient.config
+  const ambientLockPath = canonicalizePath(pc.lockFile || join(ambient.root, FILE_LOCK))
+  const requestedLockPath = lockFile !== undefined ? canonicalizePath(lockFile) : ambientLockPath
+  if (requestedLockPath !== ambientLockPath) {
+    // Independent State: plugin owns its own lockfile + bundle, no parentage. We do NOT
+    // assert agreement with the ambient on scope/lock/bundle/debug -- the user has
+    // explicitly opted out of unification by pointing at a different lockfile, and one
+    // legitimate motivation is to run the bundler under different scope/lock semantics
+    // than the host process's Node loader. The plugin's options drive everything; the
+    // standard State invariants (a lockfile or a bundle must be configured, frozen needs
+    // attestation, etc.) still apply at construction time.
+    return { state: new State(cwd, options), isNoop: false }
+  }
+
+  // Same lockfile as the ambient: enforce coordination as before.
   if (lock !== undefined && lock !== pc.lock) {
     throw new Error(`${label}: lock='${lock}' conflicts with active preload lock='${pc.lock}'`)
   }
@@ -145,17 +175,24 @@ export function resolvePluginState(label, options, cwd) {
       )
     }
     if (bundleFile === undefined || bundleFile === pc.bundleFile) {
-      // Rule 5: same path reuses the preload.
-      assertOptionsMatchConfig(pc, options)
+      // Rule 5: same path reuses the preload. Strip lockFile before cross-checking:
+      // the explicit-path comparison above already proved the requested lockfile path
+      // matches the ambient's. A literal lockFile-string equality through
+      // assertOptionsMatchConfig would spuriously fail when the user spelled out the
+      // ambient's default path (`<root>/stasis.lock.json`) while `pc.lockFile` is unset.
+      const { lockFile: _lf, ...rest } = options
+      assertOptionsMatchConfig(pc, rest)
       return { state: ambient, isNoop: false }
     }
-    // Rule 6: different path -- sidecar inherits preload's modes, overrides bundleFile.
+    // Rule 6: different path -- sidecar inherits preload's modes, overrides bundleFile
+    // (and resourcesBundleFile if the plugin provided one for a split layout).
     const sidecar = new State(cwd, {
       parent: ambient,
       scope: pc.scope,
       lock: pc.lock,
       bundle: pc.bundleMode,
       bundleFile,
+      resourcesBundleFile,
       debug: pc.debug,
     })
     return { state: sidecar, isNoop: false }
@@ -173,7 +210,10 @@ export function resolvePluginState(label, options, cwd) {
     // disagreement -- the assert pins the contract to today's two values.
     assert.ok(pc.bundleMode === 'none' || pc.bundleMode === 'ignore',
       `unexpected preload bundleMode='${pc.bundleMode}' in the no-bundle branch`)
-    const { bundle: _b, ...rest } = options
+    // Same lockFile-strip as Rule 5 -- the resolve()-compare upstream already proved
+    // the requested lockfile path matches the ambient's, so a literal mismatch here
+    // would be spurious.
+    const { bundle: _b, lockFile: _lf, ...rest } = options
     assertOptionsMatchConfig(pc, rest)
     return { state: ambient, isNoop: false }
   }
@@ -189,6 +229,7 @@ export function resolvePluginState(label, options, cwd) {
     lock: pc.lock,
     bundle,
     bundleFile,
+    resourcesBundleFile,
     debug: pc.debug,
   })
   return { state: sidecar, isNoop: false }

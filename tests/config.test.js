@@ -6,8 +6,10 @@ import { Config, assertOptionsMatchConfig, validatePluginOptions } from '@exodus
 const ENV_KEYS = [
   'EXODUS_STASIS_SCOPE',
   'EXODUS_STASIS_LOCK',
+  'EXODUS_STASIS_LOCK_FILE',
   'EXODUS_STASIS_BUNDLE',
   'EXODUS_STASIS_BUNDLE_FILE',
+  'EXODUS_STASIS_RESOURCES_BUNDLE_FILE',
   'EXODUS_STASIS_DEBUG',
 ]
 const withEnv = (vars, fn) => (t) => {
@@ -234,6 +236,129 @@ test('loadConfig rejects invalid lock', (t) => {
 test('loadConfig rejects invalid bundle', (t) => {
   const c = new Config()
   t.assert.throws(() => c.loadConfig(json({ bundle: 'maybe' })))
+})
+
+// --- resourcesBundleFile (split-bundle layout) ----------------------------------
+
+test('resourcesBundleFile defaults to undefined', (t) => {
+  const c = new Config({ bundle: 'add', bundleFile: '/tmp/code.br' })
+  t.assert.equal(c.resourcesBundleFile, undefined)
+})
+
+test('resourcesBundleFile is exposed via the getter', (t) => {
+  const c = new Config({ bundle: 'add', bundleFile: '/tmp/code.br', resourcesBundleFile: '/tmp/res.br' })
+  t.assert.equal(c.resourcesBundleFile, '/tmp/res.br')
+})
+
+test('resourcesBundleFile picks up EXODUS_STASIS_RESOURCES_BUNDLE_FILE', withEnv(
+  { EXODUS_STASIS_RESOURCES_BUNDLE_FILE: '/env/res.br' },
+  (t) => {
+    const c = new Config({ bundle: 'add', bundleFile: '/tmp/code.br' })
+    t.assert.equal(c.resourcesBundleFile, '/env/res.br')
+  }))
+
+test('env and option must agree on resourcesBundleFile', withEnv(
+  { EXODUS_STASIS_RESOURCES_BUNDLE_FILE: '/env/res.br' },
+  (t) => {
+    t.assert.throws(() => new Config({ bundle: 'add', bundleFile: '/tmp/code.br', resourcesBundleFile: '/other/res.br' }),
+      /Config options can not override stasis env/)
+  }))
+
+test('resourcesBundleFile requires an active bundle mode', (t) => {
+  // Default bundle is 'none' -- the split is silently inert there, so refuse the misconfig.
+  t.assert.throws(() => new Config({ lock: 'add', resourcesBundleFile: '/tmp/res.br' }),
+    /resourcesBundleFile requires an active bundle mode/)
+  t.assert.throws(() => new Config({ lock: 'add', bundle: 'ignore', resourcesBundleFile: '/tmp/res.br' }),
+    /resourcesBundleFile requires an active bundle mode/)
+})
+
+test('resourcesBundleFile must differ from bundleFile (raw same path)', (t) => {
+  t.assert.throws(() => new Config({ bundle: 'add', bundleFile: '/tmp/x.br', resourcesBundleFile: '/tmp/x.br' }),
+    /resourcesBundleFile '\/tmp\/x\.br' targets the same file as bundleFile/)
+})
+
+test('resourcesBundleFile must differ from bundleFile (path normalization: ./x vs x)', (t) => {
+  // Lexically-different but canonically-same paths must collide. The Config-level
+  // canonicalization (resolve() + realpathSync) closes the silent-clobber on write.
+  t.assert.throws(() => new Config({
+    bundle: 'add',
+    bundleFile: '/tmp/sub/x.br',
+    resourcesBundleFile: '/tmp/sub/./x.br',
+  }), /targets the same file as bundleFile/)
+})
+
+test('lockFile must differ from bundleFile and resourcesBundleFile', (t) => {
+  // Without this check, State.write() would emit brotli bundle bytes to the same path
+  // as the JSON lockfile -- the bundle write happens second, silently clobbering the
+  // lockfile under lock=add + bundle=add.
+  t.assert.throws(() => new Config({
+    lock: 'add', lockFile: '/tmp/x.br',
+    bundle: 'add', bundleFile: '/tmp/x.br',
+  }), /bundleFile '\/tmp\/x\.br' targets the same file as lockFile/)
+  t.assert.throws(() => new Config({
+    lock: 'add', lockFile: '/tmp/x.br',
+    bundle: 'add', bundleFile: '/tmp/y.br', resourcesBundleFile: '/tmp/x.br',
+  }), /resourcesBundleFile '\/tmp\/x\.br' targets the same file as lockFile/)
+})
+
+test('validatePluginOptions accepts resourcesBundleFile, rejects non-string', (t) => {
+  t.assert.doesNotThrow(() => validatePluginOptions('Plug', { resourcesBundleFile: '/tmp/r.br' }))
+  t.assert.throws(() => validatePluginOptions('Plug', { resourcesBundleFile: 42 }),
+    /resourcesBundleFile must be a string/)
+})
+
+test('assertOptionsMatchConfig catches a resourcesBundleFile mismatch with the active Config', (t) => {
+  const c = new Config({ bundle: 'add', bundleFile: '/tmp/code.br', resourcesBundleFile: '/tmp/res.br' })
+  t.assert.doesNotThrow(() => assertOptionsMatchConfig(c, { resourcesBundleFile: '/tmp/res.br' }))
+  t.assert.throws(() => assertOptionsMatchConfig(c, { resourcesBundleFile: '/tmp/other.br' }),
+    /Plugin options conflict with active stasis state/)
+})
+
+// --- lockFile (independent-lockfile layout) -------------------------------------
+
+test('lockFile defaults to undefined', (t) => {
+  const c = new Config({ lock: 'add' })
+  t.assert.equal(c.lockFile, undefined)
+})
+
+test('lockFile is exposed via the getter', (t) => {
+  const c = new Config({ lock: 'add', lockFile: '/tmp/my.lock.json' })
+  t.assert.equal(c.lockFile, '/tmp/my.lock.json')
+})
+
+test('lockFile picks up EXODUS_STASIS_LOCK_FILE', withEnv(
+  { EXODUS_STASIS_LOCK_FILE: '/env/my.lock.json' },
+  (t) => {
+    const c = new Config({ lock: 'add' })
+    t.assert.equal(c.lockFile, '/env/my.lock.json')
+  }))
+
+test('env and option must agree on lockFile', withEnv(
+  { EXODUS_STASIS_LOCK_FILE: '/env/my.lock.json' },
+  (t) => {
+    t.assert.throws(() => new Config({ lock: 'add', lockFile: '/other/my.lock.json' }),
+      /Config options can not override stasis env/)
+  }))
+
+test('lockFile requires an active lock mode', (t) => {
+  // bundle=load + lock=none is otherwise valid; lockFile on top makes no sense.
+  t.assert.throws(() => new Config({ lock: 'none', bundle: 'load', bundleFile: '/tmp/x.br', lockFile: '/tmp/my.lock.json' }),
+    /lockFile requires an active lock mode/)
+  t.assert.throws(() => new Config({ lock: 'ignore', lockFile: '/tmp/my.lock.json' }),
+    /lockFile requires an active lock mode/)
+})
+
+test('validatePluginOptions accepts lockFile, rejects non-string', (t) => {
+  t.assert.doesNotThrow(() => validatePluginOptions('Plug', { lockFile: '/tmp/my.lock.json' }))
+  t.assert.throws(() => validatePluginOptions('Plug', { lockFile: 42 }),
+    /lockFile must be a string/)
+})
+
+test('assertOptionsMatchConfig catches a lockFile mismatch with the active Config', (t) => {
+  const c = new Config({ lock: 'add', lockFile: '/tmp/my.lock.json' })
+  t.assert.doesNotThrow(() => assertOptionsMatchConfig(c, { lockFile: '/tmp/my.lock.json' }))
+  t.assert.throws(() => assertOptionsMatchConfig(c, { lockFile: '/tmp/other.lock.json' }),
+    /Plugin options conflict with active stasis state/)
 })
 
 test('loadConfig rejects non-boolean debug', (t) => {
