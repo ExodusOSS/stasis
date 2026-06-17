@@ -112,12 +112,14 @@ export function transform(config, projectRoot, filename, data, options) {
 export function getCacheKey(config) {
   // Fold the wrapped transformer's own cache key in (so changing the base transformer
   // still invalidates), then add a stasis-load discriminator: load-mode transforms can
-  // produce different bytes than a disk build for the same file, so their cached results
-  // must not be served to a plain build (or vice versa). The bundle path keys it to the
-  // specific bundle in play.
+  // produce different bytes than a disk build for the same file (and Metro hashes the
+  // on-disk bytes into its cache key BEFORE we substitute, so when disk == bundle the
+  // content hash alone wouldn't tell a load result apart from a plain build), so their
+  // cached results must not cross-pollinate. Derive the marker from the resolved load
+  // State -- the SAME source of truth as transform() -- not the env var, so load activated
+  // via stasis.config.json is keyed correctly too; the bundle path keys it to the bundle.
   const baseKey = typeof getBase().getCacheKey === 'function' ? getBase().getCacheKey(config) : ''
-  const marker = process.env.EXODUS_STASIS_BUNDLE === 'load'
-    ? `load:${process.env.EXODUS_STASIS_BUNDLE_FILE || 'default'}`
-    : 'off'
+  const state = getLoadState()
+  const marker = state ? `load:${state.config.bundleFile || 'default'}` : 'off'
   return `${baseKey}$stasis-metro-transformer:${marker}`
 }

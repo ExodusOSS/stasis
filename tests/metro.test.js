@@ -585,3 +585,18 @@ test('virtual / unresolved graph entries are skipped (no disk-backed file, no ed
   // Only the real, resolved code edge is attested.
   t.assert.deepEqual(lock.imports['*']['src/entry.js'], { './hello.js': 'src/hello.js' })
 }))
+
+test('real-Metro contract smoke test (ReadOnlyGraph / customSerializer / transformer)', { skip: 'metro is not a dependency; see comment' }, () => {
+  // Every metro test above drives a hand-built MOCK of Metro's graph + transformer, because
+  // Metro is intentionally NOT a dependency (matching stasis-core's zero-dep stance). The
+  // mock is hardened (dependencies keyed by a synthetic opaque key, not the specifier; shapes
+  // documented against real Metro versions) and the plugin reads only `.values()` +
+  // `dep.data.name`, but nothing here exercises Metro's ACTUAL ReadOnlyGraph, customSerializer
+  // signature, preModules arg, or transformer(config, projectRoot, filename, data, options)
+  // contract -- so a future Metro that changes any of those would not be caught by CI.
+  //
+  // To pin the contract against reality (fast-follow): add `metro` as a devDependency and,
+  // gated on it resolving, run a real `metro build` over a fixture with `withStasis(config)`
+  // wired (capture) and, separately, `transformer.transformerPath` set + EXODUS_STASIS_BUNDLE=load
+  // (load), asserting the lockfile/bundle round-trips. The mock is the verified surface today.
+})

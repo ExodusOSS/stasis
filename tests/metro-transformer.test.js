@@ -195,16 +195,46 @@ test('transformer is a transparent pass-through when not in load mode', withTmp(
 
 test('getCacheKey folds in the base transformer key and a load-mode discriminator', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
+  const bundle = join(tmp, 'snapshot.br')
+  // Produce a bundle (+ idempotent lockfile) so a real load State can be constructed.
+  const cap = capture('src/entry.js', {
+    cwd: tmp,
+    graph: FULL_GRAPH,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_BUNDLE_FILE: bundle },
+  })
+  t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
 
+  // off: nothing load-related configured -> 'off' marker, base key still wrapped.
   const off = transform(['--cache-key'], { cwd: tmp, env: {} })
   t.assert.equal(off.status, 0, `stderr: ${off.stderr}`)
   t.assert.match(off.stdout, /mock-base-cache-key/, 'wraps the base transformer cache key')
 
+  // on: a VALID load config (frozen uses the committed lockfile; load reads the bundle).
   const on = transform(['--cache-key'], {
     cwd: tmp,
-    env: { EXODUS_STASIS_BUNDLE: 'load', EXODUS_STASIS_BUNDLE_FILE: join(tmp, 'snapshot.br') },
+    env: { EXODUS_STASIS_BUNDLE: 'load', EXODUS_STASIS_BUNDLE_FILE: bundle, EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' },
   })
   t.assert.equal(on.status, 0, `stderr: ${on.stderr}`)
   t.assert.notEqual(on.stdout, off.stdout, 'load-mode cache key differs from the non-load key')
   t.assert.match(on.stdout, /load:/, 'load-mode marker present so disk-built results are not reused')
+}))
+
+test('getCacheKey marks load when activated via stasis.config.json, not just env', withTmp((t, tmp) => {
+  // Regression guard for the env/config split: the marker must track the same source of
+  // truth as transform() (config.loadBundle), not just EXODUS_STASIS_BUNDLE. Before the fix
+  // this keyed as 'off' for a config-file-activated load, colliding with a plain build.
+  cpSync(fullFixture, tmp, { recursive: true })
+  // Capture to the DEFAULT bundle path so config-file load discovers it with no env.
+  const cap = capture('src/entry.js', {
+    cwd: tmp,
+    graph: FULL_GRAPH,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_BUNDLE_FILE: join(tmp, 'stasis.code.br') },
+  })
+  t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+  // Activate load purely through the config file (no EXODUS_STASIS_* load env).
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full', lock: 'frozen', bundle: 'load' }))
+
+  const r = transform(['--cache-key'], { cwd: tmp, env: {} })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /load:/, 'config-file-activated load is keyed as load mode, not "off"')
 }))

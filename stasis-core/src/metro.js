@@ -24,14 +24,17 @@ function entrySet(graph) {
   return new Set()
 }
 
-// Metro has no public "default serializer" export, but its default bundle output is exactly
-// `bundleToString(baseJSBundle(entryPoint, preModules, graph, options))` (Metro's own
-// Server.js else-branch when no customSerializer is set). These internal module paths are
-// the ecosystem-standard entry (used by Expo, metro-serializer-* etc.) and have been stable
-// from Metro 0.66 through current, re-exported under `metro/private/*` since 0.81. Loaded
-// lazily and ONLY when withStasis()/customSerializer() must produce output with no
-// user-supplied base, so a normal capture build never touches Metro internals -- and the
-// `metro` spec is built indirectly so it isn't treated as a hard dependency of stasis.
+// Metro has no public "default serializer" export, but its default bundle CODE is exactly
+// `bundleToString(baseJSBundle(entryPoint, preModules, graph, options)).code` (Metro's own
+// Server.js else-branch when no customSerializer is set). bundleToString returns
+// `{ code, metadata }` -- we return the `code` string; a plain string is a valid
+// customSerializer return and Metro regenerates the source map itself, the same way its
+// else-branch does. These internal module paths are the ecosystem-standard entry (Expo,
+// metro-serializer-*): `metro/src/*` resolves through ~0.82, `metro/private/*` exists from
+// 0.81.4 on (and is the ONLY option from 0.83), so the two-tier require below spans the
+// range. Loaded lazily and ONLY when withStasis()/customSerializer() must produce output
+// with no user-supplied base, so a normal capture build never touches Metro internals --
+// and the `metro` spec is built indirectly so it isn't treated as a hard dependency of stasis.
 let metroDefault
 function metroDefaultSerializer() {
   if (metroDefault) return metroDefault
@@ -56,8 +59,10 @@ function metroDefaultSerializer() {
   // either as the namespace itself or under `.default`.
   baseJSBundle = baseJSBundle.default ?? baseJSBundle
   bundleToString = bundleToString.default ?? bundleToString
+  // Return the `.code` string (bundleToString yields { code, metadata }); a string is a
+  // valid customSerializer return and Metro regenerates the source map itself.
   metroDefault = (entryPoint, preModules, graph, options) =>
-    bundleToString(baseJSBundle(entryPoint, preModules, graph, options))
+    bundleToString(baseJSBundle(entryPoint, preModules, graph, options)).code
   return metroDefault
 }
 
