@@ -1,0 +1,27 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.js"
+  ],
+  "sources": {
+    ".": {
+      "name": "stasis-webpack-assets",
+      "version": "0.0.0",
+      "files": {
+        "src/entry.js": "sha512-aHaimHs1TPXJysM+46ixm9FdX1Fmfx/oBc0TNH5vKcllNwNp3HMxRp8wNQr5+IECoHEh9zskpaTlSHG6OvkiRg==",
+        "src/icon.svg": "sha512-/Uj4ERtDeqpqLe1nY57gYqfCjtVFIiO545ZLuh6EoPYPVyBq5ygaYp5umyOzAnm7zPpShw3XzfoBwaYOSKlmjA==",
+        "src/logo.png": "sha512-f2kHkZn+b7Q0ZsYIgX4lV1vSwbRUcMPRy4pwff11KLQKg6TGoyFhJk+rtgK+KM25zriZSD54UkO+KePBMUhqgA=="
+      }
+    }
+  },
+  "modules": {},
+  "imports": {},
+  "formats": {
+    "src/entry.js": "commonjs",
+    "src/icon.svg": "resource",
+    "src/logo.png": "resource:base64"
+  }
+}

@@ -23,6 +23,7 @@
     "@exodus/stasis": "workspace:*",
     "@exodus/stasis-core": "workspace:*",
     "esbuild": "^0.27.3",
+    "file-loader": "^6.2.0",
     "oxlint": "^1.52.0",
     "string-replace-loader": "^2.3.0",
     "webpack": "^4.47.0"

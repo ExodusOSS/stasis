@@ -768,7 +768,13 @@ export class State {
   }
 
   getFile(url) {
-    const file = this.#canonicalFile(url)
+    // #canonicalFile -> relative() throws a bare assertion if the URL is outside
+    // state.root (an absolute path that escapes the project). Wrap it so callers
+    // get a contextual message instead of a stack pointing at relative()'s
+    // assert.ok(!file.startsWith('..')).
+    let file
+    try { file = this.#canonicalFile(url) }
+    catch (cause) { throw new Error(`stasis: file is outside the project root: ${url}`, { cause }) }
     const format = this.formats.get(file) // might be undefined e.g. for some bundlers
     // Resources live in this.resources, code in this.sources. Decode per the format:
     // 'resource:base64' is base64, 'resource' is raw UTF-8, code is raw text.

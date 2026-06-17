@@ -5,10 +5,21 @@ import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
 import { diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact } from '@exodus/stasis/diff'
 import { Lockfile } from '@exodus/stasis/lockfile'
 import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
+import { StasisEsbuild } from '@exodus/stasis/esbuild'
+import { StasisWebpack } from '@exodus/stasis/webpack'
+import { StasisEsbuild as CoreEsbuild } from '@exodus/stasis-core/esbuild'
+import { StasisWebpack as CoreWebpack } from '@exodus/stasis-core/webpack'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
   t.assert.equal(Bundle.VERSION, 1)
+})
+
+test('@exodus/stasis/{esbuild,webpack} re-export the stasis-core plugins', (t) => {
+  t.assert.equal(typeof StasisEsbuild, 'function')
+  t.assert.equal(typeof StasisWebpack, 'function')
+  t.assert.equal(StasisEsbuild, CoreEsbuild)
+  t.assert.equal(StasisWebpack, CoreWebpack)
 })
 
 test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API', (t) => {

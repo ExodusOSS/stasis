@@ -1,0 +1,27 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.js"
+  ],
+  "sources": {
+    ".": {
+      "name": "stasis-esbuild-assets",
+      "version": "0.0.0",
+      "files": {
+        "src/entry.js": "sha512-8TYatoIwaCXjaqxcK53PXuSbMZJwj0Rte3Y25Lxz1lxWAR5kfkVAnmqZCUcOhPBNqdjogNiNJTvIu0k+sAGciw==",
+        "src/icon.svg": "sha512-/Uj4ERtDeqpqLe1nY57gYqfCjtVFIiO545ZLuh6EoPYPVyBq5ygaYp5umyOzAnm7zPpShw3XzfoBwaYOSKlmjA==",
+        "src/logo.png": "sha512-f2kHkZn+b7Q0ZsYIgX4lV1vSwbRUcMPRy4pwff11KLQKg6TGoyFhJk+rtgK+KM25zriZSD54UkO+KePBMUhqgA=="
+      }
+    }
+  },
+  "modules": {},
+  "imports": {},
+  "formats": {
+    "src/entry.js": "module",
+    "src/icon.svg": "resource",
+    "src/logo.png": "resource:base64"
+  }
+}

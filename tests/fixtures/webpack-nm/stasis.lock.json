@@ -1,0 +1,29 @@
+{
+  "version": 0,
+  "config": {
+    "scope": "node_modules"
+  },
+  "modules": {
+    "node_modules/fake-cjs-pkg": {
+      "name": "fake-cjs-pkg",
+      "version": "1.0.0",
+      "ecosystem": "npm",
+      "files": {
+        "index.js": "sha512-PdB1cXMqNrwQmSbjwGr15Kr/JLTJOGLXMrqtcuTFIJB8MyFLYJo994vpwAprs3E/AeZDJW2AuIPTms5YsNK09Q=="
+      }
+    }
+  },
+  "imports": {
+    "*": {
+      "src/entry.js": {
+        "fake-cjs-pkg": "node_modules/fake-cjs-pkg/index.js",
+        "./helper": "src/helper.js"
+      }
+    }
+  },
+  "formats": {
+    "src/entry.js": "commonjs",
+    "src/helper.js": "commonjs",
+    "node_modules/fake-cjs-pkg/index.js": "commonjs"
+  }
+}
