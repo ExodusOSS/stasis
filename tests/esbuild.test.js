@@ -326,6 +326,72 @@ test('bundle=load runs from a clean dir holding only the bundle + a minimal pack
   t.assert.equal(replayOutput, captureOutput)
 }))
 
+// Regression: a Node.js built-in (`node:constants`, `path`, ...) imported by an
+// in-scope file must NOT be looked up in the bundle's import map under bundle=load.
+// Built-ins are never carried in the bundle and never recorded as import edges -- the
+// capture side defers isBuiltin() specifiers before addImport sees them. So the
+// load-mode onResolve hook has to return undefined for them and let esbuild externalize
+// them (platform:'node'), exactly as in a build without this plugin. Pre-fix,
+// state.getImport found no edge and threw ERR_MODULE_NOT_FOUND, which esbuild surfaced
+// as `[plugin: stasis] Cannot find module 'node:constants' imported from <file>`
+// (the same class of failure the webpack plugin hit with graceful-fs's require('constants')).
+test('bundle=load defers Node built-ins to esbuild instead of looking them up in the bundle', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  rmSync(join(capDir, 'stasis.lock.json'))  // entry is rewritten below; build a fresh lockfile
+  // A node:-prefixed builtin and a bare builtin alongside the normal relative import:
+  // the relative edge IS attested and served from the bundle; the builtins must defer
+  // to esbuild's own externalization.
+  writeFileSync(join(capDir, 'src', 'entry.js'),
+    "import { O_RDONLY } from 'node:constants'\n" +
+    "import { sep } from 'path'\n" +
+    "import { greet } from './hello.js'\n" +
+    "console.log(greet('world'), O_RDONLY, sep)\n")
+  const capBundle = join(capDir, 'snapshot.br')
+  const outA = join(tmp, 'out-capture')
+
+  const capture = run(['src/entry.js'], {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_ESBUILD_OUTDIR: outA,
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'entry.js'), 'utf-8')
+
+  // Clean load dir: only the bundle + a minimal package.json. No sources on disk, so a
+  // working load mode is the only path to a build -- and the builtins, which the bundle
+  // never carried, must resolve through esbuild's own externalization.
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true, "type": "module" }')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run(['src/entry.js'], {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_ESBUILD_OUTDIR: outB,
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  const replayOutput = readFileSync(join(outB, 'entry.js'), 'utf-8')
+
+  // Round-trip faithfulness AND builtin externalization: the load output equals the
+  // capture output, and esbuild externalized the builtins rather than failing to resolve.
+  t.assert.equal(replayOutput, captureOutput)
+  t.assert.match(replayOutput, /from "node:constants"/)
+  t.assert.match(replayOutput, /from "path"/)
+}))
+
 test('bundle=load: import attributes (with { type: "json" }) round-trip', withTmp((t, tmp) => {
   // The Node run loader stores edges under a conditions-with-attributes key when
   // an import carries `with { type: 'json' }` (state.#conditionsKey). The esbuild

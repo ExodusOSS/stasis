@@ -165,6 +165,74 @@ test('bundle=load runs from a clean dir holding only the bundle + a minimal pack
   t.assert.equal(replayOutput, captureOutput)
 }))
 
+// Regression: a Node.js built-in (`constants`, `path`, ...) imported by an
+// in-scope file must NOT be looked up in the bundle's import map under bundle=load.
+// Built-ins are never carried in the bundle and never recorded as import edges --
+// the capture-side resolve hook and CJS resolution shim (stasis-core/hooks.js) both
+// short-circuit isBuiltin() specifiers to Node BEFORE addImport sees them. So the
+// load-mode beforeResolve hook has to skip them and let webpack externalize them as
+// it would without the plugin. Pre-fix, state.getImport found no edge and threw
+// ERR_MODULE_NOT_FOUND, which webpack surfaced as
+// `Module not found: Error: Cannot find module 'constants' imported from <file>`
+// (exactly the failure seen with graceful-fs/polyfills.js's `require('constants')`).
+test('bundle=load defers Node built-ins to webpack instead of looking them up in the bundle', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  rmSync(join(capDir, 'stasis.lock.json'))  // entry is rewritten below; build a fresh lockfile
+  // A bare builtin (`constants`, like graceful-fs) and another (`path`) alongside the
+  // normal relative import: the relative edge IS attested and served from the bundle;
+  // the builtins must instead defer to webpack's own externalization.
+  writeFileSync(join(capDir, 'src', 'entry.js'),
+    "const constants = require('constants')\n" +
+    "const path = require('path')\n" +
+    "const { greet } = require('./hello')\n" +
+    "console.log(greet('world'), constants.O_RDONLY, path.sep)\n")
+  const capBundle = join(capDir, 'snapshot.br')
+  const outA = join(tmp, 'out-capture')
+
+  const capture = run('src/entry.js', {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_WEBPACK_OUTDIR: outA,
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'bundle.js'), 'utf-8')
+
+  // Clean load dir: only the bundle + a minimal package.json. No sources on disk,
+  // so a working load mode is the only path to a build -- and the builtins, which
+  // the bundle never carried, must resolve through webpack's own externalization.
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true }')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run('src/entry.js', {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_WEBPACK_OUTDIR: outB,
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  const replayOutput = readFileSync(join(outB, 'bundle.js'), 'utf-8')
+
+  // Round-trip faithfulness AND builtin externalization: the load output equals the
+  // capture output, and webpack externalized the builtins (target:'node') rather
+  // than failing to resolve them.
+  t.assert.equal(replayOutput, captureOutput)
+  t.assert.match(replayOutput, /require\("constants"\)/)
+  t.assert.match(replayOutput, /require\("path"\)/)
+}))
+
 test('bundle=load fails closed when an in-scope file is missing from the bundle (does NOT silently fall through to disk)', withTmp((t, tmp) => {
   // Capture in dir A (full fixture).
   const capDir = join(tmp, 'cap')

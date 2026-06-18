@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { isUtf8 } from 'node:buffer'
+import { isBuiltin } from 'node:module'
 import { extname, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
@@ -48,6 +49,15 @@ export class StasisEsbuild {
     // comments, asset names, and source maps all use the original paths.
     onResolve({ filter: /$/ }, ({ path: specifier, importer, kind: resolveKind, with: attrs }) => {
       if (!this.#state.config.loadBundle) return undefined
+      // Node built-ins (`constants`, `node:fs`, ...) are never carried in the bundle
+      // and never recorded as import edges -- the capture side (and the Node run
+      // loader, stasis-core/hooks.js) defer isBuiltin() specifiers before addImport
+      // sees them. Returning undefined hands the builtin back to esbuild's own
+      // resolution, which externalizes it under platform:'node' exactly as in a build
+      // without this plugin; state.getImport would instead throw ERR_MODULE_NOT_FOUND
+      // ("Cannot find module 'constants' imported from <file>"). Mirrors the webpack
+      // plugin's load-mode builtin guard.
+      if (isBuiltin(specifier)) return undefined
       const isEntry = resolveKind === 'entry-point'
       let url
       if (isEntry) {

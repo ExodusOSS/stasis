@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
 import { existsSync, readFileSync } from 'node:fs'
+import { isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -168,6 +169,17 @@ export class StasisWebpack {
         // webpack-internal loader resolution) defer to webpack's resolver --
         // they were never the bundle's responsibility to attest.
         if (!inScope(issuer)) return
+        // Node built-ins (`constants`, `fs`, `node:path`, ...) are never carried
+        // in the bundle and never recorded as import edges: the capture-side
+        // resolve hook and the CJS resolution shim (stasis-core/hooks.js) both
+        // short-circuit isBuiltin() specifiers to Node BEFORE addImport sees them.
+        // So state.getImport has no edge for one and would throw
+        // ERR_MODULE_NOT_FOUND ("Cannot find module 'constants' imported from ..."),
+        // which webpack surfaces as a "Module not found" build error. Leave
+        // data.request untouched and let webpack resolve/externalize the builtin
+        // exactly as it would in a build without this plugin (e.g. target:'node'
+        // externalizes it; a browser target applies its own polyfill/fallback).
+        if (isBuiltin(data.request)) return
         const parentURL = pathToFileURL(issuer).toString()
         const { url } = state.getImport(parentURL, data.request)
         // Redirect the resolver to the absolute bundle path; our stat wrapper
