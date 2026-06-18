@@ -6,8 +6,10 @@
 // hooks). Pre-fix: addFile never ran for those URLs, so the bundle's
 // `modules` map was missing files the `imports` map referenced, producing
 // a structurally inconsistent lockfile/bundle. The fix backfills addFile
-// in the resolve hook when state.sources/resources doesn't already carry
-// the file -- see stasis-core/src/hooks.js, the resolve hook's tail.
+// at save() time (the beforeExit / exit handler that runs just before
+// state.write()) for any URL referenced in state.imports but absent from
+// state.sources/resources -- see stasis-core/src/hooks.js, initState's
+// save() closure.
 
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
