@@ -447,3 +447,42 @@ test('run --bundle=load keeps a resolve-only require.resolve() edge whose target
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'child.js\n')
 }))
+
+// require()/require.resolve() resolve under Node's REQUIRE conditions ([require, node,
+// node-addons, module-sync], + any --conditions) -- they honor the `require` branch of
+// conditional exports, so they are NOT condition-free. The recorded edge must be keyed
+// under those conditions, never the wildcard '*' (which would claim condition-
+// independence and let an import query fall back onto a require resolution). On newer
+// Node the resolve hook keys it directly; on 24.14 require.resolve is native and gets
+// backfilled, reusing the require-condition set observed from a require() (here,
+// require('a')). Either way the key must carry 'require', not '*'.
+test('run --lock=add keys require.resolve() edges under require conditions, not "*"', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'cond', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.mjs'), "import './r.cjs'\n")
+  // require('a') makes the resolve hook report the require-condition set on every
+  // supported Node; require.resolve('b') (resolve-only) is the edge under test.
+  writeFileSync(join(tmp, 'r.cjs'), "require('a')\nrequire.resolve('b')\nconsole.log('ok')\n")
+  for (const name of ['a', 'b']) {
+    const d = join(tmp, 'node_modules', name)
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'index.js' }))
+    writeFileSync(join(d, 'index.js'), `module.exports = '${name}'\n`)
+  }
+
+  const save = run(['run', '--lock=add', 'index.mjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'ok\n')
+
+  const imports = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).imports
+  // every condition bucket recording the require.resolve('b') edge must be a require-
+  // condition set, never '*'
+  const bKeys = Object.entries(imports)
+    .filter(([, byParent]) => Object.values(byParent).some((s) => s.b === 'node_modules/b/index.js'))
+    .map(([cond]) => cond)
+  t.assert.ok(bKeys.length > 0, 'require.resolve("b") edge recorded')
+  for (const cond of bKeys) {
+    t.assert.notEqual(cond, '*', `require.resolve edge keyed '*' (buckets: ${JSON.stringify(bKeys)})`)
+    t.assert.ok(cond.split(', ').includes('require'), `expected require conditions, got '${cond}'`)
+  }
+}))

@@ -138,6 +138,20 @@ export class State {
   // the hook missed (deduped, in-bundle targets only). Populated only during capture.
   #observedResolutions = new Map()
 
+  // Node's require-condition set (e.g. ['require', 'node', 'node-addons',
+  // 'module-sync'], plus any --conditions), captured the first time addImport sees a
+  // require()-context edge. require()/require.resolve() resolve under THESE conditions
+  // -- they honor the `require` branch of conditional `exports`, so they're not
+  // condition-free -- so #backfillObservedResolutions keys the native
+  // (Module._resolveFilename) edges it recovers under this set rather than the
+  // wildcard '*'. That matches what the resolve hook records directly (newer Node) and
+  // unifies them with the require() bucket, so any capture that does at least one
+  // require() (the common case) yields the same lockfile on every Node version. null
+  // until observed -- a capture that ONLY require.resolve()s and never require()s
+  // leaves it null and backfill falls back to '*' (as before this change), which the
+  // getImport/resolveBundled wildcard fallbacks still match.
+  #requireConditions = null
+
   // Absolute path of a package whose source files were loaded by Node BEFORE
   // our hooks registered (the preload-cached set). Set by the loader's
   // initState to stasis-core's own root; sidecars inherit it from their
@@ -1210,6 +1224,15 @@ export class State {
 
   addImport(parentURL, specifier, url, { conditions = '*', format, importAttributes } = {}) {
     if (conditions !== '*') assert.ok(Array.isArray(conditions))
+    // Capture Node's require-condition set the first time we see a require()-context
+    // edge: it carries 'require' and never 'import' (the import set carries 'import'
+    // instead). Requiring the absence of 'import' also rejects an import edge a user
+    // forced 'require' onto via --conditions. #backfillObservedResolutions reuses this
+    // set to key native require.resolve() edges accurately instead of '*' (see field doc).
+    if (this.#requireConditions === null && Array.isArray(conditions) &&
+        conditions.includes('require') && !conditions.includes('import')) {
+      this.#requireConditions = conditions
+    }
     assert.ok(parentURL, 'addImport requires a parent (entries go through addFile)')
     const parent = this.#canonicalFile(parentURL)
     const file = this.#canonicalFile(url)
@@ -1605,12 +1628,13 @@ export class State {
   //     (Targets escaping the root throw in #canonicalFile -> caught below.)
   //   - only edges the hook didn't already record (dedup across all condition
   //     buckets), so this never double-records a normal require().
-  // addImport keys these under the wildcard '*' (the native resolver gives us no
-  // conditions), whereas the resolve hook keys them under the precise condition set
-  // Node reported. So the same resolve-only program yields a '*' bucket on native-
-  // resolve Node and a precise bucket on resolve-hook Node -- benign: both getImport
-  // and resolveBundled scan every bucket, and it's the same version-dependent
-  // routing that already makes any hook-vs-native edge differ.
+  // Keyed under the observed require-condition set (#requireConditions) -- require()/
+  // require.resolve() resolve under those conditions, not condition-free -- so a
+  // native-resolve Node (where these edges land here) keys them the same way the
+  // resolve hook keys them directly on newer Node. Any capture that does at least one
+  // require() thus yields the same lockfile on every version; '*' only when the set was
+  // never observed (a capture with no require() at all), which getImport/resolveBundled
+  // still match via their wildcard fallback.
   #backfillObservedResolutions() {
     if (this.#observedResolutions.size === 0) return
     for (const [parentURL, specs] of this.#observedResolutions) {
@@ -1626,7 +1650,7 @@ export class State {
         for (const [, byParent] of this.imports) {
           if (byParent.get(parent)?.get(spec) !== undefined) { recorded = true; break }
         }
-        if (!recorded) this.addImport(parentURL, specifier, resolvedURL)
+        if (!recorded) this.addImport(parentURL, specifier, resolvedURL, { conditions: this.#requireConditions ?? '*' })
       }
     }
   }
