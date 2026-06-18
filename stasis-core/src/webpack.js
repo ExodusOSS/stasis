@@ -224,6 +224,17 @@ export class StasisWebpack {
         const filePath = cd.resourceResolveData?.path
         if (!filePath || !path.isAbsolute(filePath) || !existsSync(filePath)) return
 
+        // Skip out-of-root resolutions. webpack's resolver follows symlinks
+        // and pnpm-hoisted node_modules entries to their realpath, which can
+        // land OUTSIDE state.root (a loader like babel-loader hoisted to a
+        // monorepo root, a workspace dep linked from elsewhere). Forwarding
+        // such paths to state.addImport / state.addFile would assert on
+        // `state.relative`'s `!file.startsWith('..')` guard -- which webpack
+        // catches and re-reports as a resolution error ("Can't resolve
+        // 'babel-loader'"). The unrecorded targets stay correctly resolved
+        // by webpack itself; we just don't add them to the bundle.
+        try { this.#state.relative(filePath) } catch { return }
+
         const kind = classifyExtension(filePath, this.#resources)
         if (kind === 'unknown') {
           throw new Error(
