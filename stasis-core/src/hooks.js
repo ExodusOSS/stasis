@@ -75,7 +75,6 @@ let loadingModule = 0
 let entryUnseen = true
 
 // Resolve once at module-load: stasis-core's own package root. Passed to State
-// Resolve once at module-load: stasis-core's own package root. Passed to State
 // as `preloadRoot` so state.write()'s backfill statically captures stasis-core's
 // internal edges -- the (state.js -> config.js)-shape relative imports that
 // were loaded by Node BEFORE install() registered our hooks and that the live
