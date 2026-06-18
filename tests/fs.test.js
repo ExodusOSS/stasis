@@ -170,3 +170,17 @@ test('getFsStat classifies recorded files and directories, undefined otherwise',
   t.assert.equal(state.getFsStat(fileURL(dir, 'assets')), 'directory')
   t.assert.equal(state.getFsStat(fileURL(dir, 'assets', 'nope.txt')), undefined)
 }))
+
+test('getFsStat reports ancestor directories implied by a recorded file', withProject((t, dir) => {
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  mkdirSync(join(dir, 'assets', 'sub'))
+  writeFileSync(join(dir, 'assets', 'sub', 'deep.txt'), 'x\n')
+  // Only the file is recorded -- the intermediate dir 'assets/sub' is never readdir'd.
+  state.addFsFile(fileURL(dir, 'assets', 'sub', 'deep.txt'), Buffer.from('x\n'))
+  t.assert.equal(state.getFsStat(fileURL(dir, 'assets', 'sub', 'deep.txt')), 'file')
+  // ...yet every ancestor dir (and the project root) is provably a directory.
+  t.assert.equal(state.getFsStat(fileURL(dir, 'assets', 'sub')), 'directory')
+  t.assert.equal(state.getFsStat(fileURL(dir, 'assets')), 'directory')
+  t.assert.equal(state.getFsStat(pathToFileURL(dir).toString()), 'directory') // root
+  t.assert.equal(state.getFsStat(fileURL(dir, 'assets', 'other')), undefined) // not implied
+}))

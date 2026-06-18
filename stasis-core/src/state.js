@@ -132,6 +132,14 @@ export class State {
   // construction, so a single build is safe.
   #bundleResolveIndex = null
 
+  // Lazily-built set of directory paths IMPLIED by the bundle's recorded entries
+  // (files, resources, directory listings): a recorded `node_modules/dep/index.js`
+  // proves `node_modules` and `node_modules/dep` exist as directories even though
+  // neither was readdir'd. getFsStat consults it so
+  // `fs.statSync('node_modules').isDirectory()` succeeds at bundle=load. Same load-mode
+  // immutability assumption as #bundleResolveIndex, so a single build is safe.
+  #impliedDirIndex = null
+
   // Capture-time native resolutions (parent URL -> specifier -> resolved URL)
   // observed via the Module._resolveFilename shim: require.resolve() and any CJS
   // require() that bypasses the resolve hook. write()'s backfill records the edges
@@ -1138,16 +1146,39 @@ export class State {
     return names
   }
 
-  // Classify a captured path for the `fs.lstatSync(x).isFile()/isDirectory()`
-  // shim (`stasis run --fs`, bundle=load): 'directory' for a readdir capture,
-  // 'file' for a readFileSync capture, or undefined when the path wasn't captured
-  // (the shim then falls back to a real on-disk lstatSync). A directory lives in
-  // this.resources too, so the 'directory' format is checked first.
+  // Every ancestor directory implied by the bundle's recorded file/resource/directory
+  // keys. A recorded `node_modules/dep/index.js` implies `node_modules/dep` and
+  // `node_modules` (and the root, ''). Built once; load-mode immutable (see field).
+  #impliedDirs() {
+    if (this.#impliedDirIndex) return this.#impliedDirIndex
+    const dirs = new Set([''])
+    const add = (key) => {
+      let prefix = ''
+      const parts = key.split('/')
+      for (let i = 0; i < parts.length - 1; i++) {
+        prefix = prefix === '' ? parts[i] : `${prefix}/${parts[i]}`
+        dirs.add(prefix)
+      }
+    }
+    for (const key of this.sources.keys()) add(key)
+    for (const key of this.resources.keys()) add(key)
+    this.#impliedDirIndex = dirs
+    return dirs
+  }
+
+  // Classify a captured path for the `fs.lstatSync(x)/statSync(x)` .isFile()/.isDirectory()
+  // shim (`stasis run --fs`, bundle=load): 'directory' for a readdir capture, 'file' for
+  // a readFileSync capture, 'directory' for an ancestor directory implied by a recorded
+  // file (e.g. `node_modules` when the bundle carries `node_modules/dep/index.js`), or
+  // undefined when the path wasn't captured (the shim then falls back to a real on-disk
+  // lstatSync). A directory lives in this.resources too, so the 'directory' format is
+  // checked first; implied dirs are checked last so an explicit file/dir record wins.
   getFsStat(url) {
     let file
     try { file = this.#canonicalFile(url) } catch { return undefined }
     if (this.formats.get(file) === 'directory') return 'directory'
     if (this.sources.has(file) || this.resources.has(file)) return 'file'
+    if (this.#impliedDirs().has(file)) return 'directory'
     return undefined
   }
 

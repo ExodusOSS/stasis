@@ -342,7 +342,9 @@ live in the usual `sources`/`modules` buckets, tagged in `formats`:
   (`encoding`, `withFileTypes`, `recursive`) pass through untouched, so such a call
   is not captured and is not served from the bundle on load.
 - `fs.lstatSync(path)` and `fs.statSync(path)` are not themselves recorded; on a load
-  run, for a path the bundle already carries (as a file or a `directory`),
+  run, for a path the bundle already carries — a recorded file, a `directory`, or an
+  ancestor directory implied by a recorded file (a bundled `node_modules/dep/index.js`
+  proves `node_modules` and `node_modules/dep` are directories) —
   `.isFile()`/`.isDirectory()` answer from the bundle so existence checks succeed even
   when the path is absent from disk. Other `Stats` fields/methods are the real stat's
   while the file is still on disk, and benign synthetic defaults (`0` / epoch / a

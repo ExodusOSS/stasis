@@ -433,3 +433,34 @@ test('run --fs: real graceful-fs statSync/lstatSync survive bundle=load', withTm
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'stat:true\nlstat:true\nstatdir:true\n')
 }))
+
+test('run --fs: statSync/lstatSync report implied ancestor directories of bundled files', withTmp((t, tmp) => {
+  // A recorded node_modules/dep/index.js proves node_modules and node_modules/dep
+  // exist as directories, even though neither was readdir'd. statSync/lstatSync must
+  // report them as directories at bundle=load -- regression: they used to ENOENT once
+  // node_modules was removed, breaking the very common "does node_modules exist?" probe.
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'index.js'), "module.exports = 'DEP'\n")
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import dep from 'dep'", // records node_modules/dep/index.js into the bundle
+    "import { statSync, lstatSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const nm = join(process.cwd(), "node_modules")',
+    'console.log(`dep:${dep}`)',
+    'console.log(`stat-nm:${statSync(nm).isDirectory()}`)',
+    'console.log(`stat-dep:${statSync(join(nm, "dep")).isDirectory()}`)',
+    'console.log(`lstat-nm:${lstatSync(nm).isDirectory()}`)',
+    // a path NOT implied by any recorded file still passes through (ENOENT once gone)
+    'try { statSync(join(process.cwd(), "nope")) } catch (e) { console.log(`miss:${e.code}`) }',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'node_modules'), { recursive: true }) // gone; the dirs are known only via the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'dep:DEP\nstat-nm:true\nstat-dep:true\nlstat-nm:true\nmiss:ENOENT\n')
+}))
