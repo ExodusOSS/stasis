@@ -5,20 +5,25 @@
 // (bundle=load).
 //
 // SCOPE, deliberately narrow:
-//   - Only the SYNC fs.readFileSync / fs.readdirSync / fs.lstatSync. Non-sync fs
-//     (fs.readFile, fs.promises.*, fs.opendir, streams, ...) is NOT touched.
+//   - Only the SYNC fs.readFileSync / fs.readdirSync / fs.lstatSync / fs.statSync
+//     plus async `fs.stat` (serve-only). The async stat exception exists because
+//     enhanced-resolve (webpack's resolver) probes file/directory existence via
+//     async `fs.stat` by default; without it, bundle=load can't resolve any path
+//     that isn't also on disk. fs.readFile, fs.promises.*, fs.opendir, streams,
+//     and other async readers are still NOT touched.
 //   - readdirSync: only the single-argument form `readdirSync(path)`. Any options
 //     (encoding, withFileTypes, recursive) fall through untouched -- Dirent objects
 //     and recursive listings aren't modelled.
 //   - readFileSync: the optional second argument (an `encoding` string, or an
 //     options object with `encoding`) is honoured; the raw bytes are what we
 //     capture/serve and `encoding` is applied on the way out.
-//   - lstatSync: serve-only, bundle=load, single-argument form. For a recorded path
-//     it returns a Stats-like object whose isFile()/isDirectory() come from the
+//   - lstatSync / statSync / stat: serve-only, bundle=load, single-argument form
+//     (async stat additionally accepts the trailing callback). For a recorded path
+//     each returns a Stats-like object whose isFile()/isDirectory() come from the
 //     bundle (the common existence check), and every other member LAZILY passes
 //     through to the real lstatSync(path) (which throws if the file is absent, just
-//     as without the bundle). It is never patched in capture mode (the file is on
-//     disk there, so the real Stats is correct).
+//     as without the bundle). Never patched in capture mode (the file is on disk
+//     there, so the real Stats is correct).
 //   - Only paths inside the project root -- whose REAL path (symlinks resolved)
 //     also stays inside the root -- are captured/served; anything else (a system
 //     path, a symlink escaping the root, an fd, a non-file URL) falls through to
@@ -48,6 +53,8 @@ const fs = require('node:fs')
 const realReadFileSync = fs.readFileSync
 const realReaddirSync = fs.readdirSync
 const realLstatSync = fs.lstatSync
+const realStatSync = fs.statSync
+const realStat = fs.stat
 const realRealpathSync = fs.realpathSync
 
 // Resolve a path argument to an absolute filesystem path, or null when it's
@@ -211,6 +218,44 @@ export function installFsHooks({ getState, markAborted, isLoadingModule }) {
       }
     }
     return realLstatSync(path, options)
+  }
+
+  // statSync mirrors lstatSync. enhanced-resolve uses statSync for file-existence
+  // probes under `useSyncFileSystemCalls`; without serving from the bundle here,
+  // bundle=load can't resolve any path that isn't also on disk.
+  fs.statSync = function statSync(path, options) {
+    const state = getState()
+    if (state?.config.loadBundle && options === undefined) {
+      const abs = toAbsPath(path)
+      if (abs !== null && withinRoot(state.root, abs)) {
+        const kind = state.getFsStat(pathToFileURL(abs).toString())
+        if (kind !== undefined) return bundleStats(path, kind === 'directory')
+      }
+    }
+    return realStatSync(path, options)
+  }
+
+  // Async stat. enhanced-resolve uses fs.stat by default (no useSyncFileSystemCalls)
+  // for webpack's loader and module resolution: without this, a bundle=load build
+  // fails with "Can't resolve '<loader>'" / "Can't resolve './entry.js'" because
+  // every existence probe ENOENTs through the unpatched async path. We schedule
+  // the success callback on a microtask to match the real fs's deferred shape
+  // (callers depend on `cb` running after the current frame).
+  fs.stat = function stat(path, options, callback) {
+    if (typeof options === 'function') { callback = options; options = undefined }
+    const state = getState()
+    if (state?.config.loadBundle && options === undefined) {
+      const abs = toAbsPath(path)
+      if (abs !== null && withinRoot(state.root, abs)) {
+        const kind = state.getFsStat(pathToFileURL(abs).toString())
+        if (kind !== undefined) {
+          const stats = bundleStats(path, kind === 'directory')
+          queueMicrotask(() => callback(null, stats))
+          return
+        }
+      }
+    }
+    return options === undefined ? realStat(path, callback) : realStat(path, options, callback)
   }
 
   // Refresh the node:fs ESM wrapper so destructured/namespace ESM imports made

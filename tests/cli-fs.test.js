@@ -359,3 +359,30 @@ test('run --fs serves lstatSync().isFile()/isDirectory() from the bundle, passes
   // lstatSync, which throws ENOENT (the file isn't on disk or in the bundle).
   t.assert.equal(load.stdout, 'file:true\ndir:true\nawaited:true\nmiss:ENOENT\n')
 }))
+
+test('run --fs serves statSync and async stat from the bundle (webpack-resolver path)', withTmp((t, tmp) => {
+  mkdirSync(join(tmp, 'src', 'data'))
+  writeFileSync(join(tmp, 'src', 'data', 'a.txt'), 'A')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { stat, statSync, readFileSync, readdirSync } from 'node:fs'",
+    "import { promisify } from 'node:util'",
+    "import { join } from 'node:path'",
+    'const dir = join(import.meta.dirname, "data")',
+    'readdirSync(dir); readFileSync(join(dir, "a.txt"))',
+    'console.log(`syncFile:${statSync(join(dir, "a.txt")).isFile()}`)',
+    'console.log(`syncDir:${statSync(dir).isDirectory()}`)',
+    'const asyncStat = promisify(stat)',
+    'console.log(`asyncFile:${(await asyncStat(join(dir, "a.txt"))).isFile()}`)',
+    'console.log(`asyncDir:${(await asyncStat(dir)).isDirectory()}`)',
+    'try { statSync(join(dir, "missing")) } catch (e) { console.log(`miss:${e.code}`) }',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'src', 'data'), { recursive: true })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'syncFile:true\nsyncDir:true\nasyncFile:true\nasyncDir:true\nmiss:ENOENT\n')
+}))
