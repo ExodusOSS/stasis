@@ -52,8 +52,15 @@ let saved = false
 // allowed to exit non-zero for its own reasons and still be persisted.
 let aborted = false
 
+// Resolve once at module-load: stasis-core's own package root. Passed to State
+// as `preloadRoot` so state.write()'s backfill statically captures stasis-core's
+// internal edges -- the (state.js -> config.js)-shape relative imports that
+// were loaded by Node BEFORE install() registered our hooks and that the live
+// resolve hook therefore never observed.
+const PRELOAD_ROOT = dirname(findPackageJSON(import.meta.url))
+
 function initState(root) {
-  state = new State(root, { preload: true })
+  state = new State(root, { preload: true, preloadRoot: PRELOAD_ROOT })
 
   // Persist the lockfile/bundle on exit UNLESS a stasis verification rejected something.
   // We deliberately do NOT gate on the exit code: a clean capture that exits non-zero for
@@ -76,61 +83,6 @@ function initState(root) {
   const save = () => {
     if (saved || aborted) return
     saved = true
-    // Backfill capture for files Node had cached BEFORE our hooks registered:
-    // stasis-core's own modules (state.js / config.js / state.util.js / ...)
-    // get loaded by hooks.js's transitive imports during preload, BEFORE
-    // install() runs. Once registered, any later `import` of those URLs hits
-    // Node's module cache and skips the load hook, so addFile would otherwise
-    // never run for them and the lockfile / bundle would have edges in
-    // `imports` referencing files absent from `modules` (the dangling-edge
-    // shape the user observed).
-    //
-    // Why here and not in the resolve hook: the resolve hook fires for EVERY
-    // import edge, AHEAD of load. Calling addFile in resolve would race the
-    // load-time addFile for non-preload-cached URLs (where load fires later
-    // with `source` AND with `format` determined by nextLoad) -- doubling
-    // work and, worse, forcing an addFile with a `format` either undefined
-    // or inferred from extname before nextLoad determined the authoritative
-    // value. The noupsert on `state.formats` then conflicted on the second
-    // call. By the time save() runs, every load that was going to fire HAS
-    // fired, so any URL still missing from state.sources/resources is
-    // exactly the set Node's module cache short-circuited -- and addFile
-    // fires AT MOST ONCE per file (either from load or from this backfill).
-    if (state) {
-      // Snapshot first; addFile mutates state.sources/resources during the
-      // loop. Project-relative dedup -- a target may be referenced from
-      // multiple parents.
-      const missing = new Set()
-      for (const [, byParent] of state.imports) {
-        for (const [, specifiers] of byParent) {
-          for (const [, file] of specifiers) {
-            if (typeof file !== 'string') continue
-            if (file.startsWith('..')) continue
-            if (state.sources.has(file) || state.resources.has(file)) continue
-            missing.add(file)
-          }
-        }
-      }
-      for (const file of missing) {
-        const url = pathToFileURL(resolvePath(state.root, file)).toString()
-        // addFile reads the file from disk and infers `format` from
-        // extension + nearest package.json `type` -- the same path load
-        // takes when nextLoad doesn't pre-populate. A throw here (frozen
-        // mismatch, unattested file under a closed bundle, lockfile hash
-        // conflict, ...) follows the same abort contract as the load /
-        // resolve hooks: mark aborted, propagate. Node's exit handler will
-        // see the throw and the process exits non-zero, mirroring the
-        // pre-existing capture-rejection contract; `aborted` keeps a
-        // subsequent save() (e.g. process.on('exit') after beforeExit
-        // already threw) from re-running.
-        try {
-          state.addFile(url, {})
-        } catch (err) {
-          aborted = true
-          throw err
-        }
-      }
-    }
     state.write()
   }
 

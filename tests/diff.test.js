@@ -9,7 +9,7 @@ import { stripVTControlCharacters } from 'node:util'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
-import { sha512integrity } from '@exodus/stasis-core/state.util'
+import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact } from '../stasis/src/diff.js'
 import { diffCommand } from '../stasis/src/cmd/diff.js'
 

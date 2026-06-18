@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 
-import { canonicalizePath } from './state.util.js'
+import { canonicalizePath } from './state-util.js'
 
 const VALID_SCOPE = new Set(['node_modules', 'full'])
 const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])

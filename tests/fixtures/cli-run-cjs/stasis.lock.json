@@ -18,6 +18,11 @@
   },
   "modules": {},
   "imports": {
+    "node, import, module-sync, node-addons": {
+      "src/entry.cjs": {
+        "file:///home/user/stasis/tests/fixtures/cli-run-cjs/src/hello.cjs": "src/hello.cjs"
+      }
+    },
     "require, node, node-addons, module-sync": {
       "src/entry.cjs": {
         "./hello.cjs": "src/hello.cjs"

@@ -9,7 +9,7 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
-import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state.util.js'
+import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
 import { fileMapToObject, objectToMaps, splitNodeModulesPath } from './util.js'
 
@@ -114,6 +114,15 @@ export class State {
   #bundleImports = null
   #bundleFormats = null
 
+  // Absolute path of a package whose source files were loaded by Node BEFORE
+  // our hooks registered (the preload-cached set). Set by the loader's
+  // initState to stasis-core's own root; sidecars inherit it from their
+  // parent so plugin-driven write()s also backfill internal edges. write()'s
+  // backfill statically parses each file under this root and addImports its
+  // relative-specifier edges -- recovering the (state.js -> config.js)-shape
+  // edges that the live resolve hook never observed.
+  #preloadRoot = null
+
   // Per-artifact "last serialized" caches: write() compares the freshly serialized
   // JSON text against the cached one for each output (lockfile / unified bundle /
   // split code / split resources) and skips both the brotli step and the writeFileSync
@@ -135,7 +144,7 @@ export class State {
   //     write() on a sidecar skips the lockfile (parent owns it) and only writes its bundle.
   //   All other keys forward to Config.
   constructor(root, options = {}) {
-    const { preload: isPreload = false, parent: parentState, ...configOptions } = options
+    const { preload: isPreload = false, parent: parentState, preloadRoot, ...configOptions } = options
     this.config = new Config(configOptions)
     if (isPreload) assert.ok(!preload, 'Only one preload Stasis instance is supported')
     assert.ok(!(isPreload && parentState), 'preload and parent are mutually exclusive')
@@ -148,6 +157,10 @@ export class State {
       this.hashes = parentState.hashes
       this.entries = parentState.entries
       this.modules = parentState.modules
+      // Sidecar inherits the parent's preloadRoot so plugin-driven write()s
+      // (StasisWebpack / StasisEsbuild done-hook saves) backfill stasis-core's
+      // internal edges the same way the parent does.
+      this.#preloadRoot = parentState.#preloadRoot
       // Inherit the parent's lockfile attestation maps so #mergeBundleMetadata
       // cross-checks the sidecar bundle against the same attestation the parent
       // already loaded. Without this the sidecar would silently trust whatever
@@ -458,6 +471,15 @@ export class State {
     }
     if (this.config.writeLockfile && this.config.lockFile) {
       claimWritePath(`lockFile '${this.config.lockFile}'`, this.config.lockFile)
+    }
+
+    // preloadRoot is opt-in -- only the runtime loader (hooks.js's initState)
+    // sets it, pointing at stasis-core's own package root. Plain top-level
+    // States constructed via the CLI / direct API leave it null and skip
+    // the internal-edges backfill entirely.
+    if (preloadRoot !== undefined) {
+      assert.equal(typeof preloadRoot, 'string', 'preloadRoot must be a string')
+      this.#preloadRoot = preloadRoot
     }
 
     if (isPreload) preload = this
@@ -1222,6 +1244,7 @@ export class State {
   }
 
   write() {
+    this.#backfillBeforeWrite()
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     // Sidecars never write the lockfile -- the parent owns it. They only emit their bundle.
     // A "sidecar" here is one sharing the parent's lockfile data structures; an independent
@@ -1233,6 +1256,7 @@ export class State {
     // Critical for webpack/esbuild watch-mode rebuilds, where compiler.hooks.done fires on
     // every rebuild but the captured graph usually doesn't change. Without this, every
     // rebuild brotli-compresses (quality 11) and rewrites every output.
+
     if (this.config.writeLockfile && !this.#parent) {
       const lockText = this.lockData
       if (lockText !== this.#lastLockData) {
@@ -1274,4 +1298,150 @@ export class State {
   get parent() {
     return this.#parent
   }
+
+  // Capture stasis-core's own files + internal edges that the live hooks missed.
+  // When app code (or a bundler plugin) imports a stasis-core module, Node had
+  // it cached from preload-time -- BEFORE install() registered our hooks -- so
+  // the resolve hook records the edge but the load hook never fires, leaving
+  // addFile / addImport blind to the file's bytes AND its outgoing edges. This
+  // BFS, scoped strictly to the `<root>/.../@exodus/stasis-core/src/<name>.js`
+  // shape, walks the graph starting from missing imports targets + already-
+  // captured stasis-core files: for each, addFile (asserting the shape),
+  // statically scans for relative-`.js` specifiers, resolves them, and
+  // addImports each edge. The strict shape allowlist + existsSync gate filter
+  // out comment-noise like a `require('../../pkg/x')` sitting in a JSDoc block.
+  //
+  // Called from write() so every State variant (preload via beforeExit/exit;
+  // sidecar / independent plugin States via compiler.hooks.done) gets the
+  // same coverage.
+  #backfillBeforeWrite() {
+    // List what the live hooks missed first. An empty list means there's
+    // nothing to do -- either the live hooks captured everything (the common
+    // case for non-preload runs and for plugin-driven States that don't
+    // touch preload-cached modules), or we're a State variant that doesn't
+    // observe imports at all.
+    const missing = this.#collectMissingImportedFiles()
+    if (missing.size === 0) return
+
+    const isStasisCoreFile = (file) => STASIS_CORE_FILE_RE.test(`/${file}`)
+    const preloadRel = this.#preloadRoot ? relative(this.root, this.#preloadRoot) : null
+    const canBackfill = preloadRel !== null && !preloadRel.startsWith('..')
+
+    // Without a usable preloadRoot (no loader present, or stasis-core is a
+    // workspace sibling not under state.root) there's nothing this method
+    // can do. But there ALSO shouldn't be any missing in-scope files -- the
+    // live hooks are authoritative for everything else. A non-empty missing
+    // list at this point means the live load hook missed something it
+    // should have captured: fail loud rather than silently patch.
+    assert.ok(canBackfill,
+      `state.write() has imports referencing un-captured files but no usable preloadRoot ` +
+      `(preloadRoot=${this.#preloadRoot ?? 'unset'}). The live load hook missed an in-scope target -- ` +
+      `investigate rather than silently patch: ${[...missing].slice(0, 3).join(', ')}`)
+
+    // Every missing target MUST be a stasis-core source file -- the only
+    // legitimate "in-scope but un-captured" case is preload-cached modules.
+    // Anything else means the live load hook missed something it should have
+    // captured; surface that loudly rather than silently patching.
+    for (const file of missing) {
+      assert.ok(isStasisCoreFile(file),
+        `state.write() backfill refused: '${file}' is referenced by the imports map but ` +
+        `not yet captured AND not a stasis-core source file. The live load hook missed ` +
+        `an in-scope target -- investigate rather than silently patch.`)
+    }
+
+    const PRELOAD_CONDITIONS = ['node', 'import', 'module-sync', 'node-addons']
+    const stasisAddFile = (file) => {
+      // Tight invariant: every backfilled file MUST match the stasis-core
+      // source-file shape. The caller pre-filters via isStasisCoreFile, but
+      // asserting here keeps the contract local and catches any future code
+      // path that forgets.
+      assert.ok(isStasisCoreFile(file),
+        `state.write() backfill refused: '${file}' is not a stasis-core source file ` +
+        `(expected '.../@exodus/stasis-core/src/<name>.js')`)
+      this.addFile(pathToFileURL(resolve(this.root, file)).toString(), {})
+    }
+
+    // BFS through stasis-core's module graph. Seed:
+    //   (a) the missing files (asserted stasis-core above) -- user-code ->
+    //       stasis-core edges the live load hook missed because Node's
+    //       module cache short-circuited it.
+    //   (b) every stasis-core file already in sources -- a static `stasis
+    //       bundle` pass may have pulled one in via the live hook; we still
+    //       need to walk its transitive imports.
+    //
+    // For each queued file: addFile if not yet captured, then scan its
+    // source for relative-`.js` specifiers, validate the resolved target,
+    // addImport the edge, and queue the target. The single addFile site
+    // covers seeds AND transitive targets -- a queued target gets addFile'd
+    // on its next pop, no separate inner addFile call needed. BFS converges
+    // because the matching file set is finite and `processed` dedups.
+    const queue = [...missing]
+    for (const file of this.sources.keys()) {
+      if (isStasisCoreFile(file)) queue.push(file)
+    }
+
+    const processed = new Set()
+    while (queue.length > 0) {
+      const file = queue.shift()
+      if (processed.has(file)) continue
+      processed.add(file)
+      if (!this.sources.has(file) && !this.resources.has(file)) stasisAddFile(file)
+      const source = this.sources.get(file)
+      if (typeof source !== 'string') continue
+      const baseURL = pathToFileURL(resolve(this.root, file)).toString()
+      // Match `from './<name>.js'\n` -- the only import shape stasis-core
+      // uses (ESM `import ... from` and `export ... from`, always single-
+      // quoted, filenames without `.`). Tight enough to ignore JSDoc /
+      // template-literal false positives, narrow enough to reject parent-
+      // relative (`../`), subpath (`./dir/file.js`), or extensionless.
+      for (const m of source.matchAll(/ from '(\.\/[a-zA-Z-]+\.js)'\n/g)) {
+        const specifier = m[1]
+        const targetURL = new URL(specifier, baseURL).toString()
+        const targetAbsolute = fileURLToPath(targetURL)
+        let targetFile
+        try { targetFile = this.relative(targetAbsolute) } catch { continue }
+        if (!isStasisCoreFile(targetFile)) continue
+        if (!existsSync(targetAbsolute)) continue
+        queue.push(targetFile)
+        this.addImport(baseURL, specifier, targetURL, { conditions: PRELOAD_CONDITIONS })
+      }
+    }
+  }
+
+  // Project-relative files referenced by `this.imports` that the live hooks
+  // didn't capture into this.sources / this.resources, restricted to the
+  // in-scope set (full: everything under state.root; nm: only node_modules).
+  // Out-of-scope files are NOT included -- the live hooks correctly skip them
+  // (workspace files under nm-scope), and including them would force the
+  // backfill caller to wave away false alarms.
+  #collectMissingImportedFiles() {
+    const missing = new Set()
+    for (const [, byParent] of this.imports) {
+      for (const [, specifiers] of byParent) {
+        for (const [, file] of specifiers) {
+          if (typeof file !== 'string') continue
+          if (missing.has(file)) continue
+          // Union of three "captured" signals: hashes (addFile ran -- present
+          // under any lock mode), sources/resources (bundle pre-seeded -- present
+          // under bundle=load even without a lockfile). Any one suffices; a
+          // file in NONE of them is the actual missing-from-capture case.
+          if (this.hashes.has(file) || this.sources.has(file) || this.resources.has(file)) continue
+          const url = pathToFileURL(resolve(this.root, file)).toString()
+          if (!this.config.full && !this.inNodeModules(url)) continue
+          missing.add(file)
+        }
+      }
+    }
+    return missing
+  }
 }
+
+// Allowed shape for a stasis-core source path -- `.../@exodus/stasis-core/src/<name>.js`.
+// Used by the backfill BFS to reject anything that doesn't look like a real
+// stasis-core module (comment noise, paths escaping `src/`, etc.). Matched
+// against `/${projectRelativeFile}` so the leading-`/` anchor isn't fooled
+// by a file at the project root happening to end in `@exodus/stasis-core/...`.
+// Filenames are `[a-zA-Z-]+\.js` only -- no `.` in the basename, which is why
+// `state.util.js` was renamed to `state-util.js`.
+const STASIS_CORE_FILE_RE = /\/@exodus\/stasis-core\/src\/[a-zA-Z-]+\.js$/
+

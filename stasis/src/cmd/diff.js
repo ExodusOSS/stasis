@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 
-import { sha512integrity } from '@exodus/stasis-core/state.util'
+import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { parseFileWithKind } from '../parse.js'
 import { diffArtifacts, formatDiffStat, hasDifferences } from '../diff.js'
 

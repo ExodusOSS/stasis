@@ -12,7 +12,7 @@
     "./lockfile": "./src/lockfile.js",
     "./util": "./src/util.js",
     "./brotli": "./src/brotli.js",
-    "./state.util": "./src/state.util.js",
+    "./state-util": "./src/state-util.js",
     "./prune": "./src/prune.js",
     "./esbuild": "./src/esbuild.js",
     "./webpack": "./src/webpack.js",
@@ -34,7 +34,7 @@
     "src/plugins.js",
     "src/prune.js",
     "src/state.js",
-    "src/state.util.js",
+    "src/state-util.js",
     "src/util.js",
     "src/webpack.js"
   ],

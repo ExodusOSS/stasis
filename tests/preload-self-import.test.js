@@ -89,6 +89,32 @@ test('app code importing stasis-core (preload-cached) gets its files captured in
   t.assert.equal(lockEdge, 'node_modules/@exodus/stasis-core/src/state.js')
   t.assert.ok(lock.modules?.['node_modules/@exodus/stasis-core']?.files?.['src/state.js']?.startsWith('sha512-'),
     'lockfile must hash state.js (no dangling import reference)')
+
+  // stasis-core's INTERNAL edges (state.js -> ./config.js, etc.) must also be
+  // recorded. Pre-fix: state.js was loaded by Node BEFORE our hooks registered,
+  // so the resolve hook never observed its own imports -- the lockfile/bundle
+  // ended up with state.js's bytes but no edges originating from it. The
+  // static-parse backfill in state.write() recovers them.
+  const stasisEdges = bundle.imports?.['node, import, module-sync, node-addons']?.['node_modules/@exodus/stasis-core/src/state.js']
+  t.assert.ok(stasisEdges, 'state.js must have outgoing edges recorded')
+  t.assert.equal(stasisEdges['./config.js'], 'node_modules/@exodus/stasis-core/src/config.js',
+    'state.js -> ./config.js must be in the bundle')
+  t.assert.equal(stasisEdges['./state-util.js'], 'node_modules/@exodus/stasis-core/src/state-util.js',
+    'state.js -> ./state-util.js must be in the bundle')
+
+  // The user-reported case: config.js -> ./state-util.js was missing pre-fix.
+  const configEdges = bundle.imports?.['node, import, module-sync, node-addons']?.['node_modules/@exodus/stasis-core/src/config.js']
+  t.assert.ok(configEdges, 'config.js must have outgoing edges recorded')
+  t.assert.equal(configEdges['./state-util.js'], 'node_modules/@exodus/stasis-core/src/state-util.js',
+    'config.js -> ./state-util.js must be in the bundle (the user-reported missing edge)')
+
+  // The transitively-reachable internal files (config.js, state-util.js,
+  // bundle.js, lockfile.js, util.js, brotli.js) must all be captured.
+  const stasisBucketFiles = Object.keys(bundle.modules['node_modules/@exodus/stasis-core'].files).toSorted()
+  for (const expected of ['src/config.js', 'src/state.js', 'src/state-util.js']) {
+    t.assert.ok(stasisBucketFiles.includes(expected),
+      `stasis-core bucket must include ${expected} (transitively reachable from state.js); got ${stasisBucketFiles.join(', ')}`)
+  }
 }))
 
 // Round-trip the captured bundle through bundle=load + lock=frozen. Pre-fix

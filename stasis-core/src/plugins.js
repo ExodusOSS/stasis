@@ -9,7 +9,7 @@ import { join } from 'node:path'
 
 import { DEFAULT_LOCK, assertOptionsMatchConfig, validatePluginOptions } from './config.js'
 import { State } from './state.js'
-import { canonicalizePath } from './state.util.js'
+import { canonicalizePath } from './state-util.js'
 
 const FILE_LOCK = 'stasis.lock.json'
 

@@ -12,7 +12,7 @@ import {
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
 import { Lockfile } from './lockfile.js'
-import { sha512integrity } from './state.util.js' // also runs the posix-sep assertion
+import { sha512integrity } from './state-util.js' // also runs the posix-sep assertion
 import { isPlainObject, posixPathEscapes, splitNodeModulesPath } from './util.js'
 
 const LOCKFILE = 'stasis.lock.json'
