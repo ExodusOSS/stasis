@@ -1095,14 +1095,25 @@ export class State {
       file = this.imports.get('*')?.get(parent)?.get(specifier)
     }
     if (file === undefined) {
+      // Under-recorded edge: Node's module cache hid this require() from the
+      // resolve hook at capture (another module loaded the target first), so no
+      // edge was recorded under this importer. Newer Node routes a bundle-served
+      // CJS require() through the resolve hook (this path) rather than through
+      // Module._resolveFilename (where the CJS-loader shim recovers it) -- the
+      // routing changed within 26.x -- so recover it from the bundle here too.
+      if (this.config.loadBundle) {
+        const abs = this.resolveBundled(parentURL, specifier)
+        if (abs !== undefined) {
+          const f = relative(this.root, abs)
+          return { url: pathToFileURL(abs).toString(), format: this.formats.get(f) }
+        }
+      }
       // Throw with Node's ERR_MODULE_NOT_FOUND shape rather than asserting:
       // plain Node's resolver throws this when a bare or relative specifier
       // can't be found, and ESM dynamic-import callers commonly do
       // `try { await import(x) } catch (e) { if (e.code !== 'ERR_MODULE_NOT_FOUND') throw e }`.
       // A bare assertion produced an ERR_ASSERTION code that re-threw out of
-      // those guards. (CJS `require()` doesn't hit this path: Node's CJS
-      // resolver throws MODULE_NOT_FOUND upstream of our hook, so the only
-      // miss-shape callers can observe is dynamic ESM import().)
+      // those guards.
       const err = new Error(`Cannot find module '${specifier}' imported from ${parent}`)
       err.code = 'ERR_MODULE_NOT_FOUND'
       throw err
