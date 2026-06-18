@@ -204,6 +204,13 @@ export class StasisWebpack {
       })
 
       nmf.hooks.afterResolve.tap('Stasis', (data) => {
+        // Cross-version field unwrap: webpack 5 wraps `rawRequest` and
+        // `resourceResolveData` inside `data.createData` (the bundle of fields
+        // that will populate the NormalModule), whereas webpack 4 hangs them off
+        // `data` directly. Same field names underneath, just one level of
+        // indirection -- fall through to `data` when `createData` is absent so
+        // both shapes flow through the same code path below.
+        const cd = data.createData ?? data
         // resourceResolveData.path is the resolved on-disk path without query/fragment;
         // data.resource may carry a `?query` (inline-loader, asset import suffixes) or
         // be a synthetic resource (data:, null-loader). We track the resolved file only.
@@ -214,7 +221,7 @@ export class StasisWebpack {
         // it'll get captured then; otherwise it stays unattested. This matches
         // webpack's view -- those resolutions don't have a real source file we
         // could hash.
-        const filePath = data.resourceResolveData?.path
+        const filePath = cd.resourceResolveData?.path
         if (!filePath || !path.isAbsolute(filePath) || !existsSync(filePath)) return
 
         const kind = classifyExtension(filePath, this.#resources)
@@ -226,18 +233,26 @@ export class StasisWebpack {
         }
 
         const url = pathToFileURL(filePath).toString()
-        // Prefer the beforeResolve-captured issuer over rrd.context.issuer (see
-        // the WeakMap setup above). Falls back to rrd.context.issuer for dependencies
-        // that bypassed beforeResolve -- shouldn't happen in webpack 4's NMF path
-        // but kept defensive in case a future webpack or a stacked plugin reaches
-        // afterResolve without firing beforeResolve.
+        // Issuer attribution -- tier the sources from most reliable to least:
+        //   1. beforeResolve-captured value (works on both webpack 4 and 5;
+        //      necessary on webpack 4 to dodge the stale rrd.context.issuer bug)
+        //   2. data.contextInfo.issuer (fresh in webpack 5's afterResolve, often
+        //      undefined in webpack 4's, but harmless when set)
+        //   3. createData.resourceResolveData.context.issuer (webpack 4 only --
+        //      enhanced-resolve 5 removed `context.issuer` from ResolveRequest, so
+        //      tier 3 is structurally dead under webpack 5. Kept as a defensive
+        //      last resort for any stacked plugin that reached afterResolve
+        //      without firing beforeResolve on webpack 4.)
         const dep = data?.dependencies?.[0]
-        const issuer = (dep && issuerByDep.get(dep)) ?? data.resourceResolveData.context?.issuer
+        const issuer = (dep && issuerByDep.get(dep))
+          ?? data.contextInfo?.issuer
+          ?? cd.resourceResolveData?.context?.issuer
         const isEntry = !issuer
+        const rawRequest = cd.rawRequest ?? data.rawRequest
 
         if (kind === 'code' && !isEntry) {
           const parentURL = pathToFileURL(path.resolve(issuer)).toString()
-          this.#state.addImport(parentURL, data.rawRequest, url)
+          this.#state.addImport(parentURL, rawRequest, url)
         }
 
         if (!this.#seen.has(filePath)) {
