@@ -55,7 +55,7 @@ const EXPECTED_STDOUT = [
 test('run --fs --bundle=add captures readFileSync/readdirSync with per-kind formats', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -78,7 +78,7 @@ test('run --fs --bundle=add captures readFileSync/readdirSync with per-kind form
 test('run --fs --lock=add attests fs captures by integrity in the lockfile', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -95,7 +95,7 @@ test('run --fs --lock=add attests fs captures by integrity in the lockfile', wit
 test('run --fs --bundle=load serves the reads from the bundle with the files gone from disk', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -104,7 +104,7 @@ test('run --fs --bundle=load serves the reads from the bundle with the files gon
   rmSync(join(tmp, 'src', 'assets'), { recursive: true })
 
   const load = run(
-    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'],
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
@@ -114,7 +114,7 @@ test('run --fs --bundle=load serves the reads from the bundle with the files gon
 test('run --bundle=load WITHOUT --fs does not serve fs reads (falls back to disk)', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
@@ -143,7 +143,7 @@ test('run --fs only patches the single-argument readdirSync', withTmp((t, tmp) =
 
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
-    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'],
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
@@ -174,13 +174,13 @@ test('run --fs honors readFileSync encoding (string + object form) identically o
   ].join('\n'))
 
   const bundlePath = join(tmp, 'snapshot.br')
-  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   t.assert.match(save.stdout, /buffer-throws:ERR_UNKNOWN_ENCODING/) // 'buffer' is not a valid readFileSync encoding
 
   rmSync(join(tmp, 'src', 'assets'), { recursive: true })
 
-  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   // Served-from-bundle output is identical to capture across every encoding form.
   t.assert.equal(load.stdout, save.stdout)
@@ -204,7 +204,7 @@ test('run --fs on a CommonJS program: a required module stays code, explicit rea
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   const bundle = decode(bundlePath)
   // the required CJS module is recorded as CODE (commonjs), not an fs resource
@@ -215,15 +215,25 @@ test('run --fs on a CommonJS program: a required module stays code, explicit rea
   t.assert.equal(bundle.formats['src'], 'directory')
 
   rmSync(join(tmp, 'src', 'data.txt')) // explicitly-read asset gone; served from the bundle on load
-  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, save.stdout)
 }))
 
 test('run --fs requires an active bundle mode', (t) => {
-  const r = run(['run', '--lock=add', '--fs', 'src/entry.js'], { cwd: fixture })
+  const r = run(['run', '--lock=add', '--fs=sync', 'src/entry.js'], { cwd: fixture })
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /--fs requires --bundle=\(add\|replace\|load\)/)
+})
+
+test('run --fs requires the mode argument (=sync)', (t) => {
+  // bare --fs (no value) is rejected -- the mode argument is now required
+  const bare = run(['run', '--lock=add', '--bundle=add', '--fs', 'src/entry.js'], { cwd: fixture })
+  t.assert.equal(bare.status, 1)
+  // an unknown mode is rejected with a clear message
+  const bogus = run(['run', '--lock=add', '--bundle=add', '--fs=nope', 'src/entry.js'], { cwd: fixture })
+  t.assert.equal(bogus.status, 1)
+  t.assert.match(bogus.stderr, /--fs must be 'sync'/)
 })
 
 test('stasis-core run --fs captures and serves the same way', withTmp((t, tmp) => {
@@ -234,13 +244,13 @@ test('stasis-core run --fs captures and serves the same way', withTmp((t, tmp) =
     r.stderr = stripVTControlCharacters(r.stderr)
     return r
   }
-  const save = core(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'])
+  const save = core(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'])
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   t.assert.equal(save.stdout, EXPECTED_STDOUT)
   t.assert.equal(decode(bundlePath).formats['src/assets'], 'directory')
 
   rmSync(join(tmp, 'src', 'assets'), { recursive: true })
-  const load = core(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'])
+  const load = core(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'])
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, EXPECTED_STDOUT)
 }))
@@ -254,7 +264,7 @@ test('run --fs captures a readdirSync of a bucket root without discarding the ru
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'root:true\n')
   t.assert.ok(existsSync(bundlePath), 'bundle must be written (not silently discarded)')
@@ -276,7 +286,7 @@ test('run --fs handles a type-less .js that is both imported and readFileSync-re
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hi:29\n')
   t.assert.ok(existsSync(bundlePath), 'bundle must be written (no format conflict)')
@@ -298,7 +308,7 @@ test('run --fs does NOT attest a directory symlink that escapes the project root
       '',
     ].join('\n'))
     const bundlePath = join(tmp, 'snapshot.br')
-    const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+    const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
     t.assert.equal(r.stdout, 'peek:secret.env\n') // the program still reads it from disk
     const bundle = decode(bundlePath)
@@ -322,7 +332,7 @@ test('run --fs warns (not silently) when a capture is aborted by a mid-run byte 
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0) // the program itself ran fine
   t.assert.equal(r.stdout, 'done\n')
   t.assert.match(r.stderr, /--fs: capture aborted/)
@@ -348,11 +358,11 @@ test('run --fs serves lstatSync().isFile()/isDirectory() from the bundle, passes
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   rmSync(join(tmp, 'src', 'data'), { recursive: true }) // gone from disk; served from bundle
-  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   // isFile/isDirectory answered from the bundle (incl. through an await, proving the
   // Stats is not a rejecting thenable); the unrecorded path passes through to a real
@@ -386,11 +396,11 @@ test('run --fs serves statSync() and benign synthetic Stats fields for removed r
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   rmSync(join(tmp, 'src', 'data'), { recursive: true }) // gone from disk; served from bundle
-  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   // isFile/isDirectory + mode type-bits from the bundle; uid/gid/size/mtime are benign
   // synthetic defaults (0 / epoch) rather than ENOENT; unrecorded path still passes through.
@@ -425,11 +435,11 @@ test('run --fs: real graceful-fs statSync/lstatSync survive bundle=load', withTm
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   rmSync(join(tmp, 'src', 'data'), { recursive: true }) // gone; graceful-fs must still stat it
-  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'stat:true\nlstat:true\nstatdir:true\n')
 }))
@@ -456,11 +466,11 @@ test('run --fs: statSync/lstatSync report implied ancestor directories of bundle
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
-  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   rmSync(join(tmp, 'node_modules'), { recursive: true }) // gone; the dirs are known only via the bundle
-  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'dep:DEP\nstat-nm:true\nstat-dep:true\nlstat-nm:true\nmiss:ENOENT\n')
 }))

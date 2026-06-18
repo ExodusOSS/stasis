@@ -120,7 +120,7 @@ lockfile/bundle `config` block.
   (`solidity`, `php`, `bash`, `rust`). Resource files use `resource` (content is
   raw UTF-8) or `resource:base64` (content is binary, base64-encoded) — this is
   what distinguishes a resource from code per file, and tells a reader how to
-  decode the bundle payload. Filesystem captures (`stasis run --fs`) add
+  decode the bundle payload. Filesystem captures (`stasis run --fs=sync`) add
   `directory` for a `fs.readdirSync` listing (the content is a sorted JSON array
   of names); a captured `fs.readFileSync` reuses the code or resource tags above.
   The integrity of a `directory` listing is the sha512 of its JSON text, just
@@ -317,13 +317,13 @@ In the lockfile, a resource is hashed like any other file (sha512 of its raw
 bytes) and carries the same `resource`/`resource:base64` entry in `formats`, so
 a frozen run verifies a copied asset byte-for-byte just as it does code.
 
-## Filesystem captures (`stasis run --fs`)
+## Filesystem captures (`stasis run --fs=sync`)
 
-The loader hooks capture the module graph; `--fs` additionally monkey-patches the
+The loader hooks capture the module graph; `--fs=sync` additionally monkey-patches the
 **sync** readers `fs.readFileSync` and `fs.readdirSync`, plus `fs.lstatSync` (and
 only those — no `fs.readFile`, `fs.promises`, streams, …) so a program's explicit
 file reads are recorded into the bundle (`--bundle=add|replace`) and served back
-from it (`--bundle=load`). The same `--fs` flag is needed on the load run for the
+from it (`--bundle=load`). The same `--fs=sync` flag is needed on the load run for the
 patch to serve; an un-captured read falls through to the real disk read. Captures
 live in the usual `sources`/`modules` buckets, tagged in `formats`:
 
@@ -356,7 +356,7 @@ live in the usual `sources`/`modules` buckets, tagged in `formats`:
 
 The two recorded kinds are hashed like any other content (the `directory` integrity
 is the sha512 of its JSON text), so the lockfile attests them and a frozen run
-verifies them. `--fs` requires an active bundle mode (`add`, `replace`, or `load`).
+verifies them. `--fs=sync` requires an active bundle mode (`add`, `replace`, or `load`).
 
 ## Discovery
 
