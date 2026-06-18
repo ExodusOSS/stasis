@@ -226,14 +226,14 @@ test('run --fs requires an active bundle mode', (t) => {
   t.assert.match(r.stderr, /--fs requires --bundle=\(add\|replace\|load\)/)
 })
 
-test('run --fs requires the mode argument (=sync)', (t) => {
-  // bare --fs (no value) is rejected -- the mode argument is now required
+test('run --fs requires the mode argument (sync or async)', (t) => {
+  // bare --fs (no value) is rejected -- the mode argument is required
   const bare = run(['run', '--lock=add', '--bundle=add', '--fs', 'src/entry.js'], { cwd: fixture })
   t.assert.equal(bare.status, 1)
   // an unknown mode is rejected with a clear message
   const bogus = run(['run', '--lock=add', '--bundle=add', '--fs=nope', 'src/entry.js'], { cwd: fixture })
   t.assert.equal(bogus.status, 1)
-  t.assert.match(bogus.stderr, /--fs must be 'sync'/)
+  t.assert.match(bogus.stderr, /--fs must be 'sync' or 'async'/)
 })
 
 test('stasis-core run --fs captures and serves the same way', withTmp((t, tmp) => {
@@ -473,4 +473,79 @@ test('run --fs: statSync/lstatSync report implied ancestor directories of bundle
   const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'dep:DEP\nstat-nm:true\nstat-dep:true\nlstat-nm:true\nmiss:ENOENT\n')
+}))
+
+test('run --fs=async captures and serves async (callback + fs/promises) reads', withTmp((t, tmp) => {
+  // The async readers share the sync logic; bundle=load must serve callback readFile,
+  // fs/promises readFile/readdir/stat the same way -- with the files gone from disk.
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFile as readFileCb } from 'node:fs'",
+    "import { readFile as readFileP, readdir as readdirP, stat as statP } from 'node:fs/promises'",
+    "import { join } from 'node:path'",
+    'const assets = join(import.meta.dirname, "assets")',
+    'const msg = join(assets, "message.txt")',
+    'const cb = await new Promise((res, rej) => readFileCb(msg, "utf8", (e, d) => (e ? rej(e) : res(d))))',
+    'console.log(`cb:${cb.trim()}`)',
+    'console.log(`p:${(await readFileP(msg, "utf8")).trim()}`)',
+    'console.log(`dir:${(await readdirP(assets)).sort().join(",")}`)',
+    'console.log(`stat:${(await statP(msg)).isFile()}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'src', 'assets'), { recursive: true }) // gone; served from the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'cb:hello from txt\np:hello from txt\ndir:blob.bin,data.json,message.txt\nstat:true\n')
+}))
+
+test('run --fs=sync does not patch the async readers (only --fs=async does)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFile } from 'node:fs/promises'",
+    "import { join } from 'node:path'",
+    'console.log((await readFile(join(import.meta.dirname, "assets", "message.txt"), "utf8")).trim())',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  // Captured under --fs=sync: the async read is NOT recorded into the bundle.
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'src', 'assets'), { recursive: true })
+  // Under --fs=sync the async read hits the real (now-missing) file -- proving the
+  // async readers are served only under --fs=async.
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /ENOENT/)
+}))
+
+test('run --fs=async serves callback stat/lstat and routes a bad encoding to the callback', withTmp((t, tmp) => {
+  mkdirSync(join(tmp, 'src', 'data'))
+  writeFileSync(join(tmp, 'src', 'data', 'a.txt'), 'A')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { stat, lstat, readFile, readFileSync, readdirSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const dir = join(import.meta.dirname, "data")',
+    'const file = join(dir, "a.txt")',
+    'readdirSync(dir); readFileSync(file)', // record dir + file
+    'const p = (fn, ...a) => new Promise((res, rej) => fn(...a, (e, v) => (e ? rej(e) : res(v))))',
+    'console.log(`cb-stat:${(await p(stat, file)).isFile()}`)',
+    'console.log(`cb-lstat-dir:${(await p(lstat, dir)).isDirectory()}`)',
+    // an invalid encoding must reach the callback as an error, NOT crash the process
+    'let code = "none"',
+    'try { await p(readFile, file, "buffer") } catch (e) { code = e.code }',
+    'console.log(`bad-enc:${code}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.match(save.stdout, /bad-enc:ERR_UNKNOWN_ENCODING/) // delivered to cb; process survived
+
+  rmSync(join(tmp, 'src', 'data'), { recursive: true })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'cb-stat:true\ncb-lstat-dir:true\nbad-enc:ERR_UNKNOWN_ENCODING\n')
 }))

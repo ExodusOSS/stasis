@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] [--fs=sync] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] [--fs=(sync|async)] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -82,11 +82,12 @@ if (command === '-v' || command === '--version') {
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
   if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
   if (values.mock && bundle === 'load') usage('Error: --mock is for capturing imports while building a bundle; not compatible with --bundle=load')
-  // --fs=sync monkey-patches the sync fs readers (readFileSync/readdirSync +
-  // lstatSync/statSync) to capture them into the bundle (add|replace) or serve them
-  // from it (load); it has nothing to record into or read from without one of those
-  // bundle modes. The mode argument is required (currently only `sync`).
-  if (values.fs !== undefined && values.fs !== 'sync') usage("Error: --fs must be 'sync'")
+  // --fs monkey-patches the fs readers (readFileSync/readdirSync + lstatSync/statSync)
+  // to capture them into the bundle (add|replace) or serve them from it (load); it has
+  // nothing to record into or read from without one of those bundle modes. The mode
+  // argument is required: `sync` patches the sync readers, `async` adds their async
+  // (callback + fs.promises) counterparts on top.
+  if (values.fs !== undefined && !['sync', 'async'].includes(values.fs)) usage("Error: --fs must be 'sync' or 'async'")
   if (values.fs !== undefined && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
   const captureFs = values.fs ?? ''
   console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }) })

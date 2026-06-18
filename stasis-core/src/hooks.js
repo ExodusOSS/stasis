@@ -326,17 +326,22 @@ export function install() {
   installed = true
   registerHooks({ load, resolve })
   patchCjsResolution()
-  // `--fs` (EXODUS_STASIS_FS): additionally monkey-patch fs.readFileSync /
-  // fs.readdirSync (and fs.lstatSync) to capture them into the bundle
-  // (bundle=add|replace) or serve them from it (bundle=load). Installed here -- after the lib's own fs snapshots
-  // (state.js / state-util.js / above) are taken and after registerHooks -- so the
-  // patch never redirects stasis's own reads, and only when the user opted in.
-  // `state` is read lazily (per call) since it's created when the entry loads. A
-  // capture-side conflict (a file read twice with diverging bytes) taints the run
-  // the same way an addFile/addImport rejection does, so nothing inconsistent is
-  // written.
-  if (process.env.EXODUS_STASIS_FS) {
+  // `--fs` (EXODUS_STASIS_FS = 'sync' | 'async'): additionally monkey-patch the fs
+  // readers -- readFileSync/readdirSync + lstatSync/statSync, and under 'async' their
+  // async (callback + fs.promises) counterparts -- to capture them into the bundle
+  // (bundle=add|replace) or serve them from it (bundle=load). Installed here -- after
+  // the lib's own fs snapshots (state.js / state-util.js / above) are taken and after
+  // registerHooks -- so the patch never redirects stasis's own reads, and only when
+  // the user opted in. `state` is read lazily (per call) since it's created when the
+  // entry loads. A capture-side conflict (a file read twice with diverging bytes)
+  // taints the run the same way an addFile/addImport rejection does, so nothing
+  // inconsistent is written.
+  const fsMode = process.env.EXODUS_STASIS_FS
+  if (fsMode) {
     installFsHooks({
+      // 'async' adds the async readers; any other truthy value (incl. the legacy '1')
+      // is sync-only.
+      async: fsMode === 'async',
       getState: () => state,
       // True while Node's default loader is reading a module's source: the --fs hook
       // skips those so it captures the program's explicit reads, not module loading.

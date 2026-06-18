@@ -10,6 +10,15 @@ import { join, resolve, sep } from 'node:path'
 // Matches state.js's identical snapshot of the real fs writers/readers.
 const { readFileSync, realpathSync } = fs
 
+// Async counterpart, snapshotted off the namespace for the same reason and exported
+// for the bundler plugins (esbuild.js): under `--fs=async` fs.promises.readFile is
+// patched too, and a plugin module loads AFTER the patch, so importing
+// `node:fs/promises` directly there would route the bundler's OWN source reads
+// through the --fs capture hook. This pre-patch snapshot keeps them genuine. This
+// module is evaluated during stasis's `--import` preload (via state.js), before any
+// patch, so the snapshot is always the real builtin.
+export const realReadFile = fs.promises.readFile
+
 assert.equal(sep, '/', 'Not tested on Windows')
 
 export const sha512integrity = (x) => `sha512-${hash('sha512', x, 'base64')}`

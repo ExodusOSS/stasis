@@ -1,12 +1,20 @@
-// `stasis run --fs` (EXODUS_STASIS_FS): monkey-patch the SYNC filesystem readers
-// fs.readFileSync, fs.readdirSync, and fs.lstatSync so that, alongside the module
-// graph the loader hooks already capture, a program's explicit file/directory reads
-// are recorded into the bundle (bundle=add|replace) and served back from it
+// `stasis run --fs=sync|async` (EXODUS_STASIS_FS): monkey-patch the filesystem readers
+// fs.readFileSync, fs.readdirSync, fs.lstatSync, fs.statSync so that, alongside the
+// module graph the loader hooks already capture, a program's explicit file/directory
+// reads are recorded into the bundle (bundle=add|replace) and served back from it
 // (bundle=load).
 //
+// MODE:
+//   - `=sync` patches only the sync readers above (the default; `--fs` bare == sync).
+//   - `=async` additionally patches their async counterparts -- the callback forms
+//     fs.readFile/readdir/lstat/stat and the promise forms fs.promises.* (the latter
+//     IS node:fs/promises, the same object, so syncBuiltinESMExports() covers ESM
+//     `import ... from 'node:fs/promises'` too). Each async wrapper shares the exact
+//     capture/serve logic of its sync sibling; only the I/O plumbing differs.
+//
 // SCOPE, deliberately narrow:
-//   - Only the SYNC fs.readFileSync / fs.readdirSync / fs.lstatSync. Non-sync fs
-//     (fs.readFile, fs.promises.*, fs.opendir, streams, ...) is NOT touched.
+//   - Only those four operations. Other fs (fs.opendir, streams, fs.cp, watchers,
+//     ...) is NOT touched, in either mode.
 //   - readdirSync: only the single-argument form `readdirSync(path)`. Any options
 //     (encoding, withFileTypes, recursive) fall through untouched -- Dirent objects
 //     and recursive listings aren't modelled.
@@ -55,6 +63,20 @@ const realReaddirSync = fs.readdirSync
 const realLstatSync = fs.lstatSync
 const realStatSync = fs.statSync
 const realRealpathSync = fs.realpathSync
+
+// Async counterparts, snapshotted for `--fs=async`. Callback forms off `fs`, promise
+// forms off `fs.promises` (which IS node:fs/promises -- same object, so patching it +
+// syncBuiltinESMExports() also covers `import ... from 'node:fs/promises'`). The
+// bundleStats shim still falls back to the SYNC real stat (a Stats field read is
+// synchronous), so no async stat snapshot is needed.
+const realReadFile = fs.readFile
+const realReaddir = fs.readdir
+const realLstat = fs.lstat
+const realStat = fs.stat
+const realReadFileP = fs.promises.readFile
+const realReaddirP = fs.promises.readdir
+const realLstatP = fs.promises.lstat
+const realStatP = fs.promises.stat
 
 // Resolve a path argument to an absolute filesystem path, or null when it's
 // something we don't capture (an integer fd, or a non-file URL). Strings/Buffers
@@ -173,7 +195,7 @@ function bundleStats(realStatFn, statPath, isDir) {
 
 let installed = false
 
-export function installFsHooks({ getState, markAborted, isLoadingModule }) {
+export function installFsHooks({ async: patchAsync, getState, markAborted, isLoadingModule }) {
   if (installed) return // idempotent: install() is the sole caller, but guard anyway
   installed = true
 
@@ -266,8 +288,143 @@ export function installFsHooks({ getState, markAborted, isLoadingModule }) {
     return realStatSync(path, options)
   }
 
-  // Refresh the node:fs ESM wrapper so destructured/namespace ESM imports made
-  // AFTER this point resolve to the patched functions. Stasis's own modules, linked
-  // earlier, keep their pre-patch snapshots.
+  // --fs=async: the async counterparts. Each shares its sync sibling's capture/serve
+  // logic via fsTarget(); only the I/O plumbing (callback / promise) differs. A served
+  // callback is deferred (queueMicrotask) so a bundle hit never fires it synchronously,
+  // preserving fs's "the callback is always async" contract. fs.promises.* IS
+  // node:fs/promises (same object), so syncBuiltinESMExports() below propagates these
+  // to ESM `import ... from 'node:fs/promises'` as well.
+  if (patchAsync) {
+    // Classify a path exactly as the sync readers do: serve from the bundle
+    // (loadBundle), capture into it (writeBundle, outside a module-load window), or
+    // pass through (null) for out-of-root / fd / non-file-URL / no-state.
+    const fsTarget = (path) => {
+      const state = getState()
+      if (!state) return null
+      const abs = toAbsPath(path)
+      if (abs === null || !withinRoot(state.root, abs)) return null
+      const url = pathToFileURL(abs).toString()
+      if (state.config.loadBundle) return { mode: 'serve', state, url, abs }
+      if (state.config.writeBundle && !isLoadingModule()) return { mode: 'capture', state, url, abs }
+      return null
+    }
+
+    // Decode bytes for a callback reader, routing a decode error (e.g. an invalid
+    // encoding like 'buffer') to the callback -- exactly as fs.readFile does. Without
+    // this the throw escapes the deferred/real-reader callback as an UNCAUGHT exception
+    // and crashes the process (the sync path is fine: there the throw is the caller's
+    // to catch). The promise readers don't need it -- a throw there rejects the promise.
+    const decodeToCb = (cb, buf, options) => {
+      let out
+      try { out = decode(buf, options) } catch (err) { cb(err); return }
+      cb(null, out)
+    }
+
+    fs.readFile = function readFile(path, options, callback) {
+      const cb = typeof options === 'function' ? options : callback
+      const opts = typeof options === 'function' ? undefined : options
+      const t = typeof cb === 'function' ? fsTarget(path) : null
+      if (t?.mode === 'serve') {
+        const buf = t.state.getFsFile(t.url)
+        if (buf !== undefined) { queueMicrotask(() => decodeToCb(cb, buf, opts)); return }
+      } else if (t?.mode === 'capture') {
+        realReadFile(path, (err, buf) => {
+          if (err) return cb(err)
+          if (realContained(t.state.root, t.abs)) { try { t.state.addFsFile(t.url, buf) } catch (e) { markAborted(e) } }
+          decodeToCb(cb, buf, opts)
+        })
+        return
+      }
+      return realReadFile(path, options, callback)
+    }
+
+    fs.promises.readFile = async function readFile(path, options) {
+      const t = fsTarget(path)
+      if (t?.mode === 'serve') {
+        const buf = t.state.getFsFile(t.url)
+        if (buf !== undefined) return decode(buf, options)
+      } else if (t?.mode === 'capture') {
+        const buf = await realReadFileP(path)
+        if (realContained(t.state.root, t.abs)) { try { t.state.addFsFile(t.url, buf) } catch (e) { markAborted(e) } }
+        return decode(buf, options)
+      }
+      return realReadFileP(path, options)
+    }
+
+    // Single-argument form only (options === the callback / undefined), like readdirSync.
+    fs.readdir = function readdir(path, options, callback) {
+      const cb = typeof options === 'function' ? options : callback
+      const t = (typeof options === 'function' && typeof cb === 'function') ? fsTarget(path) : null
+      if (t?.mode === 'serve') {
+        const names = t.state.getFsDir(t.url)
+        if (names !== undefined) { queueMicrotask(() => cb(null, names)); return }
+      } else if (t?.mode === 'capture') {
+        realReaddir(path, (err, names) => {
+          if (err) return cb(err)
+          if (realContained(t.state.root, t.abs)) { try { t.state.addFsDir(t.url, names) } catch (e) { markAborted(e) } }
+          cb(null, names)
+        })
+        return
+      }
+      return realReaddir(path, options, callback)
+    }
+
+    fs.promises.readdir = async function readdir(path, options) {
+      const t = options === undefined ? fsTarget(path) : null
+      if (t?.mode === 'serve') {
+        const names = t.state.getFsDir(t.url)
+        if (names !== undefined) return names
+      } else if (t?.mode === 'capture') {
+        const names = await realReaddirP(path)
+        if (realContained(t.state.root, t.abs)) { try { t.state.addFsDir(t.url, names) } catch (e) { markAborted(e) } }
+        return names
+      }
+      return realReaddirP(path, options)
+    }
+
+    // lstat/stat are serve-only (like their sync siblings); capture is left to the real
+    // call. bundleStats's field fallback is synchronous, so it uses the sync real stat.
+    fs.lstat = function lstat(path, options, callback) {
+      const cb = typeof options === 'function' ? options : callback
+      const t = (typeof options === 'function' && typeof cb === 'function') ? fsTarget(path) : null
+      if (t?.mode === 'serve') {
+        const kind = t.state.getFsStat(t.url)
+        if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realLstatSync, path, kind === 'directory'))); return }
+      }
+      return realLstat(path, options, callback)
+    }
+
+    fs.stat = function stat(path, options, callback) {
+      const cb = typeof options === 'function' ? options : callback
+      const t = (typeof options === 'function' && typeof cb === 'function') ? fsTarget(path) : null
+      if (t?.mode === 'serve') {
+        const kind = t.state.getFsStat(t.url)
+        if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realStatSync, path, kind === 'directory'))); return }
+      }
+      return realStat(path, options, callback)
+    }
+
+    fs.promises.lstat = async function lstat(path, options) {
+      const t = options === undefined ? fsTarget(path) : null
+      if (t?.mode === 'serve') {
+        const kind = t.state.getFsStat(t.url)
+        if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
+      }
+      return realLstatP(path, options)
+    }
+
+    fs.promises.stat = async function stat(path, options) {
+      const t = options === undefined ? fsTarget(path) : null
+      if (t?.mode === 'serve') {
+        const kind = t.state.getFsStat(t.url)
+        if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
+      }
+      return realStatP(path, options)
+    }
+  }
+
+  // Refresh the node:fs (and node:fs/promises) ESM wrappers so destructured/namespace
+  // ESM imports made AFTER this point resolve to the patched functions. Stasis's own
+  // modules, linked earlier, keep their pre-patch snapshots.
   syncBuiltinESMExports()
 }

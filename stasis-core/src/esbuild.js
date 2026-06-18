@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { isUtf8 } from 'node:buffer'
 import { isBuiltin } from 'node:module'
 import { extname, resolve as resolvePath } from 'node:path'
@@ -8,6 +7,12 @@ import assert from 'node:assert/strict'
 import { Bundle } from './bundle.js'
 import { classifyExtension, parseResourcesOption, resolvePluginState } from './plugins.js'
 import { State } from './state.js'
+// Pre-patch snapshot, NOT `import { readFile } from 'node:fs/promises'`: under
+// `stasis run --fs=async` that builtin is monkey-patched, and this plugin loads after
+// the patch, so a direct import would route esbuild's own source reads through the
+// --fs capture hook. The snapshot in state-util (taken during the --import preload) is
+// the genuine reader.
+import { realReadFile } from './state-util.js'
 
 export class StasisEsbuild {
   #seen = new Set()
@@ -152,7 +157,7 @@ export class StasisEsbuild {
         return { contents: source, loader }
       }
 
-      const source = await readFile(path)
+      const source = await realReadFile(path)
 
       if (kind === 'resource') {
         // Mark this file as a resource. State picks the encoding from its bytes:

@@ -317,15 +317,24 @@ In the lockfile, a resource is hashed like any other file (sha512 of its raw
 bytes) and carries the same `resource`/`resource:base64` entry in `formats`, so
 a frozen run verifies a copied asset byte-for-byte just as it does code.
 
-## Filesystem captures (`stasis run --fs=sync`)
+## Filesystem captures (`stasis run --fs=sync` / `--fs=async`)
 
 The loader hooks capture the module graph; `--fs=sync` additionally monkey-patches the
-**sync** readers `fs.readFileSync` and `fs.readdirSync`, plus `fs.lstatSync` (and
-only those — no `fs.readFile`, `fs.promises`, streams, …) so a program's explicit
-file reads are recorded into the bundle (`--bundle=add|replace`) and served back
-from it (`--bundle=load`). The same `--fs=sync` flag is needed on the load run for the
-patch to serve; an un-captured read falls through to the real disk read. Captures
-live in the usual `sources`/`modules` buckets, tagged in `formats`:
+**sync** readers `fs.readFileSync` and `fs.readdirSync`, plus `fs.lstatSync`/`fs.statSync`
+(and only those — no streams, `fs.opendir`, …) so a program's explicit file reads are
+recorded into the bundle (`--bundle=add|replace`) and served back from it
+(`--bundle=load`). The same `--fs=…` flag is needed on the load run for the patch to
+serve; an un-captured read falls through to the real disk read.
+
+`--fs=async` patches everything `--fs=sync` does **and** the async counterparts —
+the callback forms `fs.readFile`/`fs.readdir`/`fs.lstat`/`fs.stat` and the promise
+forms `fs.promises.*` (which is `node:fs/promises`, so `import … from 'node:fs/promises'`
+is covered too). Each async wrapper records/serves identically to its sync sibling; a
+served callback is always invoked asynchronously. The captured bytes and `directory`
+listings are the same regardless of mode — a bundle built with `--fs=async` is read by
+either mode (the load run just won't intercept async reads under `--fs=sync`).
+
+Captures live in the usual `sources`/`modules` buckets, tagged in `formats`:
 
 - A `fs.readFileSync(path)` is stored "generically by extension": a recognized code
   extension (`.json`/`.mjs`/`.cjs`/`.mts`/`.cts`/`.js`/`.ts`) carrying UTF-8 bytes
@@ -356,7 +365,7 @@ live in the usual `sources`/`modules` buckets, tagged in `formats`:
 
 The two recorded kinds are hashed like any other content (the `directory` integrity
 is the sha512 of its JSON text), so the lockfile attests them and a frozen run
-verifies them. `--fs=sync` requires an active bundle mode (`add`, `replace`, or `load`).
+verifies them. `--fs` (either mode) requires an active bundle mode (`add`, `replace`, or `load`).
 
 ## Discovery
 
