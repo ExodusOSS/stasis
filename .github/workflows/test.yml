@@ -11,15 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     strategy:
-      # Run every Node version even if one fails, so a single break doesn't
-      # hide the others in a compatibility matrix.
       fail-fast: false
       matrix:
         node-version:
-          - '24.14.0' # minimum supported (engines >=24.14.0) / .nvmrc pin
-          - '24'      # latest 24.x
-          - '26.0.0'  # first release of the next major
-          - '26'      # latest 26.x
+          - '24.14.0' # min supported (engines floor, matches .nvmrc)
+          - '24'
+          - '26.0.0'
+          - '26'
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
