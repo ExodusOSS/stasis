@@ -549,3 +549,61 @@ test('run --fs=async serves callback stat/lstat and routes a bad encoding to the
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'cb-stat:true\ncb-lstat-dir:true\nbad-enc:ERR_UNKNOWN_ENCODING\n')
 }))
+
+test('run --fs=async serves readdir(path, null, cb) -- the graceful-fs null-options form', withTmp((t, tmp) => {
+  // graceful-fs normalises readdir(path, cb) to readdir(path, null, cb); the patch must
+  // treat that explicit-null options as the single-arg form and serve it, not pass it
+  // through. (Regression: the null form fell through, so async readdir returned the
+  // on-disk listing -- the failure enhanced-resolve's async file system hit.)
+  mkdirSync(join(tmp, 'src', 'd'))
+  writeFileSync(join(tmp, 'src', 'd', 'x.txt'), 'x')
+  writeFileSync(join(tmp, 'src', 'd', 'y.txt'), 'y')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readdir } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const dir = join(import.meta.dirname, "d")',
+    'const names = await new Promise((res, rej) => readdir(dir, null, (e, v) => (e ? rej(e) : res(v))))',
+    'console.log(names.slice().sort().join(","))',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  rmSync(join(tmp, 'src', 'd'), { recursive: true })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'x.txt,y.txt\n')
+}))
+
+test('run --fs=async: real graceful-fs async readFile/stat/readdir survive bundle=load', withTmp((t, tmp) => {
+  // The user's exact case: enhanced-resolve uses graceful-fs's async readers; readdir
+  // goes through the null-options form. Locate the installed graceful-fs and copy it in.
+  const pnpmDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', '.pnpm')
+  const hit = existsSync(pnpmDir) && readdirSync(pnpmDir).find((d) => d.startsWith('graceful-fs@'))
+  const gfsSrc = hit && join(pnpmDir, hit, 'node_modules', 'graceful-fs')
+  if (!gfsSrc || !existsSync(join(gfsSrc, 'package.json'))) return t.skip('graceful-fs not installed')
+
+  mkdirSync(join(tmp, 'node_modules', 'graceful-fs'), { recursive: true })
+  cpSync(gfsSrc, join(tmp, 'node_modules', 'graceful-fs'), { recursive: true })
+  mkdirSync(join(tmp, 'src', 'data'))
+  writeFileSync(join(tmp, 'src', 'data', 'a.json'), '{"k":1}')
+  writeFileSync(join(tmp, 'src', 'data', 'b.txt'), 'b')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import gfs from 'graceful-fs'",
+    "import { join } from 'node:path'",
+    'const dir = join(import.meta.dirname, "data")',
+    'const p = (fn, ...a) => new Promise((res, rej) => fn(...a, (e, v) => (e ? rej(e) : res(v))))',
+    'console.log(`readFile:${JSON.parse(await p(gfs.readFile, join(dir, "a.json"))).k}`)',
+    'console.log(`stat:${(await p(gfs.stat, join(dir, "a.json"))).isFile()}`)',
+    'console.log(`readdir:${(await p(gfs.readdir, dir)).slice().sort().join(",")}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'src', 'data'), { recursive: true }) // gone; graceful-fs's async reads must serve from the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'readFile:1\nstat:true\nreaddir:a.json,b.txt\n')
+}))

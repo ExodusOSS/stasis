@@ -234,7 +234,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     const state = getState()
     // Single-argument form only: any options (encoding/withFileTypes/recursive)
     // are out of scope and pass straight through.
-    if (state && options === undefined) {
+    if (state && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
         const url = pathToFileURL(abs).toString()
@@ -262,7 +262,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     const state = getState()
     // Serve-only, single-argument form. Capture mode is left to the real lstatSync
     // (the file is on disk, so its Stats is correct and complete).
-    if (state?.config.loadBundle && options === undefined) {
+    if (state?.config.loadBundle && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
         const kind = state.getFsStat(pathToFileURL(abs).toString())
@@ -278,7 +278,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
   // case, so it falls back to the real statSync rather than lstatSync.
   fs.statSync = function statSync(path, options) {
     const state = getState()
-    if (state?.config.loadBundle && options === undefined) {
+    if (state?.config.loadBundle && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
         const kind = state.getFsStat(pathToFileURL(abs).toString())
@@ -354,7 +354,11 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     // Single-argument form only (options === the callback / undefined), like readdirSync.
     fs.readdir = function readdir(path, options, callback) {
       const cb = typeof options === 'function' ? options : callback
-      const t = (typeof options === 'function' && typeof cb === 'function') ? fsTarget(path) : null
+      // "single-argument" form: fn(path, cb) OR fn(path, null/undefined, cb). graceful-fs
+      // normalises readdir(path, cb) to readdir(path, null, cb), so a null options must
+      // count as "no options" -- otherwise its reads never hit the bundle (the exact
+      // gap that made --fs=async fail for enhanced-resolve's async file system).
+      const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
       if (t?.mode === 'serve') {
         const names = t.state.getFsDir(t.url)
         if (names !== undefined) { queueMicrotask(() => cb(null, names)); return }
@@ -370,7 +374,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     }
 
     fs.promises.readdir = async function readdir(path, options) {
-      const t = options === undefined ? fsTarget(path) : null
+      const t = options == null ? fsTarget(path) : null
       if (t?.mode === 'serve') {
         const names = t.state.getFsDir(t.url)
         if (names !== undefined) return names
@@ -386,7 +390,11 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     // call. bundleStats's field fallback is synchronous, so it uses the sync real stat.
     fs.lstat = function lstat(path, options, callback) {
       const cb = typeof options === 'function' ? options : callback
-      const t = (typeof options === 'function' && typeof cb === 'function') ? fsTarget(path) : null
+      // "single-argument" form: fn(path, cb) OR fn(path, null/undefined, cb). graceful-fs
+      // normalises readdir(path, cb) to readdir(path, null, cb), so a null options must
+      // count as "no options" -- otherwise its reads never hit the bundle (the exact
+      // gap that made --fs=async fail for enhanced-resolve's async file system).
+      const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realLstatSync, path, kind === 'directory'))); return }
@@ -396,7 +404,11 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
 
     fs.stat = function stat(path, options, callback) {
       const cb = typeof options === 'function' ? options : callback
-      const t = (typeof options === 'function' && typeof cb === 'function') ? fsTarget(path) : null
+      // "single-argument" form: fn(path, cb) OR fn(path, null/undefined, cb). graceful-fs
+      // normalises readdir(path, cb) to readdir(path, null, cb), so a null options must
+      // count as "no options" -- otherwise its reads never hit the bundle (the exact
+      // gap that made --fs=async fail for enhanced-resolve's async file system).
+      const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realStatSync, path, kind === 'directory'))); return }
@@ -405,7 +417,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     }
 
     fs.promises.lstat = async function lstat(path, options) {
-      const t = options === undefined ? fsTarget(path) : null
+      const t = options == null ? fsTarget(path) : null
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
@@ -414,7 +426,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     }
 
     fs.promises.stat = async function stat(path, options) {
-      const t = options === undefined ? fsTarget(path) : null
+      const t = options == null ? fsTarget(path) : null
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
