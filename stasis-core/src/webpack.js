@@ -180,6 +180,29 @@ export class StasisWebpack {
 
   #applyCaptureMode(compiler) {
     compiler.hooks.normalModuleFactory.tap('Stasis', (nmf) => {
+      // webpack 4's resolver reuses `resourceResolveData.context.issuer` across
+      // factory invocations -- by the time `afterResolve` fires for a given
+      // dependency, that field can hold the issuer from an EARLIER resolution.
+      // The resolved path (rrd.path) is still correct, so webpack's bundle is
+      // fine, but a plugin reading rrd.context.issuer for parent attribution
+      // would mis-bucket the edge. Reproduced under webpack@4.15.1 and 4.47.0
+      // (see tests/fixtures/webpack-stale-issuer-repro/NOTES.md for the
+      // BEFORE-vs-AFTER trace evidence).
+      //
+      // beforeResolve's `data.contextInfo.issuer` is the fresh value passed
+      // into create() for this exact dependency, so capture it there keyed
+      // by the dependency object and look it up in afterResolve. The same
+      // `data.dependencies[0]` reference flows through the create() pipeline
+      // unchanged (NormalModuleFactory passes the array through to factory()
+      // -> resolver -> afterResolve), so a WeakMap keyed on dep[0] keeps the
+      // mapping correct without holding refs after the dep is GC'd.
+      const issuerByDep = new WeakMap()
+      nmf.hooks.beforeResolve.tap('Stasis', (data) => {
+        const dep = data?.dependencies?.[0]
+        const issuer = data?.contextInfo?.issuer
+        if (dep && issuer) issuerByDep.set(dep, issuer)
+      })
+
       nmf.hooks.afterResolve.tap('Stasis', (data) => {
         // resourceResolveData.path is the resolved on-disk path without query/fragment;
         // data.resource may carry a `?query` (inline-loader, asset import suffixes) or
@@ -203,7 +226,13 @@ export class StasisWebpack {
         }
 
         const url = pathToFileURL(filePath).toString()
-        const issuer = data.resourceResolveData.context?.issuer
+        // Prefer the beforeResolve-captured issuer over rrd.context.issuer (see
+        // the WeakMap setup above). Falls back to rrd.context.issuer for dependencies
+        // that bypassed beforeResolve -- shouldn't happen in webpack 4's NMF path
+        // but kept defensive in case a future webpack or a stacked plugin reaches
+        // afterResolve without firing beforeResolve.
+        const dep = data?.dependencies?.[0]
+        const issuer = (dep && issuerByDep.get(dep)) ?? data.resourceResolveData.context?.issuer
         const isEntry = !issuer
 
         if (kind === 'code' && !isEntry) {

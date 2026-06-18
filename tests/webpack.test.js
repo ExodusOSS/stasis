@@ -10,7 +10,7 @@
 
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -478,6 +478,63 @@ test('file-loader frozen run rejects a tampered asset', withTmp((t, tmp) => {
   })
   t.assert.notEqual(r.status, 0, `expected frozen rejection; stderr=${r.stderr}`)
   t.assert.match(r.stderr, /ERR_ASSERTION|ModuleBuildError|sha512-/)
+}))
+
+// Regression: webpack 4's NormalModuleFactory reuses
+// data.resourceResolveData.context.issuer across factory invocations -- by the
+// time afterResolve fires for a given dependency, that field can hold the
+// issuer from an EARLIER resolution, even though rrd.path (the file webpack
+// actually bundles) is fresh. A plugin reading rrd.context.issuer for parent
+// attribution would mis-bucket the edge; pre-fix, stasis bucketed two distinct
+// (issuer, 'bs58') edges under the SAME stale parent and the noupsert in
+// state.addImport threw "Conflict for 'bs58'". The fix taps beforeResolve and
+// caches contextInfo.issuer per-dependency, then looks it up in afterResolve.
+// Topology: top bs58@3 + base58check at top (requires bs58 -> top), example
+// as a file: dep via symlink, middle bs58@6 inside example/node_modules.
+// example/index.js requires bs58 (-> middle) AND base58check; base58check's
+// own require('bs58') resolves to top. The third resolution is the one that
+// gets the stale-issuer treatment from webpack 4.
+test('regression: webpack 4 stale rrd.context.issuer does not collapse two distinct (issuer, bs58) edges', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'root', version: '0.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+
+  // top-level bs58@3
+  mkdirSync(join(tmp, 'node_modules', 'bs58'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'bs58', 'package.json'), JSON.stringify({ name: 'bs58', version: '3.1.0', main: 'index.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'bs58', 'index.js'), 'module.exports = { v: 3 }\n')
+
+  // top-level base58check (requires bs58 -> top)
+  mkdirSync(join(tmp, 'node_modules', 'base58check'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'base58check', 'package.json'), JSON.stringify({ name: 'base58check', version: '2.0.0', main: 'index.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'base58check', 'index.js'), "const bs58 = require('bs58')\nmodule.exports = { v: 2, bs58 }\n")
+
+  // example: a file: dep at the project root, with its own node_modules/bs58@6 (middle)
+  mkdirSync(join(tmp, 'example', 'node_modules', 'bs58'), { recursive: true })
+  writeFileSync(join(tmp, 'example', 'package.json'), JSON.stringify({ name: 'example', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'example', 'index.js'), "require('bs58')\nrequire('base58check')\n")
+  writeFileSync(join(tmp, 'example', 'node_modules', 'bs58', 'package.json'), JSON.stringify({ name: 'bs58', version: '6.0.0', main: 'index.js' }))
+  writeFileSync(join(tmp, 'example', 'node_modules', 'bs58', 'index.js'), 'module.exports = { v: 6 }\n')
+
+  // node_modules/example -> ../example (the file: dep symlink that npm/yarn produces)
+  symlinkSync(join('..', 'example'), join(tmp, 'node_modules', 'example'), 'dir')
+
+  const r = run('node_modules/example/index.js', {
+    cwd: tmp,
+    env: withOpts({ lock: 'add', bundle: 'none', scope: 'full' }),
+  })
+  t.assert.equal(r.status, 0, `pre-fix this throws Conflict for 'bs58'; got stderr:\n${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const edges = lock.imports?.['*'] ?? {}
+
+  // example/index.js's two edges
+  t.assert.equal(edges['example/index.js']?.['bs58'], 'example/node_modules/bs58/index.js', 'example bs58 -> middle')
+  t.assert.equal(edges['example/index.js']?.['base58check'], 'node_modules/base58check/index.js', 'example base58check -> top')
+
+  // base58check's bs58 edge must be attributed to base58check, not to the stale example/index.js
+  t.assert.equal(edges['node_modules/base58check/index.js']?.['bs58'], 'node_modules/bs58/index.js',
+    "base58check's bs58 must be attributed to base58check's own parent, not the stale example/index.js")
 }))
 
 test('sidecar bundle (rule 6) is emitted by the plugin alongside preload bundle', withTmp((t, tmp) => {
