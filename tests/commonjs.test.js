@@ -347,21 +347,25 @@ test('run --bundle=load records and resolves a require.resolve() edge', withTmp(
   t.assert.equal(load.stdout, 'index.js DEP\n')
 }))
 
-// The optional-dependency probe `try { require.resolve('x') } catch {}`, where the
-// target is NEVER require()d, must not crash capture. On Node 26.x require.resolve
-// routes through the resolve hook and records an edge to the unloaded target;
-// write() prunes such resolve-only edges (the file isn't bundled, so recording it
-// is useless and previously tripped #backfillBeforeWrite's missing-file check,
-// crashing capture on Node 26).
-test('run --bundle=add does not crash on a resolve-only require.resolve (optional-dep probe)', withTmp((t, tmp) => {
+// A resolve-only require.resolve() -- a module resolved but NEVER loaded in-process
+// -- must (a) not crash capture and (b) keep its resolution edge so the same
+// require.resolve() returns the same path at load, EVEN THOUGH the target's bytes
+// are not in the bundle. This is the worker-farm shape: at import time it does
+// require.resolve('./child') for a worker it forks into a separate process, so the
+// child is never loaded by the parent and never bundled -- but if the edge is
+// dropped, importing worker-farm throws at load when that require.resolve can't be
+// satisfied. (On Node 26.x the edge routes through the resolve hook and previously
+// tripped #backfillBeforeWrite's missing-file assertion, crashing capture.)
+test('run --bundle=load keeps a resolve-only require.resolve() edge whose target is not bundled', withTmp((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ro', version: '1.0.0', private: true }))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
-  writeFileSync(join(tmp, 'index.mjs'), "import './r.cjs'\n")
-  writeFileSync(join(tmp, 'r.cjs'), "let ok = false\ntry { require.resolve('opt'); ok = true } catch {}\nconsole.log('probe', ok)\n")
-  const opt = join(tmp, 'node_modules', 'opt')
-  mkdirSync(opt, { recursive: true })
-  writeFileSync(join(opt, 'package.json'), JSON.stringify({ name: 'opt', version: '1.0.0', main: 'index.js' }))
-  writeFileSync(join(opt, 'index.js'), "module.exports = 'OPT'\n")
+  writeFileSync(join(tmp, 'index.mjs'), "import wf from 'wf'\nimport { basename } from 'node:path'\nconsole.log(basename(wf))\n")
+  const wf = join(tmp, 'node_modules', 'wf')
+  mkdirSync(wf, { recursive: true })
+  writeFileSync(join(wf, 'package.json'), JSON.stringify({ name: 'wf', version: '1.0.0', main: 'index.js' }))
+  // index.js resolves ./child but never require()s it (a forked worker, in real life)
+  writeFileSync(join(wf, 'index.js'), "module.exports = require.resolve('./child')\n")
+  writeFileSync(join(wf, 'child.js'), "module.exports = 'CHILD never loaded in this process'\n")
 
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
@@ -369,9 +373,26 @@ test('run --bundle=add does not crash on a resolve-only require.resolve (optiona
     { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
-  t.assert.equal(save.stdout, 'probe true\n')
-  // opt is resolve-only (never require()d): not bundled, so the edge is pruned.
-  const imports = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).imports
-  const hasOpt = Object.values(imports).some((byParent) => Object.values(byParent).some((s) => 'opt' in s))
-  t.assert.ok(!hasOpt, 'resolve-only require.resolve target is not recorded')
+  t.assert.equal(save.stdout, 'child.js\n')
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  // the resolve-only edge IS recorded ...
+  const edgeRecorded = Object.values(lock.imports).some((byParent) =>
+    Object.values(byParent).some((specs) => specs['./child'] === 'node_modules/wf/child.js'))
+  t.assert.ok(edgeRecorded, 'resolve-only require.resolve("./child") edge recorded')
+  // ... but the target's bytes are NOT bundled (it was never loaded)
+  const wfFiles = lock.modules['node_modules/wf']?.files ?? {}
+  t.assert.ok('index.js' in wfFiles, 'wf/index.js is captured')
+  t.assert.ok(!('child.js' in wfFiles), 'wf/child.js is NOT captured (resolve-only)')
+
+  rmSync(join(tmp, 'node_modules'), { recursive: true, force: true })
+
+  // frozen load with node_modules gone: require.resolve('./child') still resolves
+  // to the recorded path even though child.js exists neither on disk nor in bundle.
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.mjs'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'child.js\n')
 }))

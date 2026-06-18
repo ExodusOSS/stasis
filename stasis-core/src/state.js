@@ -1414,33 +1414,6 @@ export class State {
     })
   }
 
-  // Drop resolution edges whose target was resolved but never loaded -- i.e.
-  // require.resolve() (or any resolve-without-load) of a module the bundle doesn't
-  // carry. On Node versions where require.resolve routes through the resolve hook
-  // (26.x), addImport records such an edge directly into this.imports; left there
-  // it (a) trips #backfillBeforeWrite's "missing in-scope file" assertion --
-  // crashing capture on the common `try { require.resolve('x') } catch {}`
-  // optional-dependency probe -- and (b) would be useless in the artifact anyway
-  // (require.resolve returns a path; the file isn't bundled, and reading it
-  // bypasses the bundle). Pruning mirrors the in-bundle guard #backfillObserved-
-  // Resolutions applies on the Module._resolveFilename path, so capture behaves
-  // the same on every Node version. stasis-core's own preload-cached files are
-  // exempt -- #backfillBeforeWrite's BFS genuinely captures those next.
-  #pruneResolveOnlyEdges() {
-    const missing = this.#collectMissingImportedFiles()
-    const prune = new Set([...missing].filter((file) => !STASIS_CORE_FILE_RE.test(`/${file}`)))
-    if (prune.size === 0) return
-    for (const [conditions, byParent] of this.imports) {
-      for (const [parent, specifiers] of byParent) {
-        for (const [specifier, file] of specifiers) {
-          if (prune.has(file)) specifiers.delete(specifier)
-        }
-        if (specifiers.size === 0) byParent.delete(parent)
-      }
-      if (byParent.size === 0) this.imports.delete(conditions)
-    }
-  }
-
   // Record a capture-time native resolution (from the Module._resolveFilename
   // shim). Stored verbatim; #backfillObservedResolutions decides at write() which
   // to add. Last-write-wins per (parent, specifier) so duplicates collapse.
@@ -1452,14 +1425,29 @@ export class State {
 
   // Backfill resolution edges the live resolve hook never observed -- require.resolve()
   // (and CJS require()s that resolve natively) on Node versions where they bypass
-  // the hook. Recorded under the wildcard conditions key so a load-time lookup
-  // (getImport / resolveBundled) finds them regardless of conditions. Two guards:
-  //   - only edges whose target the bundle already carries (this.sources/.resources).
-  //     A resolve-only target isn't bundled, recording an edge to it would be
-  //     useless (require.resolve returns a path; reading it bypasses the bundle)
-  //     and would trip #backfillBeforeWrite's missing-file assertion.
+  // the hook. Records BOTH kinds the hook missed:
+  //   - under-recorded require()s whose target the bundle carries (Node's module
+  //     cache hid the require() from the resolve hook -- another module loaded the
+  //     target first), and
+  //   - resolve-only edges whose target it does NOT carry: require.resolve() of a
+  //     module never loaded in-process (an optional-dependency probe, a forked-
+  //     worker child like worker-farm's, a .node addon). The resolution is real and
+  //     must be attested so the same require.resolve() returns the same path at
+  //     load; the file simply has no bytes -- require.resolve returns a path, load()
+  //     never runs for it, so getFile is never asked to serve it.
+  // Guards:
+  //   - skip out-of-scope targets (mirroring #collectMissingImportedFiles) so a
+  //     node_modules-scope artifact doesn't attest workspace resolutions it isn't
+  //     responsible for; an in-bundle target is always in scope, so it's exempt.
+  //     (Targets escaping the root throw in #canonicalFile -> caught below.)
   //   - only edges the hook didn't already record (dedup across all condition
   //     buckets), so this never double-records a normal require().
+  // addImport keys these under the wildcard '*' (the native resolver gives us no
+  // conditions), whereas the resolve hook keys them under the precise condition set
+  // Node reported. So the same resolve-only program yields a '*' bucket on native-
+  // resolve Node and a precise bucket on resolve-hook Node -- benign: both getImport
+  // and resolveBundled scan every bucket, and it's the same version-dependent
+  // routing that already makes any hook-vs-native edge differ.
   #backfillObservedResolutions() {
     if (this.#observedResolutions.size === 0) return
     for (const [parentURL, specs] of this.#observedResolutions) {
@@ -1468,7 +1456,8 @@ export class State {
       for (const [specifier, resolvedURL] of specs) {
         let file
         try { file = this.#canonicalFile(resolvedURL) } catch { continue }
-        if (!this.sources.has(file) && !this.resources.has(file)) continue
+        const bundled = this.sources.has(file) || this.resources.has(file)
+        if (!bundled && !this.config.full && !this.inNodeModules(resolvedURL)) continue
         const spec = this.#canonicalSpecifier(parentURL, specifier)
         let recorded = false
         for (const [, byParent] of this.imports) {
@@ -1480,9 +1469,19 @@ export class State {
   }
 
   write() {
-    this.#pruneResolveOnlyEdges()
-    this.#backfillBeforeWrite()
+    // Backfill observed (native Module._resolveFilename) resolutions BEFORE the
+    // stasis-core BFS. On Node's native-resolve versions a resolve-only edge to a
+    // stasis-core src/*.js submodule (e.g. require.resolve('@exodus/stasis-core/
+    // prune') of a module never loaded) is added only here; running the BFS first
+    // would compute its missing-set without that edge, never seed the file, and
+    // ship a dangling edge with no bytes -- which a later lock=frozen replay then
+    // rejects. Recording it first lets the BFS capture the bytes, matching what the
+    // resolve-hook path already records in-line on newer Node. Order is otherwise
+    // independent: the BFS doesn't read #observedResolutions, and observe-backfill's
+    // `bundled` check sees files loaded during capture (already in this.sources)
+    // regardless of when the BFS runs.
     this.#backfillObservedResolutions()
+    this.#backfillBeforeWrite()
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     // Sidecars never write the lockfile -- the parent owns it. They only emit their bundle.
     // A "sidecar" here is one sharing the parent's lockfile data structures; an independent
@@ -1562,30 +1561,33 @@ export class State {
     if (missing.size === 0) return
 
     const isStasisCoreFile = (file) => STASIS_CORE_FILE_RE.test(`/${file}`)
+
+    // Split the uncaptured targets. stasis-core's own preload-cached files are the
+    // one case we both can and must reconstruct -- bytes AND transitive edges (the
+    // BFS below). Everything else uncaptured is a resolution we attest WITHOUT
+    // bundling: require.resolve() of a module never loaded in-process (an optional-
+    // dependency probe, a forked-worker child like worker-farm's), or a file Node
+    // can't serve from a bundle anyway (a .node addon). Those edges stay in
+    // this.imports -- the user needs the resolution pinned even though the bytes are
+    // absent -- and we do nothing further with them here. The load-time getFile
+    // gate, not this capture-time pass, enforces the trust boundary: an actual load
+    // of un-bundled bytes still fails closed there, while require.resolve (which
+    // never loads) is served the attested path.
+    const stasisCoreMissing = [...missing].filter((file) => isStasisCoreFile(file))
+    if (stasisCoreMissing.length === 0) return
+
     const preloadRel = this.#preloadRoot ? relative(this.root, this.#preloadRoot) : null
     const canBackfill = preloadRel !== null && !preloadRel.startsWith('..')
 
-    // Without a usable preloadRoot (no loader present, or stasis-core is a
-    // workspace sibling not under state.root) there's nothing this method
-    // can do. But there ALSO shouldn't be any missing in-scope files -- the
-    // live hooks are authoritative for everything else. A non-empty missing
-    // list at this point means the live load hook missed something it
-    // should have captured: fail loud rather than silently patch.
+    // We have stasis-core files to reconstruct but no usable preloadRoot (no loader
+    // present, or stasis-core is a workspace sibling not under state.root): nothing
+    // this method can do, and a stasis-core source going uncaptured IS a real gap --
+    // the bundle would be missing part of its own runtime. Fail loud rather than
+    // silently ship it.
     assert.ok(canBackfill,
-      `state.write() has imports referencing un-captured files but no usable preloadRoot ` +
+      `state.write() has imports referencing un-captured stasis-core files but no usable preloadRoot ` +
       `(preloadRoot=${this.#preloadRoot ?? 'unset'}). The live load hook missed an in-scope target -- ` +
-      `investigate rather than silently patch: ${[...missing].slice(0, 3).join(', ')}`)
-
-    // Every missing target MUST be a stasis-core source file -- the only
-    // legitimate "in-scope but un-captured" case is preload-cached modules.
-    // Anything else means the live load hook missed something it should have
-    // captured; surface that loudly rather than silently patching.
-    for (const file of missing) {
-      assert.ok(isStasisCoreFile(file),
-        `state.write() backfill refused: '${file}' is referenced by the imports map but ` +
-        `not yet captured AND not a stasis-core source file. The live load hook missed ` +
-        `an in-scope target -- investigate rather than silently patch.`)
-    }
+      `investigate rather than silently patch: ${stasisCoreMissing.slice(0, 3).join(', ')}`)
 
     const PRELOAD_CONDITIONS = ['node', 'import', 'module-sync', 'node-addons']
     const stasisAddFile = (file) => {
@@ -1600,9 +1602,8 @@ export class State {
     }
 
     // BFS through stasis-core's module graph. Seed:
-    //   (a) the missing files (asserted stasis-core above) -- user-code ->
-    //       stasis-core edges the live load hook missed because Node's
-    //       module cache short-circuited it.
+    //   (a) the missing stasis-core files -- user-code -> stasis-core edges the
+    //       live load hook missed because Node's module cache short-circuited it.
     //   (b) every stasis-core file already in sources -- a static `stasis
     //       bundle` pass may have pulled one in via the live hook; we still
     //       need to walk its transitive imports.
@@ -1613,7 +1614,7 @@ export class State {
     // covers seeds AND transitive targets -- a queued target gets addFile'd
     // on its next pop, no separate inner addFile call needed. BFS converges
     // because the matching file set is finite and `processed` dedups.
-    const queue = [...missing]
+    const queue = [...stasisCoreMissing]
     for (const file of this.sources.keys()) {
       if (isStasisCoreFile(file)) queue.push(file)
     }
