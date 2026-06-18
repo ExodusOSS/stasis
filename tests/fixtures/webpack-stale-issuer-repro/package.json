@@ -1,0 +1,15 @@
+{
+  "name": "wp-bug-repro",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "bs58": "^3.0.0",
+    "bn.js": "^5.0.0",
+    "rlp": "^2.2.0",
+    "example": "file:./example",
+    "webpack": "4.15.1",
+    "babel-loader": "^8.3.0",
+    "@babel/core": "^7.23.0",
+    "@babel/preset-env": "^7.23.0"
+  }
+}
