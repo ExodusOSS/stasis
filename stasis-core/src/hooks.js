@@ -200,15 +200,23 @@ function load(url, context, nextLoad) {
   }
 
   assert.equal(saved, false)
+  // Mirror the resolve hook's out-of-root skip: a file loaded from outside
+  // state.root (e.g. a workspace-root-hoisted dep, a system library loaded
+  // by tooling) isn't in the bundle's scope, and state.addFile would assert
+  // in `relative()`. The throw would propagate out of Node's loader hook
+  // and could be reframed as an opaque load error by the host (webpack
+  // catches such throws during loader instantiation). Skip silently.
   // A throw from addFile -- a frozen byte/format mismatch, an unattested file, a lock=add
   // conflict against an existing lockfile, ... -- means stasis rejected this capture. Flag
   // it so save() persists nothing, even if user code swallows the rejection (a try/catch
   // around a dynamic import) and the process then exits cleanly.
-  try {
-    state.addFile(url, { source, format, isEntry })
-  } catch (err) {
-    aborted = true
-    throw err
+  if (state.inRoot(url)) {
+    try {
+      state.addFile(url, { source, format, isEntry })
+    } catch (err) {
+      aborted = true
+      throw err
+    }
   }
 
   return result
@@ -277,9 +285,20 @@ function resolve(specifier, context, nextResolve) {
 
   assert.equal(res.importAttributes, undefined) // unsupported yet
   if (parentURL) assert.ok(state)
+  // Skip out-of-root edges: monorepo / pnpm / hoisted layouts can resolve a
+  // bare specifier to a node_modules entry whose realpath lies outside the
+  // project root (a workspace-root-hoisted babel-loader, a linked sibling
+  // package), and the resolve hook fires on edges initiated by tooling
+  // outside the bundle's scope too (webpack 4's loader-runner `require()`s
+  // the loader from a webpack-internal parent). state.addImport would
+  // assert in `relative()` on either an out-of-root parent or target; the
+  // throw propagates out of the loader hook and webpack catches it during
+  // loader resolution, surfacing as "Can't resolve '<loader>'". Recording
+  // out-of-root edges would be incorrect anyway (those files aren't in the
+  // bundle), so skip them silently.
   // As in load(): a rejected resolution (frozen redirect mismatch, conflict, ...) must keep
   // the captured state from being written, swallowed or not.
-  if (state) {
+  if (state && (parentURL == null || state.inRoot(parentURL)) && state.inRoot(url)) {
     try {
       state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
     } catch (err) {

@@ -780,6 +780,20 @@ export class State {
     return this.relative(this.#canonical(url).absolute)
   }
 
+  // True when `url` (a file:// URL) canonicalizes to a path inside state.root.
+  // Tolerant of non-file URLs and unresolvable paths -- both return false, so the
+  // hooks can use this as a precondition for addImport/addFile (which would
+  // otherwise assert in `relative()`) without having to know which URL shapes
+  // are file-backed.
+  inRoot(url) {
+    try {
+      this.#canonicalFile(url)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   // True when `url` resolves (through any workspace symlink) to a file under
   // node_modules -- i.e. a bundled dependency -- as opposed to a workspace source
   // linked into node_modules (which #canonical records as a source). The loader
