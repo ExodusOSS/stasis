@@ -75,11 +75,26 @@ let loadingModule = 0
 let entryUnseen = true
 
 // Resolve once at module-load: stasis-core's own package root. Passed to State
+// Resolve once at module-load: stasis-core's own package root. Passed to State
 // as `preloadRoot` so state.write()'s backfill statically captures stasis-core's
 // internal edges -- the (state.js -> config.js)-shape relative imports that
 // were loaded by Node BEFORE install() registered our hooks and that the live
 // resolve hook therefore never observed.
-const PRELOAD_ROOT = dirname(findPackageJSON(import.meta.url))
+//
+// `findPackageJSON` is wrapped because bundlers that ship this file as part
+// of a captured bundle don't always have it mocked / wired up -- e.g. a
+// metro-built bundle replaces node:module with its own shim where the API
+// is absent. Returning undefined on failure makes the State constructor's
+// `if (preloadRoot !== undefined)` skip cleanly; the backfill that consumes
+// preloadRoot is a best-effort feature and falls through gracefully when
+// it's unset.
+const PRELOAD_ROOT = (() => {
+  try {
+    return dirname(findPackageJSON(import.meta.url))
+  } catch {
+    return undefined
+  }
+})()
 
 function initState(root) {
   state = new State(root, { preload: true, preloadRoot: PRELOAD_ROOT })
