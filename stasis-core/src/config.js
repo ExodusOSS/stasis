@@ -14,9 +14,9 @@ export const DEFAULT_LOCK = 'add'
 export const DEFAULT_BUNDLE = 'none'
 export const DEFAULT_SCOPE = 'full'
 
-const envDebugBool = (value) => Boolean(value && value !== '0')
+const envBool = (value) => Boolean(value && value !== '0')
 
-const OPTION_KEYS = ['scope', 'lock', 'lockFile', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug']
+const OPTION_KEYS = ['scope', 'lock', 'lockFile', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'childProcess']
 
 // Plugins accept the same options as Config but want to validate without constructing one,
 // since constructing State has side effects. Mirror Config's per-field validation.
@@ -24,7 +24,7 @@ export function validatePluginOptions(label, options) {
   const rest = { ...options }
   for (const key of OPTION_KEYS) delete rest[key]
   assert.equal(Object.keys(rest).length, 0, `Unknown ${label} options: ${Object.keys(rest).join(', ')}`)
-  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
+  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, childProcess } = options
   if (scope !== undefined) assert.ok(VALID_SCOPE.has(scope), `Invalid scope: ${scope}`)
   if (lock !== undefined) assert.ok(VALID_LOCK.has(lock), `Invalid lock: ${lock}`)
   if (lockFile !== undefined) assert.equal(typeof lockFile, 'string', 'lockFile must be a string')
@@ -32,12 +32,13 @@ export function validatePluginOptions(label, options) {
   if (bundleFile !== undefined) assert.equal(typeof bundleFile, 'string', 'bundleFile must be a string')
   if (resourcesBundleFile !== undefined) assert.equal(typeof resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
   if (debug !== undefined) assert.equal(typeof debug, 'boolean', 'debug must be a boolean')
+  if (childProcess !== undefined) assert.equal(typeof childProcess, 'boolean', 'childProcess must be a boolean')
 }
 
 // When a plugin runs against a State that already exists (preload path), the active Config
 // is authoritative. Any options the plugin was given must agree with it.
 export function assertOptionsMatchConfig(config, options) {
-  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
+  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, childProcess } = options
   try {
     if (scope !== undefined) assert.equal(config.scope, scope)
     if (lock !== undefined) assert.equal(config.lock, lock)
@@ -46,6 +47,7 @@ export function assertOptionsMatchConfig(config, options) {
     if (bundleFile !== undefined) assert.equal(config.bundleFile, bundleFile)
     if (resourcesBundleFile !== undefined) assert.equal(config.resourcesBundleFile, resourcesBundleFile)
     if (debug !== undefined) assert.equal(config.debug, debug)
+    if (childProcess !== undefined) assert.equal(config.childProcess, childProcess)
   } catch (cause) {
     // Re-throw with the underlying assertion message folded into the top-level
     // text -- a plugin author hitting this gets the offending field's name and
@@ -64,8 +66,9 @@ export class Config {
   #bundleFile
   #resourcesBundleFile
   #debug
+  #childProcess
 
-  // Options match the CLI flags (lock/lockFile/bundle/bundleFile/resourcesBundleFile/scope/debug).
+  // Options match the CLI flags (lock/lockFile/bundle/bundleFile/resourcesBundleFile/scope/debug/childProcess).
   // Env vars take effect at construction time; if both env and an option are set they must
   // agree. Likewise, any explicit constructor option is treated as authoritative: a later
   // `loadConfig` call (which reads stasis.config.json) must agree with it -- the alternative
@@ -73,9 +76,9 @@ export class Config {
   // was a footgun the CLI couldn't detect, since the flag was happily accepted
   // and then quietly ignored.
   constructor(options = {}) {
-    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, childProcess, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
-    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug }
+    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, childProcess }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
@@ -85,6 +88,7 @@ export class Config {
       bundleFile: process.env.EXODUS_STASIS_BUNDLE_FILE || undefined,
       resourcesBundleFile: process.env.EXODUS_STASIS_RESOURCES_BUNDLE_FILE || undefined,
       debug: process.env.EXODUS_STASIS_DEBUG || undefined,
+      childProcess: process.env.EXODUS_STASIS_CHILD_PROCESS || undefined,
     }
 
     try {
@@ -101,7 +105,10 @@ export class Config {
         assert.equal(this.#env.resourcesBundleFile, resourcesBundleFile)
       }
       if (this.#env.debug !== undefined && debug !== undefined) {
-        assert.equal(envDebugBool(this.#env.debug), debug)
+        assert.equal(envBool(this.#env.debug), debug)
+      }
+      if (this.#env.childProcess !== undefined && childProcess !== undefined) {
+        assert.equal(envBool(this.#env.childProcess), childProcess)
       }
     } catch (cause) {
       throw new Error('Config options can not override stasis env', { cause })
@@ -113,7 +120,8 @@ export class Config {
     this.#bundle = this.#env.bundle || bundle || DEFAULT_BUNDLE
     this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
-    this.#debug = this.#env.debug !== undefined ? envDebugBool(this.#env.debug) : (debug ?? false)
+    this.#debug = this.#env.debug !== undefined ? envBool(this.#env.debug) : (debug ?? false)
+    this.#childProcess = this.#env.childProcess !== undefined ? envBool(this.#env.childProcess) : (childProcess ?? false)
 
     this.#checkInvariants()
   }
@@ -125,6 +133,17 @@ export class Config {
     assert.ok(VALID_LOCK.has(this.#lock), `Invalid lock: ${this.#lock}`)
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
+    assert.equal(typeof this.#childProcess, 'boolean', 'childProcess must be a boolean')
+
+    // --child-process propagates stasis enforcement to forked Node children. It is
+    // only meaningful when THIS run is itself read-only enforcement: a frozen
+    // lockfile (lock=frozen) or a bundle that is loaded/frozen. Capture modes
+    // (lock/bundle add|replace) are excluded on purpose -- write operations must
+    // never be passed down to a child (two processes writing the same lockfile/
+    // bundle), so there is nothing safe to propagate from a pure-capture run.
+    if (this.#childProcess && this.#lock !== 'frozen' && this.#bundle !== 'load' && this.#bundle !== 'frozen') {
+      throw new RangeError("childProcess requires read-only enforcement: lock='frozen' or bundle=(load|frozen)")
+    }
     if (this.#bundleFile !== undefined) assert.equal(typeof this.#bundleFile, 'string', 'bundleFile must be a string')
     if (this.#lockFile !== undefined) {
       assert.equal(typeof this.#lockFile, 'string', 'lockFile must be a string')
@@ -203,7 +222,7 @@ export class Config {
       if (this.#env.scope !== undefined) assert.equal(this.#scope, this.#env.scope)
       if (this.#env.lock !== undefined) assert.equal(this.#lock, this.#env.lock)
       if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
-      if (this.#env.debug !== undefined) assert.equal(this.#debug, envDebugBool(this.#env.debug))
+      if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool(this.#env.debug))
       // Explicit constructor options are equally authoritative: an explicit
       // `--scope=full` shouldn't be silently overridden by an on-disk
       // `{"scope":"node_modules"}`. The asserts mirror the env block above.
@@ -236,6 +255,15 @@ export class Config {
 
   get debug() {
     return this.#debug
+  }
+
+  // True when forked Node children should run under stasis too (the --child-process
+  // flag / EXODUS_STASIS_CHILD_PROCESS env). The loader reads this to decide whether
+  // to propagate a read-only, write-stripped config into child_process.fork() (when
+  // set) or to strip stasis from the child entirely (when unset). Never persisted to
+  // stasis.config.json -- it is a per-invocation runtime flag, like bundleFile.
+  get childProcess() {
+    return this.#childProcess
   }
 
   get values() {

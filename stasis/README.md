@@ -49,6 +49,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --bundle=load app.js` | run from the bundle alone |
 | `stasis run --lock=add --bundle=add app.js` | build a lockfile and bundle together |
 | `stasis run --lock=frozen --bundle=load app.js` | run from the bundle, verified against the lockfile |
+| `stasis run --lock=frozen --child-process app.js` | also enforce forked Node children (`childProcess.fork`) |
 | `stasis run --lock=add --bundle=add --mock app.js` | build without the app's side effects (network, fs writes) |
 | `stasis run --bundle=add --fs=sync app.js` | build a bundle that also captures sync `fs.readFileSync`/`readdirSync` reads |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
@@ -60,7 +61,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis sbom --format=spdx stasis.lock.json` | export an SPDX SBOM for a lockfile or bundle |
 | `stasis sbom --format=cyclonedx app.stasis.code.br` | export a CycloneDX SBOM for a lockfile or bundle |
 
-Lock/bundle modes appear in the table above (omit a flag to skip that artifact); `--dependencies` limits to `node_modules` scope, `--mock` captures with side effects denied, and `--fs=sync` captures a program's sync `fs.readFileSync`/`fs.readdirSync` reads into the bundle (and serves them back, along with `fs.lstatSync`/`fs.statSync` existence checks, under `--bundle=load`); `--fs=async` additionally covers the async (callback + `fs.promises`) forms (see [doc/file-formats.md](../doc/file-formats.md)). The zero-dependency `@exodus/stasis-core` CLI provides `run` and `prune` only.
+Lock/bundle modes appear in the table above (omit a flag to skip that artifact); `--dependencies` limits to `node_modules` scope, `--mock` captures with side effects denied, and `--fs=sync` captures a program's sync `fs.readFileSync`/`fs.readdirSync` reads into the bundle (and serves them back, along with `fs.lstatSync`/`fs.statSync` existence checks, under `--bundle=load`); `--fs=async` additionally covers the async (callback + `fs.promises`) forms (see [doc/file-formats.md](../doc/file-formats.md)). `--child-process` extends a read-only run's enforcement into forked Node children: `childProcess.fork` re-launches the child under stasis with the loader forced in and a read-only, write-stripped config (it requires `--bundle=load`, `--bundle=frozen`, or `--lock=frozen`, and never passes a capture/write mode down); without it, forked children run as plain Node. The zero-dependency `@exodus/stasis-core` CLI provides `run` and `prune` only.
 
 ## License
 

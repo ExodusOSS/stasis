@@ -1,10 +1,11 @@
-import Module, { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
+import Module, { registerHooks, findPackageJSON, isBuiltin, createRequire, syncBuiltinESMExports } from 'node:module'
 import { basename, dirname, extname, resolve as resolvePath } from 'node:path'
 import * as fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
+import { Config } from './config.js'
 import { installFsHooks } from './fs.js'
 
 // Snapshot off the namespace so `--fs` (which patches fs.readFileSync and then
@@ -73,6 +74,11 @@ let loadingModule = 0
 // be triggered eagerly by plugins.js via ensureStateForLoader (state set
 // before the entry's load).
 let entryUnseen = true
+
+// True in a process the fork patch launched as a stasis-enforced child (it sets
+// EXODUS_STASIS_FORKED). Tells the entry-point check apart from the root run: see
+// patchChildProcessFork below for the full rationale. Resolved once at load time.
+const forkedChild = Boolean(process.env.EXODUS_STASIS_FORKED) && process.env.EXODUS_STASIS_FORKED !== '0'
 
 // Resolve once at module-load: stasis-core's own package root. Passed to State
 // as `preloadRoot` so state.write()'s backfill statically captures stasis-core's
@@ -266,7 +272,10 @@ function resolve(specifier, context, nextResolve) {
     const url = specifier.startsWith('file:')
       ? specifier
       : pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
-    if (!parentURL && state.config.full) state.assertEntry(url)
+    // A forked child's main module is whatever the parent chose to fork, not a CLI
+    // entry, so it need not appear in the bundle's entries list -- getFile() below
+    // still rejects anything the bundle doesn't attest. The root run stays strict.
+    if (!parentURL && state.config.full && !forkedChild) state.assertEntry(url)
     const format = state.getFormat(url)
     if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
     return { url, format, importAttributes: undefined, shortCircuit: true }
@@ -355,6 +364,137 @@ export function install() {
       },
     })
   }
+  patchChildProcessFork()
+}
+
+// Env vars the loader reads (Config mirrors these). Cleared from a forked child's
+// env when stasis is NOT being propagated, so a child can never silently pick up
+// the parent's config -- in particular a write mode -- through Node's default
+// `env: process.env` inheritance.
+const STASIS_ENV_VARS = [
+  'EXODUS_STASIS_SCOPE',
+  'EXODUS_STASIS_LOCK',
+  'EXODUS_STASIS_LOCK_FILE',
+  'EXODUS_STASIS_BUNDLE',
+  'EXODUS_STASIS_BUNDLE_FILE',
+  'EXODUS_STASIS_RESOURCES_BUNDLE_FILE',
+  'EXODUS_STASIS_DEBUG',
+  'EXODUS_STASIS_FS',
+  'EXODUS_STASIS_CHILD_PROCESS',
+  'EXODUS_STASIS_FORKED',
+]
+
+// EXODUS_STASIS_FORKED (read once into `forkedChild` near the top) marks a process the
+// fork patch launched under enforcement, so the loader can tell it apart from the root
+// run: the root's entry came from the CLI and must be a declared entry (assertEntry),
+// whereas a forked child's main module is a fork target -- legitimately ANY attested file
+// (a frozen run is already this permissive, since it gates on file membership, not the
+// entries list). When set, full-scope load mode relaxes the entry-point check to that same
+// "is it attested?" gate; getFile() still fails closed on anything the bundle omits.
+// Reaching a non-attested file via fork is no broader than the trusted parent importing
+// it directly, which it could already do.
+
+// Remove a leading-or-anywhere `--import <loaderURL>` (and the `--import=<loaderURL>`
+// spelling) from an execArgv list. Used to dedupe before re-injecting our own loader,
+// and to strip it back out when stasis is not being propagated to the child.
+function stripLoaderImport(argv, loaderURL) {
+  const out = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--import' && argv[i + 1] === loaderURL) {
+      i++ // also skip the URL that follows
+      continue
+    }
+    if (argv[i] === `--import=${loaderURL}`) continue
+    out.push(argv[i])
+  }
+  return out
+}
+
+// child_process.fork() spawns `node <module>` and, by default, inherits BOTH the
+// parent's execArgv (which under stasis carries our `--import <loader>`) and its env
+// (the EXODUS_STASIS_* vars). Left alone, every forked child would therefore silently
+// re-run under the parent's full config -- including capture/write modes, so two
+// processes would write the same lockfile/bundle. We take control of fork() to make
+// the behavior explicit and gated on the --child-process flag:
+//
+//   * disabled (the default): strip stasis from the child -- drop our loader from
+//     execArgv and clear EXODUS_STASIS_* from its env -- so it runs as plain Node.
+//     Enforcement governs only the process stasis launched. This is also what
+//     guarantees write operations are never passed down absent the flag.
+//
+//   * enabled (--child-process; Config only allows it in read-only modes): force our
+//     loader into the child's execArgv (so a child spawned with `execArgv: []` still
+//     cannot escape enforcement) and hand it a read-only, WRITE-STRIPPED config --
+//     lock=frozen only if the parent is frozen, bundle=load/frozen only if the parent
+//     loads/freezes, never add|replace -- plus the flag itself so the child enforces
+//     ITS OWN forks transitively.
+//
+// Only fork() is patched (not spawn/exec/execFile): fork always launches a Node
+// module, the one child kind the module hooks can meaningfully govern.
+function patchChildProcessFork() {
+  // Cheap env gate first: only the --child-process path (or a future opt-in) sets this.
+  // When unset we still patch, but solely to strip inherited stasis from children.
+  const enabled = Boolean(process.env.EXODUS_STASIS_CHILD_PROCESS) && process.env.EXODUS_STASIS_CHILD_PROCESS !== '0'
+  // Construct Config only when propagating: it normalizes the parent's modes/paths and
+  // re-validates the read-only invariant. When stripping we need none of that.
+  const config = enabled ? new Config() : null
+  // The loader entry every `stasis run` puts in execArgv (`--import .../loader.js`).
+  // Join via URL rather than import.meta.resolve(): resolve() would re-enter our own
+  // (just-registered) resolve hook before `state` exists and assert. hooks.js is loaded
+  // from the resolved real path, so `./loader.js` here equals the URL the CLI injected,
+  // which is what makes stripLoaderImport's dedupe/strip exact.
+  const loaderURL = new URL('./loader.js', import.meta.url).href
+
+  const childExecArgv = (provided) => {
+    const base = provided === undefined ? process.execArgv : provided
+    const stripped = stripLoaderImport(base, loaderURL)
+    return enabled ? ['--import', loaderURL, ...stripped] : stripped
+  }
+
+  const childEnv = (provided) => {
+    const env = { ...(provided === undefined ? process.env : provided) }
+    if (!enabled) {
+      for (const key of STASIS_ENV_VARS) delete env[key]
+      return env
+    }
+    // Map the parent's modes to the read-only subset the child is allowed to inherit.
+    const childLock = config.frozen ? 'frozen' : 'none'
+    const childBundle = config.loadBundle ? 'load' : config.frozenBundle ? 'frozen' : 'none'
+    env.EXODUS_STASIS_SCOPE = config.scope
+    env.EXODUS_STASIS_LOCK = childLock
+    // lockFile/bundleFile/resourcesBundleFile only make sense alongside an active mode;
+    // Config rejects them otherwise. Clear each when its mode was stripped to 'none'.
+    env.EXODUS_STASIS_LOCK_FILE = childLock === 'frozen' ? (config.lockFile ?? '') : ''
+    env.EXODUS_STASIS_BUNDLE = childBundle
+    env.EXODUS_STASIS_BUNDLE_FILE = childBundle === 'none' ? '' : (config.bundleFile ?? '')
+    env.EXODUS_STASIS_RESOURCES_BUNDLE_FILE = childBundle === 'none' ? '' : (config.resourcesBundleFile ?? '')
+    env.EXODUS_STASIS_DEBUG = config.debug ? '1' : ''
+    // --fs is read-only only when SERVING (bundle=load); in add|replace it captures reads
+    // (a write), which must not be passed down. So propagate the parent's fs mode only
+    // when the child loads from the bundle -- then its fs reads are served/verified from
+    // the bundle too -- and clear it otherwise (where --fs would also be an invalid combo).
+    env.EXODUS_STASIS_FS = childBundle === 'load' ? (process.env.EXODUS_STASIS_FS || '') : ''
+    env.EXODUS_STASIS_CHILD_PROCESS = '1'
+    env.EXODUS_STASIS_FORKED = '1'
+    return env
+  }
+
+  const childProcess = createRequire(import.meta.url)('node:child_process')
+  const originalFork = childProcess.fork
+  childProcess.fork = function fork(modulePath, args, options) {
+    // Mirror Node's own (args?, options?) overloading: a non-array second arg is options.
+    if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+      options = args
+      args = undefined
+    }
+    const patched = { ...options, execArgv: childExecArgv(options?.execArgv), env: childEnv(options?.env) }
+    return args === undefined
+      ? originalFork.call(this, modulePath, patched)
+      : originalFork.call(this, modulePath, args, patched)
+  }
+  // Refresh node:child_process's ESM wrapper so user code's `import { fork }` (linked
+  // after this --import entry runs) sees the patched function, not the original.
+  syncBuiltinESMExports()
 }
 
 // registerHooks intercepts the ESM loader and Node's native CommonJS loader, but

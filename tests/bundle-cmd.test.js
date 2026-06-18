@@ -42,6 +42,7 @@ const cleanEnv = (() => {
     EXODUS_STASIS_BUNDLE: _b,
     EXODUS_STASIS_BUNDLE_FILE: _bf,
     EXODUS_STASIS_DEBUG: _d,
+    EXODUS_STASIS_CHILD_PROCESS: _cp,
     ...rest
   } = process.env
   return rest

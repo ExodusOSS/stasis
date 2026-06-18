@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] [--fs=(sync|async)] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] [--fs=(sync|async)] [--child-process] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -62,6 +62,7 @@ if (command === '-v' || command === '--version') {
     dependencies: { type: 'boolean' },
     mock: { type: 'boolean' },
     fs: { type: 'string' },
+    'child-process': { type: 'boolean' },
   }
 
   let values
@@ -77,6 +78,7 @@ if (command === '-v' || command === '--version') {
   const bundle = values.bundle
   const bundleFile = values['bundle-file'] ? resolve(values['bundle-file']) : ''
   const debug = values.debug ? '1' : ''
+  const childProcess = values['child-process'] ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
@@ -90,7 +92,15 @@ if (command === '-v' || command === '--version') {
   if (values.fs !== undefined && !['sync', 'async'].includes(values.fs)) usage("Error: --fs must be 'sync' or 'async'")
   if (values.fs !== undefined && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
   const captureFs = values.fs ?? ''
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }) })
+  // --child-process propagates read-only enforcement into forked children; it only makes
+  // sense when this run is itself read-only (frozen lock, or a loaded/frozen bundle).
+  if (childProcess && lock !== 'frozen' && bundle !== 'load' && bundle !== 'frozen') {
+    usage('Error: --child-process requires --bundle=(load|frozen) or --lock=frozen')
+  }
+  // --mock denies child processes outright (Node --permission with no --allow-child-process),
+  // so propagating enforcement into forks would have nothing to propagate into.
+  if (values.mock && childProcess) usage('Error: --child-process is incompatible with --mock (which denies child processes)')
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(childProcess && { childProcess: true }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -98,6 +108,7 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
   setEnv('EXODUS_STASIS_FS', captureFs)
+  setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   // --mock: capture imports by running user code with side-effects denied,
   // fail-closed. Node's permission system blocks fs writes, child processes,
   // worker threads, native addons (no --allow-addons -- addons would bypass

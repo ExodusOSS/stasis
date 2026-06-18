@@ -12,6 +12,7 @@ const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cl
 const nmFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm')
 const nmCjsFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm-cjs')
 const jsonAttrFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-json-attr')
+const forkFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-fork')
 
 // strip any inherited stasis env vars so the CLI's env-conflict guard doesn't trip
 const {
@@ -20,6 +21,7 @@ const {
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
+  EXODUS_STASIS_CHILD_PROCESS: _cp,
   ...cleanEnv
 } = process.env
 
@@ -1860,4 +1862,126 @@ test('run --bundle=load refuses every NON_NODE_SOURCE_LANGUAGE tag (php parallel
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /cannot execute a 'php' bundle/)
   t.assert.doesNotMatch(r.stdout, /hello/, 'php-tagged file must not execute')
+}))
+
+// --- --child-process: propagate read-only enforcement to forked Node children -------
+//
+// The fork fixture's entry.js forks src/worker.js (with execArgv: []), but only when
+// RUN_WORKER is set in the env -- so the seed run (which must NOT fork, to record a
+// clean lockfile/bundle) and the enforced run (which must fork) can share one entry,
+// as a frozen run rejects an entry the lockfile never recorded. worker.js prints the
+// stasis lock/bundle mode it actually sees, which is what these tests assert on.
+
+// Build a lockfile + bundle from the fork fixture without forking (RUN_WORKER unset).
+const seedFork = (t, tmp) => {
+  cpSync(forkFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `seed stderr: ${save.stderr}`)
+  return bundlePath
+}
+
+test('run rejects --child-process without read-only enforcement (lock=add)', (t) => {
+  const r = run(['run', '--lock=add', '--child-process', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--child-process requires --bundle=\(load\|frozen\) or --lock=frozen/)
+  t.assert.doesNotMatch(r.stderr, /Running stasis with config/)
+})
+
+test('run rejects --child-process combined with --mock', (t) => {
+  const r = run(['run', '--lock=frozen', '--mock', '--child-process', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--child-process is incompatible with --mock/)
+})
+
+test('run --child-process announces childProcess in the config banner', withTmp((t, tmp) => {
+  seedFork(t, tmp)
+  const r = run(['run', '--lock=frozen', '--child-process', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stderr, /childProcess: true/)
+}))
+
+test('run --lock=frozen --child-process enforces a forked child, re-injecting the loader', withTmp((t, tmp) => {
+  seedFork(t, tmp)
+  // entry.js forks worker.js with execArgv: []; --child-process must still force the
+  // loader in, so the child runs under lock=frozen (and verifies its hello.js import).
+  const r = run(
+    ['run', '--lock=frozen', '--child-process', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /PARENT start/)
+  t.assert.match(r.stdout, /^WORKER hello, child lock=frozen bundle=none$/m)
+  t.assert.match(r.stdout, /PARENT child-exit=0/)
+}))
+
+test('run --bundle=load --child-process serves a forked child from the bundle (sources absent)', withTmp((t, tmp) => {
+  const bundlePath = seedFork(t, tmp)
+  // Remove every source: the bundle is the only place the entry, worker, and hello can
+  // come from. worker.js is an attested file but NOT a declared entry -- a forked child
+  // entry is allowed to be any attested file, unlike the root run.
+  rmSync(join(tmp, 'src'), { recursive: true })
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--child-process', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^WORKER hello, child lock=frozen bundle=load$/m)
+  t.assert.match(r.stdout, /PARENT child-exit=0/)
+}))
+
+test('run --bundle=frozen --child-process enforces a forked child against the bundle', withTmp((t, tmp) => {
+  const bundlePath = seedFork(t, tmp)
+  rmSync(join(tmp, 'stasis.lock.json')) // a frozen bundle is self-sufficient; lock=none
+  const r = run(
+    ['run', '--lock=none', '--bundle=frozen', `--bundle-file=${bundlePath}`, '--child-process', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  // lock is stripped to 'none' (parent lock=none is not frozen); bundle stays frozen.
+  t.assert.match(r.stdout, /^WORKER hello, child lock=none bundle=frozen$/m)
+  t.assert.match(r.stdout, /PARENT child-exit=0/)
+}))
+
+test('run --lock=frozen --bundle=add --child-process does NOT pass the write mode down', withTmp((t, tmp) => {
+  seedFork(t, tmp)
+  const childBundle = join(tmp, 'child-should-not-write.br')
+  // The parent verifies against the frozen lockfile AND writes a fresh bundle. The child
+  // must inherit only the frozen lockfile -- bundle=add is a write and is stripped to none.
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=add', `--bundle-file=${join(tmp, 'parent.br')}`, '--child-process', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^WORKER hello, child lock=frozen bundle=none$/m, 'bundle=add must be stripped to none in the child')
+  t.assert.ok(!existsSync(childBundle), 'the child must not write its own bundle')
+}))
+
+test('run without --child-process leaves a forked child unenforced (plain Node)', withTmp((t, tmp) => {
+  seedFork(t, tmp)
+  // In a read-only run but WITHOUT --child-process, fork() strips stasis from the child:
+  // no loader, no EXODUS_STASIS_* env -- it runs as plain Node, so it never inherits the
+  // parent's config (in particular, never a write mode through Node's default env: inherit).
+  const r = run(
+    ['run', '--lock=frozen', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^WORKER hello, child lock= bundle=$/m, 'child sees no stasis env when --child-process is off')
+}))
+
+test('run --lock=frozen --child-process makes a forked child fail closed on a tampered import', withTmp((t, tmp) => {
+  seedFork(t, tmp)
+  // hello.js is imported by the forked worker. Tampering it must be caught inside the
+  // child (the enforcement reaches forks), failing the whole run -- not silently run.
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `PWNED ${n}`\n')
+  const r = run(
+    ['run', '--lock=frozen', '--child-process', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.doesNotMatch(r.stdout, /PWNED/, 'the tampered code must not run in the child')
 }))

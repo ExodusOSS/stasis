@@ -13,6 +13,7 @@ import { stripVTControlCharacters } from 'node:util'
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis-core', 'bin', 'stasis-core.js')
 const runFixture = join(here, 'fixtures', 'cli-run')
+const forkFixture = join(here, 'fixtures', 'cli-run-fork')
 const pruneFixture = join(here, 'fixtures', 'prune')
 
 const {
@@ -21,6 +22,7 @@ const {
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
+  EXODUS_STASIS_CHILD_PROCESS: _cp,
   ...cleanEnv
 } = process.env
 
@@ -94,6 +96,27 @@ test('run does not support --mock (tooling-only flag)', (t) => {
   // never proceeds to announce a run config for an unsupported flag
   t.assert.doesNotMatch(r.stderr, /Running stasis with config/)
 })
+
+test('run rejects --child-process without read-only enforcement', (t) => {
+  const r = run(['run', '--lock=add', '--child-process', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--child-process requires --bundle=\(load\|frozen\) or --lock=frozen/)
+})
+
+test('run --lock=frozen --child-process enforces a forked child via the core loader', withTmp((t, tmp) => {
+  // Seed a lockfile from the fork fixture without forking (RUN_WORKER unset).
+  cpSync(forkFixture, tmp, { recursive: true })
+  const seed = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(seed.status, 0, `seed stderr: ${seed.stderr}`)
+  // Now fork under enforcement: the child must run under lock=frozen, not plain Node.
+  const r = run(
+    ['run', '--lock=frozen', '--child-process', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^WORKER hello, child lock=frozen bundle=none$/m)
+  t.assert.match(r.stdout, /PARENT child-exit=0/)
+}))
 
 test('prune validates and removes against the lockfile', withTmp((t, tmp) => {
   cpSync(pruneFixture, tmp, { recursive: true })

@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--fs=(sync|async)] path/to/file.js ...
+ stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--fs=(sync|async)] [--child-process] path/to/file.js ...
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)
@@ -50,6 +50,7 @@ if (command === '-v' || command === '--version') {
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
     fs: { type: 'string' },
+    'child-process': { type: 'boolean' },
   }
 
   let values
@@ -65,6 +66,7 @@ if (command === '-v' || command === '--version') {
   const bundle = values.bundle
   const bundleFile = values['bundle-file'] ? resolve(values['bundle-file']) : ''
   const debug = values.debug ? '1' : ''
+  const childProcess = values['child-process'] ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
@@ -76,7 +78,12 @@ if (command === '-v' || command === '--version') {
   if (values.fs !== undefined && !['sync', 'async'].includes(values.fs)) usage("Error: --fs must be 'sync' or 'async'")
   if (values.fs !== undefined && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
   const captureFs = values.fs ?? ''
-  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.fs && { fs: values.fs }) })
+  // --child-process propagates read-only enforcement into forked children; it only makes
+  // sense when this run is itself read-only (frozen lock, or a loaded/frozen bundle).
+  if (childProcess && lock !== 'frozen' && bundle !== 'load' && bundle !== 'frozen') {
+    usage('Error: --child-process requires --bundle=(load|frozen) or --lock=frozen')
+  }
+  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.fs && { fs: values.fs }), ...(childProcess && { childProcess: true }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -84,6 +91,7 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
   setEnv('EXODUS_STASIS_FS', captureFs)
+  setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code] = await once(child, 'close')

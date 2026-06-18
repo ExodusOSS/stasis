@@ -11,6 +11,7 @@ const ENV_KEYS = [
   'EXODUS_STASIS_BUNDLE_FILE',
   'EXODUS_STASIS_RESOURCES_BUNDLE_FILE',
   'EXODUS_STASIS_DEBUG',
+  'EXODUS_STASIS_CHILD_PROCESS',
 ]
 const withEnv = (vars, fn) => (t) => {
   const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
@@ -483,6 +484,61 @@ test('Config(options) enforces lock=none requires a bundle', (t) => {
   for (const bundle of ['add', 'replace', 'load', 'frozen', 'ignore']) {
     t.assert.ok(new Config({ lock: 'none', bundle }))
   }
+})
+
+// --- childProcess (--child-process) -------------------------------------------------
+
+test('Config childProcess defaults to false', (t) => {
+  t.assert.equal(new Config({ lock: 'frozen' }).childProcess, false)
+})
+
+test('Config(options) sets childProcess in read-only modes', (t) => {
+  t.assert.equal(new Config({ lock: 'frozen', childProcess: true }).childProcess, true)
+  t.assert.equal(new Config({ lock: 'none', bundle: 'load', childProcess: true }).childProcess, true)
+  t.assert.equal(new Config({ lock: 'none', bundle: 'frozen', childProcess: true }).childProcess, true)
+  // a frozen lockfile alongside a writing bundle still qualifies (frozen lock is read-only)
+  t.assert.equal(new Config({ lock: 'frozen', bundle: 'add', bundleFile: '/tmp/b.br', childProcess: true }).childProcess, true)
+})
+
+test('Config(options) rejects childProcess without read-only enforcement', (t) => {
+  t.assert.throws(() => new Config({ lock: 'add', childProcess: true }), /childProcess requires read-only enforcement/)
+  t.assert.throws(() => new Config({ lock: 'replace', childProcess: true }), /childProcess requires read-only enforcement/)
+  t.assert.throws(() => new Config({ lock: 'ignore', bundle: 'add', bundleFile: '/tmp/b.br', childProcess: true }), /childProcess requires read-only enforcement/)
+})
+
+test('Config(options) rejects non-boolean childProcess', (t) => {
+  t.assert.throws(() => new Config({ lock: 'frozen', childProcess: 'yes' }), /childProcess must be a boolean/)
+})
+
+test('Config childProcess is not persisted to json', (t) => {
+  const c = new Config({ lock: 'frozen', childProcess: true })
+  t.assert.equal(JSON.parse(c.json).childProcess, undefined)
+})
+
+test('Config reads EXODUS_STASIS_CHILD_PROCESS from env', withEnv(
+  { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_CHILD_PROCESS: '1' },
+  (t) => { t.assert.equal(new Config().childProcess, true) }
+))
+
+test('Config childProcess env "0" is falsy', withEnv(
+  { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_CHILD_PROCESS: '0' },
+  (t) => { t.assert.equal(new Config().childProcess, false) }
+))
+
+test('Config childProcess option conflicting with env throws', withEnv(
+  { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_CHILD_PROCESS: '0' },
+  (t) => { t.assert.throws(() => new Config({ childProcess: true }), /Config options can not override stasis env/) }
+))
+
+test('validatePluginOptions accepts boolean childProcess, rejects non-boolean', (t) => {
+  t.assert.doesNotThrow(() => validatePluginOptions('test', { childProcess: true }))
+  t.assert.throws(() => validatePluginOptions('test', { childProcess: 'yes' }), /childProcess must be a boolean/)
+})
+
+test('assertOptionsMatchConfig compares childProcess', (t) => {
+  const c = new Config({ lock: 'frozen', childProcess: true })
+  t.assert.doesNotThrow(() => assertOptionsMatchConfig(c, { childProcess: true }))
+  t.assert.throws(() => assertOptionsMatchConfig(c, { childProcess: false }), /conflict/)
 })
 
 // Env coverage. The constructor reads EXODUS_STASIS_* at construction time; options that
