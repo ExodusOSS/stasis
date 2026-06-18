@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 
 import { DEFAULT_LOCK, assertOptionsMatchConfig, validatePluginOptions } from './config.js'
+import { ensureStateForLoader, isLoaderInstalled } from './hooks.js'
 import { State } from './state.js'
 import { canonicalizePath } from './state-util.js'
 
@@ -95,6 +96,17 @@ export function classifyExtension(filePath, resources) {
 export function resolvePluginState(label, options, cwd) {
   validatePluginOptions(label, options)
   const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
+  // Same-instance fast path: the plugin's stasis-core IS the binary's, the
+  // hooks are installed, but the lazy initState hasn't fired yet (plugin
+  // ran AHEAD of the first user-file load -- webpack constructs plugins
+  // during config-parse before user code executes). Force-init now so the
+  // plugin lands in the ambient branch and inherits the loader's Config.
+  // We deliberately do NOT do this when the loader is a SEPARATE module
+  // instance (different stasis-core copy in the plugin's node_modules vs
+  // the binary's): force-init there would create a phantom State.preload
+  // with its own beforeExit/exit save handlers that race the real loader's
+  // lockfile write. Cross-instance detection lives below via env vars.
+  if (!State.preload && isLoaderInstalled()) ensureStateForLoader()
   const ambient = State.preload
 
   if (!ambient) {
@@ -114,8 +126,20 @@ export function resolvePluginState(label, options, cwd) {
         `bundle=${bundle === undefined ? 'default' : `'${bundle}'`})`
       )
     }
+    // Cross-instance "running under stasis run" detection: `stasis run`'s
+    // bin script always sets EXODUS_STASIS_LOCK on the spawned child (even
+    // for the default `--lock=add`), so the env var is a reliable
+    // process-wide signal regardless of which stasis-core copy is hosting
+    // this code. When set, the runtime's loader is providing full lockfile
+    // coverage for the process; the plugin's lockfile (at its own path,
+    // typically a sidecar like `sources.stasis.lock.json`) is a sibling
+    // artifact covering bundler-side resolutions, and the "lock=add needs
+    // a preload" rationale doesn't apply. Skip that rule under stasis run;
+    // Config below will pick up env-var defaults (lock/scope/bundle) for
+    // the standalone plugin State.
+    const underStasisRun = process.env.EXODUS_STASIS_LOCK !== undefined
     const effectiveLock = lock ?? DEFAULT_LOCK
-    if (effectiveLock !== 'none' && effectiveLock !== 'ignore') {
+    if (!underStasisRun && effectiveLock !== 'none' && effectiveLock !== 'ignore') {
       const phrasing = lock === undefined
         ? `the default lockfile mode ('${DEFAULT_LOCK}')`
         : `lockfile mode '${lock}'`

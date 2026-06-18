@@ -68,6 +68,11 @@ let aborted = false
 // already captured as code via addFile, so the --fs capture hook skips reads taken
 // while this is set: it records the program's OWN fs reads, not Node's module loading.
 let loadingModule = 0
+// True until the first non-builtin load hook fires. Replaces the legacy
+// `!state` heuristic for entry detection, which broke once initState could
+// be triggered eagerly by plugins.js via ensureStateForLoader (state set
+// before the entry's load).
+let entryUnseen = true
 
 // Resolve once at module-load: stasis-core's own package root. Passed to State
 // as `preloadRoot` so state.write()'s backfill statically captures stasis-core's
@@ -165,7 +170,15 @@ function load(url, context, nextLoad) {
   // Node's CJS loader may return source=null and read from disk itself; capture it for the bundle
   if (source == null && format === 'commonjs') source = readFileSync(fileURLToPath(url))
 
-  const isEntry = !state
+  // Entry detection: the FIRST non-builtin load through this hook is the
+  // entry. `entryUnseen` (set true on every state init) flips to false after
+  // the first load fires here. The pre-existing heuristic was `!state` --
+  // tight while initState was lazy, but a plugin-driven `ensureStateForLoader`
+  // path now eager-inits from cwd before the first load, so `!state` would
+  // miss the entry. The flag lives module-local rather than on State because
+  // it's strictly a hook-firing-order signal.
+  const isEntry = entryUnseen
+  entryUnseen = false
   if (!state) {
     const pkg = findPackageJSON(url)
     assert.equal(basename(pkg), 'package.json')
@@ -264,6 +277,28 @@ function resolve(specifier, context, nextResolve) {
 }
 
 let installed = false
+
+// True iff install() has run. Exported so plugins.js can detect "we're
+// running under the stasis loader" even before the lazy initState fires --
+// a bundler plugin constructed during webpack's config-parse can run
+// AHEAD of the first user-file load hook, leaving State.preload null.
+// resolvePluginState reads this to force-init State from cwd in that
+// window so the plugin inherits the loader's config rather than erroring
+// on the default lock mode.
+export function isLoaderInstalled() {
+  return installed
+}
+
+// Force-initialize state from process.cwd() if it hasn't been initialized
+// yet. Used by plugins.js's resolvePluginState to ensure State.preload is
+// available when the plugin constructor runs ahead of the load hook. A
+// subsequent first-load through the load hook detects "state already set"
+// and skips its own lazy initState, but still marks isEntry correctly via
+// the entryUnseen flag.
+export function ensureStateForLoader() {
+  if (state) return
+  initState(process.cwd())
+}
 
 // Register Node's module hooks. Kept separate from the --import entry points
 // (loader.js here; the @exodus/stasis package's loader and --mock loader) so a

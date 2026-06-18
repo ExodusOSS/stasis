@@ -328,6 +328,45 @@ test('rule 1: plugin lockfile without preload is a hard throw', withTmp((t, tmp)
   t.assert.match(r.stderr, /lockfile mode 'add' requires a stasis preload/)
 }))
 
+// Regression: plugin construction lands in the "no ambient" branch when
+// either (a) the plugin's stasis-core copy differs from the loader's binary
+// (different module instance, isLoaderInstalled() returns false in the
+// plugin's copy), or (b) the loader's lazy initState hasn't fired yet when
+// the plugin is constructed. Both surface as `State.preload === undefined`.
+// In that branch, pre-fix, the default `lock='add'` triggered "requires a
+// stasis preload; pass lock='none' or lock='ignore'" even when the user
+// IS running under `stasis run`. The fix: when `EXODUS_STASIS_LOCK` is
+// set (which `stasis run`'s bin always sets, even at its default 'add')
+// the runtime IS providing lockfile coverage -- the plugin's standalone
+// State is a sidecar artifact and any lock mode is acceptable.
+test('no-ambient plugin under stasis run (env-var detected) accepts default lock=add', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  const lockPath = join(tmp, 'sources.stasis.lock.json')
+  const bundlePath = join(tmp, 'sources.stasis.code.br')
+
+  // STASIS_TEST_PRELOAD=0 simulates the cross-instance scenario: the
+  // plugin's copy of stasis-core sees no ambient State.preload because
+  // the binary's stasis-core (separate copy in a real install) has the
+  // active loader. EXODUS_STASIS_LOCK is the cross-instance signal.
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: standalone({
+      ...withOpts({ lockFile: lockPath, bundleFile: bundlePath }),
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+    }),
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.ok(existsSync(lockPath), 'plugin writes its own lockfile at the configured path')
+  t.assert.ok(existsSync(bundlePath), 'plugin writes its own bundle at the configured path')
+  // The plugin's standalone State must NOT have written the default-path
+  // lockfile -- that would race the binary's writer.
+  t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')),
+    'plugin must not write a phantom lockfile at the default path')
+}))
+
 test('rule 7: plugin with lock=none + bundle=none and no preload is a no-op', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
