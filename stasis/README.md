@@ -64,6 +64,10 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 
 The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run` and `prune` commands and bundler plugins only.
 
+## Bundler plugins
+
+Build a lockfile/bundle straight from your bundler's graph (and load one back into the build) with first-party plugins for [esbuild](https://github.com/ExodusOSS/stasis/blob/main/doc/plugins/esbuild.md), [webpack](https://github.com/ExodusOSS/stasis/blob/main/doc/plugins/webpack.md), and [Metro](https://github.com/ExodusOSS/stasis/blob/main/doc/plugins/metro.md) — see [bundler plugins](https://github.com/ExodusOSS/stasis/blob/main/doc/plugins/README.md).
+
 ## License
 
 [MIT](./LICENSE)
