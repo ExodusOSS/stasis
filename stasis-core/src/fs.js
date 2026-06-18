@@ -13,12 +13,16 @@
 //   - readFileSync: the optional second argument (an `encoding` string, or an
 //     options object with `encoding`) is honoured; the raw bytes are what we
 //     capture/serve and `encoding` is applied on the way out.
-//   - lstatSync: serve-only, bundle=load, single-argument form. For a recorded path
-//     it returns a Stats-like object whose isFile()/isDirectory() come from the
-//     bundle (the common existence check), and every other member LAZILY passes
-//     through to the real lstatSync(path) (which throws if the file is absent, just
-//     as without the bundle). It is never patched in capture mode (the file is on
-//     disk there, so the real Stats is correct).
+//   - lstatSync / statSync: serve-only, bundle=load, single-argument form. For a
+//     recorded path they return a Stats-like object whose isFile()/isDirectory() come
+//     from the bundle (the common existence check); every other member is the real
+//     stat while the file is still on disk, and a benign synthetic default (0 / epoch
+//     / file-or-dir mode) once it's gone -- so fs wrappers that read more than
+//     isFile()/isDirectory() (graceful-fs reads stats.uid/gid) keep working under
+//     bundle=load instead of re-throwing ENOENT. Never patched in capture mode (the
+//     file is on disk there, so the real Stats is correct). statSync vs lstatSync
+//     differ only in symlink following, which matters solely for that on-disk
+//     passthrough -- each falls back to its own real implementation.
 //   - Only paths inside the project root -- whose REAL path (symlinks resolved)
 //     also stays inside the root -- are captured/served; anything else (a system
 //     path, a symlink escaping the root, an fd, a non-file URL) falls through to
@@ -42,12 +46,14 @@ const require = createRequire(import.meta.url)
 const fs = require('node:fs')
 
 // Snapshot the real functions now, while they're still the genuine builtins. The
-// hooks below call THESE (never the patched `fs.*`), so there is no recursion and
-// capture always sees real bytes. realpathSync/lstatSync aren't patched, but are
-// snapshotted for symmetry and to stay immune to any future patch.
+// hooks below call THESE (never the patched `fs.*`), so there is no recursion,
+// capture always sees real bytes, and the patched lstatSync/statSync fall back to
+// the real impls here. realpathSync isn't patched, but is snapshotted for symmetry
+// and to stay immune to any future patch.
 const realReadFileSync = fs.readFileSync
 const realReaddirSync = fs.readdirSync
 const realLstatSync = fs.lstatSync
+const realStatSync = fs.statSync
 const realRealpathSync = fs.realpathSync
 
 // Resolve a path argument to an absolute filesystem path, or null when it's
@@ -105,31 +111,62 @@ function decode(buf, options) {
   return buf.toString(encoding)
 }
 
+// File-type bits, so code that derives the kind from stats.mode (rather than the
+// is*() methods) still sees file-vs-directory for an absent bundle-served path.
+const S_IFREG = 0o100000
+const S_IFDIR = 0o040000
+
+// Benign fs.Stats-shaped record for a recorded path whose bytes are served from the
+// bundle but is GONE from disk. isFile/isDirectory come from the bundle; the rest are
+// neutral defaults (zeros, epoch Dates, file/dir mode bits) -- never a throw. This is
+// what lets fs wrappers that read more than isFile()/isDirectory() off the returned
+// Stats keep working under bundle=load: graceful-fs's statFixSync, for instance,
+// reads stats.uid/gid, which would otherwise re-trigger the very ENOENT the bundle
+// exists to paper over. The other is*() are false -- the shim models only files and
+// directories.
+function syntheticStat(isDir) {
+  const epoch = new Date(0)
+  return {
+    dev: 0, ino: 0, mode: isDir ? S_IFDIR : S_IFREG, nlink: 1, uid: 0, gid: 0,
+    rdev: 0, size: 0, blksize: 4096, blocks: 0,
+    atimeMs: 0, mtimeMs: 0, ctimeMs: 0, birthtimeMs: 0,
+    atime: epoch, mtime: epoch, ctime: epoch, birthtime: epoch,
+    isSymbolicLink: () => false, isBlockDevice: () => false,
+    isCharacterDevice: () => false, isFIFO: () => false, isSocket: () => false,
+  }
+}
+
 // A Stats-like object for a bundle-served path (bundle=load). isFile()/isDirectory()
-// answer from the bundle's record (always available, even when the file is absent
-// from disk -- the point of the shim). EVERYTHING else lazily passes through to the
-// real lstatSync(path): if the file is on disk you get its true metadata, and if it
-// isn't you get the same error you'd get without stasis. Built as a Proxy so the
-// passthrough covers the full Stats surface (methods AND numeric/Date fields)
-// without enumerating it.
+// always answer from the bundle's record (the point of the shim -- available even
+// when the file is absent from disk). Every other member comes from the REAL stat
+// while the file is still on disk (faithful metadata); once it's gone -- the
+// bundle-load case -- realStatFn throws and we fall back to syntheticStat's benign
+// defaults instead of forwarding the ENOENT. Built as a Proxy so this covers the
+// full Stats surface (methods AND numeric/Date fields) without enumerating it.
 //
 // `then` is short-circuited to undefined: a real fs.Stats is never thenable, but the
-// lazy passthrough would otherwise forward the `then` probe that `await`/Promise
-// resolution performs to realLstatSync -- which THROWS for an absent file, making a
+// lazy resolution would otherwise forward the `then` probe that `await`/Promise
+// resolution performs to realStatFn -- which THROWS for an absent file, making a
 // bundle-served Stats an accidental rejecting thenable (`await lstatSync(x)` would
 // reject with ENOENT for exactly the absent-from-disk case the shim exists to serve).
 // Returning undefined keeps it non-thenable in both the present and absent cases.
-function bundleStats(realPath, isDir) {
-  let real
-  const realStat = () => (real ??= realLstatSync(realPath))
+//
+// Read-only: there is no `set` trap, so a write to a field (a wrapper normalising
+// e.g. stats.uid) lands on the override target, not on `data`, and isn't reflected
+// back on read. No real consumer needs mutate-then-read here -- graceful-fs only
+// writes uid/gid when they're < 0, which the synthetic 0 (and modern Node) never hit.
+function bundleStats(realStatFn, statPath, isDir) {
+  let data // real fs.Stats, or the synthetic fallback -- resolved once, on demand
   const overrides = { isFile: () => !isDir, isDirectory: () => isDir }
   return new Proxy(overrides, {
     get(target, prop) {
       if (prop === 'isFile' || prop === 'isDirectory') return target[prop]
       if (prop === 'then') return undefined // never an (accidentally rejecting) thenable
-      const r = realStat()
-      const value = r[prop]
-      return typeof value === 'function' ? value.bind(r) : value
+      if (data === undefined) {
+        try { data = realStatFn(statPath) } catch { data = syntheticStat(isDir) }
+      }
+      const value = data[prop]
+      return typeof value === 'function' ? value.bind(data) : value
     },
   })
 }
@@ -207,10 +244,26 @@ export function installFsHooks({ getState, markAborted, isLoadingModule }) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
         const kind = state.getFsStat(pathToFileURL(abs).toString())
-        if (kind !== undefined) return bundleStats(path, kind === 'directory')
+        if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
       }
     }
     return realLstatSync(path, options)
+  }
+
+  // statSync mirrors lstatSync exactly; the only difference is symlink following,
+  // which is moot for a bundle-served path (there is no link to follow once the
+  // bytes come from the bundle) but matters for the passthrough/present-on-disk
+  // case, so it falls back to the real statSync rather than lstatSync.
+  fs.statSync = function statSync(path, options) {
+    const state = getState()
+    if (state?.config.loadBundle && options === undefined) {
+      const abs = toAbsPath(path)
+      if (abs !== null && withinRoot(state.root, abs)) {
+        const kind = state.getFsStat(pathToFileURL(abs).toString())
+        if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
+      }
+    }
+    return realStatSync(path, options)
   }
 
   // Refresh the node:fs ESM wrapper so destructured/namespace ESM imports made

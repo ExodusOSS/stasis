@@ -341,11 +341,16 @@ live in the usual `sources`/`modules` buckets, tagged in `formats`:
   `readdirSync` ordering should sort explicitly. `readdirSync` calls with options
   (`encoding`, `withFileTypes`, `recursive`) pass through untouched, so such a call
   is not captured and is not served from the bundle on load.
-- `fs.lstatSync(path)` is not itself recorded; on a load run, for a path the bundle
-  already carries (as a file or a `directory`), `.isFile()`/`.isDirectory()` answer
-  from the bundle so existence checks succeed even when the path is absent from
-  disk. Every other `Stats` field/method — and any path the bundle does not carry —
-  passes through to the real `lstatSync`.
+- `fs.lstatSync(path)` and `fs.statSync(path)` are not themselves recorded; on a load
+  run, for a path the bundle already carries (as a file or a `directory`),
+  `.isFile()`/`.isDirectory()` answer from the bundle so existence checks succeed even
+  when the path is absent from disk. Other `Stats` fields/methods are the real stat's
+  while the file is still on disk, and benign synthetic defaults (`0` / epoch / a
+  file-or-directory `mode`) once it's gone — so fs wrappers that read more than
+  `isFile()`/`isDirectory()` off the result (graceful-fs's `statFixSync` reads
+  `uid`/`gid`, for example) keep working under `--bundle=load` instead of re-throwing
+  `ENOENT`. Any path the bundle does not carry passes straight through to the real
+  call.
 
 The two recorded kinds are hashed like any other content (the `directory` integrity
 is the sha512 of its JSON text), so the lockfile attests them and a frozen run

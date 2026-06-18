@@ -3,7 +3,7 @@
 // cli-run-fs fixture's entry reads a text file (resource), a .json (code), a binary
 // blob (resource:base64), and lists a directory (directory) -- one of each format.
 import { test } from 'node:test'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -358,4 +358,78 @@ test('run --fs serves lstatSync().isFile()/isDirectory() from the bundle, passes
   // Stats is not a rejecting thenable); the unrecorded path passes through to a real
   // lstatSync, which throws ENOENT (the file isn't on disk or in the bundle).
   t.assert.equal(load.stdout, 'file:true\ndir:true\nawaited:true\nmiss:ENOENT\n')
+}))
+
+test('run --fs serves statSync() and benign synthetic Stats fields for removed recorded paths', withTmp((t, tmp) => {
+  mkdirSync(join(tmp, 'src', 'data'))
+  writeFileSync(join(tmp, 'src', 'data', 'a.txt'), 'A')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { statSync, readFileSync, readdirSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const dir = join(import.meta.dirname, "data")',
+    'const file = join(dir, "a.txt")',
+    'readdirSync(dir); readFileSync(file)', // record dir + file
+    'const s = statSync(file)',
+    'console.log(`file:${s.isFile()}:${s.isDirectory()}`)',
+    'console.log(`dir:${statSync(dir).isDirectory()}`)',
+    // Fields a wrapper like graceful-fs reads off the Stats (it touches uid/gid in
+    // statFixSync): once the file is gone these must be benign synthetic values, not
+    // a re-thrown ENOENT from forwarding to the absent file.
+    'console.log(`fields:${s.uid}:${s.gid}:${s.size}:${s.mtime.getTime()}`)',
+    // mode carries file-vs-dir type bits, so code that classifies via (mode & S_IFMT)
+    // rather than is*() still works on the synthetic Stats.
+    'const S_IFMT = 0o170000',
+    'console.log(`mode:${(s.mode & S_IFMT) === 0o100000}:${(statSync(dir).mode & S_IFMT) === 0o040000}`)',
+    'const awaited = await statSync(file)', // a served Stats must not be a rejecting thenable
+    'console.log(`awaited:${awaited.isFile()}`)',
+    'try { statSync(join(dir, "missing")) } catch (e) { console.log(`miss:${e.code}`) }',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'src', 'data'), { recursive: true }) // gone from disk; served from bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  // isFile/isDirectory + mode type-bits from the bundle; uid/gid/size/mtime are benign
+  // synthetic defaults (0 / epoch) rather than ENOENT; unrecorded path still passes through.
+  t.assert.equal(load.stdout, 'file:true:false\ndir:true\nfields:0:0:0:0\nmode:true:true\nawaited:true\nmiss:ENOENT\n')
+}))
+
+test('run --fs: real graceful-fs statSync/lstatSync survive bundle=load', withTmp((t, tmp) => {
+  // graceful-fs wraps statSync/lstatSync and reads stats.uid/gid off the result
+  // (polyfills.js statFixSync); under bundle=load the file is gone, so the shim must
+  // serve benign synthetic fields rather than forwarding ENOENT. Locate the installed
+  // graceful-fs (pnpm nests it under .pnpm/graceful-fs@<ver>) and copy it INTO the
+  // project so its real path stays in-root (an external symlink would be refused).
+  const pnpmDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', '.pnpm')
+  const hit = existsSync(pnpmDir) && readdirSync(pnpmDir).find((d) => d.startsWith('graceful-fs@'))
+  const gfsSrc = hit && join(pnpmDir, hit, 'node_modules', 'graceful-fs')
+  if (!gfsSrc || !existsSync(join(gfsSrc, 'package.json'))) return t.skip('graceful-fs not installed')
+
+  mkdirSync(join(tmp, 'node_modules', 'graceful-fs'), { recursive: true })
+  cpSync(gfsSrc, join(tmp, 'node_modules', 'graceful-fs'), { recursive: true })
+  mkdirSync(join(tmp, 'src', 'data'))
+  writeFileSync(join(tmp, 'src', 'data', 'a.txt'), 'A')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import gfs from 'graceful-fs'",
+    "import { readFileSync, readdirSync } from 'node:fs'", // record via node fs (single-arg)
+    "import { join } from 'node:path'",
+    'const dir = join(import.meta.dirname, "data")',
+    'const file = join(dir, "a.txt")',
+    'readdirSync(dir); readFileSync(file)',
+    'console.log(`stat:${gfs.statSync(file).isFile()}`)',
+    'console.log(`lstat:${gfs.lstatSync(file).isFile()}`)',
+    'console.log(`statdir:${gfs.statSync(dir).isDirectory()}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'src', 'data'), { recursive: true }) // gone; graceful-fs must still stat it
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'stat:true\nlstat:true\nstatdir:true\n')
 }))
