@@ -226,6 +226,39 @@ function resolve(specifier, context, nextResolve) {
       aborted = true
       throw err
     }
+    // Backfill capture for files Node already had cached BEFORE our hooks were
+    // registered: stasis-core's own modules (state.js / config.js / bundle.js /
+    // etc.) get loaded by hooks.js's transitive imports during preload, BEFORE
+    // install() registers these hooks. Once registered, any later `import` of
+    // those URLs hits Node's module cache and skips the load hook entirely --
+    // so addFile (which lives in load) never runs for them, and the bundle's
+    // sources map ends up missing files the imports map references. The most
+    // visible symptom: a user's bundle=load run fails because the bundle has
+    // an edge to <stasis-core>/src/state.js but no content for that file.
+    //
+    // Gating on `!state.sources.has(file) && !state.resources.has(file)` makes
+    // this a no-op for the common case (non-cached files captured by the load
+    // hook moments later), since by the time resolve fires again for an
+    // already-loaded URL those maps already hold it. For the preload-cached
+    // case, resolve is the only hook that fires, so this is the capture site.
+    if (url.startsWith('file:')) {
+      const absolute = fileURLToPath(url)
+      let file
+      // state.relative throws on out-of-root paths (system files, /tmp, ...);
+      // catching it here makes the backfill a no-op for them. Scoped to JUST
+      // that call so any other throw (a malformed-URL fileURLToPath, an
+      // addFile rejection) still propagates -- we'd want to know about
+      // those, not silently swallow.
+      try { file = state.relative(absolute) } catch { return res }
+      if (!file.startsWith('..') && !state.sources.has(file) && !state.resources.has(file)) {
+        try {
+          state.addFile(url, { format })
+        } catch (err) {
+          aborted = true
+          throw err
+        }
+      }
+    }
   }
   return res
 }
