@@ -10,6 +10,8 @@ const sep = '/'
 //   Executable by Node's loader — module, commonjs, json, *-typescript
 //   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
+//   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
+//     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload)
 // Adding a new format is a deliberate schema change: list it here AND extend
 // hooks.js's executable allowlist if Node should serve it from a bundle.
 export const KNOWN_FORMATS = new Set([
@@ -24,7 +26,21 @@ export const KNOWN_FORMATS = new Set([
   'rust',
   'resource',
   'resource:base64',
+  'directory',
 ])
+
+// Flat project-relative key for the file `rel` inside module dir `dir`, inverse of
+// the bucketing State/Bundle apply. The `rel === ''` branch is reached only by a
+// `directory` capture whose path IS a module root (e.g. `fs.readdirSync` of a
+// package dir, or of the project root): the listing is keyed at the bucket itself,
+// so the flat key is the dir (or '' for the workspace root) — never `${dir}/`,
+// which a trailing-slash join would wrongly produce and break the round-trip. For
+// every ordinary file `rel` is a real basename, so this matches the historical
+// `dir === '.' ? rel : `${dir}/${rel}`` exactly.
+export function moduleFileKey(dir, rel) {
+  if (rel === '') return dir === '.' ? '' : dir
+  return dir === '.' ? rel : `${dir}/${rel}`
+}
 
 // Resolve `baseDir/relPath` through symlinks and confirm the real target stays
 // within `realBase` (the caller-resolved real path of baseDir). Throws on a

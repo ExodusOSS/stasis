@@ -26,6 +26,7 @@
     "src/bundle.js",
     "src/config.js",
     "src/esbuild.js",
+    "src/fs.js",
     "src/hooks.js",
     "src/loader.js",
     "src/lockfile.js",

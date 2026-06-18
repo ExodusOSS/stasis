@@ -5,6 +5,7 @@ import { brotliDecompressSync } from 'node:zlib'
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
+import { moduleFileKey } from '@exodus/stasis-core/util'
 
 const FILE_LOCK = 'stasis.lock.json'
 
@@ -127,6 +128,16 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
   const targets = new Set()
   for (const [dir, { files }] of bundle.modules) {
     for (const [rel, content] of Object.entries(files)) {
+      // A `directory` capture (`stasis run --fs`) keys a listing at the directory's
+      // OWN path; it isn't a file to write (its child files recreate the directory),
+      // and writing one would collide with those children at the file-vs-directory
+      // guard below. Skip it on disk -- the derived lockfile still attests its hash
+      // (lockfileFromBundle hashes every bundle entry, directory listings included).
+      // The format is looked up under the canonical key (moduleFileKey, so a
+      // package-ROOT listing's rel==='' resolves to the dir, not `${dir}/`); the
+      // write path below keeps the literal join, so a NON-directory empty file name
+      // still trips the non-canonical-path guard rather than being accepted here.
+      if (bundle.formats.get(moduleFileKey(dir, rel)) === 'directory') continue
       const file = dir === '.' ? rel : `${dir}/${rel}`
       if (typeof content !== 'string') throw new Error(`extract: bundle file content is not a string: ${file}`)
       const abs = resolve(outDir, file)

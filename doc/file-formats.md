@@ -120,7 +120,11 @@ lockfile/bundle `config` block.
   (`solidity`, `php`, `bash`, `rust`). Resource files use `resource` (content is
   raw UTF-8) or `resource:base64` (content is binary, base64-encoded) — this is
   what distinguishes a resource from code per file, and tells a reader how to
-  decode the bundle payload. The loader picks module-vs-commonjs and (for the
+  decode the bundle payload. Filesystem captures (`stasis run --fs`) add
+  `directory` for a `fs.readdirSync` listing (the content is a sorted JSON array
+  of names); a captured `fs.readFileSync` reuses the code or resource tags above.
+  The integrity of a `directory` listing is the sha512 of its JSON text, just
+  like any other content. The loader picks module-vs-commonjs and (for the
   `*-typescript` formats) whether type-shaped syntax is stripped purely from
   this value, so attesting it stops a tampered bundle — or a flipped, un-pinned
   `package.json` `type` on disk — from running hash-valid bytes under a
@@ -186,7 +190,8 @@ reporting failures) still persists what it cleanly captured.
   `json`) or a source-language tag (`solidity`, `php`, `bash`, `rust`).
   Resource files use `resource` (raw UTF-8 payload) or `resource:base64`
   (base64 payload) — the per-file tag that both marks a file as a resource
-  and says how to decode its bundle bytes. May be missing per file for code
+  and says how to decode its bundle bytes. A `directory` tag (a `stasis run
+  --fs` capture) marks a raw-UTF-8 JSON listing. May be missing per file for code
   whose format Node infers. TypeScript sources are stored verbatim (types
   intact); Node strips the types at load time based on the format.
 - `imports`: conditions → parent file → specifier → resolved
@@ -311,6 +316,40 @@ in `formats` by how its payload is encoded:
 In the lockfile, a resource is hashed like any other file (sha512 of its raw
 bytes) and carries the same `resource`/`resource:base64` entry in `formats`, so
 a frozen run verifies a copied asset byte-for-byte just as it does code.
+
+## Filesystem captures (`stasis run --fs`)
+
+The loader hooks capture the module graph; `--fs` additionally monkey-patches the
+**sync** readers `fs.readFileSync` and `fs.readdirSync`, plus `fs.lstatSync` (and
+only those — no `fs.readFile`, `fs.promises`, streams, …) so a program's explicit
+file reads are recorded into the bundle (`--bundle=add|replace`) and served back
+from it (`--bundle=load`). The same `--fs` flag is needed on the load run for the
+patch to serve; an un-captured read falls through to the real disk read. Captures
+live in the usual `sources`/`modules` buckets, tagged in `formats`:
+
+- A `fs.readFileSync(path)` is stored "generically by extension": a recognized code
+  extension (`.json`/`.mjs`/`.cjs`/`.mts`/`.cts`/`.js`/`.ts`) carrying UTF-8 bytes
+  keeps its Node loader format; anything else (and any of those whose bytes are not
+  UTF-8) falls back to `resource`/`resource:base64`. A file that is both imported
+  and read this way collapses to one entry. The optional encoding argument (string
+  or `{ encoding }`) is honored when serving; an invalid encoding throws as fs does.
+- A single-argument `fs.readdirSync(path)` is stored as `directory`: its listing is
+  **sorted** and JSON-serialized so the attested bytes are reproducible regardless
+  of the OS's directory order. Note this makes replay subtly *un*faithful to
+  capture for that one call: at capture time the program sees the OS order, but on
+  a `--bundle=load` run it receives the sorted listing, so code that relies on
+  `readdirSync` ordering should sort explicitly. `readdirSync` calls with options
+  (`encoding`, `withFileTypes`, `recursive`) pass through untouched, so such a call
+  is not captured and is not served from the bundle on load.
+- `fs.lstatSync(path)` is not itself recorded; on a load run, for a path the bundle
+  already carries (as a file or a `directory`), `.isFile()`/`.isDirectory()` answer
+  from the bundle so existence checks succeed even when the path is absent from
+  disk. Every other `Stats` field/method — and any path the bundle does not carry —
+  passes through to the real `lstatSync`.
+
+The two recorded kinds are hashed like any other content (the `directory` integrity
+is the sha512 of its JSON text), so the lockfile attests them and a frozen run
+verifies them. `--fs` requires an active bundle mode (`add`, `replace`, or `load`).
 
 ## Discovery
 

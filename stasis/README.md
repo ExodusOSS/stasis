@@ -50,6 +50,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --lock=add --bundle=add app.js` | build a lockfile and bundle together |
 | `stasis run --lock=frozen --bundle=load app.js` | run from the bundle, verified against the lockfile |
 | `stasis run --lock=add --bundle=add --mock app.js` | build without the app's side effects (network, fs writes) |
+| `stasis run --bundle=add --fs app.js` | build a bundle that also captures sync `fs.readFileSync`/`readdirSync` reads |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |
 | `stasis diff --stat a.lock.json b.stasis.code.br` | summarize module/file differences between two lockfiles/bundles |
@@ -59,7 +60,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis sbom --format=spdx stasis.lock.json` | export an SPDX SBOM for a lockfile or bundle |
 | `stasis sbom --format=cyclonedx app.stasis.code.br` | export a CycloneDX SBOM for a lockfile or bundle |
 
-Lock/bundle modes appear in the table above (omit a flag to skip that artifact); `--dependencies` limits to `node_modules` scope and `--mock` captures with side effects denied. The zero-dependency `@exodus/stasis-core` CLI provides `run` and `prune` only.
+Lock/bundle modes appear in the table above (omit a flag to skip that artifact); `--dependencies` limits to `node_modules` scope, `--mock` captures with side effects denied, and `--fs` captures a program's sync `fs.readFileSync`/`fs.readdirSync` reads into the bundle (and serves them back, along with `fs.lstatSync` existence checks, under `--bundle=load`). The zero-dependency `@exodus/stasis-core` CLI provides `run` and `prune` only.
 
 ## License
 

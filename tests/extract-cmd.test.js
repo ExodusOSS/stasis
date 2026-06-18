@@ -1,14 +1,15 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
+import { State } from '@exodus/stasis-core/state'
 import { buildSolidityBundle, bundleCommand } from '../stasis/src/cmd/bundle.js'
 import { extractCommand, lockfileFromBundle } from '../stasis/src/cmd/extract.js'
 import { prune } from '@exodus/stasis-core/prune'
@@ -524,3 +525,105 @@ test('lockfileFromBundle accepts canonical base64 and produces a hash matching t
   const lock = lockfileFromBundle(bundle)
   t.assert.equal(lock.modules.get('node_modules/foo').files['asset.bin'], sha512integrity(raw))
 })
+
+// --- `stasis run --fs` directory captures (the `directory` format) ---
+
+test('extractCommand skips a directory-listing entry on disk but keeps it in the lockfile', withTmp((t, tmp) => {
+  // A `--fs` bundle keys a readdir listing at the directory's OWN path
+  // ('src/assets'), alongside the files under it. extract must NOT write a file at
+  // that path (the children recreate the directory; a file there would collide with
+  // them at the file-vs-directory guard) -- but the derived lockfile still attests
+  // the listing by hash.
+  const bundle = new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(['src/entry.js']),
+    modules: new Map([
+      ['.', { name: 'app', version: '1.0.0', files: {
+        'src/entry.js': 'export const x = 1\n',
+        'src/assets/a.txt': 'A',
+        'src/assets': '["a.txt"]', // a workspace SUB-directory listing (rel='src/assets')
+      } }],
+      // a directory captured at a node_modules package ROOT keys the listing at the
+      // bucket itself (rel === '') -- the case that needs moduleFileKey, not a
+      // trailing-slash join, in the skip check.
+      ['node_modules/dep', { name: 'dep', version: '2.0.0', ecosystem: 'npm', files: {
+        '': '["index.js"]',
+        'index.js': 'module.exports = 1\n',
+      } }],
+    ]),
+    formats: new Map([
+      ['src/entry.js', 'module'],
+      ['src/assets/a.txt', 'resource'],
+      ['src/assets', 'directory'],
+      ['node_modules/dep', 'directory'],
+      ['node_modules/dep/index.js', 'commonjs'],
+    ]),
+    imports: new Map([['*', new Map([['src/entry.js', new Map()]])]]),
+  })
+  const bundlePath = join(tmp, 'snap.br')
+  writeFileSync(bundlePath, brotliCompressSync(bundle.serialize()))
+
+  const outDir = join(tmp, 'out')
+  t.assert.doesNotThrow(() => extractCommand({ bundleFile: bundlePath, output: outDir }))
+  // workspace sub-directory listing: not written as a file, path is a real dir
+  t.assert.equal(readFileSync(join(outDir, 'src', 'assets', 'a.txt'), 'utf8'), 'A')
+  t.assert.ok(statSync(join(outDir, 'src', 'assets')).isDirectory(), 'the path is a real directory, not a file')
+  // node_modules package-ROOT listing (rel=''): same, and the child still written
+  t.assert.equal(readFileSync(join(outDir, 'node_modules', 'dep', 'index.js'), 'utf8'), 'module.exports = 1\n')
+  t.assert.ok(statSync(join(outDir, 'node_modules', 'dep')).isDirectory())
+  const lock = JSON.parse(readFileSync(join(outDir, 'stasis.lock.json'), 'utf8'))
+  t.assert.equal(lock.formats['src/assets'], 'directory')
+  t.assert.equal(lock.formats['node_modules/dep'], 'directory')
+  t.assert.equal(lock.sources['.'].files['src/assets'], sha512integrity('["a.txt"]'))
+}))
+
+test('prune tolerates a --fs directory capture under node_modules', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0', type: 'module' }))
+  mkdirSync(join(tmp, 'node_modules', 'dep', 'locales'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '2.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'index.js'), 'module.exports = 1\n')
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'locales', 'en.json'), '{}\n')
+
+  const u = (p) => pathToFileURL(join(tmp, p)).toString()
+  const cap = new State(tmp, { scope: 'full', lock: 'add', bundle: 'none' })
+  cap.addFile(u('node_modules/dep/index.js'))
+  cap.addFile(u('node_modules/dep/locales/en.json'))
+  cap.addFsDir(u('node_modules/dep/locales'), ['en.json']) // a SUB-directory (rel='locales')
+  cap.addFsDir(u('node_modules/dep'), ['index.js', 'locales', 'package.json']) // the package ROOT (rel='')
+  cap.write() // lockfile tags both node_modules/dep and .../locales as 'directory'
+
+  // Without the fix, prune adds the directory path to its expected-FILE set, then
+  // walkFiles (real files only) never yields it -> "missing on disk" throw. The
+  // package-ROOT case (rel='') additionally needs moduleFileKey, not a trailing-slash
+  // join, or the skip lookup misses 'node_modules/dep' and demands 'node_modules/dep/'.
+  let res
+  t.assert.doesNotThrow(() => { res = prune({ root: tmp }) })
+  t.assert.ok(res.validated.includes('node_modules/dep/index.js'))
+  t.assert.ok(res.validated.includes('node_modules/dep/locales/en.json'))
+}))
+
+test('prune still removes a file named in a recorded directory listing if its content is not recorded', withTmp((t, tmp) => {
+  // A `directory` capture attests only the set of NAMES (a hashed JSON blob), not
+  // the files' contents. So a file whose name appears in a recorded listing but
+  // whose bytes were never recorded (not readFileSync'd / imported) is NOT trusted
+  // and must still be pruned -- only content-hash-attested files survive.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0', type: 'module' }))
+  mkdirSync(join(tmp, 'node_modules', 'dep', 'locales'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '2.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'index.js'), 'module.exports = 1\n')
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'locales', 'a.json'), '{"a":1}\n')
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'locales', 'b.json'), '{"b":2}\n')
+
+  const u = (p) => pathToFileURL(join(tmp, p)).toString()
+  const cap = new State(tmp, { scope: 'full', lock: 'add', bundle: 'none' })
+  cap.addFile(u('node_modules/dep/index.js'))
+  cap.addFile(u('node_modules/dep/locales/a.json')) // a.json CONTENT recorded
+  cap.addFsDir(u('node_modules/dep/locales'), ['a.json', 'b.json']) // listing names BOTH; b.json content NOT recorded
+  cap.write()
+
+  const res = prune({ root: tmp })
+  t.assert.ok(res.validated.includes('node_modules/dep/locales/a.json'), 'content-recorded file kept')
+  t.assert.ok(res.removed.includes('node_modules/dep/locales/b.json'), 'listed-but-content-unrecorded file removed')
+  t.assert.ok(!existsSync(join(tmp, 'node_modules', 'dep', 'locales', 'b.json')))
+  t.assert.ok(existsSync(join(tmp, 'node_modules', 'dep', 'locales', 'a.json')))
+}))

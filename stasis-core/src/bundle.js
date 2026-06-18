@@ -5,6 +5,7 @@ import {
   fileSetToObject,
   fromEntries,
   isPlainObject,
+  moduleFileKey,
   objectToMaps,
   posixPathEscapes,
   sortPaths,
@@ -66,21 +67,26 @@ export class Bundle {
 
   // Flat project-relative view of file contents collected from this.modules.
   // Per-file encoding is signalled by `formats[file]`: 'resource:base64' is a
-  // base64 string, everything else (including 'resource') is a raw UTF-8 string.
+  // base64 string, everything else (including 'resource' and 'directory') is a
+  // raw UTF-8 string.
   get sources() {
     const m = new Map()
     for (const [dir, { files }] of this.modules) {
       for (const [rel, content] of Object.entries(files)) {
-        m.set(dir === '.' ? rel : `${dir}/${rel}`, content)
+        m.set(moduleFileKey(dir, rel), content)
       }
     }
     return m
   }
 
-  // True for the two resource formats; their bundle content is, respectively, a raw
-  // UTF-8 string ('resource') or a base64 blob ('resource:base64').
+  // True for the resource-like, non-executable payload formats. Their bundle
+  // content is a raw UTF-8 string ('resource', and 'directory' — a JSON-serialized
+  // `fs.readdirSync` listing) or a base64 blob ('resource:base64'). State stores
+  // all three in `this.resources` (vs `this.sources` for code) and the loader's
+  // executable allowlist rejects them, so this is the single "is this a code file?"
+  // discriminator. Only 'resource:base64' is base64-decoded; the others are raw.
   static isResourceFormat(format) {
-    return format === 'resource' || format === 'resource:base64'
+    return format === 'resource' || format === 'resource:base64' || format === 'directory'
   }
 
   // One parser for the unified shape (and legacy v0 code bundles). Resources are just
@@ -134,7 +140,10 @@ export class Bundle {
         let hasCode = false
         for (const [dir, { files }] of modules) {
           for (const rel of Object.keys(files)) {
-            const fp = dir === '.' ? rel : `${dir}/${rel}`
+            // moduleFileKey (not `${dir}/${rel}`): a `directory` capture at a module
+            // root keys at rel === '', whose trailing-slash join would miss its
+            // resource-format lookup and miscount the listing as code here.
+            const fp = moduleFileKey(dir, rel)
             if (!Bundle.isResourceFormat(formats.get(fp))) { hasCode = true; break }
           }
           if (hasCode) break

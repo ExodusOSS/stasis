@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] path/to/file.js ...
+ stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--fs] path/to/file.js ...
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)
@@ -49,6 +49,7 @@ if (command === '-v' || command === '--version') {
     'bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
+    fs: { type: 'boolean' },
   }
 
   let values
@@ -68,13 +69,19 @@ if (command === '-v' || command === '--version') {
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
   if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
-  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }) })
+  // --fs monkey-patches fs.readFileSync/readdirSync (and fs.lstatSync) to capture
+  // them into the bundle (add|replace) or serve them from it (load); nothing to
+  // record/read without one.
+  if (values.fs && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
+  const captureFs = values.fs ? '1' : ''
+  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.fs && { fs: true }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
+  setEnv('EXODUS_STASIS_FS', captureFs)
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code] = await once(child, 'close')

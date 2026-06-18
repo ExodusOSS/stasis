@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { fileMapToObject, objectToMaps, splitNodeModulesPath } from './util.js'
+import { fileMapToObject, moduleFileKey, objectToMaps, splitNodeModulesPath } from './util.js'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
 // the destructured `const` captures function values at this module's eval time, so
@@ -28,6 +28,14 @@ const FILE_CODE = 'stasis.code.br'
 // Extensions Node's CommonJS loader tries for an extensionless require() (and for
 // a directory's index.*). Used by the bundle file-set fallback in resolveBundled.
 const CJS_EXTENSIONS = ['.js', '.json', '.node']
+
+// Extensions an `fs.readFileSync` capture records as code (its Node loader format),
+// rather than as a 'resource'. Exactly the set addFile's extToFormat can infer a
+// format for -- `.js`/`.ts` resolve to module/commonjs via the nearest package
+// `type`, the rest map unambiguously. Any other extension (and any of these whose
+// bytes aren't UTF-8) falls back to 'resource'/'resource:base64'. Kept in sync with
+// addFile's extToFormat below.
+const FS_CODE_EXTENSIONS = new Set(['.json', '.mjs', '.cjs', '.mts', '.cts', '.js', '.ts'])
 
 function readPackageJSON(pkgAbsolute) {
   const buf = readFileSync(pkgAbsolute)
@@ -572,7 +580,7 @@ export class State {
         // code-format hole is closed by the loader allowlist anyway.)
         for (const [dir, { files }] of bundle.modules) {
           for (const rel of Object.keys(files)) {
-            const file = dir === '.' ? rel : `${dir}/${rel}`
+            const file = moduleFileKey(dir, rel)
             const lockFormat = this.#lockFormats.get(file)
             if (!Bundle.isResourceFormat(lockFormat)) continue
             assert.equal(bundle.formats.get(file), lockFormat,
@@ -776,33 +784,39 @@ export class State {
     return splitNodeModulesPath(file) !== null
   }
 
-  // `resource: true` (alias: legacy `isBinary: true`) marks the file as a resource
-  // rather than code. Its format is then derived from the bytes: 'resource' for valid
-  // UTF-8 (stored raw, human-readable in the bundle) or 'resource:base64' for binary
-  // (base64-encoded). Code files keep their inferred loader format.
-  addFile(url, { source, format, isEntry, isBinary, resource } = {}) {
-    const asResource = resource === true || isBinary === true
-    // A resource format must not arrive on the code path: 'resource' /
-    // 'resource:base64' identifies asset payloads, which State stores in
-    // `this.resources` with content-derived encoding (UTF-8 vs base64). A caller
-    // who passes the format string without setting resource:true is asking for
-    // a code file tagged as a resource -- nonsense, and exactly the kind of
-    // accidental misclassification the per-file format design is meant to
-    // catch. The reverse (resource:true with a non-resource format) is rejected
-    // below when the content-derived format is checked against any explicit one.
-    if (!asResource && Bundle.isResourceFormat(format)) {
-      throw new Error(`addFile: format '${format}' requires resource: true`)
+  // Nearest package.json at or above a directory, for addFsDir (`stasis run --fs`
+  // readdir captures). Replaces findPackageJSON, which is unreliable for a directory
+  // URL (see #locateModule). Walks up using the real fs (the destructured existsSync
+  // snapshot), bounded by the project root -- which is always an existing-package.json
+  // dir, so an in-root directory always resolves. Returns an absolute package.json path.
+  #nearestPackageJsonFor(dirAbsolute) {
+    let dir = dirAbsolute
+    while (true) {
+      const candidate = join(dir, 'package.json')
+      if (existsSync(candidate)) return candidate
+      if (dir === this.root) break // checked the root's package.json; never escape root
+      const parent = dirname(dir)
+      if (parent === dir) break // filesystem root
+      dir = parent
     }
-    // A resource can't be an entry: entries name code loaded by Node (the module
-    // graph's roots), and Bundle.parse / assertEntry validate them as code-shaped
-    // paths. A resource entry would land in this.entries -> codeBundle.entries
-    // (state.js's split-bundle getter), producing a v1 bundle whose entries refer
-    // to files absent from its sources -- structurally valid but semantically
-    // broken, and the kind of misclassification that's silent at capture time and
-    // surfaces opaquely at the loader's NODEJS_FORMATS gate later.
-    if (asResource && isEntry) {
-      throw new Error(`addFile: a resource can't be an entry (resource:true + isEntry:true)`)
-    }
+    // Unreachable in practice: state.root is resolved to a dir that has package.json.
+    assert.fail(`no package.json at or above directory ${this.relative(dirAbsolute)}`)
+  }
+
+  // Canonicalize `url` and resolve the package bucket that owns it, registering the
+  // module (name/version, `npm` ecosystem under node_modules) on first sight. Shared
+  // by addFile (code/resource) and addFsDir (directory captures): everything here is
+  // independent of a file's bytes or loader format, so both reuse it. Returns the
+  // canonical absolute path, the project-relative `file`, the bucket `dir`/`module`,
+  // and the nearest package `type` (for addFile's extension inference).
+  //
+  // `directory: true` (addFsDir): the url names a directory, not a file. Node's
+  // findPackageJSON is unreliable for a directory URL -- depending on Node version
+  // it returns the PARENT's package.json, `undefined` (at a bucket root), or even a
+  // `node_modules/` DIRECTORY path, which readPackageJSON would then read as a file
+  // and throw EISDIR. So for a directory we walk up to the nearest package.json
+  // ourselves (#nearestPackageJsonFor), which is correct on every Node version.
+  #locateModule(url, { directory = false } = {}) {
     // Canonicalize first: a workspace source linked into node_modules is recorded
     // under its real (non-node_modules) path so it classifies as a source.
     const canonical = this.#canonical(url)
@@ -811,38 +825,11 @@ export class State {
     assert.ok(existsSync(absolute))
     const file = this.relative(absolute)
 
-    const closestPkgAbsolute = findPackageJSON(url)
+    const closestPkgAbsolute = directory ? this.#nearestPackageJsonFor(absolute) : findPackageJSON(url)
     const closestPkg = readPackageJSON(closestPkgAbsolute)
 
     const closestType = closestPkg.type
     assert.ok(closestType === undefined || closestType === 'module' || closestType === 'commonjs')
-    // Resources don't get a loader format inferred from extension/package type --
-    // their format ('resource' / 'resource:base64') is chosen by content below.
-    if (!asResource) {
-      const extToFormat = {
-        __proto__: null,
-        '.json': 'json',
-        '.mjs': 'module',
-        '.cjs': 'commonjs',
-        '.mts': 'module-typescript',
-        '.cts': 'commonjs-typescript',
-      }
-      if (closestType !== undefined) {
-        extToFormat['.js'] = closestType
-        extToFormat['.ts'] = `${closestType}-typescript`
-      }
-      const inferredFormat = extToFormat[extname(file)]
-      if (inferredFormat !== undefined) {
-        if (format != null) assert.equal(format, inferredFormat)
-        else format = inferredFormat
-      } else if (format == null) {
-        // No `type` in the nearest package.json: Node decides .js/.ts by
-        // module-syntax detection, so either variant is legitimate and the
-        // caller's reported format wins. When no format was provided at all
-        // (e.g. bundler plugins), keep the legacy commonjs default.
-        format = { __proto__: null, '.js': 'commonjs', '.ts': 'commonjs-typescript' }[extname(file)]
-      }
-    }
 
     // findPackageJSON may land on a `{"type":"module"}`-style sub-bucket
     // marker that lacks name/version.
@@ -899,6 +886,75 @@ export class State {
     const module = this.modules.get(dir)
     assert.equal(module.name, name)
     assert.equal(module.version, version)
+
+    return { absolute, file, dir, module, closestType }
+  }
+
+  // `resource: true` (alias: legacy `isBinary: true`) marks the file as a resource
+  // rather than code. Its format is then derived from the bytes: 'resource' for valid
+  // UTF-8 (stored raw, human-readable in the bundle) or 'resource:base64' for binary
+  // (base64-encoded). Code files keep their inferred loader format.
+  //
+  // `inferFormat: false` records the bytes WITHOUT inferring or recording any loader
+  // format (an existing recorded format, if any, is left intact). addFsFile uses it
+  // for `.js`/`.ts`, whose module-vs-commonjs is Node's syntax-detection call (not
+  // knowable from bytes): the module loader is the authority, so the fs-read capture
+  // must not impose the legacy `commonjs` default and collide with a `module` the
+  // loader records for the same file when it is both imported and read.
+  addFile(url, { source, format, isEntry, isBinary, resource, inferFormat = true } = {}) {
+    const asResource = resource === true || isBinary === true
+    // A resource format must not arrive on the code path: 'resource' /
+    // 'resource:base64' identifies asset payloads, which State stores in
+    // `this.resources` with content-derived encoding (UTF-8 vs base64). A caller
+    // who passes the format string without setting resource:true is asking for
+    // a code file tagged as a resource -- nonsense, and exactly the kind of
+    // accidental misclassification the per-file format design is meant to
+    // catch. The reverse (resource:true with a non-resource format) is rejected
+    // below when the content-derived format is checked against any explicit one.
+    if (!asResource && Bundle.isResourceFormat(format)) {
+      throw new Error(`addFile: format '${format}' requires resource: true`)
+    }
+    // A resource can't be an entry: entries name code loaded by Node (the module
+    // graph's roots), and Bundle.parse / assertEntry validate them as code-shaped
+    // paths. A resource entry would land in this.entries -> codeBundle.entries
+    // (state.js's split-bundle getter), producing a v1 bundle whose entries refer
+    // to files absent from its sources -- structurally valid but semantically
+    // broken, and the kind of misclassification that's silent at capture time and
+    // surfaces opaquely at the loader's NODEJS_FORMATS gate later.
+    if (asResource && isEntry) {
+      throw new Error(`addFile: a resource can't be an entry (resource:true + isEntry:true)`)
+    }
+    // Canonicalize + bucket by the owning package (shared with addFsDir).
+    const { absolute, file, dir, module, closestType } = this.#locateModule(url)
+
+    // Resources don't get a loader format inferred from extension/package type --
+    // their format ('resource' / 'resource:base64') is chosen by content below.
+    // inferFormat:false (addFsFile for .js/.ts) skips inference entirely.
+    if (!asResource && inferFormat) {
+      const extToFormat = {
+        __proto__: null,
+        '.json': 'json',
+        '.mjs': 'module',
+        '.cjs': 'commonjs',
+        '.mts': 'module-typescript',
+        '.cts': 'commonjs-typescript',
+      }
+      if (closestType !== undefined) {
+        extToFormat['.js'] = closestType
+        extToFormat['.ts'] = `${closestType}-typescript`
+      }
+      const inferredFormat = extToFormat[extname(file)]
+      if (inferredFormat !== undefined) {
+        if (format != null) assert.equal(format, inferredFormat)
+        else format = inferredFormat
+      } else if (format == null) {
+        // No `type` in the nearest package.json: Node decides .js/.ts by
+        // module-syntax detection, so either variant is legitimate and the
+        // caller's reported format wins. When no format was provided at all
+        // (e.g. bundler plugins), keep the legacy commonjs default.
+        format = { __proto__: null, '.js': 'commonjs', '.ts': 'commonjs-typescript' }[extname(file)]
+      }
+    }
 
     if (typeof source === 'string') {
       assert.ok(source.isWellFormed())
@@ -972,6 +1028,113 @@ export class State {
     }
 
     if (format) noupsert(this.formats, file, format)
+  }
+
+  // Record an `fs.readFileSync` capture (`stasis run --fs`, capture side). `source`
+  // is the raw bytes (a Buffer). The format is "generic by extension":
+  //  - an unambiguous code extension (.json/.mjs/.cjs/.mts/.cts) carrying UTF-8 →
+  //    code, with the Node loader format addFile infers from the extension;
+  //  - `.js`/`.ts` carrying UTF-8 → code, but with `inferFormat: false` so NO format
+  //    is imposed: module-vs-commonjs is Node's syntax-detection call, the module
+  //    loader is the authority for it, and forcing a default here would collide
+  //    (noupsert) with the loader's record when the same file is both imported and
+  //    fs-read. The loader sets the format if/when it loads the module; getFsFile
+  //    serves the bytes regardless of whether a format was recorded;
+  //  - anything else (unknown extension, or a code extension whose bytes aren't
+  //    UTF-8 -- an fs read is data, not an import) → a 'resource'/'resource:base64'
+  //    payload.
+  // Routing through addFile means a file that is BOTH imported and fs-read lands in
+  // one consistent, deduped entry, hashed and bucketed exactly like every other file.
+  addFsFile(url, source) {
+    assert.ok(Buffer.isBuffer(source), 'addFsFile requires a Buffer source')
+    const ext = extname(fileURLToPath(url)).toLowerCase()
+    if (FS_CODE_EXTENSIONS.has(ext) && isUtf8(source)) {
+      this.addFile(url, { source, inferFormat: ext !== '.js' && ext !== '.ts' })
+    } else {
+      this.addFile(url, { source, resource: true })
+    }
+  }
+
+  // Record an `fs.readdirSync(path)` capture (single-arg form only). The listing is
+  // SORTED so the attested content is reproducible regardless of the OS's directory
+  // order, JSON-serialized, and stored as a 'directory'-format payload -- a
+  // resource-like file whose integrity (sha512 over the JSON text) lands in the
+  // lockfile just like any other content. Buckets/dedups via #locateModule like
+  // addFile; the directory's own project-relative path is the key (a readdir of a
+  // module root keys the listing at the bucket itself -- see moduleFileKey).
+  addFsDir(url, names) {
+    assert.ok(Array.isArray(names) && names.every((n) => typeof n === 'string'),
+      'addFsDir requires an array of string names')
+    const { file, dir, module } = this.#locateModule(url, { directory: true })
+    const content = JSON.stringify(names.toSorted())
+    const format = 'directory'
+    const integrity = sha512integrity(content)
+    noupsert(this.hashes, file, integrity)
+    const rel = relative(dir, file)
+    assert.ok(!rel.startsWith('..'))
+
+    // Frozen attestation, mirroring addFile: in the attested zone the listing must
+    // already be recorded (closed set) and its format/integrity must match.
+    const inAttestedZone = dir.includes('node_modules') || this.config.full
+    if (this.config.frozen && inAttestedZone) {
+      assert.ok(Object.hasOwn(module.files, rel))
+    }
+    if (this.config.frozenBundle && inAttestedZone) {
+      assert.ok(this.#bundleResources?.has(file), `Directory not attested by the frozen bundle: ${file}`)
+    }
+    if (this.config.frozen && this.#lockFormats !== null && inAttestedZone) {
+      this.#assertAttestedFormat(this.#lockFormats, file, format, { what: 'observed', source: 'lockfile' })
+    }
+    if (this.config.frozenBundle && this.#bundleFormats !== null && inAttestedZone) {
+      this.#assertAttestedFormat(this.#bundleFormats, file, format, { what: 'observed', source: 'frozen bundle' })
+    }
+
+    if (!Object.hasOwn(module.files, rel)) module.files[rel] = integrity
+    assert.equal(module.files[rel], integrity)
+    if (this.config.bundle) noupsert(this.resources, file, content)
+    noupsert(this.formats, file, format)
+  }
+
+  // Serve an `fs.readFileSync` from the bundle (`stasis run --fs`, bundle=load).
+  // Returns the raw bytes as a Buffer, or undefined when the path was not captured
+  // (the hook then falls back to a real disk read) or names a captured directory (a
+  // readFileSync of a directory must fail, not return its listing). Decoding and the
+  // lockfile hash check reuse getFile. Note a captured `.js`/`.ts` may have no
+  // recorded format (see addFsFile); it's still served from `this.sources` by
+  // presence -- the format only governs the module loader, not an fs read.
+  getFsFile(url) {
+    let file
+    try { file = this.#canonicalFile(url) } catch { return undefined }
+    if (this.formats.get(file) === 'directory') return undefined
+    if (!this.sources.has(file) && !this.resources.has(file)) return undefined
+    const { source } = this.getFile(url)
+    return Buffer.isBuffer(source) ? source : Buffer.from(source, 'utf8')
+  }
+
+  // Serve an `fs.readdirSync(path)` from the bundle: the sorted listing captured at
+  // build time, or undefined when the path was not captured as a directory (the hook
+  // falls back to a real disk read). Reuses getFile for the hash check.
+  getFsDir(url) {
+    let file
+    try { file = this.#canonicalFile(url) } catch { return undefined }
+    if (this.formats.get(file) !== 'directory') return undefined
+    const { source } = this.getFile(url)
+    const names = JSON.parse(source)
+    assert.ok(Array.isArray(names), `corrupt directory listing for ${file}`)
+    return names
+  }
+
+  // Classify a captured path for the `fs.lstatSync(x).isFile()/isDirectory()`
+  // shim (`stasis run --fs`, bundle=load): 'directory' for a readdir capture,
+  // 'file' for a readFileSync capture, or undefined when the path wasn't captured
+  // (the shim then falls back to a real on-disk lstatSync). A directory lives in
+  // this.resources too, so the 'directory' format is checked first.
+  getFsStat(url) {
+    let file
+    try { file = this.#canonicalFile(url) } catch { return undefined }
+    if (this.formats.get(file) === 'directory') return 'directory'
+    if (this.sources.has(file) || this.resources.has(file)) return 'file'
+    return undefined
   }
 
   getFile(url) {
@@ -1334,7 +1497,7 @@ export class State {
     for (const [dir, info] of this.modules) {
       const files = {}
       for (const rel of Object.keys(info.files)) {
-        const file = dir === '.' ? rel : `${dir}/${rel}`
+        const file = moduleFileKey(dir, rel)
         const content = perFile.get(file)
         if (content !== undefined) files[rel] = content
       }

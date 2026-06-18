@@ -1,10 +1,16 @@
 import Module, { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
 import { basename, dirname, extname, resolve as resolvePath } from 'node:path'
-import { readFileSync } from 'node:fs'
+import * as fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
+import { installFsHooks } from './fs.js'
+
+// Snapshot off the namespace so `--fs` (which patches fs.readFileSync and then
+// syncBuiltinESMExports()s for user code) can't redirect the read the CJS-source
+// capture below relies on. Same rationale as state.js / state-util.js.
+const { readFileSync } = fs
 
 // Warning: only covers code imports, not file reads
 
@@ -37,6 +43,12 @@ function refuseNonNodeFormat(format, url) {
       `executable JavaScript. Read it with fs (or your bundler's asset loader) instead (${url})`
     )
   }
+  if (format === 'directory') {
+    throw new Error(
+      `[stasis] cannot import a directory listing ('directory'): a captured ` +
+      `fs.readdirSync result is not executable JavaScript. Read it with fs.readdirSync instead (${url})`
+    )
+  }
   // Unknown format string: usually a tampered or forward-incompatible bundle.
   throw new Error(
     `[stasis] cannot execute '${url}': attested format '${format}' is not a Node loader ` +
@@ -51,6 +63,11 @@ let saved = false
 // addFile/addImport below). Distinct from "the run exited non-zero": a clean capture is
 // allowed to exit non-zero for its own reasons and still be persisted.
 let aborted = false
+// >0 while Node's default loader (nextLoad) is reading a module's source -- which for
+// CommonJS goes through the public fs.readFileSync the --fs hook patches. The module is
+// already captured as code via addFile, so the --fs capture hook skips reads taken
+// while this is set: it records the program's OWN fs reads, not Node's module loading.
+let loadingModule = 0
 
 // Resolve once at module-load: stasis-core's own package root. Passed to State
 // as `preloadRoot` so state.write()'s backfill statically captures stasis-core's
@@ -131,7 +148,16 @@ function load(url, context, nextLoad) {
     return { source, format, shortCircuit: true }
   }
 
-  const result = nextLoad(url, context)
+  // nextLoad runs Node's default loader, which reads a CJS module's source through
+  // the public fs.readFileSync the --fs hook patches. Mark the window so that hook
+  // doesn't re-capture the module as a filesystem read (it's recorded as code below).
+  loadingModule++
+  let result
+  try {
+    result = nextLoad(url, context)
+  } finally {
+    loadingModule--
+  }
   let { source } = result
   const { format } = result
   assert.notEqual(format, 'builtin')
@@ -250,6 +276,31 @@ export function install() {
   installed = true
   registerHooks({ load, resolve })
   patchCjsResolution()
+  // `--fs` (EXODUS_STASIS_FS): additionally monkey-patch fs.readFileSync /
+  // fs.readdirSync (and fs.lstatSync) to capture them into the bundle
+  // (bundle=add|replace) or serve them from it (bundle=load). Installed here -- after the lib's own fs snapshots
+  // (state.js / state-util.js / above) are taken and after registerHooks -- so the
+  // patch never redirects stasis's own reads, and only when the user opted in.
+  // `state` is read lazily (per call) since it's created when the entry loads. A
+  // capture-side conflict (a file read twice with diverging bytes) taints the run
+  // the same way an addFile/addImport rejection does, so nothing inconsistent is
+  // written.
+  if (process.env.EXODUS_STASIS_FS) {
+    installFsHooks({
+      getState: () => state,
+      // True while Node's default loader is reading a module's source: the --fs hook
+      // skips those so it captures the program's explicit reads, not module loading.
+      isLoadingModule: () => loadingModule > 0,
+      // A genuine capture conflict (a file read twice mid-run with diverging bytes)
+      // taints the run like an addFile/addImport rejection -- nothing is written.
+      // Warn on the first taint so the discard isn't silent (the user's reads still
+      // succeed, so the run otherwise exits 0 with no bundle/lockfile and no clue).
+      markAborted: (err) => {
+        if (!aborted) console.warn(`[stasis] --fs: capture aborted, no bundle/lockfile will be written -- ${err?.message ?? err}`)
+        aborted = true
+      },
+    })
+  }
 }
 
 // registerHooks intercepts the ESM loader and Node's native CommonJS loader, but

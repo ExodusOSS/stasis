@@ -13,7 +13,7 @@ import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } fr
 
 import { Lockfile } from './lockfile.js'
 import { sha512integrity } from './state-util.js' // also runs the posix-sep assertion
-import { isPlainObject, posixPathEscapes, splitNodeModulesPath } from './util.js'
+import { isPlainObject, moduleFileKey, posixPathEscapes, splitNodeModulesPath } from './util.js'
 
 const LOCKFILE = 'stasis.lock.json'
 
@@ -66,7 +66,16 @@ function buildExpected(lockfile) {
     if (!dir.includes('node_modules')) continue // workspace sources, not pnpm-managed
     knownDirs.add(dir)
     for (const [rel, hash] of Object.entries(files)) {
-      expected.set(`${dir}/${rel}`, hash)
+      // moduleFileKey (not `${dir}/${rel}`): a readdir of a package ROOT records
+      // rel === '', whose trailing-slash join would miss the `directory` format
+      // lookup below and wrongly demand a file at `node_modules/<pkg>/`.
+      const file = moduleFileKey(dir, rel)
+      // A `directory` entry (`stasis run --fs` readdir capture) is a JSON listing
+      // attested by hash, NOT a file on disk -- the on-disk path is a real directory
+      // whose contents prune walks separately. Excluding it keeps prune from
+      // demanding a regular file at the directory's path ("missing on disk").
+      if (lockfile.formats?.get(file) === 'directory') continue
+      expected.set(file, hash)
     }
   }
   return { expected, knownDirs }

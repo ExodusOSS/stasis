@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
 import { hash } from 'node:crypto'
-import { readFileSync, realpathSync } from 'node:fs'
+import * as fs from 'node:fs'
 import { join, resolve, sep } from 'node:path'
+
+// Snapshot off the namespace (not `import { readFileSync } from 'node:fs'`) so
+// `stasis run --fs` -- which monkey-patches fs.readFileSync and then calls
+// module.syncBuiltinESMExports() to reach user code's ESM imports -- can't swap
+// the binding stasis itself reads config/lockfile/bundle/package.json through.
+// Matches state.js's identical snapshot of the real fs writers/readers.
+const { readFileSync, realpathSync } = fs
 
 assert.equal(sep, '/', 'Not tested on Windows')
 
