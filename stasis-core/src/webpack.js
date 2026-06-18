@@ -77,9 +77,15 @@ export class StasisWebpack {
   //     - inputFileSystem.readFile / stat: in-scope paths MUST come from
   //       state.getFile (which re-verifies the hash against the lockfile); a path
   //       the bundle doesn't carry throws rather than falling back to disk
-  //     - normalModuleFactory.hooks.beforeResolve: in-scope (issuer, request)
-  //       edges MUST resolve via state.getImport; if the bundle doesn't attest
-  //       the edge, the throw surfaces as a webpack resolution error
+  //     - normalModuleFactory.hooks.beforeResolve: an in-scope (issuer, request)
+  //       edge the bundle attests is redirected to its absolute bundle path. A
+  //       request the bundle records no edge for is not a file the bundle carries
+  //       -- at a successful capture it was EXTERNALIZED (a Node built-in,
+  //       `electron` under an electron target, a user `externals` entry); those
+  //       are never recorded as edges, so we defer to webpack's resolver/externals
+  //       handling. This relaxes only the resolve-time EDGE lookup; the fail-closed
+  //       gate for in-scope file BYTES stays the inputFileSystem wrapper above,
+  //       which still serves every in-scope read from the bundle or throws.
   //     - Out-of-scope paths defer to disk
   //
   //   KNOWN LIMITATION: bundle=load works today only for module graphs that
@@ -162,30 +168,43 @@ export class StasisWebpack {
       nmf.hooks.beforeResolve.tap('Stasis', (data) => {
         const issuer = data.contextInfo?.issuer
         if (!issuer) return  // entries: already absolute, inputFileSystem covers them
-        // An in-scope parent's resolution MUST come from the bundle's import map;
-        // if state.getImport throws ERR_MODULE_NOT_FOUND, the bundle is missing the
-        // attested edge and we let it propagate (webpack surfaces it as a
-        // resolution error). Out-of-scope parents (e.g. nm-scope app code,
-        // webpack-internal loader resolution) defer to webpack's resolver --
-        // they were never the bundle's responsibility to attest.
+        // Out-of-scope parents (nm-scope app code, webpack-internal loader
+        // resolution) were never the bundle's responsibility to attest -- defer
+        // to webpack's resolver.
         if (!inScope(issuer)) return
-        // Node built-ins (`constants`, `fs`, `node:path`, ...) are never carried
-        // in the bundle and never recorded as import edges: the capture-side
-        // resolve hook and the CJS resolution shim (stasis-core/hooks.js) both
-        // short-circuit isBuiltin() specifiers to Node BEFORE addImport sees them.
-        // So state.getImport has no edge for one and would throw
-        // ERR_MODULE_NOT_FOUND ("Cannot find module 'constants' imported from ..."),
-        // which webpack surfaces as a "Module not found" build error. Leave
-        // data.request untouched and let webpack resolve/externalize the builtin
-        // exactly as it would in a build without this plugin (e.g. target:'node'
-        // externalizes it; a browser target applies its own polyfill/fallback).
+        // Node built-ins (`constants`, `fs`, `node:path`, ...) are never bundled and
+        // never recorded as edges: the capture-side resolve hook and CJS resolution
+        // shim (stasis-core/hooks.js) short-circuit isBuiltin() specifiers to Node
+        // before addImport sees them. Skip them up front -- defer to webpack
+        // (target:'node' externalizes them, a browser target polyfills them) and,
+        // crucially, NEVER consult getImport for a builtin name, so a tampered
+        // bundle can't smuggle in an edge that redirects `fs` to an arbitrary file.
         if (isBuiltin(data.request)) return
         const parentURL = pathToFileURL(issuer).toString()
-        const { url } = state.getImport(parentURL, data.request)
+        let resolved
+        try {
+          resolved = state.getImport(parentURL, data.request)
+        } catch (err) {
+          // No attested edge. getImport already tried the recorded edges AND the
+          // under-recorded bundle-file-set fallback (resolveBundled), so a miss
+          // means the request names nothing the bundle carries. At a SUCCESSFUL
+          // capture that is an EXTERNAL -- a module webpack externalized instead of
+          // bundling: `electron` under an electron target, anything the target's
+          // externals preset covers, or a user `externals` entry. Externals are
+          // never recorded as edges (afterResolve only records resolutions with an
+          // on-disk path; see #applyCaptureMode), exactly like built-ins -- so defer
+          // to webpack's resolver/externals handling rather than failing the build.
+          // This relaxes ONLY the resolve-time edge lookup: a genuinely missing
+          // in-scope FILE still fails closed at the inputFileSystem wrapper (it
+          // serves in-scope bytes from the bundle or throws), so no disk fallback
+          // is introduced. A non-MODULE_NOT_FOUND error is a real fault -- rethrow.
+          if (err?.code === 'ERR_MODULE_NOT_FOUND') return
+          throw err
+        }
         // Redirect the resolver to the absolute bundle path; our stat wrapper
         // then reports it exists, so the resolver short-circuits without
         // walking node_modules or trying extension fallbacks.
-        data.request = fileURLToPath(url)
+        data.request = fileURLToPath(resolved.url)
       })
     })
   }

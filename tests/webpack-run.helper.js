@@ -68,12 +68,22 @@ const module_ = rulesRaw
 // compare capture-mode output against load-mode output byte-for-byte.
 const outdirEnv = process.env.STASIS_TEST_WEBPACK_OUTDIR
 const dist = outdirEnv ?? await mkdtemp(join(tmpdir(), 'stasis-webpack-test-'))
+// STASIS_TEST_WEBPACK_TARGET -- override webpack's `target` (default 'node'), e.g.
+// 'electron-main' to exercise a target whose externals preset externalizes 'electron'.
+const target = process.env.STASIS_TEST_WEBPACK_TARGET || 'node'
+// STASIS_TEST_WEBPACK_EXTERNALS (JSON) -- optional webpack `externals` (e.g.
+// { "some-lib": "commonjs some-lib" }) so the build externalizes a bare module by
+// user config rather than a target preset -- the generic "externalized, not bundled,
+// not an edge" case the load-mode defer must handle for ANY external.
+const externalsRaw = process.env.STASIS_TEST_WEBPACK_EXTERNALS
+const externals = externalsRaw ? JSON.parse(externalsRaw) : undefined
 try {
   const compiler = webpack({
     mode: 'none',
-    target: 'node',
+    target,
     entry: resolve(process.cwd(), entries[0]),
     output: { path: dist, filename: 'bundle.js' },
+    ...(externals ? { externals } : {}),
     ...(module_ ? { module: module_, resolveLoader: { modules: [workspaceNodeModules, 'node_modules'] } } : {}),
     plugins: [new StasisWebpack(pluginOptions)],
   })

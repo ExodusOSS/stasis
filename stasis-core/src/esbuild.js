@@ -86,7 +86,23 @@ export class StasisEsbuild {
         // won't reload via the esbuild plugin without further work
         // (state.getImport would need a multi-conditions match scan, or the
         // Node loader would need to mirror under '*' too).
-        ;({ url } = this.#state.getImport(parentURL, specifier, { importAttributes: attrs }))
+        try {
+          ;({ url } = this.#state.getImport(parentURL, specifier, { importAttributes: attrs }))
+        } catch (err) {
+          // No attested edge. getImport already tried the recorded edges AND the
+          // under-recorded bundle-file-set fallback (resolveBundled), so a miss
+          // means the request names nothing the bundle carries -- at a successful
+          // capture it was an EXTERNAL (a user `external` entry; built-ins are
+          // handled above). Externals are never recorded as edges, so return
+          // undefined to hand it back to esbuild, which externalizes it as it would
+          // without this plugin. This relaxes only the resolve-time edge lookup:
+          // a genuinely missing in-scope FILE still fails closed at onLoad
+          // (state.getFile serves in-scope bytes from the bundle or throws), so no
+          // disk fallback is introduced. A non-MODULE_NOT_FOUND error is a real
+          // fault -- rethrow it.
+          if (err?.code === 'ERR_MODULE_NOT_FOUND') return undefined
+          throw err
+        }
       }
       const format = this.#state.getFormat(url)
       const kind = Bundle.isResourceFormat(format) ? 'resource' : 'code'

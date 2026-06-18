@@ -267,6 +267,57 @@ test('bundle=load fails closed when an in-scope file is missing from the bundle 
   t.assert.match(r.stderr, /hello\.js/)
 }))
 
+// Fail-closed on the genuinely-new branch: the externals defer must NOT become a disk
+// fallback for an in-scope FILE. The test above drops only the SOURCE (keeping the edge),
+// so getImport still succeeds and never reaches the new catch. Here we drop BOTH the edge
+// AND the bytes for an in-scope relative import: getImport's resolveBundled fallback can't
+// recover it (bytes gone) -> it throws ERR_MODULE_NOT_FOUND -> the new catch returns
+// undefined -> esbuild re-resolves ./hello.js -> onLoad's getFile throws (not in bundle).
+// The build MUST fail even though hello.js is present on disk in the load dir.
+test('bundle=load still fails closed when an in-scope edge AND its bytes are dropped (defer is not a disk fallback)', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  const capBundle = join(capDir, 'snapshot.br')
+
+  const capture = run(['src/entry.js'], {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_ESBUILD_OUTDIR: join(tmp, 'out-capture'),
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+
+  // Drop both the import edge from src/entry.js and the bytes of src/hello.js -- the only
+  // way to reach the defer branch for an in-scope file (with either intact, getImport
+  // resolves it from the bundle instead of throwing).
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(capBundle)))
+  for (const k of Object.keys(decoded.imports)) delete decoded.imports[k]['src/entry.js']
+  delete decoded.sources['.'].files['src/hello.js']
+  writeFileSync(capBundle, brotliCompressSync(JSON.stringify(decoded)))
+
+  const loadDir = join(tmp, 'load')
+  cpSync(capDir, loadDir, { recursive: true })  // full source tree stays on disk
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  rmSync(join(loadDir, 'stasis.lock.json'))
+
+  const r = run(['src/entry.js'], {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_ESBUILD_OUTDIR: join(tmp, 'out-load'),
+    },
+  })
+  t.assert.notEqual(r.status, 0, 'defer must not silently read the in-scope file from disk')
+  t.assert.match(r.stderr, /hello\.js/)
+}))
+
 test('bundle=load runs from a clean dir holding only the bundle + a minimal package.json', withTmp((t, tmp) => {
   // Phase 1 in a capture-side dir (full fixture: sources, lockfile, config).
   const capDir = join(tmp, 'cap')
@@ -390,6 +441,62 @@ test('bundle=load defers Node built-ins to esbuild instead of looking them up in
   t.assert.equal(replayOutput, captureOutput)
   t.assert.match(replayOutput, /from "node:constants"/)
   t.assert.match(replayOutput, /from "path"/)
+}))
+
+// Regression (generalizes the built-in case to ALL externals): a non-builtin module the
+// user marks `external` (esbuild has no electron preset, so externals are declared in
+// config) is never bundled and never recorded as an import edge. At bundle=load,
+// state.getImport throws ERR_MODULE_NOT_FOUND; the load-mode onResolve hook must treat
+// that miss as "external" and return undefined so esbuild externalizes it, instead of
+// failing the build with `Cannot find module 'electron'`. The byte-level fail-closed
+// gate (onLoad -> getFile) is unaffected -- see the missing-file test above.
+test('bundle=load defers user externals (electron) to esbuild instead of looking them up in the bundle', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  rmSync(join(capDir, 'stasis.lock.json'))  // entry is rewritten below; build a fresh lockfile
+  writeFileSync(join(capDir, 'src', 'entry.js'),
+    "import { app } from 'electron'\n" +
+    "import { greet } from './hello.js'\n" +
+    "console.log(greet(typeof app))\n")
+  const capBundle = join(capDir, 'snapshot.br')
+  const outA = join(tmp, 'out-capture')
+
+  const capture = run(['src/entry.js'], {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_ESBUILD_EXTERNAL: '["electron"]',
+      STASIS_TEST_ESBUILD_OUTDIR: outA,
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'entry.js'), 'utf-8')
+
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true, "type": "module" }')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run(['src/entry.js'], {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_ESBUILD_EXTERNAL: '["electron"]',
+      STASIS_TEST_ESBUILD_OUTDIR: outB,
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  const replayOutput = readFileSync(join(outB, 'entry.js'), 'utf-8')
+
+  t.assert.equal(replayOutput, captureOutput)
+  t.assert.match(replayOutput, /from "electron"/)
 }))
 
 test('bundle=load: import attributes (with { type: "json" }) round-trip', withTmp((t, tmp) => {

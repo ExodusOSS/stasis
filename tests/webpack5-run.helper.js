@@ -49,10 +49,13 @@ const module_ = rulesRaw
 
 const outdirEnv = process.env.STASIS_TEST_WEBPACK_OUTDIR
 const dist = outdirEnv ?? await mkdtemp(join(tmpdir(), 'stasis-webpack5-test-'))
+// STASIS_TEST_WEBPACK_TARGET -- override webpack's `target` (default 'node'), e.g.
+// 'electron-main' to exercise a target whose externals preset externalizes 'electron'.
+const target = process.env.STASIS_TEST_WEBPACK_TARGET || 'node'
 try {
   const compiler = webpack({
     mode: 'none',
-    target: 'node',
+    target,
     entry: resolve(process.cwd(), entries[0]),
     output: { path: dist, filename: 'bundle.js' },
     ...(module_ ? { module: module_, resolveLoader: { modules: [workspaceNodeModules, 'node_modules'] } } : {}),

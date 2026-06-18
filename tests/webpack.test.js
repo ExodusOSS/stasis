@@ -233,6 +233,178 @@ test('bundle=load defers Node built-ins to webpack instead of looking them up in
   t.assert.match(replayOutput, /require\("path"\)/)
 }))
 
+// Regression (generalizes the built-in case to ALL externals): a non-builtin module
+// the bundler externalizes -- `electron` under target:'electron-main', anything a
+// target's externals preset covers, a user `externals` entry -- is never bundled and
+// never recorded as an import edge (afterResolve only records resolutions with an
+// on-disk path). At bundle=load, state.getImport therefore has no edge and throws
+// ERR_MODULE_NOT_FOUND; the load-mode beforeResolve hook must treat that miss as
+// "external" and defer to webpack (which externalizes it) instead of failing the
+// build with `Cannot find module 'electron'`. The byte-level fail-closed gate
+// (inputFileSystem wrapper) is unaffected -- see the missing-file test below.
+test('bundle=load defers externals (electron under target:electron-main) to webpack', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  rmSync(join(capDir, 'stasis.lock.json'))  // entry is rewritten below; build a fresh lockfile
+  // `electron` is externalized by the electron-main target's externals preset, exactly
+  // as a real Electron main-process build does; `./hello` is the in-bundle relative edge.
+  writeFileSync(join(capDir, 'src', 'entry.js'),
+    "const { app } = require('electron')\n" +
+    "const { greet } = require('./hello')\n" +
+    "console.log(greet(typeof app))\n")
+  const capBundle = join(capDir, 'snapshot.br')
+  const outA = join(tmp, 'out-capture')
+
+  const capture = run('src/entry.js', {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_WEBPACK_TARGET: 'electron-main',
+      STASIS_TEST_WEBPACK_OUTDIR: outA,
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'bundle.js'), 'utf-8')
+
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true }')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run('src/entry.js', {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_WEBPACK_TARGET: 'electron-main',
+      STASIS_TEST_WEBPACK_OUTDIR: outB,
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  const replayOutput = readFileSync(join(outB, 'bundle.js'), 'utf-8')
+
+  t.assert.equal(replayOutput, captureOutput)
+  t.assert.match(replayOutput, /require\("electron"\)/)
+}))
+
+// Generality (the user's "likely other targets too"): the defer is keyed on "the bundle
+// has no edge", not on electron or any specific target preset. A bare module the user
+// marks external via webpack `externals` config (here under the default target:'node',
+// where it is NOT a builtin and NOT installed) must round-trip the same way. Proves the
+// fix covers ANY externalized specifier, not just preset/electron ones.
+test('bundle=load defers a user-configured webpack `externals` entry to webpack', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  rmSync(join(capDir, 'stasis.lock.json'))  // entry is rewritten below; build a fresh lockfile
+  writeFileSync(join(capDir, 'src', 'entry.js'),
+    "const lib = require('fake-external-lib')\n" +
+    "const { greet } = require('./hello')\n" +
+    "console.log(greet(typeof lib))\n")
+  const capBundle = join(capDir, 'snapshot.br')
+  const outA = join(tmp, 'out-capture')
+  // `commonjs fake-external-lib` -> webpack emits `require("fake-external-lib")` and never
+  // resolves it to disk (it isn't installed), so it is externalized, not bundled.
+  const EXTERNALS = JSON.stringify({ 'fake-external-lib': 'commonjs fake-external-lib' })
+
+  const capture = run('src/entry.js', {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_WEBPACK_EXTERNALS: EXTERNALS,
+      STASIS_TEST_WEBPACK_OUTDIR: outA,
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'bundle.js'), 'utf-8')
+
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true }')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run('src/entry.js', {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_WEBPACK_EXTERNALS: EXTERNALS,
+      STASIS_TEST_WEBPACK_OUTDIR: outB,
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  const replayOutput = readFileSync(join(outB, 'bundle.js'), 'utf-8')
+
+  t.assert.equal(replayOutput, captureOutput)
+  t.assert.match(replayOutput, /require\("fake-external-lib"\)/)
+}))
+
+// Fail-closed on the genuinely-new branch: the externals defer must NOT become a disk
+// fallback for an in-scope FILE. The existing missing-file test below drops only the
+// SOURCE (keeping the edge), so getImport still succeeds and never reaches the new
+// catch. Here we drop BOTH the edge AND the bytes for an in-scope relative import:
+// getImport's resolveBundled fallback can't recover it (bytes gone) -> it throws
+// ERR_MODULE_NOT_FOUND -> the new catch defers to webpack's resolver -> which re-resolves
+// ./hello against the inputFileSystem wrapper -> getFile throws (not in bundle). The
+// build MUST fail even though hello.js is present on disk in the load dir.
+test('bundle=load still fails closed when an in-scope edge AND its bytes are dropped (defer is not a disk fallback)', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  const capBundle = join(capDir, 'snapshot.br')
+
+  const capture = run('src/entry.js', {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_WEBPACK_OUTDIR: join(tmp, 'out-capture'),
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+
+  // Drop both the import edge from src/entry.js and the bytes of src/hello.js. This is
+  // the only way to reach the defer branch for an in-scope file (with the edge or the
+  // bytes intact, getImport resolves it from the bundle instead of throwing).
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(capBundle)))
+  for (const k of Object.keys(decoded.imports)) delete decoded.imports[k]['src/entry.js']
+  delete decoded.sources['.'].files['src/hello.js']
+  writeFileSync(capBundle, brotliCompressSync(JSON.stringify(decoded)))
+
+  // Load dir keeps the full source tree on disk, so the ONLY way to succeed would be a
+  // silent disk read of hello.js -- which fail-closed must prevent.
+  const loadDir = join(tmp, 'load')
+  cpSync(capDir, loadDir, { recursive: true })
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  rmSync(join(loadDir, 'stasis.lock.json'))
+
+  const r = run('src/entry.js', {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_WEBPACK_OUTDIR: join(tmp, 'out-load'),
+    },
+  })
+  t.assert.notEqual(r.status, 0, 'defer must not silently read the in-scope file from disk')
+  t.assert.match(r.stderr, /hello/)
+  t.assert.match(r.stderr, /resolve|not found|not attested/i)
+}))
+
 test('bundle=load fails closed when an in-scope file is missing from the bundle (does NOT silently fall through to disk)', withTmp((t, tmp) => {
   // Capture in dir A (full fixture).
   const capDir = join(tmp, 'cap')

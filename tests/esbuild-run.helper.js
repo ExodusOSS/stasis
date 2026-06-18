@@ -60,6 +60,11 @@ const loader = loaderRaw ? JSON.parse(loaderRaw) : undefined
 const outdirEnv = process.env.STASIS_TEST_ESBUILD_OUTDIR
 const dist = outdirEnv ?? await mkdtemp(join(tmpdir(), 'stasis-esbuild-test-'))
 const writeOutput = Boolean(outdirEnv)
+// STASIS_TEST_ESBUILD_EXTERNAL (JSON array) -- optional esbuild `external` list,
+// e.g. ["electron"] so the build externalizes a non-builtin module the way a real
+// app config would (esbuild has no electron preset; externals are user-declared).
+const externalRaw = process.env.STASIS_TEST_ESBUILD_EXTERNAL
+const external = externalRaw ? JSON.parse(externalRaw) : undefined
 try {
   await esbuild.build({
     entryPoints: entries.map((e) => resolve(process.cwd(), e)),
@@ -70,6 +75,7 @@ try {
     write: writeOutput,
     logLevel: 'silent',
     ...(loader ? { loader } : {}),
+    ...(external ? { external } : {}),
     plugins: [new StasisEsbuild(pluginOptions)],
   })
 } finally {
