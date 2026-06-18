@@ -1,4 +1,4 @@
-import { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
+import Module, { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
 import { basename, dirname, extname, resolve as resolvePath } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -249,4 +249,36 @@ export function install() {
   if (installed) return
   installed = true
   registerHooks({ load, resolve })
+  patchCjsResolution()
+}
+
+// registerHooks intercepts the ESM loader and Node's native CommonJS loader, but
+// NOT the require() the ESM->CJS translator (node:internal/modules/esm/translators)
+// builds when it evaluates a CJS module: that require resolves through
+// Module._resolveFilename against disk before any hook runs. So a CJS module we
+// serve from the bundle (`import chalk from 'chalk'`, chalk being CommonJS) has
+// its nested require()s resolved on disk -- and once node_modules is pruned or
+// shipped-without, `require('escape-string-regexp')` throws MODULE_NOT_FOUND
+// before our hooks can serve it, i.e. the bundle isn't self-contained for a CJS
+// dependency graph. Shim _resolveFilename in load mode to resolve such a target
+// from the bundle's recorded import map and return its (possibly non-existent on
+// disk) path; the load() hook then serves the bytes. For an edge the bundle
+// doesn't record, or outside load mode, fall back to Node's native resolution.
+function patchCjsResolution() {
+  const original = Module._resolveFilename
+  Module._resolveFilename = function (request, parent, ...rest) {
+    if (state?.config.loadBundle && typeof request === 'string'
+        && !isBuiltin(request) && typeof parent?.filename === 'string') {
+      const parentURL = pathToFileURL(parent.filename).toString()
+      // Same scope gate the resolve hook applies (see above): node_modules scope
+      // only serves dependency parents from the bundle; workspace/app code is left
+      // to Node's native resolution (read from disk). Without this the shim would
+      // silently take over CJS resolution for app files too.
+      if (state.config.full || state.inNodeModules(parentURL)) {
+        const resolved = state.resolveBundled(parentURL, request)
+        if (resolved !== undefined) return resolved
+      }
+    }
+    return original.call(this, request, parent, ...rest)
+  }
 }
