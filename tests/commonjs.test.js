@@ -308,3 +308,70 @@ test('run --bundle=load scopes an under-recorded #imports subpath to the importi
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'AIMPL|BIMPL\n') // each #impl resolves within its own package
 }))
+
+// require.resolve() resolves through native Module._resolveFilename and, on Node
+// versions where that bypasses the resolve hook (e.g. 24.x), addImport never sees
+// it -- so the edge wasn't recorded and require.resolve() failed at load even when
+// the target is in the bundle. write()'s backfill records it (for in-bundle
+// targets), so require.resolve() returns the bundled path at load.
+test('run --bundle=load records and resolves a require.resolve() edge', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'rr', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.mjs'), "import './r.cjs'\n")
+  writeFileSync(join(tmp, 'r.cjs'), "const p = require.resolve('dep')\nconsole.log(require('node:path').basename(p), require(p))\n")
+  const dep = join(tmp, 'node_modules', 'dep')
+  mkdirSync(dep, { recursive: true })
+  writeFileSync(join(dep, 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(dep, 'index.js'), "module.exports = 'DEP'\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // the require.resolve('dep') edge is recorded (the regression: it was missing)
+  const imports = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).imports
+  const recorded = Object.values(imports).some((byParent) =>
+    Object.values(byParent).some((specs) => specs.dep === 'node_modules/dep/index.js'))
+  t.assert.ok(recorded, 'require.resolve("dep") edge recorded in the lockfile')
+
+  rmSync(join(tmp, 'node_modules'), { recursive: true, force: true })
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.mjs'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'index.js DEP\n')
+}))
+
+// The optional-dependency probe `try { require.resolve('x') } catch {}`, where the
+// target is NEVER require()d, must not crash capture. On Node 26.x require.resolve
+// routes through the resolve hook and records an edge to the unloaded target;
+// write() prunes such resolve-only edges (the file isn't bundled, so recording it
+// is useless and previously tripped #backfillBeforeWrite's missing-file check,
+// crashing capture on Node 26).
+test('run --bundle=add does not crash on a resolve-only require.resolve (optional-dep probe)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ro', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.mjs'), "import './r.cjs'\n")
+  writeFileSync(join(tmp, 'r.cjs'), "let ok = false\ntry { require.resolve('opt'); ok = true } catch {}\nconsole.log('probe', ok)\n")
+  const opt = join(tmp, 'node_modules', 'opt')
+  mkdirSync(opt, { recursive: true })
+  writeFileSync(join(opt, 'package.json'), JSON.stringify({ name: 'opt', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(opt, 'index.js'), "module.exports = 'OPT'\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'probe true\n')
+  // opt is resolve-only (never require()d): not bundled, so the edge is pruned.
+  const imports = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).imports
+  const hasOpt = Object.values(imports).some((byParent) => Object.values(byParent).some((s) => 'opt' in s))
+  t.assert.ok(!hasOpt, 'resolve-only require.resolve target is not recorded')
+}))

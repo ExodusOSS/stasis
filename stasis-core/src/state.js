@@ -124,6 +124,12 @@ export class State {
   // construction, so a single build is safe.
   #bundleResolveIndex = null
 
+  // Capture-time native resolutions (parent URL -> specifier -> resolved URL)
+  // observed via the Module._resolveFilename shim: require.resolve() and any CJS
+  // require() that bypasses the resolve hook. write()'s backfill records the edges
+  // the hook missed (deduped, in-bundle targets only). Populated only during capture.
+  #observedResolutions = new Map()
+
   // Absolute path of a package whose source files were loaded by Node BEFORE
   // our hooks registered (the preload-cached set). Set by the loader's
   // initState to stasis-core's own root; sidecars inherit it from their
@@ -1408,8 +1414,75 @@ export class State {
     })
   }
 
+  // Drop resolution edges whose target was resolved but never loaded -- i.e.
+  // require.resolve() (or any resolve-without-load) of a module the bundle doesn't
+  // carry. On Node versions where require.resolve routes through the resolve hook
+  // (26.x), addImport records such an edge directly into this.imports; left there
+  // it (a) trips #backfillBeforeWrite's "missing in-scope file" assertion --
+  // crashing capture on the common `try { require.resolve('x') } catch {}`
+  // optional-dependency probe -- and (b) would be useless in the artifact anyway
+  // (require.resolve returns a path; the file isn't bundled, and reading it
+  // bypasses the bundle). Pruning mirrors the in-bundle guard #backfillObserved-
+  // Resolutions applies on the Module._resolveFilename path, so capture behaves
+  // the same on every Node version. stasis-core's own preload-cached files are
+  // exempt -- #backfillBeforeWrite's BFS genuinely captures those next.
+  #pruneResolveOnlyEdges() {
+    const missing = this.#collectMissingImportedFiles()
+    const prune = new Set([...missing].filter((file) => !STASIS_CORE_FILE_RE.test(`/${file}`)))
+    if (prune.size === 0) return
+    for (const [conditions, byParent] of this.imports) {
+      for (const [parent, specifiers] of byParent) {
+        for (const [specifier, file] of specifiers) {
+          if (prune.has(file)) specifiers.delete(specifier)
+        }
+        if (specifiers.size === 0) byParent.delete(parent)
+      }
+      if (byParent.size === 0) this.imports.delete(conditions)
+    }
+  }
+
+  // Record a capture-time native resolution (from the Module._resolveFilename
+  // shim). Stored verbatim; #backfillObservedResolutions decides at write() which
+  // to add. Last-write-wins per (parent, specifier) so duplicates collapse.
+  observeResolution(parentURL, specifier, resolvedURL) {
+    let byParent = this.#observedResolutions.get(parentURL)
+    if (byParent === undefined) this.#observedResolutions.set(parentURL, (byParent = new Map()))
+    byParent.set(specifier, resolvedURL)
+  }
+
+  // Backfill resolution edges the live resolve hook never observed -- require.resolve()
+  // (and CJS require()s that resolve natively) on Node versions where they bypass
+  // the hook. Recorded under the wildcard conditions key so a load-time lookup
+  // (getImport / resolveBundled) finds them regardless of conditions. Two guards:
+  //   - only edges whose target the bundle already carries (this.sources/.resources).
+  //     A resolve-only target isn't bundled, recording an edge to it would be
+  //     useless (require.resolve returns a path; reading it bypasses the bundle)
+  //     and would trip #backfillBeforeWrite's missing-file assertion.
+  //   - only edges the hook didn't already record (dedup across all condition
+  //     buckets), so this never double-records a normal require().
+  #backfillObservedResolutions() {
+    if (this.#observedResolutions.size === 0) return
+    for (const [parentURL, specs] of this.#observedResolutions) {
+      let parent
+      try { parent = this.#canonicalFile(parentURL) } catch { continue }
+      for (const [specifier, resolvedURL] of specs) {
+        let file
+        try { file = this.#canonicalFile(resolvedURL) } catch { continue }
+        if (!this.sources.has(file) && !this.resources.has(file)) continue
+        const spec = this.#canonicalSpecifier(parentURL, specifier)
+        let recorded = false
+        for (const [, byParent] of this.imports) {
+          if (byParent.get(parent)?.get(spec) !== undefined) { recorded = true; break }
+        }
+        if (!recorded) this.addImport(parentURL, specifier, resolvedURL)
+      }
+    }
+  }
+
   write() {
+    this.#pruneResolveOnlyEdges()
     this.#backfillBeforeWrite()
+    this.#backfillObservedResolutions()
     // writeFileSync(join(this.root, FILE_CONFIG), this.config.json)
     // Sidecars never write the lockfile -- the parent owns it. They only emit their bundle.
     // A "sidecar" here is one sharing the parent's lockfile data structures; an independent

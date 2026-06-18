@@ -267,7 +267,8 @@ export function install() {
 function patchCjsResolution() {
   const original = Module._resolveFilename
   Module._resolveFilename = function (request, parent, ...rest) {
-    if (state?.config.loadBundle && typeof request === 'string'
+    const loadMode = state?.config.loadBundle
+    if (loadMode && typeof request === 'string'
         && !isBuiltin(request) && typeof parent?.filename === 'string') {
       const parentURL = pathToFileURL(parent.filename).toString()
       // Same scope gate the resolve hook applies (see above): node_modules scope
@@ -279,6 +280,15 @@ function patchCjsResolution() {
         if (resolved !== undefined) return resolved
       }
     }
-    return original.call(this, request, parent, ...rest)
+    const resolved = original.call(this, request, parent, ...rest)
+    // Capture: require.resolve() (and, on some Node versions, CJS require()s)
+    // resolve through native Module._resolveFilename WITHOUT firing the resolve
+    // hook, so addImport never sees them. Observe the resolution here; write()'s
+    // backfill records the ones the hook missed (deduped, in-bundle targets only).
+    if (state && !loadMode && typeof request === 'string'
+        && !isBuiltin(request) && typeof parent?.filename === 'string') {
+      state.observeResolution(pathToFileURL(parent.filename).toString(), request, pathToFileURL(resolved).toString())
+    }
+    return resolved
   }
 }
