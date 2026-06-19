@@ -60,7 +60,9 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis sbom --format=spdx stasis.lock.json` | export an SPDX SBOM for a lockfile or bundle |
 | `stasis sbom --format=cyclonedx app.stasis.code.br` | export a CycloneDX SBOM for a lockfile or bundle |
 
-Lock/bundle modes appear in the table above (omit a flag to skip that artifact); `--dependencies` limits to `node_modules` scope, `--mock` captures with side effects denied, and `--fs=sync` captures a program's sync `fs.readFileSync`/`fs.readdirSync` reads into the bundle (and serves them back, along with `fs.lstatSync`/`fs.statSync` existence checks, under `--bundle=load`); `--fs=async` additionally covers the async (callback + `fs.promises`) forms (see [doc/file-formats.md](../doc/file-formats.md)). The zero-dependency `@exodus/stasis-core` CLI provides `run` and `prune` only.
+## Runtime
+
+The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run` and `prune` commands and bundler plugins only.
 
 ## License
 
