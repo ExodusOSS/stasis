@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { canonicalizePath } from './state-util.js'
+import { extSetsEqual, parseResourcesOption } from './util.js'
 
 const VALID_SCOPE = new Set(['node_modules', 'full'])
 const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])
@@ -16,7 +17,12 @@ export const DEFAULT_SCOPE = 'full'
 
 const envDebugBool = (value) => Boolean(value && value !== '0')
 
-const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug']
+// EXODUS_STASIS_RESOURCES is a comma-separated extension list; split + trim + drop
+// empties so '' and ' png , svg ' normalize predictably (parseResourcesOption then
+// validates each entry). An empty/unset env var means "no allowlist".
+const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
+
+const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources']
 
 // Plugins accept the same options as Config but want to validate without constructing one,
 // since constructing State has side effects. Mirror Config's per-field validation.
@@ -24,19 +30,25 @@ export function validatePluginOptions(label, options) {
   const rest = { ...options }
   for (const key of OPTION_KEYS) delete rest[key]
   assert.equal(Object.keys(rest).length, 0, `Unknown ${label} options: ${Object.keys(rest).join(', ')}`)
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources } = options
   if (scope !== undefined) assert.ok(VALID_SCOPE.has(scope), `Invalid scope: ${scope}`)
   if (lock !== undefined) assert.ok(VALID_LOCK.has(lock), `Invalid lock: ${lock}`)
   if (bundle !== undefined) assert.ok(VALID_BUNDLE.has(bundle), `Invalid bundle: ${bundle}`)
   if (bundleFile !== undefined) assert.equal(typeof bundleFile, 'string', 'bundleFile must be a string')
   if (resourcesBundleFile !== undefined) assert.equal(typeof resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
   if (debug !== undefined) assert.equal(typeof debug, 'boolean', 'debug must be a boolean')
+  // parseResourcesOption is the validator: it throws on a non-array, non-string entries,
+  // malformed extensions, or a code extension (those are always tracked, never resources).
+  if (resources !== undefined) parseResourcesOption(label, resources)
 }
 
 // When a plugin runs against a State that already exists (preload path), the active Config
 // is authoritative. Any options the plugin was given must agree with it.
 export function assertOptionsMatchConfig(config, options) {
   const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug } = options
+  // `resources` is intentionally NOT cross-checked here: it's a Set (needs set-equality,
+  // which assert.equal can't express) and is coordinated explicitly in resolvePluginState
+  // before this runs -- don't "fix" the omission with assert.equal(config.resources, ...).
   try {
     if (scope !== undefined) assert.equal(config.scope, scope)
     if (lock !== undefined) assert.equal(config.lock, lock)
@@ -61,6 +73,7 @@ export class Config {
   #bundle
   #bundleFile
   #resourcesBundleFile
+  #resources
   #debug
 
   // Options match the CLI flags (lock/lockFile/bundle/bundleFile/resourcesBundleFile/scope/debug).
@@ -71,9 +84,9 @@ export class Config {
   // was a footgun the CLI couldn't detect, since the flag was happily accepted
   // and then quietly ignored.
   constructor(options = {}) {
-    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
-    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug }
+    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
@@ -83,6 +96,7 @@ export class Config {
       bundleFile: process.env.EXODUS_STASIS_BUNDLE_FILE || undefined,
       resourcesBundleFile: process.env.EXODUS_STASIS_RESOURCES_BUNDLE_FILE || undefined,
       debug: process.env.EXODUS_STASIS_DEBUG || undefined,
+      resources: process.env.EXODUS_STASIS_RESOURCES || undefined,
     }
 
     try {
@@ -101,6 +115,15 @@ export class Config {
       if (this.#env.debug !== undefined && debug !== undefined) {
         assert.equal(envDebugBool(this.#env.debug), debug)
       }
+      // Compare parsed sets, not the raw strings: ['png','svg'] and 'svg,png' are the
+      // same allowlist. An empty/unset env var is "no env opinion" (handled by `||
+      // undefined` above), so this only fires on two genuinely different non-empty lists.
+      if (this.#env.resources !== undefined && resources !== undefined) {
+        assert.ok(
+          extSetsEqual(parseResourcesOption('env', envList(this.#env.resources)), parseResourcesOption('options', resources)),
+          'resources option does not match EXODUS_STASIS_RESOURCES'
+        )
+      }
     } catch (cause) {
       throw new Error('Config options can not override stasis env', { cause })
     }
@@ -112,6 +135,12 @@ export class Config {
     this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envDebugBool(this.#env.debug) : (debug ?? false)
+    // env wins over the option (it's the process-wide signal); parseResourcesOption
+    // normalizes both to a Set of lowercase extensions/filenames, or empty when neither set.
+    this.#resources = parseResourcesOption(
+      'resources',
+      this.#env.resources !== undefined ? envList(this.#env.resources) : resources
+    )
 
     this.#checkInvariants()
   }
@@ -188,6 +217,7 @@ export class Config {
       lock = this.#lock,
       bundle = this.#bundle,
       debug = this.#debug,
+      resources,
       ...rest
     } = JSON.parse(json)
     assert.equal(Object.keys(rest).length, 0)
@@ -195,6 +225,7 @@ export class Config {
     this.#lock = lock
     this.#bundle = bundle
     this.#debug = debug
+    if (resources !== undefined) this.#resources = parseResourcesOption('stasis.config.json', resources)
     this.#checkInvariants()
 
     try {
@@ -202,6 +233,10 @@ export class Config {
       if (this.#env.lock !== undefined) assert.equal(this.#lock, this.#env.lock)
       if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
       if (this.#env.debug !== undefined) assert.equal(this.#debug, envDebugBool(this.#env.debug))
+      if (this.#env.resources !== undefined) {
+        assert.ok(extSetsEqual(this.#resources, parseResourcesOption('env', envList(this.#env.resources))),
+          'resources in stasis.config.json must match EXODUS_STASIS_RESOURCES')
+      }
       // Explicit constructor options are equally authoritative: an explicit
       // `--scope=full` shouldn't be silently overridden by an on-disk
       // `{"scope":"node_modules"}`. The asserts mirror the env block above.
@@ -209,6 +244,10 @@ export class Config {
       if (this.#explicit.lock !== undefined) assert.equal(this.#lock, this.#explicit.lock)
       if (this.#explicit.bundle !== undefined) assert.equal(this.#bundle, this.#explicit.bundle)
       if (this.#explicit.debug !== undefined) assert.equal(this.#debug, this.#explicit.debug)
+      if (this.#explicit.resources !== undefined) {
+        assert.ok(extSetsEqual(this.#resources, parseResourcesOption('options', this.#explicit.resources)),
+          'resources in stasis.config.json must match the resources option')
+      }
     } catch (cause) {
       throw new Error('Flags/env can not override stasis.config.json', { cause })
     }
@@ -231,6 +270,14 @@ export class Config {
   // bundle=load reads both. Unset is the default unified-bundle behavior.
   get resourcesBundleFile() {
     return this.#resourcesBundleFile
+  }
+
+  // The parsed `resources` allowlist: a Set of lowercase extensions or extensionless
+  // filenames that classifyExtension treats as asset payloads. Drives both the plugins'
+  // per-import classification and State's `--fs` capture, so the two share one list.
+  // Empty Set when no allowlist was configured (option or EXODUS_STASIS_RESOURCES).
+  get resources() {
+    return this.#resources
   }
 
   get debug() {
@@ -308,6 +355,9 @@ export class Config {
 
   get json() {
     const data = { scope: this.#scope, lock: this.#lock, bundle: this.#bundle }
+    // resources persists like scope/lock/bundle (a project-level declaration), but only
+    // when non-empty so configs without an allowlist serialize byte-identically as before.
+    if (this.#resources.size > 0) data.resources = [...this.#resources].toSorted()
     return JSON.stringify(data, undefined, 2) + '\n'
   }
 }

@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] [--fs=(sync|async)] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -49,7 +49,7 @@ if (command === '-v' || command === '--version') {
   process.exit(0)
 } else if (command === 'run') {
   const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file', '--lock'])
+  const valueFlags = new Set(['--bundle', '--bundle-file', '--lock', '--resources'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -62,6 +62,7 @@ if (command === '-v' || command === '--version') {
     dependencies: { type: 'boolean' },
     mock: { type: 'boolean' },
     fs: { type: 'string' },
+    resources: { type: 'string' },
   }
 
   let values
@@ -90,7 +91,10 @@ if (command === '-v' || command === '--version') {
   if (values.fs !== undefined && !['sync', 'async'].includes(values.fs)) usage("Error: --fs must be 'sync' or 'async'")
   if (values.fs !== undefined && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
   const captureFs = values.fs ?? ''
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }) })
+  // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
+  // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
+  const resources = values.resources ?? ''
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -98,6 +102,7 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
   setEnv('EXODUS_STASIS_FS', captureFs)
+  setEnv('EXODUS_STASIS_RESOURCES', resources)
   // --mock: capture imports by running user code with side-effects denied,
   // fail-closed. Node's permission system blocks fs writes, child processes,
   // worker threads, native addons (no --allow-addons -- addons would bypass

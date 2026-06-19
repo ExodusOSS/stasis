@@ -5,8 +5,9 @@ import { createRequire } from 'node:module'
 import { isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { classifyExtension, parseResourcesOption, resolvePluginState } from './plugins.js'
+import { resolvePluginState } from './plugins.js'
 import { State } from './state.js'
+import { classifyExtension } from './util.js'
 
 const require = createRequire(import.meta.url)
 
@@ -117,10 +118,11 @@ export class StasisMetro {
   #resources
 
   constructor(options = {}) {
-    const { resources, ...rest } = options
-    this.#resources = parseResourcesOption('StasisMetro', resources)
-    const { state } = resolvePluginState('StasisMetro', rest, process.cwd())
+    const { state } = resolvePluginState('StasisMetro', options, process.cwd())
     this.#state = state // null when the plugin should be inert (Rule 7)
+    // resources is a Config field now (validated + coordinated against any preload in
+    // resolvePluginState); cache the resolved Set for the per-file classify hot path.
+    this.#resources = state?.config.resources ?? new Set()
   }
 
   // Build a Metro `serializer.customSerializer`: captures the graph AND `preModules`
@@ -195,7 +197,7 @@ export class StasisMetro {
       if (kind === 'unknown') {
         throw new Error(
           `StasisMetro: unsupported extension for '${modPath}' -- ` +
-          `add its extension to the plugin's resources option or stop importing it`
+          `add its extension or filename to the plugin's resources option or stop importing it`
         )
       }
       const url = pathToFileURL(modPath).toString()

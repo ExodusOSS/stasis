@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { Bundle } from './bundle.js'
-import { classifyExtension, parseResourcesOption, resolvePluginState } from './plugins.js'
+import { resolvePluginState } from './plugins.js'
 import { State } from './state.js'
 // Pre-patch snapshot, NOT `import { readFile } from 'node:fs/promises'`: under
 // `stasis run --fs=async` that builtin is monkey-patched, and this plugin loads after
@@ -13,6 +13,7 @@ import { State } from './state.js'
 // --fs capture hook. The snapshot in state-util (taken during the --import preload) is
 // the genuine reader.
 import { realReadFile } from './state-util.js'
+import { classifyExtension } from './util.js'
 
 export class StasisEsbuild {
   #seen = new Set()
@@ -20,10 +21,11 @@ export class StasisEsbuild {
   #resources
 
   constructor(options = {}) {
-    const { resources, ...rest } = options
-    this.#resources = parseResourcesOption('StasisEsbuild', resources)
-    const { state } = resolvePluginState('StasisEsbuild', rest, process.cwd())
+    const { state } = resolvePluginState('StasisEsbuild', options, process.cwd())
     this.#state = state  // null when plugin should be inert
+    // resources is a Config field now (validated + coordinated against any preload in
+    // resolvePluginState); cache the resolved Set for the per-file classify hot path.
+    this.#resources = state?.config.resources ?? new Set()
   }
 
   get name() {
@@ -131,7 +133,7 @@ export class StasisEsbuild {
         if (kind === 'unknown') {
           return {
             errors: [{
-              text: `StasisEsbuild: unsupported extension for '${res.path}' -- add its extension to the plugin's resources option or stop importing it`,
+              text: `StasisEsbuild: unsupported extension for '${res.path}' -- add its extension or filename to the plugin's resources option or stop importing it`,
             }],
           }
         }

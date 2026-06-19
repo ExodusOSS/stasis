@@ -1,61 +1,16 @@
-// Bundler-plugin glue: per-file classification (CODE_EXTENSIONS / pathExt /
-// parseResourcesOption / classifyExtension) and the plugin <-> preload
-// coordination (resolvePluginState). Kept out of state.js because none of it
-// touches State internals -- the classification is pure, and the coordination
-// only consults State.preload + Config helpers.
+// Plugin <-> preload coordination (resolvePluginState): decides which State a bundler
+// plugin drives, given its options and the ambient preload. The per-file classification
+// helpers (pathExt / parseResourcesOption / classifyExtension) live in util.js -- they're
+// pure and shared with State's `--fs` capture, so both paths classify against one source
+// of truth. Kept out of state.js because the coordination only consults State.preload +
+// Config helpers, never State internals.
 
 import assert from 'node:assert/strict'
 
 import { DEFAULT_LOCK, assertOptionsMatchConfig, validatePluginOptions } from './config.js'
 import { ensureStateForLoader, isLoaderInstalled } from './hooks.js'
 import { State } from './state.js'
-import { CODE_EXTENSIONS } from './util.js'
-
-// Lowercased, dot-less extension of a path, or '' if none.
-export function pathExt(filePath) {
-  const m = /\.([^./\\]+)$/.exec(filePath)
-  return m ? m[1].toLowerCase() : ''
-}
-
-// Validates + normalizes a plugin's `resources` option into a Set of lowercase
-// dot-less extensions. Plugins call this once at construction so the per-file
-// classification path stays cheap. Throws on bad input (wrong type, non-string
-// entries, an extension that's already in the code set) so misconfigurations
-// surface immediately rather than as silent capture drift.
-export function parseResourcesOption(label, resources) {
-  if (resources === undefined) return new Set()
-  if (!Array.isArray(resources)) {
-    throw new TypeError(`${label}: resources must be an array of extension strings`)
-  }
-  const out = new Set()
-  for (const entry of resources) {
-    if (typeof entry !== 'string') {
-      throw new TypeError(`${label}: resources entry must be a string, got ${typeof entry}`)
-    }
-    const clean = entry.toLowerCase().replace(/^\./, '')
-    if (!/^[a-z0-9]+$/.test(clean)) {
-      throw new Error(`${label}: resources entry '${entry}' is not a valid extension`)
-    }
-    if (CODE_EXTENSIONS.has(clean)) {
-      throw new Error(`${label}: resources entry '${entry}' is a code extension; remove it (code extensions are always tracked)`)
-    }
-    out.add(clean)
-  }
-  return out
-}
-
-// Classifies a file by extension against the code set + the user's parsed
-// resources allowlist. Returns 'code' (track with its loader format),
-// 'resource' (track with a 'resource'/'resource:base64' format -- State picks
-// the encoding from content), or 'unknown' (caller must throw). The 'unknown'
-// path is what forces the user to be explicit about every non-JS asset their
-// bundler consumes -- no silent attestation widening.
-export function classifyExtension(filePath, resources) {
-  const ext = pathExt(filePath)
-  if (CODE_EXTENSIONS.has(ext)) return 'code'
-  if (resources.has(ext)) return 'resource'
-  return 'unknown'
-}
+import { extSetsEqual, parseResourcesOption } from './util.js'
 
 // Decides which State a bundler plugin (StasisWebpack / StasisEsbuild) should run against,
 // given its constructor options and the ambient preload (or lack thereof). Returns either
@@ -85,7 +40,7 @@ export function classifyExtension(filePath, resources) {
 //     plugins be env-controlled off without throwing on the lock=none/bundle=none invariant).
 export function resolvePluginState(label, options, cwd) {
   validatePluginOptions(label, options)
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources } = options
   // Same-instance fast path: the plugin's stasis-core IS the binary's, the
   // hooks are installed, but the lazy initState hasn't fired yet (plugin
   // ran AHEAD of the first user-file load -- webpack constructs plugins
@@ -157,6 +112,18 @@ export function resolvePluginState(label, options, cwd) {
   if (debug !== undefined && debug !== pc.debug) {
     throw new Error(`${label}: debug=${debug} conflicts with active preload debug=${pc.debug}`)
   }
+  // resources is process-wide (a Config field), so a plugin's allowlist must agree with
+  // the preload's -- reuse adopts it wholesale, a sidecar inherits it. Compare the parsed
+  // sets (order/dupes/case don't matter), failing on a real disagreement rather than
+  // letting one plugin silently widen the attested asset set.
+  if (resources !== undefined) {
+    const parsed = parseResourcesOption(label, resources)
+    if (!extSetsEqual(parsed, pc.resources)) {
+      throw new Error(
+        `${label}: resources=[${[...parsed].join(', ')}] conflicts with active preload resources=[${[...pc.resources].join(', ')}]`
+      )
+    }
+  }
 
   if (pc.bundle) {
     // Preload has bundle on -- plugin can't disable, must match mode.
@@ -185,6 +152,7 @@ export function resolvePluginState(label, options, cwd) {
       bundleFile,
       resourcesBundleFile,
       debug: pc.debug,
+      resources: [...pc.resources],
     })
     return { state: sidecar, isNoop: false }
   }
@@ -219,6 +187,7 @@ export function resolvePluginState(label, options, cwd) {
     bundleFile,
     resourcesBundleFile,
     debug: pc.debug,
+    resources: [...pc.resources],
   })
   return { state: sidecar, isNoop: false }
 }

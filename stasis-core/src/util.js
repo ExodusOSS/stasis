@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs'
-import { isAbsolute, join, posix, relative } from 'node:path'
+import { basename, isAbsolute, join, posix, relative } from 'node:path'
 
 const sep = '/'
 
@@ -41,6 +41,68 @@ export const KNOWN_FORMATS = new Set([
 // desync: `.jsx`/`.tsx` were code to the plugins but missing from the fs-capture's
 // own set, so an fs-read tagged a `.jsx` 'resource' while the import tagged it code.
 export const CODE_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json', 'mts', 'cts'])
+
+// Lowercased, dot-less extension of a path, or '' if none.
+export function pathExt(filePath) {
+  const m = /\.([^./\\]+)$/.exec(filePath)
+  return m ? m[1].toLowerCase() : ''
+}
+
+// Validates + normalizes a `resources` allowlist (plugin option, --resources flag,
+// EXODUS_STASIS_RESOURCES, or stasis.config.json) into a Set of lowercase entries. Each
+// entry is either a bare extension (`png`, `.png`) or an extensionless filename
+// (`LICENSE`, `Makefile`, `license-mit`); classifyExtension matches a file by its
+// extension, falling back to its basename when it has none. A dotted entry like
+// `data.bin` is rejected -- a file that HAS an extension is keyed by it, so the entry
+// would never match; declare the extension (`bin`) instead. Code extensions are rejected
+// too (always tracked). Throwing here surfaces misconfigurations immediately rather than
+// as silent capture drift. `resources` may be an array (option / config) or undefined.
+export function parseResourcesOption(label, resources) {
+  if (resources === undefined) return new Set()
+  if (!Array.isArray(resources)) {
+    throw new TypeError(`${label}: resources must be an array of extension/filename strings`)
+  }
+  const out = new Set()
+  for (const entry of resources) {
+    if (typeof entry !== 'string') {
+      throw new TypeError(`${label}: resources entry must be a string, got ${typeof entry}`)
+    }
+    const clean = entry.toLowerCase().replace(/^\./, '')
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(clean)) {
+      throw new Error(`${label}: resources entry '${entry}' is not a valid extension or filename (use e.g. 'png' or 'LICENSE')`)
+    }
+    if (CODE_EXTENSIONS.has(clean)) {
+      throw new Error(`${label}: resources entry '${entry}' is a code extension; remove it (code extensions are always tracked)`)
+    }
+    out.add(clean)
+  }
+  return out
+}
+
+// Classifies a file against the code set + a parsed resources allowlist. Returns 'code'
+// (track with its loader format), 'resource' (track with a 'resource'/'resource:base64'
+// format -- the encoding is chosen from content), or 'unknown' (caller must reject). A
+// file is keyed by its extension, or -- when it has none (LICENSE, Makefile, a dotless
+// name) -- by its basename, so a resources entry can be an extension or an extensionless
+// filename. The 'unknown' path forces every non-JS asset to be declared explicitly -- no
+// silent attestation widening. The SINGLE classifier for both capture paths: bundler
+// plugins run it on module-graph imports, State runs it on `--fs` reads, so the two
+// can't drift.
+export function classifyExtension(filePath, resources) {
+  const ext = pathExt(filePath)
+  if (CODE_EXTENSIONS.has(ext)) return 'code'
+  if (resources.has(ext || basename(filePath).toLowerCase())) return 'resource'
+  return 'unknown'
+}
+
+// Set-equality for parsed resources allowlists (lowercase extension/filename sets).
+// Coordinates a plugin's `resources` option against an active preload's, and the env
+// var against an explicit option in Config.
+export function extSetsEqual(a, b) {
+  if (a.size !== b.size) return false
+  for (const ext of a) if (!b.has(ext)) return false
+  return true
+}
 
 // Flat project-relative key for the file `rel` inside module dir `dir`, inverse of
 // the bucketing State/Bundle apply. The `rel === ''` branch is reached only by a

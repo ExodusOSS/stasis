@@ -1,16 +1,12 @@
-// Direct unit coverage for the classification helpers exported from
-// @exodus/stasis-core/plugins. They're consumed by bundler plugins on the hot
-// path (per-file), so the contract here -- what's 'code' vs 'resource' vs
-// 'unknown', what the resources option accepts -- needs to be pinned.
+// Direct unit coverage for the classification helpers in @exodus/stasis-core/util
+// (pathExt / parseResourcesOption / classifyExtension). They're the SINGLE classifier
+// shared by the bundler plugins (per-import, hot path) and State's `--fs` capture, so
+// the contract here -- what's 'code' vs 'resource' vs 'unknown', what the resources
+// allowlist accepts -- needs to be pinned.
 
 import { test } from 'node:test'
 
-import {
-  classifyExtension,
-  parseResourcesOption,
-  pathExt,
-} from '@exodus/stasis-core/plugins'
-import { CODE_EXTENSIONS } from '@exodus/stasis-core/util'
+import { CODE_EXTENSIONS, classifyExtension, parseResourcesOption, pathExt } from '@exodus/stasis-core/util'
 
 test('pathExt: lowercased dot-less extension or empty string', (t) => {
   t.assert.equal(pathExt('foo.JS'), 'js')
@@ -54,11 +50,11 @@ test('parseResourcesOption: deduplicates entries silently (Set semantics)', (t) 
 test('parseResourcesOption: rejects non-array', (t) => {
   t.assert.throws(
     () => parseResourcesOption('X', 'png'),
-    /X: resources must be an array of extension strings/
+    /X: resources must be an array of extension\/filename strings/
   )
   t.assert.throws(
     () => parseResourcesOption('X', { png: true }),
-    /X: resources must be an array of extension strings/
+    /X: resources must be an array of extension\/filename strings/
   )
 })
 
@@ -69,15 +65,25 @@ test('parseResourcesOption: rejects non-string entries', (t) => {
   )
 })
 
-test('parseResourcesOption: rejects extensions with non-alphanum chars', (t) => {
-  // Hyphens, underscores, dots, whitespace all rejected -- the gate is /^[a-z0-9]+$/.
-  for (const bad of ['my-ext', 'my_ext', 'tar.gz', 'png ', '']) {
+test('parseResourcesOption: rejects dotted / whitespace / path / empty entries', (t) => {
+  // A dotted entry can't match (a file with an extension is keyed by it, not its
+  // basename); whitespace, path separators and empty strings are never valid. Dashes and
+  // underscores ARE allowed now (extensionless filenames) -- see the accept test below.
+  for (const bad of ['tar.gz', 'png ', 'a/b', '', '.']) {
     t.assert.throws(
       () => parseResourcesOption('X', [bad]),
-      /is not a valid extension/,
+      /is not a valid extension or filename/,
       `expected '${bad}' to be rejected`
     )
   }
+})
+
+test('parseResourcesOption: accepts extensions and extensionless filenames', (t) => {
+  const out = parseResourcesOption('X', ['png', '.SVG', 'LICENSE', 'Makefile', '.eslintrc', 'license-mit', 'code_of_conduct'])
+  t.assert.deepEqual(
+    [...out].toSorted(),
+    ['code_of_conduct', 'eslintrc', 'license', 'license-mit', 'makefile', 'png', 'svg']
+  )
 })
 
 test('parseResourcesOption: rejects code extensions (already always tracked)', (t) => {
@@ -103,6 +109,18 @@ test('classifyExtension: allowlisted extensions classify as "resource"', (t) => 
   const resources = parseResourcesOption('X', ['png', 'svg'])
   t.assert.equal(classifyExtension('icon.png', resources), 'resource')
   t.assert.equal(classifyExtension('logo.SVG', resources), 'resource')
+})
+
+test('classifyExtension: an extensionless file matches a filename entry by basename', (t) => {
+  const resources = parseResourcesOption('X', ['png', 'LICENSE', 'makefile'])
+  // No extension -> keyed by basename (case-insensitive).
+  t.assert.equal(classifyExtension('proj/LICENSE', resources), 'resource')
+  t.assert.equal(classifyExtension('proj/license', resources), 'resource')
+  t.assert.equal(classifyExtension('proj/Makefile', resources), 'resource')
+  // A file WITH an extension is keyed by the extension, never the basename.
+  t.assert.equal(classifyExtension('proj/license.txt', resources), 'unknown')
+  // An undeclared extensionless file is still unknown.
+  t.assert.equal(classifyExtension('proj/AUTHORS', resources), 'unknown')
 })
 
 test('classifyExtension: anything else classifies as "unknown"', (t) => {

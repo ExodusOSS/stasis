@@ -10,6 +10,7 @@ const ENV_KEYS = [
   'EXODUS_STASIS_BUNDLE',
   'EXODUS_STASIS_BUNDLE_FILE',
   'EXODUS_STASIS_RESOURCES_BUNDLE_FILE',
+  'EXODUS_STASIS_RESOURCES',
   'EXODUS_STASIS_DEBUG',
 ]
 const withEnv = (vars, fn) => (t) => {
@@ -66,6 +67,44 @@ test('loadConfig with scope=node_modules', (t) => {
   t.assert.equal(c.scope, 'node_modules')
   t.assert.equal(c.full, false)
   t.assert.deepEqual(c.values, { scope: 'node_modules' })
+})
+
+test('Config resources: option parses to a Set of extensions/filenames', (t) => {
+  const c = new Config({ resources: ['.PNG', 'svg', 'LICENSE'] })
+  t.assert.ok(c.resources instanceof Set)
+  t.assert.deepEqual([...c.resources].toSorted(), ['license', 'png', 'svg'])
+})
+
+test('Config resources: empty by default and omitted from json', (t) => {
+  const c = new Config()
+  t.assert.equal(c.resources.size, 0)
+  t.assert.equal(JSON.parse(c.json).resources, undefined, 'no resources key when empty')
+})
+
+test('Config resources: round-trips through json (sorted) and back via loadConfig', (t) => {
+  const c = new Config({ resources: ['svg', 'png', 'LICENSE'] })
+  t.assert.deepEqual(JSON.parse(c.json).resources, ['license', 'png', 'svg'])
+  const c2 = new Config()
+  c2.loadConfig(c.json)
+  t.assert.deepEqual([...c2.resources].toSorted(), ['license', 'png', 'svg'])
+})
+
+test('Config resources: env var parses (comma-separated) and a matching option agrees', withEnv({ EXODUS_STASIS_RESOURCES: 'png, svg' }, (t) => {
+  t.assert.deepEqual([...new Config().resources].toSorted(), ['png', 'svg'])
+  t.assert.deepEqual([...new Config({ resources: ['svg', 'png'] }).resources].toSorted(), ['png', 'svg'])
+}))
+
+test('Config resources: an option conflicting with the env var throws', withEnv({ EXODUS_STASIS_RESOURCES: 'png' }, (t) => {
+  t.assert.throws(() => new Config({ resources: ['png', 'svg'] }), /can not override stasis env/)
+}))
+
+test('Config resources: stasis.config.json conflicting with the env var throws', withEnv({ EXODUS_STASIS_RESOURCES: 'png' }, (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ resources: ['svg'] })), /can not override stasis\.config\.json/)
+}))
+
+test('Config resources: rejects a code extension', (t) => {
+  t.assert.throws(() => new Config({ resources: ['js'] }), /is a code extension/)
 })
 
 test('loadConfig with lock=frozen', (t) => {

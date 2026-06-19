@@ -5,8 +5,9 @@ import { isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { classifyExtension, parseResourcesOption, resolvePluginState } from './plugins.js'
+import { resolvePluginState } from './plugins.js'
 import { State } from './state.js'
+import { classifyExtension } from './util.js'
 
 // Synthetic stat for files served from the bundle in load mode. Webpack's resolver
 // + module factory call inputFileSystem.stat() to check existence and read size;
@@ -48,10 +49,11 @@ export class StasisWebpack {
   #resources
 
   constructor(options = {}) {
-    const { resources, ...rest } = options
-    this.#resources = parseResourcesOption('StasisWebpack', resources)
-    const { state } = resolvePluginState('StasisWebpack', rest, process.cwd())
+    const { state } = resolvePluginState('StasisWebpack', options, process.cwd())
     this.#state = state  // null when plugin should be inert
+    // resources is a Config field now (validated + coordinated against any preload in
+    // resolvePluginState); cache the resolved Set for the per-file classify hot path.
+    this.#resources = state?.config.resources ?? new Set()
   }
 
   apply(compiler) {
@@ -301,7 +303,7 @@ export class StasisWebpack {
         if (kind === 'unknown') {
           throw new Error(
             `StasisWebpack: unsupported extension for '${filePath}' -- ` +
-            `add its extension to the plugin's resources option or stop importing it`
+            `add its extension or filename to the plugin's resources option or stop importing it`
           )
         }
 

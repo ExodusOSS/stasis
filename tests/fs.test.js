@@ -41,8 +41,10 @@ test('moduleFileKey joins like before for real files, keys a module-root listing
   t.assert.equal(moduleFileKey('.', ''), '')
 })
 
-test('addFsFile classifies by extension with a resource fallback', withProject((t, dir) => {
-  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+test('addFsFile classifies by extension against the resources allowlist', withProject((t, dir) => {
+  // txt + bin are declared resources here; .json is always code. The same
+  // classifyExtension the bundler plugins use decides each.
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br'), resources: ['bin', 'txt'] })
 
   state.addFsFile(fileURL(dir, 'assets', 'message.txt'), Buffer.from('hello\n'))
   state.addFsFile(fileURL(dir, 'assets', 'data.json'), Buffer.from('{ "k": "v" }\n'))
@@ -58,6 +60,43 @@ test('addFsFile classifies by extension with a resource fallback', withProject((
   t.assert.equal(state.resources.get('assets/blob.bin'), BINARY.toString('base64'))
   // Hashed like any other file, so the lockfile attests it.
   t.assert.match(state.hashes.get('assets/blob.bin'), /^sha512-/)
+}))
+
+test('addFsFile throws on an undeclared (non-code, non-allowlisted) extension', withProject((t, dir) => {
+  // No allowlist: a .dat read is neither code nor a declared resource. Recording it as
+  // a resource would silently widen the attested set, so it throws -- the --fs hook
+  // turns this into a tainted, nothing-written run.
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  writeFileSync(join(dir, 'assets', 'thing.dat'), 'payload\n')
+  t.assert.throws(
+    () => state.addFsFile(fileURL(dir, 'assets', 'thing.dat'), Buffer.from('payload\n')),
+    /neither code nor a declared resource/
+  )
+}))
+
+test('addFsFile records an allowlisted extensionless filename (LICENSE) as a resource', withProject((t, dir) => {
+  // A `resources` entry can be a bare filename; a file with no extension is matched by
+  // its basename. LICENSE is declared here, so the fs-read is captured as a resource.
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br'), resources: ['LICENSE'] })
+  writeFileSync(join(dir, 'LICENSE'), 'MIT\n')
+  state.addFsFile(fileURL(dir, 'LICENSE'), Buffer.from('MIT\n'))
+  t.assert.equal(state.formats.get('LICENSE'), 'resource')
+  t.assert.equal(state.resources.get('LICENSE'), 'MIT\n')
+  t.assert.match(state.hashes.get('LICENSE'), /^sha512-/)
+}))
+
+test('addFsFile records a .jsx fs-read as code, never a resource', withProject((t, dir) => {
+  // .jsx/.tsx are code extensions with no Node loader format. The old fs-capture set
+  // omitted them, so they fell through to the resource branch and tripped addFile's
+  // code-can't-be-a-resource guard. Now classifyExtension calls them code: hashed +
+  // stored in this.sources, no format imposed.
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  writeFileSync(join(dir, 'comp.jsx'), 'export const C = () => null\n')
+  state.addFsFile(fileURL(dir, 'comp.jsx'), Buffer.from('export const C = () => null\n'))
+  t.assert.equal(state.sources.get('comp.jsx'), 'export const C = () => null\n')
+  t.assert.equal(state.resources.has('comp.jsx'), false)
+  t.assert.equal(state.formats.get('comp.jsx'), undefined, 'no Node loader format for .jsx')
+  t.assert.match(state.hashes.get('comp.jsx'), /^sha512-/)
 }))
 
 test('addFsDir stores a sorted JSON listing as a directory payload, integrity over the JSON', withProject((t, dir) => {
@@ -80,7 +119,7 @@ test('addFsDir is idempotent for an identical listing regardless of input order'
 }))
 
 test('getFsFile / getFsDir distinguish files from directories and miss cleanly', withProject((t, dir) => {
-  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br'), resources: ['bin', 'txt'] })
   state.addFsFile(fileURL(dir, 'assets', 'message.txt'), Buffer.from('hello\n'))
   state.addFsDir(fileURL(dir, 'assets'), ['message.txt', 'data.json', 'blob.bin'])
 
@@ -97,7 +136,7 @@ test('getFsFile / getFsDir distinguish files from directories and miss cleanly',
 
 test('fs captures round-trip through a written bundle into a load-mode State', withProject((t, dir) => {
   const bundleFile = join(dir, 'snapshot.br')
-  const cap = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile })
+  const cap = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile, resources: ['bin', 'txt'] })
   cap.addFsFile(fileURL(dir, 'assets', 'message.txt'), Buffer.from('hello\n'))
   cap.addFsFile(fileURL(dir, 'assets', 'blob.bin'), BINARY)
   cap.addFsDir(fileURL(dir, 'assets'), ['message.txt', 'blob.bin', 'data.json'])
@@ -163,7 +202,7 @@ test('addFsFile records a type-less .js without a format so the loader stays aut
 }))
 
 test('getFsStat classifies recorded files and directories, undefined otherwise', withProject((t, dir) => {
-  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br'), resources: ['bin', 'txt'] })
   state.addFsFile(fileURL(dir, 'assets', 'message.txt'), Buffer.from('hello\n'))
   state.addFsDir(fileURL(dir, 'assets'), ['message.txt'])
   t.assert.equal(state.getFsStat(fileURL(dir, 'assets', 'message.txt')), 'file')
@@ -172,7 +211,7 @@ test('getFsStat classifies recorded files and directories, undefined otherwise',
 }))
 
 test('getFsStat reports ancestor directories implied by a recorded file', withProject((t, dir) => {
-  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br'), resources: ['bin', 'txt'] })
   mkdirSync(join(dir, 'assets', 'sub'))
   writeFileSync(join(dir, 'assets', 'sub', 'deep.txt'), 'x\n')
   // Only the file is recorded -- the intermediate dir 'assets/sub' is never readdir'd.

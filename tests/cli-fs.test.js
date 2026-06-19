@@ -236,6 +236,43 @@ test('run --fs requires the mode argument (sync or async)', (t) => {
   t.assert.match(bogus.stderr, /--fs must be 'sync' or 'async'/)
 })
 
+test('run --fs taints the run (writes nothing) on a read of an undeclared extension', withTmp((t, tmp) => {
+  // .dat is neither code nor in the fixture's resources allowlist (["bin","txt"]), so
+  // addFsFile throws and the --fs hook aborts the capture: the program still runs, but no
+  // bundle/lockfile is written and the user is warned -- no silent attestation widening.
+  writeFileSync(join(tmp, 'src', 'thing.dat'), 'PAYLOAD')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    'console.log(`dat:${readFileSync(new URL("./thing.dat", import.meta.url), "utf8")}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`) // the program's own read still succeeds
+  t.assert.equal(r.stdout, 'dat:PAYLOAD\n')
+  t.assert.match(r.stderr, /--fs: capture aborted/)
+  t.assert.match(r.stderr, /neither code nor a declared resource/)
+  t.assert.ok(!existsSync(bundlePath), 'an undeclared read writes no bundle')
+}))
+
+test('run --fs --resources declares an extra extension so its read is captured', withTmp((t, tmp) => {
+  // Drop the fixture's config resources so the --resources flag (-> EXODUS_STASIS_RESOURCES)
+  // is the sole allowlist; declaring 'dat' lets the otherwise-undeclared read be captured.
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  writeFileSync(join(tmp, 'src', 'thing.dat'), 'PAYLOAD')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    'console.log(`dat:${readFileSync(new URL("./thing.dat", import.meta.url), "utf8")}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', '--resources=dat', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'dat:PAYLOAD\n')
+  t.assert.ok(existsSync(bundlePath), 'declared extension -> bundle written')
+  t.assert.equal(decode(bundlePath).formats['src/thing.dat'], 'resource')
+}))
+
 test('stasis-core run --fs captures and serves the same way', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const core = (args) => {

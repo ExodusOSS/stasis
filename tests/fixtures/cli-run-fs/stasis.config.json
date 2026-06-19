@@ -1,1 +1,1 @@
-{ "scope": "full" }
+{ "scope": "full", "resources": ["bin", "txt"] }
