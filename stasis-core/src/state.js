@@ -973,8 +973,25 @@ export class State {
         // No `type` in the nearest package.json: Node decides .js/.ts by
         // module-syntax detection, so either variant is legitimate and the
         // caller's reported format wins. When no format was provided at all
-        // (e.g. bundler plugins), keep the legacy commonjs default.
-        format = { __proto__: null, '.js': 'commonjs', '.ts': 'commonjs-typescript' }[extname(file)]
+        // (e.g. bundler plugins, whose afterResolve/onLoad pass none), defer to
+        // a format already recorded for this file THIS session before falling
+        // back to the legacy commonjs default. The runtime loader records Node's
+        // authoritative module/commonjs choice (hooks.js's load hook), so a
+        // later no-format capture of the same file must KEEP a known `module`
+        // rather than re-default it to commonjs -- which would both mis-attest
+        // the bundle and collide at the noupsert below (and, for a bundler
+        // sidecar whose formats merge into the parent's unified lockfile, at
+        // #mergedFormats). A sidecar's loader records land in the parent's
+        // formats, so consult it too. Only an extension-appropriate code format
+        // is reused; a stale resource tag from a conflicting prior capture falls
+        // through to the default so the conflict still surfaces at noupsert.
+        const variants = {
+          __proto__: null,
+          '.js': ['commonjs', 'module'],
+          '.ts': ['commonjs-typescript', 'module-typescript'],
+        }[extname(file)]
+        const known = this.formats.get(file) ?? this.#parent?.formats.get(file)
+        format = variants?.includes(known) ? known : variants?.[0]
       }
     }
 
