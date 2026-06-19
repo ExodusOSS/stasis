@@ -1646,12 +1646,14 @@ export class State {
   //   - under-recorded require()s whose target the bundle carries (Node's module
   //     cache hid the require() from the resolve hook -- another module loaded the
   //     target first), and
-  //   - resolve-only edges whose target it does NOT carry: require.resolve() of a
-  //     module never loaded in-process (an optional-dependency probe, a forked-
+  //   - resolve-only edges whose target the live hooks never loaded: require.resolve()
+  //     of a module never loaded in-process (an optional-dependency probe, a forked-
   //     worker child like worker-farm's, a .node addon). The resolution is real and
-  //     must be attested so the same require.resolve() returns the same path at
-  //     load; the file simply has no bytes -- require.resolve returns a path, load()
-  //     never runs for it, so getFile is never asked to serve it.
+  //     must be attested so the same require.resolve() returns the same path at load.
+  //     Whether its BYTES get captured is decided downstream in #backfillBeforeWrite:
+  //     a SAME-package target (worker-farm's child) is bundled there; a cross-package
+  //     or un-bundlable one (a .node addon) stays edge-only -- served its attested
+  //     path at load with no bytes (require.resolve returns a path; load() never runs).
   // Guards:
   //   - skip out-of-scope targets (mirroring #collectMissingImportedFiles) so a
   //     node_modules-scope artifact doesn't attest workspace resolutions it isn't
@@ -1778,20 +1780,28 @@ export class State {
     const missing = this.#collectMissingImportedFiles()
     if (missing.size === 0) return
 
+    // First, bundle the bytes of resolve-only targets (require.resolve() of a module
+    // never loaded in-process) that live in the SAME package as the file that
+    // resolved them -- e.g. worker-farm's require.resolve('./child') for a worker it
+    // forks into a separate process. A sibling that ships inside the package belongs
+    // with it. Cross-package resolve-only targets are deliberately left edge-only
+    // (see below).
+    this.#backfillSamePackageResolutions(missing)
+
     const isStasisCoreFile = (file) => STASIS_CORE_FILE_RE.test(`/${file}`)
 
     // Split the uncaptured targets. stasis-core's own preload-cached files are the
     // one case we both can and must reconstruct -- bytes AND transitive edges (the
-    // BFS below). Everything else uncaptured is a resolution we attest WITHOUT
-    // bundling: require.resolve() of a module never loaded in-process (an optional-
-    // dependency probe, a forked-worker child like worker-farm's), or a file Node
-    // can't serve from a bundle anyway (a .node addon). Those edges stay in
-    // this.imports -- the user needs the resolution pinned even though the bytes are
-    // absent -- and we do nothing further with them here. The load-time getFile
-    // gate, not this capture-time pass, enforces the trust boundary: an actual load
-    // of un-bundled bytes still fails closed there, while require.resolve (which
-    // never loads) is served the attested path.
-    const stasisCoreMissing = [...missing].filter((file) => isStasisCoreFile(file))
+    // BFS below). Anything still uncaptured is a resolution we attest WITHOUT
+    // bundling: a CROSS-package require.resolve() (an optional-dependency probe, a
+    // peer resolved but never loaded -- its bytes belong to the OTHER package's
+    // attestation, not this importer's), or a file Node can't serve from a bundle
+    // anyway (a .node addon). Those edges stay in this.imports -- the user needs the
+    // resolution pinned even though the bytes are absent -- and we do nothing further
+    // with them here. The load-time getFile gate, not this capture-time pass,
+    // enforces the trust boundary: an actual load of un-bundled bytes still fails
+    // closed there, while require.resolve (which never loads) is served the attested path.
+    const stasisCoreMissing = [...missing.keys()].filter((file) => isStasisCoreFile(file))
     if (stasisCoreMissing.length === 0) return
 
     const preloadRel = this.#preloadRoot ? relative(this.root, this.#preloadRoot) : null
@@ -1865,19 +1875,73 @@ export class State {
     }
   }
 
+  // Bundle the bytes of resolve-only require.resolve() targets that share a package
+  // with the file that resolved them. The live load hook never fired for these (the
+  // module was resolved but never loaded -- a forked worker, an in-package optional
+  // submodule), so addFile never saw their bytes; #backfillObservedResolutions /
+  // the resolve hook recorded only the edge. A target in the SAME package as its
+  // importer ships with that package, so we capture it now; a target in a DIFFERENT
+  // package stays edge-only (its bytes are the other package's responsibility).
+  //
+  // Capture-time only. In load/frozen modes the attestation is authoritative and the
+  // bytes may be off-disk, so addFile would either read a file that's gone or reject
+  // an unattested addition -- skip entirely. We only synthesize new attested files
+  // when actually building a lockfile and/or bundle from disk (lock/bundle add or
+  // replace). addFile then records the hash (lockfile, always) and -- when a bundle
+  // is being written -- the bytes, exactly as for any captured file, so the lockfile
+  // stays identical whether or not a bundle is co-written.
+  #backfillSamePackageResolutions(missing) {
+    if (this.config.frozen || this.config.frozenBundle || this.config.loadBundle) return
+    if (!this.config.writeLockfile && !this.config.writeBundle) return
+    for (const [file, parents] of missing) {
+      if (![...parents].some((parent) => this.#sameModule(parent, file))) continue
+      try {
+        this.addFile(pathToFileURL(resolve(this.root, file)).toString(), {})
+      } catch {
+        // Un-bundlable same-package target (a .node addon or other non-UTF-8 binary,
+        // or a file no longer on disk): leave it edge-only, exactly as before. The
+        // resolution stays pinned; only the bytes are skipped.
+      }
+    }
+  }
+
+  // Whether two project-relative files belong to the same package. Under
+  // node_modules, the package is the node_modules bucket directory (so this handles
+  // scoped names and nested/duplicate copies); a file under node_modules is never
+  // the same package as one outside it. Elsewhere (workspace / full scope), the
+  // package is the nearest package.json directory.
+  #sameModule(a, b) {
+    const na = splitNodeModulesPath(a)
+    const nb = splitNodeModulesPath(b)
+    if (na || nb) return na?.dir === nb?.dir
+    try {
+      return this.#nearestPackageJsonFor(dirname(resolve(this.root, a))) ===
+             this.#nearestPackageJsonFor(dirname(resolve(this.root, b)))
+    } catch {
+      return false
+    }
+  }
+
   // Project-relative files referenced by `this.imports` that the live hooks
   // didn't capture into this.sources / this.resources, restricted to the
   // in-scope set (full: everything under state.root; nm: only node_modules).
   // Out-of-scope files are NOT included -- the live hooks correctly skip them
   // (workspace files under nm-scope), and including them would force the
   // backfill caller to wave away false alarms.
+  //
+  // Returns a Map of project-relative file -> Set of the importing files that
+  // reference it. The importer set lets #backfillSamePackageResolutions decide
+  // whether a resolve-only target shares a package with whoever resolved it.
   #collectMissingImportedFiles() {
-    const missing = new Set()
+    const missing = new Map()
     for (const [, byParent] of this.imports) {
-      for (const [, specifiers] of byParent) {
+      for (const [parent, specifiers] of byParent) {
         for (const [, file] of specifiers) {
           if (typeof file !== 'string') continue
-          if (missing.has(file)) continue
+          // Already known missing: just record this additional importer and skip
+          // the (canonicalizing) capture/scope checks already done for it.
+          const seen = missing.get(file)
+          if (seen !== undefined) { seen.add(parent); continue }
           // Union of three "captured" signals: hashes (addFile ran -- present
           // under any lock mode), sources/resources (bundle pre-seeded -- present
           // under bundle=load even without a lockfile). Any one suffices; a
@@ -1885,7 +1949,7 @@ export class State {
           if (this.hashes.has(file) || this.sources.has(file) || this.resources.has(file)) continue
           const url = pathToFileURL(resolve(this.root, file)).toString()
           if (!this.config.full && !this.inNodeModules(url)) continue
-          missing.add(file)
+          missing.set(file, new Set([parent]))
         }
       }
     }

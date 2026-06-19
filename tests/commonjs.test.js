@@ -390,16 +390,16 @@ test('run --bundle=load records and resolves a require.resolve() edge', withTmp(
   t.assert.equal(load.stdout, 'index.js DEP\n')
 }))
 
-// A resolve-only require.resolve() -- a module resolved but NEVER loaded in-process
-// -- must (a) not crash capture and (b) keep its resolution edge so the same
-// require.resolve() returns the same path at load, EVEN THOUGH the target's bytes
-// are not in the bundle. This is the worker-farm shape: at import time it does
-// require.resolve('./child') for a worker it forks into a separate process, so the
-// child is never loaded by the parent and never bundled -- but if the edge is
-// dropped, importing worker-farm throws at load when that require.resolve can't be
-// satisfied. (On Node 26.x the edge routes through the resolve hook and previously
-// tripped #backfillBeforeWrite's missing-file assertion, crashing capture.)
-test('run --bundle=load keeps a resolve-only require.resolve() edge whose target is not bundled', withTmp((t, tmp) => {
+// A resolve-only require.resolve() -- a module resolved but NEVER loaded in-process.
+// This is the worker-farm shape: at import time it does require.resolve('./child')
+// for a worker it forks into a separate process, so the child is never loaded by the
+// parent. The live load hook never fires for it, so addFile never sees its bytes;
+// only the resolution edge is recorded. Because the child lives in the SAME package
+// as the file that resolved it, its bytes ARE bundled at capture -- a sibling that
+// ships inside the package belongs with it. The edge is recorded too, so the same
+// require.resolve() returns the same path at load. (Cross-package resolve-only
+// targets stay edge-only -- the next test.)
+test('run --bundle=add bundles a same-package resolve-only require.resolve() target', withTmp((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ro', version: '1.0.0', private: true }))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
   writeFileSync(join(tmp, 'index.mjs'), "import wf from 'wf'\nimport { basename } from 'node:path'\nconsole.log(basename(wf))\n")
@@ -408,7 +408,8 @@ test('run --bundle=load keeps a resolve-only require.resolve() edge whose target
   writeFileSync(join(wf, 'package.json'), JSON.stringify({ name: 'wf', version: '1.0.0', main: 'index.js' }))
   // index.js resolves ./child but never require()s it (a forked worker, in real life)
   writeFileSync(join(wf, 'index.js'), "module.exports = require.resolve('./child')\n")
-  writeFileSync(join(wf, 'child.js'), "module.exports = 'CHILD never loaded in this process'\n")
+  const childSource = "module.exports = 'CHILD never loaded in this process'\n"
+  writeFileSync(join(wf, 'child.js'), childSource)
 
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
@@ -423,16 +424,19 @@ test('run --bundle=load keeps a resolve-only require.resolve() edge whose target
   const edgeRecorded = Object.values(lock.imports).some((byParent) =>
     Object.values(byParent).some((specs) => specs['./child'] === 'node_modules/wf/child.js'))
   t.assert.ok(edgeRecorded, 'resolve-only require.resolve("./child") edge recorded')
-  // ... but the target's bytes are NOT bundled (it was never loaded)
+  // ... and the same-package target's bytes ARE captured (hashed in the lockfile) ...
   const wfFiles = lock.modules['node_modules/wf']?.files ?? {}
   t.assert.ok('index.js' in wfFiles, 'wf/index.js is captured')
-  t.assert.ok(!('child.js' in wfFiles), 'wf/child.js is NOT captured (resolve-only)')
+  t.assert.ok('child.js' in wfFiles, 'wf/child.js IS captured (same-package resolve target)')
+  // ... with its content in the bundle, ready to ship with the package
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.modules['node_modules/wf'].files['child.js'], childSource,
+    'wf/child.js bytes are in the bundle')
 
   // frozen load with node_modules gone: require.resolve('./child') still resolves to
-  // the recorded path even though child.js exists neither on disk nor in bundle. Skip
-  // where Node can't serve an off-disk require.resolve target from a bundle-served CJS
-  // module (see RESOLVE_RESOLVE_FROM_BUNDLE); the edge-kept regression is covered by
-  // the unconditional assertions above.
+  // the recorded path. Skip where Node can't serve an off-disk require.resolve target
+  // from a bundle-served CJS module (see RESOLVE_RESOLVE_FROM_BUNDLE); the bundling
+  // and edge assertions above are unconditional.
   if (!RESOLVE_RESOLVE_FROM_BUNDLE) {
     t.diagnostic(`skipping bundle-only require.resolve load on ${process.version} (Node loader limitation)`)
     return
@@ -446,6 +450,42 @@ test('run --bundle=load keeps a resolve-only require.resolve() edge whose target
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'child.js\n')
+}))
+
+// The same-package bundling above must NOT extend to a CROSS-package resolve-only
+// target: require.resolve() of a separate dependency that's never loaded keeps its
+// edge pinned but leaves its bytes OUT of this bundle -- they belong to that other
+// package's attestation, not the importer's.
+test('run --bundle=add does NOT bundle a cross-package resolve-only require.resolve() target', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'xp', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.mjs'), "import './r.cjs'\n")
+  // r.cjs resolves 'dep' but never require()s it -- dep is a DIFFERENT package
+  writeFileSync(join(tmp, 'r.cjs'), "module.exports = require.resolve('dep')\nconsole.log('ok')\n")
+  const dep = join(tmp, 'node_modules', 'dep')
+  mkdirSync(dep, { recursive: true })
+  writeFileSync(join(dep, 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(dep, 'index.js'), "module.exports = 'DEP never loaded'\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'ok\n')
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  // the resolve-only edge IS recorded ...
+  const edgeRecorded = Object.values(lock.imports).some((byParent) =>
+    Object.values(byParent).some((specs) => specs.dep === 'node_modules/dep/index.js'))
+  t.assert.ok(edgeRecorded, 'resolve-only require.resolve("dep") edge recorded')
+  // ... but the cross-package target is NOT captured -- not in the lockfile ...
+  t.assert.ok(!('node_modules/dep' in (lock.modules ?? {})),
+    'dep is NOT a captured module (cross-package resolve-only)')
+  // ... and not in the bundle
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.ok(!('node_modules/dep' in (decoded.modules ?? {})), 'dep bytes are NOT in the bundle')
 }))
 
 // require()/require.resolve() resolve under Node's REQUIRE conditions ([require, node,
