@@ -108,10 +108,23 @@ test('app code importing stasis-core (preload-cached) gets its files captured in
   t.assert.equal(configEdges['./state-util.js'], 'node_modules/@exodus/stasis-core/src/state-util.js',
     'config.js -> ./state-util.js must be in the bundle (the user-reported missing edge)')
 
-  // The transitively-reachable internal files (config.js, state-util.js,
-  // bundle.js, lockfile.js, util.js, brotli.js) must all be captured.
+  // The version-shim chain must be captured too: state.js statically imports
+  // ./package.cjs (a CJS re-export of package.json so reading the version survives
+  // bundling), and package.cjs require()s ../package.json. The backfill recovers BOTH
+  // edges and BOTH files (the `.cjs` and `require('../package.json')` arms), so a
+  // self-import bundle stays complete rather than dangling a reference.
+  t.assert.equal(stasisEdges['./package.cjs'], 'node_modules/@exodus/stasis-core/src/package.cjs',
+    'state.js -> ./package.cjs (version shim) must be in the bundle')
+  const cjsEdges = bundle.imports?.['node, import, module-sync, node-addons']?.['node_modules/@exodus/stasis-core/src/package.cjs']
+  t.assert.ok(cjsEdges, 'package.cjs must have outgoing edges recorded')
+  t.assert.equal(cjsEdges['../package.json'], 'node_modules/@exodus/stasis-core/package.json',
+    'package.cjs -> ../package.json must be in the bundle')
+
+  // The transitively-reachable internal files (config.js, state-util.js, bundle.js,
+  // lockfile.js, util.js, brotli.js, the package.cjs version shim + package.json) must
+  // all be captured.
   const stasisBucketFiles = Object.keys(bundle.modules['node_modules/@exodus/stasis-core'].files).toSorted()
-  for (const expected of ['src/config.js', 'src/state.js', 'src/state-util.js']) {
+  for (const expected of ['src/config.js', 'src/state.js', 'src/state-util.js', 'src/package.cjs', 'package.json']) {
     t.assert.ok(stasisBucketFiles.includes(expected),
       `stasis-core bucket must include ${expected} (transitively reachable from state.js); got ${stasisBucketFiles.join(', ')}`)
   }

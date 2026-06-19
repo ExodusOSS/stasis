@@ -1,6 +1,6 @@
-// resolvePluginState behavior when no preload is active in the process.
-// Kept in its own file so the preload registry stays empty for both tests --
-// once a preload is constructed in a process it can't be cleared.
+// resolvePluginState + write-path collision behavior when NO preload is active in the
+// process. Kept in its own file so the preload registry stays empty -- once a preload is
+// constructed in a process it can't be cleared.
 
 import { test } from 'node:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolvePluginState } from '@exodus/stasis-core/plugins'
+import { State } from '@exodus/stasis-core/state'
 
 const fixture = () => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-no-preload-'))
@@ -99,6 +100,29 @@ test('lock=none paired with an active bundle mode is NOT a partial opt-out (bund
           `lock=none + bundle=${bundle} must not be treated as a partial opt-out`)
       }
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('two write-mode States collide on the same write path even with NO preload', (t) => {
+  // Collision detection is driven by the process-wide State registry, not by a preload:
+  // two write-intent States targeting the same explicit bundle path conflict even though
+  // neither is a preload (and none exists). This is the cross-State guard working without
+  // the old preload dependency -- and, via the globalThis registry, across stasis-core
+  // copies too.
+  const dir = fixture()
+  try {
+    const bundleFile = join(dir, 'shared.br')
+    const first = new State(dir, { lock: 'ignore', bundle: 'add', bundleFile })
+    t.assert.ok(first, 'first writer constructs')
+    t.assert.equal(State.preload, undefined, 'no preload is involved')
+    t.assert.throws(
+      () => new State(dir, { lock: 'ignore', bundle: 'add', bundleFile }),
+      /already claimed/
+    )
+    // A distinct path is fine.
+    t.assert.doesNotThrow(() => new State(dir, { lock: 'ignore', bundle: 'add', bundleFile: join(dir, 'other.br') }))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

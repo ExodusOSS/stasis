@@ -12,6 +12,7 @@ import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
 import { fileMapToObject, moduleFileKey, objectToMaps, splitNodeModulesPath } from './util.js'
+import corePackage from './package.cjs'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
 // the destructured `const` captures function values at this module's eval time, so
@@ -43,31 +44,29 @@ function readPackageJSON(pkgAbsolute) {
   return JSON.parse(buf.toString())
 }
 
+// This stasis-core copy's own version, via src/package.cjs (a CommonJS re-export of
+// package.json -- bundler-safe, unlike a runtime fs read or `import ... with`). A child
+// (sidecar) State must EXACTLY match its parent's version (enforced in the constructor's
+// parent branch): a sidecar shares the parent's maps by reference and reads its private
+// fields, so a version skew between two @exodus/stasis-core copies in one process would
+// be unsound.
+const VERSION = corePackage.version
+
 // TODO: stricter format validation
 
-let preload
-const liveStates = new Set()
-
-// Process-wide write-target claim registry: every write-mode State adds its
-// bundleFile, resourcesBundleFile, and lockFile (canonicalized) here at
-// construction; a second writer claiming the same path throws. Module-level
-// rather than per-State because several write-intent States can be live in one
-// process -- a parent and its sidecars, plus any independent top-level State a
-// CLI/env run constructs (e.g. with a custom config.lockFile) -- each with its
-// own per-instance registry, so a per-State Set would miss a cross-State
-// collision. Canonicalize via realpathSync-when-extant + lexical-resolve
-// fallback so a symlinked `/x/lock.json -> /shared/lock.json` and the literal
-// `/shared/lock.json` compare equal. Read-only modes (load / frozen) don't
-// claim -- they legitimately point at a path the writer produced.
-const claimedPaths = new Map()
-
-function claimWritePath(label, value) {
-  if (!value) return
-  const canonical = canonicalizePath(value)
-  const existing = claimedPaths.get(canonical)
-  assert.ok(existing === undefined,
-    `${label} '${value}' is already claimed by ${existing} of another live State`)
-  claimedPaths.set(canonical, label)
+// Process-wide registry of every live State, kept on globalThis (not a module-local
+// variable) so it is shared across DUPLICATE stasis-core copies in one process -- e.g. a
+// stasis bundle that carries its own stasis-core alongside the outer loader's. A
+// cross-realm `Symbol.for` key makes every state.js copy reach the same Set. Two roles:
+//   - the preload (top-level) State is the unique member flagged isPreload, found by
+//     State.preload; constructing a second preload (from ANY copy) is rejected, so the
+//     "one top-level state" invariant holds process-wide; and
+//   - write-target collision detection (#claimWritePath) scans every member's claimed
+//     paths, so no two live States write the same lockfile/bundle/resourcesBundle path --
+//     across copies, AND whether or not a preload exists.
+const STATES_KEY = Symbol.for('@exodus/stasis-core/states')
+function liveStates() {
+  return (globalThis[STATES_KEY] ??= new Set())
 }
 
 export class State {
@@ -81,6 +80,15 @@ export class State {
   config
   root
   #parent
+
+  // True iff this is THE preload (top-level) State. Exposed via `get isPreload()` so
+  // State.preload can find the unique flagged member of the global registry across copies.
+  #isPreload = false
+
+  // This State's claimed write-target paths (canonicalized -> label), for cross-State
+  // collision detection. Exposed via `claimedWritePathLabel()` so the global scan in
+  // #claimWritePath can consult States from other stasis-core copies.
+  #claims = new Map()
 
   // For a parent: the set of sidecar States constructed against it. The unified
   // lockfile (built by the parent's lockData via #mergedImports/#mergedFormats)
@@ -193,10 +201,22 @@ export class State {
   constructor(root, options = {}) {
     const { preload: isPreload = false, parent: parentState, preloadRoot, ...configOptions } = options
     this.config = new Config(configOptions)
-    if (isPreload) assert.ok(!preload, 'Only one preload Stasis instance is supported')
+    if (isPreload) assert.ok(!State.preload, 'Only one preload Stasis instance is supported')
     assert.ok(!(isPreload && parentState), 'preload and parent are mutually exclusive')
+    this.#isPreload = isPreload
 
     if (parentState) {
+      // A child (sidecar) shares the parent's maps by reference and inherits its lockfile
+      // attestation, so the parent MUST be the exact same stasis-core VERSION -- but it
+      // need NOT be the same module copy. A bundle that carries its OWN stasis-core (e.g.
+      // a webpack script + StasisWebpack run under `stasis run --bundle=load`) has the
+      // plugin's copy coordinate with the OUTER loader's preload across the class brand.
+      // The exact-version match makes that sound; everything the sidecar reads from the
+      // parent goes through the parent's PUBLIC surface (`version`, `sidecarInheritance`,
+      // `registerSidecar`, and the shared public maps), never a private field a foreign
+      // class brand would deny. A version skew is unsound -- reject it with a clear error.
+      assert.equal(parentState.version, VERSION,
+        `child State version '${VERSION}' must exactly match parent version '${parentState.version}'`)
       // Sidecar mode: short-circuit the on-disk discovery path. Lockfile data is shared by
       // reference with the parent; only the sidecar's bundleFile (if any) is parsed here.
       this.#parent = parentState
@@ -204,34 +224,32 @@ export class State {
       this.hashes = parentState.hashes
       this.entries = parentState.entries
       this.modules = parentState.modules
-      // Sidecar inherits the parent's preloadRoot so plugin-driven write()s
-      // (StasisWebpack / StasisEsbuild done-hook saves) backfill stasis-core's
-      // internal edges the same way the parent does.
-      this.#preloadRoot = parentState.#preloadRoot
-      // Inherit the parent's lockfile attestation maps so #mergeBundleMetadata
-      // cross-checks the sidecar bundle against the same attestation the parent
-      // already loaded. Without this the sidecar would silently trust whatever
-      // formats / imports its own bundle declared, opening a hole where a
-      // tampered sidecar bundle could redirect a resolution or flip a format
-      // (commonjs <-> module-typescript) for hash-valid bytes -- the byte check
-      // alone doesn't cover that.
-      this.#lockImports = parentState.#lockImports
-      this.#lockFormats = parentState.#lockFormats
-      this.#lockfileLoaded = parentState.#lockfileLoaded
+      // Inherit, via the parent's public sidecarInheritance() so it works across copies:
+      //  - preloadRoot, so plugin-driven write()s (StasisWebpack / StasisEsbuild done-hook
+      //    saves) backfill stasis-core's internal edges the same way the parent does;
+      //  - the lockfile attestation maps, so #mergeBundleMetadata cross-checks the sidecar
+      //    bundle against the same attestation the parent loaded -- without this a tampered
+      //    sidecar bundle could redirect a resolution or flip a format (commonjs <->
+      //    module-typescript) for hash-valid bytes, which the byte check alone misses.
+      const inherited = parentState.sidecarInheritance()
+      this.#preloadRoot = inherited.preloadRoot
+      this.#lockImports = inherited.lockImports
+      this.#lockFormats = inherited.lockFormats
+      this.#lockfileLoaded = inherited.lockfileLoaded
       assert.ok(this.config.bundleFile, 'sidecar State requires bundleFile')
-      // Claim the bundleFile (and resourcesBundleFile under the split layout) via the
+      // Claim the bundleFile (and resourcesBundleFile under the split layout) against the
       // process-wide registry so two write-intent States anywhere -- whether a sibling
       // sidecar or an independent top-level State (a CLI/env run with a custom
       // lockfile/bundle path) -- can't silently target the same on-disk file
-      // (last-write-wins on `beforeExit`). Only writing
-      // States claim; read-only modes (load / frozen) may legitimately share a path
-      // with the writer that produced the file. The Config's own pairwise cross-path
-      // check (config.js:#checkInvariants) already rejects intra-State collisions, so
-      // claimWritePath only fires on cross-State conflicts.
+      // (last-write-wins on `beforeExit`). Only writing States claim; read-only modes
+      // (load / frozen) may legitimately share a path with the writer that produced the
+      // file. The Config's own pairwise cross-path check (config.js:#checkInvariants)
+      // already rejects intra-State collisions, so #claimWritePath only fires on
+      // cross-State conflicts.
       if (this.config.writeBundle) {
-        claimWritePath(`sidecar bundleFile '${this.config.bundleFile}'`, this.config.bundleFile)
+        this.#claimWritePath(`sidecar bundleFile '${this.config.bundleFile}'`, this.config.bundleFile)
         if (this.config.resourcesBundleFile) {
-          claimWritePath(`sidecar resourcesBundleFile '${this.config.resourcesBundleFile}'`,
+          this.#claimWritePath(`sidecar resourcesBundleFile '${this.config.resourcesBundleFile}'`,
             this.config.resourcesBundleFile)
         }
       }
@@ -297,14 +315,14 @@ export class State {
       // ARE contributors -- their addImport / addFile observations have to land
       // in the unified lockfile, otherwise a `lock=frozen` re-run rejects them
       // as unattested.
-      if (this.config.writeBundle) parentState.#sidecars.add(this)
-      liveStates.add(this)
+      if (this.config.writeBundle) parentState.registerSidecar(this)
+      liveStates().add(this)
       return
     }
 
     // Preload-uniqueness invariant must be checked before construction proceeds; the
-    // actual `preload = this` registration happens after construction succeeds so a
-    // throw in setup can't leave a half-built preload reference behind.
+    // actual liveStates() registration happens after construction succeeds so a throw in
+    // setup can't leave a half-built (and, for a preload, singleton-claiming) State behind.
     const potentialRoots = []
     let cursor = root
     while (cursor) {
@@ -503,22 +521,22 @@ export class State {
     if (this.config.frozen) assert.ok(lockfileLoaded, 'No lockfile, but attempting to run in frozen mode')
     if (this.config.frozenBundle) assert.ok(this.#bundleSources !== null, 'No bundle, but attempting to run in frozen bundle mode')
 
-    // Register only after every fallible step succeeds, so a thrown error during config
-    // discovery / lockfile / bundle parsing leaves the registry untouched. Claim this
-    // State's write targets in the process-wide registry so a sidecar OR an independent
-    // top-level State (a CLI/env run with a custom lockfile/bundle path) constructed
-    // against the same path can't silently target the same file. Load / frozen / no-bundle modes don't claim --
-    // they legitimately read what a previous writer produced. lockFile is claimed too
-    // (only by writing parents -- sidecars don't write the lockfile and the explicit
-    // path may legitimately point at the parent's lockfile under unification).
+    // Claim this State's write targets against the process-wide registry (liveStates),
+    // so a sidecar OR an independent top-level State -- in this OR another stasis-core
+    // copy -- can't silently target the same on-disk file. Load / frozen / no-bundle modes
+    // don't claim (they legitimately read what a previous writer produced). lockFile is
+    // claimed only by writing top-level States -- sidecars don't write the lockfile, and
+    // the explicit path may legitimately point at the parent's under unification. The
+    // State itself is added to liveStates() below, AFTER every fallible step (including
+    // these claims), so a throw during discovery/parsing/claiming never leaves a dead member.
     if (this.config.writeBundle && this.config.bundleFile) {
-      claimWritePath(`bundleFile '${this.config.bundleFile}'`, this.config.bundleFile)
+      this.#claimWritePath(`bundleFile '${this.config.bundleFile}'`, this.config.bundleFile)
     }
     if (this.config.writeBundle && this.config.resourcesBundleFile) {
-      claimWritePath(`resourcesBundleFile '${this.config.resourcesBundleFile}'`, this.config.resourcesBundleFile)
+      this.#claimWritePath(`resourcesBundleFile '${this.config.resourcesBundleFile}'`, this.config.resourcesBundleFile)
     }
     if (this.config.writeLockfile && this.config.lockFile) {
-      claimWritePath(`lockFile '${this.config.lockFile}'`, this.config.lockFile)
+      this.#claimWritePath(`lockFile '${this.config.lockFile}'`, this.config.lockFile)
     }
 
     // preloadRoot is opt-in -- only the runtime loader (hooks.js's initState)
@@ -530,8 +548,7 @@ export class State {
       this.#preloadRoot = preloadRoot
     }
 
-    if (isPreload) preload = this
-    liveStates.add(this)
+    liveStates().add(this)
   }
 
   // Cross-check bundle metadata (entries/modules) with what the lockfile already
@@ -732,18 +749,69 @@ export class State {
     assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)
   }
 
+  // The one preload (top-level) State, or undefined. Scans the process-wide registry
+  // (shared across stasis-core copies) for the member flagged isPreload.
   static get preload() {
-    return preload
+    for (const state of liveStates()) if (state.isPreload) return state
+    return undefined
   }
 
-  // Back-compat accessor: returns the preload State if one exists, else the sole live State.
-  // Throws when several non-preload States coexist -- callers in that situation must reach
-  // for State.preload (or hold their own reference). Returns undefined when no State is live.
-  static get instance() {
-    if (preload) return preload
-    if (liveStates.size === 0) return undefined
-    if (liveStates.size > 1) throw new Error('Multiple Stasis instances; use State.preload')
-    return [...liveStates][0]
+  // True iff this is THE preload (top-level) State. Public so State.preload can identify
+  // it even when this State came from a different stasis-core copy.
+  get isPreload() {
+    return this.#isPreload
+  }
+
+  // The label under which this State claims `canonical` as a write target, or undefined.
+  // Public so #claimWritePath's collision scan can consult a State from another copy.
+  claimedWritePathLabel(canonical) {
+    return this.#claims.get(canonical)
+  }
+
+  // Claim a write target, refusing a path another live State (in ANY copy) already
+  // claims. Canonicalize so `./x` / `x` / symlinks compare equal. Scans the process-wide
+  // registry, so collisions are caught across copies and without a preload. Intra-State
+  // collisions are caught earlier by Config (#checkInvariants), so this only fires
+  // cross-State. The claim is recorded on this instance; it becomes visible to later
+  // States once this one is added to liveStates() at the end of construction.
+  #claimWritePath(label, value) {
+    if (!value) return
+    const canonical = canonicalizePath(value)
+    for (const other of liveStates()) {
+      const owner = other.claimedWritePathLabel(canonical)
+      assert.ok(owner === undefined, `${label} '${value}' is already claimed by ${owner} of another live State`)
+    }
+    this.#claims.set(canonical, label)
+  }
+
+  // This State's stasis-core version. Public so a child (sidecar) can verify it
+  // exactly matches its parent's even when the two are different module copies
+  // sharing the process-wide registry (see the constructor's parent branch).
+  get version() {
+    return VERSION
+  }
+
+  // The slice of parent state a child (sidecar) inherits. Exposed as a PUBLIC method
+  // (rather than the child reading the parent's private fields) so a sidecar from a
+  // different-but-version-matched stasis-core copy -- a bundle carrying its own
+  // stasis-core, whose plugin sidecars the outer loader's preload -- can read it across
+  // the class brand. Only ever called by the sidecar constructor, after its version
+  // assert; the exact-version match guarantees these shapes are compatible.
+  sidecarInheritance() {
+    return {
+      preloadRoot: this.#preloadRoot,
+      lockImports: this.#lockImports,
+      lockFormats: this.#lockFormats,
+      lockfileLoaded: this.#lockfileLoaded,
+    }
+  }
+
+  // Register a child (sidecar) so this parent's unified lockData unions its
+  // imports/formats. Public (not a direct `#sidecars.add`) for the same cross-copy
+  // reason as sidecarInheritance: the call runs on the parent, touching the parent's
+  // own #sidecars, so it works even when the sidecar is a foreign-copy instance.
+  registerSidecar(sidecar) {
+    this.#sidecars.add(sidecar)
   }
 
   absolute(url) {
@@ -1865,22 +1933,27 @@ export class State {
       const source = this.sources.get(file)
       if (typeof source !== 'string') continue
       const baseURL = pathToFileURL(resolve(this.root, file)).toString()
-      // Match `from './<name>.js'\n` -- the only import shape stasis-core
-      // uses (ESM `import ... from` and `export ... from`, always single-
-      // quoted, filenames without `.`). Tight enough to ignore JSDoc /
-      // template-literal false positives, narrow enough to reject parent-
-      // relative (`../`), subpath (`./dir/file.js`), or extensionless.
-      for (const m of source.matchAll(/ from '(\.\/[a-zA-Z-]+\.js)'\n/g)) {
-        const specifier = m[1]
+      const recordEdge = (specifier) => {
         const targetURL = new URL(specifier, baseURL).toString()
         const targetAbsolute = fileURLToPath(targetURL)
         let targetFile
-        try { targetFile = this.relative(targetAbsolute) } catch { continue }
-        if (!isStasisCoreFile(targetFile)) continue
-        if (!existsSync(targetAbsolute)) continue
+        try { targetFile = this.relative(targetAbsolute) } catch { return }
+        if (!isStasisCoreFile(targetFile)) return
+        if (!existsSync(targetAbsolute)) return
         queue.push(targetFile)
         this.addImport(baseURL, specifier, targetURL, { conditions: PRELOAD_CONDITIONS })
       }
+      // (1) ESM `from './<name>.js'|'.cjs'\n` -- stasis-core's source import shape
+      // (`import ... from` / `export ... from`, single-quoted, basename without `.`).
+      // Tight enough to ignore JSDoc / template-literal false positives, narrow enough
+      // to reject parent-relative (`../`), subpath (`./dir/file.js`), or extensionless.
+      // The `.cjs` arm covers state.js -> ./package.cjs (the version re-export shim).
+      for (const m of source.matchAll(/ from '(\.\/[a-zA-Z-]+\.c?js)'\n/g)) recordEdge(m[1])
+      // (2) CJS `require('../package.json')` -- the single CommonJS shim
+      // (src/package.cjs) re-exporting stasis-core's own package.json so state.js can
+      // read its version. Matched exactly (not a general require/`../` relaxation) to
+      // stay as tight as the ESM arm.
+      for (const m of source.matchAll(/require\('(\.\.\/package\.json)'\)/g)) recordEdge(m[1])
     }
   }
 
@@ -1912,12 +1985,13 @@ export class State {
   }
 }
 
-// Allowed shape for a stasis-core source path -- `.../@exodus/stasis-core/src/<name>.js`.
-// Used by the backfill BFS to reject anything that doesn't look like a real
-// stasis-core module (comment noise, paths escaping `src/`, etc.). Matched
-// against `/${projectRelativeFile}` so the leading-`/` anchor isn't fooled
-// by a file at the project root happening to end in `@exodus/stasis-core/...`.
-// Filenames are `[a-zA-Z-]+\.js` only -- no `.` in the basename, which is why
+// Allowed shape for a backfillable stasis-core path -- a `src/<name>.js` or
+// `src/<name>.cjs` source, or the package's own `package.json` (required by the
+// src/package.cjs version shim). Used by the backfill BFS to reject anything that
+// doesn't look like a real stasis-core file (comment noise, paths escaping `src/`,
+// etc.). Matched against `/${projectRelativeFile}` so the leading-`/` anchor isn't
+// fooled by a file at the project root happening to end in `@exodus/stasis-core/...`.
+// Source basenames are `[a-zA-Z-]+` only -- no `.` in the basename, which is why
 // `state.util.js` was renamed to `state-util.js`.
-const STASIS_CORE_FILE_RE = /\/@exodus\/stasis-core\/src\/[a-zA-Z-]+\.js$/
+const STASIS_CORE_FILE_RE = /\/@exodus\/stasis-core\/(?:src\/[a-zA-Z-]+\.c?js|package\.json)$/
 

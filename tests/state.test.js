@@ -24,10 +24,6 @@ test('config loaded from stasis.config.json', (t) => {
   t.assert.equal(state.config.bundle, true)
 })
 
-test('static instance getter exposes constructed state', (t) => {
-  t.assert.equal(State.instance, state)
-})
-
 test('default collections are initialised', (t) => {
   t.assert.ok(state.hashes instanceof Map)
   t.assert.ok(state.entries instanceof Set)
