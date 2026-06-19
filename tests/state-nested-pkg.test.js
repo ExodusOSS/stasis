@@ -132,6 +132,31 @@ test('addFile defaults .js format to commonjs when the closest package.json omit
   t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'commonjs')
 })
 
+test('addFile keeps a module format already recorded this session for a later no-format .js capture', (t) => {
+  const state = new State(root)
+  // widget/package.json omits `type`, so a bare no-format .js capture defaults
+  // to commonjs (the test above). But the runtime loader records Node's
+  // authoritative module-syntax choice first; a later no-format bundler-plugin
+  // capture (StasisWebpack/StasisEsbuild/StasisMetro afterResolve pass no
+  // format) of the SAME file must KEEP that `module`, not downgrade it to the
+  // legacy commonjs default (which would also collide at the formats noupsert).
+  const url = pathToFileURL(join(root, 'node_modules', 'widget', 'index.js')).toString()
+  state.addFile(url, { format: 'module' }) // loader observed ESM
+  t.assert.doesNotThrow(() => state.addFile(url)) // no-format bundler capture
+  t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'module')
+})
+
+test('addFile does not adopt a resource tag as the format of a later no-format .js code capture', (t) => {
+  const state = new State(root)
+  // The deferral only reuses an extension-appropriate code format. A file
+  // previously recorded as a 'resource' must NOT have that tag silently adopted
+  // by a later code capture -- the commonjs default re-applies, so the
+  // code/resource conflict still surfaces at the formats noupsert.
+  const url = pathToFileURL(join(root, 'node_modules', 'widget', 'index.js')).toString()
+  state.addFile(url, { resource: true })
+  t.assert.throws(() => state.addFile(url))
+})
+
 test('addFile rejects an explicit format that disagrees with the inferred one', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'sub', 'foo.cjs')).toString()

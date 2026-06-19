@@ -175,6 +175,34 @@ test('sidecar addImport / addFile formats flow to the parent-owned lockfile', (t
     'sidecar.addFile format must reach parent.lockData')
 })
 
+test('sidecar no-format addFile defers to the module format the parent already recorded', (t) => {
+  // A bundler sidecar's afterResolve passes no format. For a type-less .js the
+  // legacy default is commonjs -- but the runtime loader records Node's
+  // authoritative `module` into the PARENT (sidecars share the parent's
+  // lockfile, and the loader records there). The sidecar capture must keep
+  // `module`, not re-default to commonjs and then collide when the parent merges
+  // sidecar formats into the unified lockfile (#mergedFormats). Built against a
+  // fresh, isolated parent so the assertion on the merged lockfile is unaffected
+  // by state the shared module-level preload accumulates across tests.
+  const isoDir = mkdtempSync(join(tmpdir(), 'stasis-sidecar-iso-'))
+  t.after(() => rmSync(isoDir, { recursive: true, force: true }))
+  writeFileSync(join(isoDir, 'package.json'), JSON.stringify({ name: 'iso', version: '0.0.0' }))
+  writeFileSync(join(isoDir, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(isoDir, 'app.js'), 'export const app = 1\n')
+
+  const isoParent = new State(isoDir, { lock: 'add', bundle: 'add', bundleFile: join(isoDir, 'iso-parent.br') })
+  const url = pathToFileURL(join(isoDir, 'app.js')).toString()
+  isoParent.addFile(url, { format: 'module' }) // loader observed ESM, recorded on the parent
+
+  const side = new State(isoDir, { parent: isoParent, lock: 'add', bundle: 'add', bundleFile: join(isoDir, 'iso-side.br') })
+  t.assert.doesNotThrow(() => side.addFile(url)) // sidecar no-format (webpack-style) capture
+  t.assert.equal(side.formats.get('app.js'), 'module', 'sidecar keeps the parent-attested module format')
+  // The unified lockfile unions parent + sidecar formats; with the fix both say
+  // module, so the merge is conflict-free and attests module.
+  t.assert.doesNotThrow(() => isoParent.lockData)
+  t.assert.equal(JSON.parse(isoParent.lockData).formats?.['app.js'], 'module')
+})
+
 test('sidecar in read-only mode (load / frozen) does NOT claim a bundleFile slot', (t) => {
   // A frozen / load sidecar reads a file the writer produced; it must be legal
   // to point at the same path the writer claimed. Otherwise round-trip patterns
