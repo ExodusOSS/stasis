@@ -146,15 +146,15 @@ test('addFile keeps a module format already recorded this session for a later no
   t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'module')
 })
 
-test('addFile does not adopt a resource tag as the format of a later no-format .js code capture', (t) => {
+test('addFile refuses to record a code file as a resource (resources never admits a code extension)', (t) => {
   const state = new State(root)
-  // The deferral only reuses an extension-appropriate code format. A file
-  // previously recorded as a 'resource' must NOT have that tag silently adopted
-  // by a later code capture -- the commonjs default re-applies, so the
-  // code/resource conflict still surfaces at the formats noupsert.
+  // A code extension is never an asset payload: parseResourcesOption refuses to let
+  // one into a `resources` allowlist, so resource:true for a `.js` can only be a
+  // capture path that bypassed that gate -- exactly how an fs-read once tagged a
+  // code file 'resource' and desynced the lockfile (resource) from the bundle
+  // (code). Caught at the recording site, not as an opaque format mismatch at load.
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'index.js')).toString()
-  state.addFile(url, { resource: true })
-  t.assert.throws(() => state.addFile(url))
+  t.assert.throws(() => state.addFile(url, { resource: true }), /code file can't be recorded as a resource/)
 })
 
 test('addFile rejects an explicit format that disagrees with the inferred one', (t) => {

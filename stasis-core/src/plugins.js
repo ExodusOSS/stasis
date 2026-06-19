@@ -9,14 +9,7 @@ import assert from 'node:assert/strict'
 import { DEFAULT_LOCK, assertOptionsMatchConfig, validatePluginOptions } from './config.js'
 import { ensureStateForLoader, isLoaderInstalled } from './hooks.js'
 import { State } from './state.js'
-
-// File extensions whose bytes are JS-shaped code -- the lockfile + Node loader
-// can attest their formats (module/commonjs/json/...) and bundle=load can
-// round-trip them as Node modules. Plugins treat everything outside this set as
-// either a resource (if the user opted the extension into their `resources`
-// option) or an error (if not). Code and resources share one bundle file
-// post-collapse, distinguished per file by `formats[file]`.
-export const CODE_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json', 'mts', 'cts'])
+import { CODE_EXTENSIONS } from './util.js'
 
 // Lowercased, dot-less extension of a path, or '' if none.
 export function pathExt(filePath) {

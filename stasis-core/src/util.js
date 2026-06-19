@@ -29,6 +29,19 @@ export const KNOWN_FORMATS = new Set([
   'directory',
 ])
 
+// File extensions whose bytes are JS-shaped code -- Node's loader and the
+// lockfile/bundle format machinery can attest them (module/commonjs/json/
+// *-typescript) and `bundle=load` can round-trip them as modules. This is the
+// SINGLE source of truth for "is this a code file", shared so the two capture
+// paths can't disagree: bundler plugins classify module-graph imports against it
+// (classifyExtension), parseResourcesOption refuses to admit any of these into a
+// `resources` allowlist (a code file is never an asset payload), and State both
+// classifies `--fs` reads and guards `resource:true` against it. Dot-less +
+// lowercase, matching pathExt. Drift here was the root of a lockfile/bundle
+// desync: `.jsx`/`.tsx` were code to the plugins but missing from the fs-capture's
+// own set, so an fs-read tagged a `.jsx` 'resource' while the import tagged it code.
+export const CODE_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json', 'mts', 'cts'])
+
 // Flat project-relative key for the file `rel` inside module dir `dir`, inverse of
 // the bucketing State/Bundle apply. The `rel === ''` branch is reached only by a
 // `directory` capture whose path IS a module root (e.g. `fs.readdirSync` of a

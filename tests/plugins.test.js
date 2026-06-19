@@ -6,11 +6,11 @@
 import { test } from 'node:test'
 
 import {
-  CODE_EXTENSIONS,
   classifyExtension,
   parseResourcesOption,
   pathExt,
 } from '@exodus/stasis-core/plugins'
+import { CODE_EXTENSIONS } from '@exodus/stasis-core/util'
 
 test('pathExt: lowercased dot-less extension or empty string', (t) => {
   t.assert.equal(pathExt('foo.JS'), 'js')

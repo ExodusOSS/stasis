@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { fileMapToObject, moduleFileKey, objectToMaps, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, fileMapToObject, moduleFileKey, objectToMaps, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
@@ -1018,6 +1018,17 @@ export class State {
     }
     // Canonicalize + bucket by the owning package (shared with addFsDir).
     const { absolute, file, dir, module, closestType } = this.#locateModule(url)
+
+    // A code file can NEVER be recorded as a resource. `resources` -- the only gate
+    // that admits an asset payload -- rejects code extensions outright (see
+    // parseResourcesOption), so a resource:true call for a code extension means a
+    // capture path bypassed that gate. That is exactly how an fs.readFileSync of a
+    // `.jsx` got tagged 'resource', desyncing the unified lockfile (resource) from
+    // the bundle (code) until it surfaced as an opaque format mismatch at load. Fail
+    // at the recording site, where the cause is obvious, instead.
+    if (asResource && CODE_EXTENSIONS.has(extname(file).slice(1).toLowerCase())) {
+      throw new Error(`addFile: a code file can't be recorded as a resource: ${file}`)
+    }
 
     // Resources don't get a loader format inferred from extension/package type --
     // their format ('resource' / 'resource:base64') is chosen by content below.
