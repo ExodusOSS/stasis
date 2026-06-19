@@ -1814,7 +1814,9 @@ export class State {
         // Split-bundle layout: code-only to bundleFile, resources-only to resourcesBundleFile.
         // Each is a standalone v1 Bundle (cross-check on load enforces shape). hasContent
         // gates per half so an empty half (no code / no resources) is dropped under replace
-        // rather than written as an empty bundle -- see #emitBundle.
+        // rather than written as an empty bundle -- see #emitBundle. sources/resources size
+        // is the exact emptiness test: a code bundle's entries/imports are non-empty only
+        // when sources are (every entry/edge parent is itself an addFile'd source).
         this.#lastCodeBundle = this.#emitBundle(
           sourcesPath, this.sources.size > 0, this.#lastCodeBundle, () => this.codeBundle.serialize())
         this.#lastResourcesBundle = this.#emitBundle(

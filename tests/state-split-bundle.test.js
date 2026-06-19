@@ -157,28 +157,29 @@ test('loading without resourcesBundleFile (no on-disk file) is fine for add mode
   t.assert.equal(res.formats.size, 0)
 }))
 
-// bundle=replace is authoritative: it deliberately ignores the prior on-disk bundle, so a
-// half (or a unified bundle) the run produces no content for must not survive as the old
-// file -- it is DELETED rather than written as an empty bundle or left untouched. Contrast
-// with bundle=add above, which keeps emitting the empty half so the file always exists.
-// Each `new State(...)` simulates one process; the write-path registry (a process-wide Set
-// on globalThis) would otherwise reject a second writing State on the same path, so clear it
-// between runs to stand in for the prior run's process having exited.
-const endRun = () => globalThis[Symbol.for('@exodus/stasis-core/states')]?.clear()
+// bundle=add keeps emitting the bundle file so it always exists -- the unified counterpart
+// of the split "absent resources" case above. Only bundle=replace prunes an empty artifact.
+test('bundle=add still emits an empty unified bundle when nothing is captured', withTmp('add-empty-unified', (t, dir) => {
+  const bundlePath = join(dir, 'code.br')
+  const st = new State(dir, { lock: 'add', bundle: 'add', bundleFile: bundlePath })
+  st.write() // captured nothing
+  t.assert.ok(existsSync(bundlePath), 'add mode writes the (empty) unified bundle rather than deleting it')
+  t.assert.equal(parseBr(bundlePath).sources.size, 0)
+}))
+
+// bundle=replace is authoritative: it deliberately ignores the prior on-disk bundle, so an
+// artifact (a split half, or the unified bundle) the run produces no content for must not
+// survive as the old file -- it is DELETED rather than written as an empty bundle or left
+// untouched. A replace run never READS the prior bundle (the constructor skips loading it
+// under replace), so a placeholder blob faithfully stands in for "a file an earlier run left
+// behind"; these tests only assert it is removed, never parse it.
+const stale = (path) => writeFileSync(path, brotliCompressSync(Buffer.from('prior stasis bundle')))
 
 test('bundle=replace deletes a stale resourcesBundleFile when the run captures no resources', withTmp('replace-drop-res', (t, dir) => {
   writeFileSync(join(dir, 'entry.js'), 'export const a = 1\n')
-  writeFileSync(join(dir, 'logo.png'), Buffer.from([0xAA]))
   const codePath = join(dir, 'code.br')
   const resPath = join(dir, 'res.br')
-
-  // Prior run leaves both halves on disk.
-  const seed = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
-  seed.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
-  seed.addFile(pathToFileURL(join(dir, 'logo.png')).toString(), { resource: true })
-  seed.write()
-  t.assert.ok(existsSync(resPath), 'seed resources bundle present')
-  endRun()
+  stale(resPath) // a prior run left a resources bundle here
 
   // Replace run with no resources: the code half (has content) is written, the resources
   // half (empty) is deleted -- not kept as the old file, not left as an empty bundle.
@@ -190,17 +191,10 @@ test('bundle=replace deletes a stale resourcesBundleFile when the run captures n
 }))
 
 test('bundle=replace deletes a stale bundleFile (code half) when the run captures no code', withTmp('replace-drop-code', (t, dir) => {
-  writeFileSync(join(dir, 'entry.js'), 'export const a = 1\n')
   writeFileSync(join(dir, 'logo.png'), Buffer.from([0xAA]))
   const codePath = join(dir, 'code.br')
   const resPath = join(dir, 'res.br')
-
-  const seed = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
-  seed.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
-  seed.addFile(pathToFileURL(join(dir, 'logo.png')).toString(), { resource: true })
-  seed.write()
-  t.assert.ok(existsSync(codePath), 'seed code bundle present')
-  endRun()
+  stale(codePath) // a prior run left a code bundle here
 
   // Replace run with only a resource: the resources half is written, the (empty) code half deleted.
   const st = new State(dir, { lock: 'replace', bundle: 'replace', bundleFile: codePath, resourcesBundleFile: resPath })
@@ -211,14 +205,8 @@ test('bundle=replace deletes a stale bundleFile (code half) when the run capture
 }))
 
 test('bundle=replace deletes the unified bundle file when the run captures nothing', withTmp('replace-empty-unified', (t, dir) => {
-  writeFileSync(join(dir, 'entry.js'), 'export const a = 1\n')
   const bundlePath = join(dir, 'code.br')
-
-  const seed = new State(dir, { lock: 'add', bundle: 'add', bundleFile: bundlePath })
-  seed.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
-  seed.write()
-  t.assert.ok(existsSync(bundlePath), 'seed unified bundle present')
-  endRun()
+  stale(bundlePath) // a prior run left a unified bundle here
 
   const st = new State(dir, { lock: 'replace', bundle: 'replace', bundleFile: bundlePath })
   st.write() // captured nothing
