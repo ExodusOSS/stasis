@@ -589,17 +589,22 @@ test('no-ambient plugin under stasis run (env-var detected) accepts default lock
   // plugin's copy of stasis-core sees no ambient State.preload because
   // the binary's stasis-core (separate copy in a real install) has the
   // active loader. EXODUS_STASIS_LOCK is the cross-instance signal.
+  // The plugin no longer takes a `lockFile` option (the lockfile is always the shared
+  // ambient one); a standalone cross-instance plugin that needs a separate lockfile
+  // location gets it process-wide via EXODUS_STASIS_LOCK_FILE. The BUNDLE path is still a
+  // plugin option (bundles legitimately split per-plugin; only the lockfile must unify).
   const r = run('src/entry.js', {
     cwd: tmp,
     env: standalone({
-      ...withOpts({ lockFile: lockPath, bundleFile: bundlePath }),
+      ...withOpts({ bundleFile: bundlePath }),
       EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_LOCK_FILE: lockPath,
       EXODUS_STASIS_BUNDLE: 'add',
       EXODUS_STASIS_SCOPE: 'full',
     }),
   })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.ok(existsSync(lockPath), 'plugin writes its own lockfile at the configured path')
+  t.assert.ok(existsSync(lockPath), 'plugin writes its own lockfile at the env-configured path')
   t.assert.ok(existsSync(bundlePath), 'plugin writes its own bundle at the configured path')
   // The plugin's standalone State must NOT have written the default-path
   // lockfile -- that would race the binary's writer.

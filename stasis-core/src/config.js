@@ -16,7 +16,7 @@ export const DEFAULT_SCOPE = 'full'
 
 const envDebugBool = (value) => Boolean(value && value !== '0')
 
-const OPTION_KEYS = ['scope', 'lock', 'lockFile', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug']
+const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug']
 
 // Plugins accept the same options as Config but want to validate without constructing one,
 // since constructing State has side effects. Mirror Config's per-field validation.
@@ -24,10 +24,9 @@ export function validatePluginOptions(label, options) {
   const rest = { ...options }
   for (const key of OPTION_KEYS) delete rest[key]
   assert.equal(Object.keys(rest).length, 0, `Unknown ${label} options: ${Object.keys(rest).join(', ')}`)
-  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug } = options
   if (scope !== undefined) assert.ok(VALID_SCOPE.has(scope), `Invalid scope: ${scope}`)
   if (lock !== undefined) assert.ok(VALID_LOCK.has(lock), `Invalid lock: ${lock}`)
-  if (lockFile !== undefined) assert.equal(typeof lockFile, 'string', 'lockFile must be a string')
   if (bundle !== undefined) assert.ok(VALID_BUNDLE.has(bundle), `Invalid bundle: ${bundle}`)
   if (bundleFile !== undefined) assert.equal(typeof bundleFile, 'string', 'bundleFile must be a string')
   if (resourcesBundleFile !== undefined) assert.equal(typeof resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
@@ -37,11 +36,10 @@ export function validatePluginOptions(label, options) {
 // When a plugin runs against a State that already exists (preload path), the active Config
 // is authoritative. Any options the plugin was given must agree with it.
 export function assertOptionsMatchConfig(config, options) {
-  const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug } = options
   try {
     if (scope !== undefined) assert.equal(config.scope, scope)
     if (lock !== undefined) assert.equal(config.lock, lock)
-    if (lockFile !== undefined) assert.equal(config.lockFile, lockFile)
     if (bundle !== undefined) assert.equal(config.bundleMode, bundle)
     if (bundleFile !== undefined) assert.equal(config.bundleFile, bundleFile)
     if (resourcesBundleFile !== undefined) assert.equal(config.resourcesBundleFile, resourcesBundleFile)
@@ -221,9 +219,10 @@ export class Config {
   }
 
   // When set, State reads/writes the lockfile at this exact path instead of
-  // discovering `stasis.lock.json` at the project root. Plugins use this to
-  // run with a lockfile separate from any ambient preload's (truly independent
-  // state); when unset, the default discovery applies.
+  // discovering `stasis.lock.json` at the project root. Set via the CLI,
+  // `EXODUS_STASIS_LOCK_FILE`, or direct State construction; bundler plugins
+  // can't set it (they always share the ambient lockfile). Unset -> default
+  // discovery applies.
   get lockFile() {
     return this.#lockFile
   }

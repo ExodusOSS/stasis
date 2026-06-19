@@ -51,9 +51,10 @@ const liveStates = new Set()
 // Process-wide write-target claim registry: every write-mode State adds its
 // bundleFile, resourcesBundleFile, and lockFile (canonicalized) here at
 // construction; a second writer claiming the same path throws. Module-level
-// rather than per-State because Rule 0 (plugins.js) constructs an INDEPENDENT
-// top-level State alongside the ambient preload -- both are "parents" with
-// their own per-instance registries, so a per-State Set would miss the
+// rather than per-State because several write-intent States can be live in one
+// process -- a parent and its sidecars, plus any independent top-level State a
+// CLI/env run constructs (e.g. with a custom config.lockFile) -- each with its
+// own per-instance registry, so a per-State Set would miss a cross-State
 // collision. Canonicalize via realpathSync-when-extant + lexical-resolve
 // fallback so a symlinked `/x/lock.json -> /shared/lock.json` and the literal
 // `/shared/lock.json` compare equal. Read-only modes (load / frozen) don't
@@ -220,8 +221,9 @@ export class State {
       assert.ok(this.config.bundleFile, 'sidecar State requires bundleFile')
       // Claim the bundleFile (and resourcesBundleFile under the split layout) via the
       // process-wide registry so two write-intent States anywhere -- whether a sibling
-      // sidecar or an independent State produced by plugins.js Rule 0 -- can't silently
-      // target the same on-disk file (last-write-wins on `beforeExit`). Only writing
+      // sidecar or an independent top-level State (a CLI/env run with a custom
+      // lockfile/bundle path) -- can't silently target the same on-disk file
+      // (last-write-wins on `beforeExit`). Only writing
       // States claim; read-only modes (load / frozen) may legitimately share a path
       // with the writer that produced the file. The Config's own pairwise cross-path
       // check (config.js:#checkInvariants) already rejects intra-State collisions, so
@@ -504,8 +506,8 @@ export class State {
     // Register only after every fallible step succeeds, so a thrown error during config
     // discovery / lockfile / bundle parsing leaves the registry untouched. Claim this
     // State's write targets in the process-wide registry so a sidecar OR an independent
-    // top-level State (plugins.js Rule 0) constructed against the same path can't
-    // silently target the same file. Load / frozen / no-bundle modes don't claim --
+    // top-level State (a CLI/env run with a custom lockfile/bundle path) constructed
+    // against the same path can't silently target the same file. Load / frozen / no-bundle modes don't claim --
     // they legitimately read what a previous writer produced. lockFile is claimed too
     // (only by writing parents -- sidecars don't write the lockfile and the explicit
     // path may legitimately point at the parent's lockfile under unification).
