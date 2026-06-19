@@ -20,7 +20,7 @@ import corePackage from './package.cjs'
 // module.syncBuiltinESMExports() to refresh node:fs's ESM wrapper for user code.
 // Direct ESM destructured imports are live bindings and would re-resolve to the
 // mocked names when state.write() fires on beforeExit.
-const { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } = fs
+const { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } = fs
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
@@ -1812,29 +1812,45 @@ export class State {
       const sourcesPath = this.config.bundleFile || join(this.root, FILE_CODE)
       if (this.config.resourcesBundleFile) {
         // Split-bundle layout: code-only to bundleFile, resources-only to resourcesBundleFile.
-        // Each is a standalone v1 Bundle (cross-check on load enforces shape).
-        const codeText = this.codeBundle.serialize()
-        if (codeText !== this.#lastCodeBundle) {
-          mkdirSync(dirname(sourcesPath), { recursive: true })
-          writeFileSync(sourcesPath, brotliCompressSync(codeText, brotliOptions()))
-          this.#lastCodeBundle = codeText
-        }
-        const resourcesPath = this.config.resourcesBundleFile
-        const resText = this.resourcesBundle.serialize()
-        if (resText !== this.#lastResourcesBundle) {
-          mkdirSync(dirname(resourcesPath), { recursive: true })
-          writeFileSync(resourcesPath, brotliCompressSync(resText, brotliOptions()))
-          this.#lastResourcesBundle = resText
-        }
+        // Each is a standalone v1 Bundle (cross-check on load enforces shape). hasContent
+        // gates per half so an empty half (no code / no resources) is dropped under replace
+        // rather than written as an empty bundle -- see #emitBundle.
+        this.#lastCodeBundle = this.#emitBundle(
+          sourcesPath, this.sources.size > 0, this.#lastCodeBundle, () => this.codeBundle.serialize())
+        this.#lastResourcesBundle = this.#emitBundle(
+          this.config.resourcesBundleFile, this.resources.size > 0, this.#lastResourcesBundle,
+          () => this.resourcesBundle.serialize())
       } else {
-        const text = this.sourceData
-        if (text !== this.#lastUnifiedBundle) {
-          mkdirSync(dirname(sourcesPath), { recursive: true })
-          writeFileSync(sourcesPath, brotliCompressSync(text, brotliOptions()))
-          this.#lastUnifiedBundle = text
-        }
+        this.#lastUnifiedBundle = this.#emitBundle(
+          sourcesPath, this.sources.size > 0 || this.resources.size > 0, this.#lastUnifiedBundle,
+          () => this.sourceData)
       }
     }
+  }
+
+  // Emit one bundle artifact, returning its new "last serialized" cache value.
+  //   - empty (hasContent === false) under bundle=replace: this run carries nothing for
+  //     this artifact, so DELETE any file at `path` rather than write an empty bundle. A
+  //     `bundle=replace` run is authoritative -- it deliberately ignores the prior on-disk
+  //     bundle (the constructor skips loading it), so a stale file the run didn't produce
+  //     must not survive as the "old one". Returning null resets the cache so a later
+  //     non-empty write() (watch-mode rebuild) re-emits the file.
+  //   - otherwise (has content, OR empty under add): serialize and write, skipping the
+  //     brotli + writeFileSync when the text is byte-identical to the last write (the
+  //     watch-mode compare-and-skip this cache exists for). add keeps emitting an empty
+  //     bundle so the file always exists -- only replace prunes a not-written artifact.
+  #emitBundle(path, hasContent, lastText, serialize) {
+    if (!hasContent && this.config.replaceBundle) {
+      rmSync(path, { force: true })
+      return null
+    }
+    const text = serialize()
+    if (text !== lastText) {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, brotliCompressSync(text, brotliOptions()))
+      return text
+    }
+    return lastText
   }
 
   get parent() {
