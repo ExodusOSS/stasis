@@ -127,6 +127,79 @@ test('webpack5 bundle=load runs from a clean dir holding only the bundle + a min
   t.assert.equal(replayOutput, captureOutput)
 }))
 
+// Commit-2 coverage (family serving). When the plugin runs as a SIDECAR -- its
+// bundleFile differs from the ambient preload's, so resolvePluginState Rule 6
+// gives it its own bundle parented to the preload -- the load-mode inputFileSystem
+// wrapper must serve an in-scope file the sidecar's OWN bundle lacks from the
+// PARENT (preload) bundle. That mirrors the real split (webpack app graph in the
+// sidecar; build-time/extra closure in the parent) WITHOUT crossing node_modules,
+// so the known package.json/DescriptionFilePlugin gap (see webpack.test.js's
+// skipped TODO) does not apply: here src/hello.js lives ONLY in the parent bundle
+// while the sidecar keeps the src/entry.js -> ./hello EDGE, so beforeResolve still
+// redirects to it and the byte read must fall through to the parent.
+//
+// Without the family lookup the sidecar's getFile throws "not attested" on
+// hello.js and the build fails; this test is the regression guard for that.
+test('webpack5 sidecar bundle=load serves an in-scope file the sidecar lacks from the parent bundle', withTmp((t, tmp) => {
+  // Phase 1: an ordinary full-scope capture -> one complete bundle (entry + hello).
+  const capDir = join(tmp, 'cap')
+  cpSync(fullFixture, capDir, { recursive: true })
+  const capBundle = join(capDir, 'parent.br')
+  const outA = join(tmp, 'out-capture')
+  const capture = run('src/entry.js', {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_WEBPACK_OUTDIR: outA,
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'bundle.js'), 'utf-8')
+
+  // Derive the SIDECAR bundle = the parent minus src/hello.js's bytes, KEEPING the
+  // entry->hello edge. The sidecar alone therefore cannot serve hello.js; only the
+  // parent can. (Same direct-bundle-surgery technique as webpack.test.js's
+  // fail-closed test.)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(capBundle)))
+  t.assert.ok(decoded.sources['.'].files['src/hello.js'], 'precondition: parent carries hello.js bytes')
+  t.assert.ok(decoded.imports['*']?.['src/entry.js']?.['./hello'], 'precondition: entry->hello edge present')
+  delete decoded.sources['.'].files['src/hello.js']
+  const sidecarBundle = join(tmp, 'sidecar.br')
+  writeFileSync(sidecarBundle, brotliCompressSync(JSON.stringify(decoded)))
+
+  // Phase 2: a clean load dir (NO src/ on disk, so a disk read can't mask the
+  // result) holding both bundles. The preload loads the parent bundle; the plugin,
+  // given a different bundleFile, becomes a sidecar parented to the preload.
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'parent.br'))
+  copyFileSync(sidecarBundle, join(loadDir, 'sidecar.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true }')
+  t.assert.ok(!existsSync(join(loadDir, 'src')), 'load dir must not contain src/')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run('src/entry.js', {
+    cwd: loadDir,
+    env: {
+      STASIS_TEST_PRELOAD_OPTIONS: JSON.stringify({
+        scope: 'full', lock: 'none', bundle: 'load', bundleFile: join(loadDir, 'parent.br'),
+      }),
+      STASIS_TEST_PLUGIN_OPTIONS: JSON.stringify({
+        scope: 'full', lock: 'none', bundle: 'load', bundleFile: join(loadDir, 'sidecar.br'),
+      }),
+      STASIS_TEST_WEBPACK_OUTDIR: outB,
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  const replayOutput = readFileSync(join(outB, 'bundle.js'), 'utf-8')
+  // hello.js was served from the parent bundle; the emitted output still matches
+  // the single-bundle capture byte-for-byte.
+  t.assert.equal(replayOutput, captureOutput)
+}))
+
 // Regression (webpack 5 + node:-prefixed builtins): same fix as the webpack 4 case
 // in tests/webpack.test.js, but webpack 5 additionally understands the `node:` scheme,
 // so this pins both the bare form (`constants`) and the prefixed form (`node:os`). The

@@ -74,9 +74,15 @@ export class StasisWebpack {
   //     - node_modules scope: node_modules paths under state.root only; app
   //       sources are deliberately disk-served
   //   Wiring:
-  //     - inputFileSystem.readFile / stat: in-scope paths MUST come from
-  //       state.getFile (which re-verifies the hash against the lockfile); a path
-  //       the bundle doesn't carry throws rather than falling back to disk
+  //     - inputFileSystem.readFile / stat: in-scope paths MUST come from the
+  //       bundle (getFile re-verifies the hash against the lockfile); a path no
+  //       bundle carries throws rather than falling back to disk. "The bundle"
+  //       here is the FAMILY -- this State plus its parent when the plugin runs
+  //       as a sidecar (its app-graph bundle alongside the ambient preload's
+  //       build-closure bundle, both under the one shared lockfile). stat serves
+  //       a synthetic directory Stats for any dir the family records (explicit
+  //       capture or one implied by a bundled descendant) so the resolver's walk
+  //       over intermediate dirs short-circuits without touching disk
   //     - normalModuleFactory.hooks.beforeResolve: an in-scope (issuer, request)
   //       edge the bundle attests is redirected to its absolute bundle path. A
   //       request the bundle records no edge for is not a file the bundle carries
@@ -88,14 +94,15 @@ export class StasisWebpack {
   //       which still serves every in-scope read from the bundle or throws.
   //     - Out-of-scope paths defer to disk
   //
-  //   KNOWN LIMITATION: bundle=load works today only for module graphs that
-  //   don't cross node_modules. The Node run loader doesn't capture the
-  //   package.json files webpack's resolver reads via fs.readFile through
-  //   DescriptionFilePlugin, and `state.getFile` throws on the intermediate
-  //   directory stats the resolver does while walking. Both happen regardless
-  //   of scope. The no-deps full-scope round-trip is the verified surface
-  //   today; see `tests/webpack.test.js` and its skipped TODO for the broader
-  //   case.
+  //   KNOWN LIMITATION: every path the resolver touches must be attested by some
+  //   family bundle. Intermediate-directory stats are covered (getFsStat over the
+  //   family, including dirs implied by a parent-bundle file -- e.g. a webpack
+  //   loader's directory). The residual gap is the package.json files webpack's
+  //   resolver reads via fs.readFile through DescriptionFilePlugin: the Node run
+  //   loader captures modules Node IMPORTS, not arbitrary resolver fs.readFile
+  //   calls, so a package.json neither bundle carries still fails closed here.
+  //   Capturing those (or a description-file shortcut) is the remaining work; see
+  //   `tests/webpack.test.js` and its skipped TODO.
   #applyLoadMode(compiler) {
     const state = this.#state
     const orig = compiler.inputFileSystem
@@ -111,11 +118,34 @@ export class StasisWebpack {
       return state.inNodeModules(pathToFileURL(p).toString())
     }
 
+    // The plugin's State may be a SIDECAR: when its bundleFile differs from the
+    // ambient preload's, resolvePluginState (Rule 6) gives the plugin its own
+    // State carrying the webpack app graph, parented to the ambient. The webpack
+    // app graph lives in the sidecar's bundle, but build-time machinery the
+    // resolver must see -- webpack loaders (babel-loader, ts-loader, ...) and the
+    // directories/package.json along their resolution path -- lives in the PARENT
+    // (ambient) bundle, captured when `stasis run` drove the build. Both bundles
+    // validate against the SAME shared lockfile (the sidecar inherits the parent's
+    // #lockImports/#lockFormats), so the attested set the build may touch is the
+    // whole family: this State plus its parent. Consult them in order -- the
+    // sidecar's own app graph first -- so a path either bundle attests is served
+    // from the bundle that carries it. With no parent (the reuse case: one unified
+    // bundle) the family is just `state`, and behavior is unchanged.
+    const family = state.parent ? [state, state.parent] : [state]
+    // The first family State that attests `url` (as a file or directory), else
+    // undefined. getFsStat is a pure existence check over each bundle's recorded
+    // files/resources/dirs; it never reads bytes or touches disk.
+    const ownerOf = (url) => family.find((s) => s.getFsStat(url) !== undefined)
+
     // getFile re-verifies the hash against the lockfile on every read (tampered
-    // bundle fails closed), and throws on a file the bundle doesn't carry --
-    // so an in-scope path the bundle is missing surfaces here, not via a silent
-    // disk fallback.
-    const serveFromBundle = (p) => state.getFile(pathToFileURL(p).toString()).source
+    // bundle fails closed). Serve from whichever family bundle carries the path;
+    // a path NO family bundle attests falls through to state.getFile, whose throw
+    // is the canonical fail-closed gate -- an in-scope miss surfaces here, never
+    // a silent disk fallback.
+    const serveFromBundle = (p) => {
+      const url = pathToFileURL(p).toString()
+      return (ownerOf(url) ?? state).getFile(url).source
+    }
 
     // Wrap inputFileSystem. CachedInputFileSystem stores internal state on `this`,
     // so a naive Object.create or Object.assign would strand methods like readdir
@@ -144,11 +174,13 @@ export class StasisWebpack {
         // A directory has no bundle content, so serveFromBundle/getFile (which only
         // attests files) throws "file not attested" on it. webpack's resolver stat()s
         // intermediate directories (`<root>`, `<root>/node_modules`, `.../<pkg>`) while
-        // walking, so serve a directory Stats from the bundle's existence record
+        // walking, so serve a directory Stats from the family's existence record
         // (getFsStat covers explicit `directory` captures AND dirs implied by a bundled
-        // file under them). This is what the async resolver tripped on; the sync path
-        // happened to work only because the Proxy wraps stat but not statSync.
-        if (state.getFsStat(pathToFileURL(p).toString()) === 'directory') {
+        // file under them -- e.g. `node_modules/<loader>` implied by the loader's files
+        // in the PARENT bundle). This is what the async resolver tripped on; the sync
+        // path happened to work only because the Proxy wraps stat but not statSync.
+        const url = pathToFileURL(p).toString()
+        if (ownerOf(url)?.getFsStat(url) === 'directory') {
           return callback(null, bundleStat(0, true))
         }
         try {
