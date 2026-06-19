@@ -12,10 +12,10 @@ import { State } from './state.js'
 // + module factory call inputFileSystem.stat() to check existence and read size;
 // we don't keep the real mtime/mode/etc., they're not security-relevant here (the
 // lockfile already attests content via hash; getFile re-verifies on every read).
-function bundleStat(size) {
+function bundleStat(size, isDir = false) {
   return {
-    isFile: () => true,
-    isDirectory: () => false,
+    isFile: () => !isDir,
+    isDirectory: () => isDir,
     isSymbolicLink: () => false,
     isBlockDevice: () => false,
     isCharacterDevice: () => false,
@@ -30,7 +30,7 @@ function bundleStat(size) {
     ctimeMs: 0,
     birthtime: new Date(0),
     birthtimeMs: 0,
-    mode: 0o100644,
+    mode: isDir ? 0o040755 : 0o100644,
     uid: 0,
     gid: 0,
     ino: 0,
@@ -141,6 +141,16 @@ export class StasisWebpack {
     }
     const wrappedStat = (p, callback) => {
       if (inScope(p)) {
+        // A directory has no bundle content, so serveFromBundle/getFile (which only
+        // attests files) throws "file not attested" on it. webpack's resolver stat()s
+        // intermediate directories (`<root>`, `<root>/node_modules`, `.../<pkg>`) while
+        // walking, so serve a directory Stats from the bundle's existence record
+        // (getFsStat covers explicit `directory` captures AND dirs implied by a bundled
+        // file under them). This is what the async resolver tripped on; the sync path
+        // happened to work only because the Proxy wraps stat but not statSync.
+        if (state.getFsStat(pathToFileURL(p).toString()) === 'directory') {
+          return callback(null, bundleStat(0, true))
+        }
         try {
           const src = serveFromBundle(p)
           // Use byte length, not String.length -- a multibyte-UTF-8 code source

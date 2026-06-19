@@ -325,3 +325,59 @@ test('webpack5 captures the file:-dep + nested-bs58 topology with correct edge a
   t.assert.equal(edges['example/index.js']?.['base58check'], 'node_modules/base58check/index.js')
   t.assert.equal(edges['node_modules/base58check/index.js']?.['bs58'], 'node_modules/bs58/index.js')
 }))
+
+// Commit-1 coverage (directory stats). webpack's resolver stat()s a directory while
+// resolving it to an index file. Here the ENTRY is a directory ('src' -> src/index.js);
+// entries bypass the beforeResolve redirect (no issuer), so the async resolver walks and
+// actually stat()s src/ through the wrapped inputFileSystem. In load mode that stat must
+// be answered with a directory Stats from the bundle's existence record (getFsStat);
+// without it the wrapper falls through to getFile -- which throws on a directory -- and
+// webpack reports `src doesn't exist`. This mirrors the real trigger (the loader resolver
+// walking in-scope node_modules dirs) without crossing node_modules, so the known
+// package.json/DescriptionFilePlugin gap (see webpack.test.js's skipped TODO) doesn't apply.
+test('webpack5 bundle=load resolves a directory entry by stat-ing the in-bundle directory', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  mkdirSync(join(capDir, 'src'), { recursive: true })
+  writeFileSync(join(capDir, 'package.json'), '{ "name": "stasis-dir-entry", "version": "0.0.0", "private": true }')
+  writeFileSync(join(capDir, 'stasis.config.json'), '{ "scope": "full" }')
+  writeFileSync(join(capDir, 'src', 'index.js'), "const { greet } = require('./hello')\nconsole.log(greet('world'))\n")
+  writeFileSync(join(capDir, 'src', 'hello.js'), 'exports.greet = (name) => `hello, ${name}`\n')
+  const capBundle = join(capDir, 'snapshot.br')
+  const outA = join(tmp, 'out-capture')
+  // Entry is the DIRECTORY 'src'; webpack resolves it to src/index.js.
+  const capture = run('src', {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_WEBPACK_OUTDIR: outA,
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'bundle.js'), 'utf-8')
+
+  // Clean load dir: only the bundle (no src/ on disk), so resolving the directory
+  // entry depends entirely on the bundle answering the stat of src/ as a directory.
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-dir-entry", "version": "0.0.0", "private": true }')
+  t.assert.ok(!existsSync(join(loadDir, 'src')), 'load dir must not contain src/')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run('src', {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_WEBPACK_OUTDIR: outB,
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  // The directory entry resolved through the bundle; output matches the disk-fed capture.
+  t.assert.equal(readFileSync(join(outB, 'bundle.js'), 'utf-8'), captureOutput)
+}))
