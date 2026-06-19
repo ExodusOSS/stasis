@@ -7,8 +7,9 @@ import { pathToFileURL } from 'node:url'
 import { State } from '@exodus/stasis-core/state'
 
 // Explicit `lockFile` config: when set, State reads + writes the lockfile at that
-// exact path instead of the default `<root>/stasis.lock.json`. Used by plugins to
-// run with a lockfile fully separate from any ambient preload's.
+// exact path instead of the default `<root>/stasis.lock.json`. This is a Config/CLI/env
+// capability (EXODUS_STASIS_LOCK_FILE) -- it is NOT a bundler-plugin option (a plugin
+// always shares the ambient lockfile; see plugins.js / state-sidecar.test.js).
 
 const withTmp = (label, fn) => (t) => {
   const dir = mkdtempSync(join(tmpdir(), `stasis-lock-${label}-`))

@@ -44,8 +44,8 @@ export function noupsert(map, key, value) {
 // `resolve()` normalizes `./` and `../` but NOT symlinks -- two paths through
 // different symlink chains that ultimately name the same inode would compare as
 // distinct strings, letting a "is this the same target?" check silently fork
-// (the resourcesBundleFile/lockFile/bundleFile claim sets, Rule 0's same-as-
-// ambient match). `realpathSync` closes that hole when the file already exists;
+// (the resourcesBundleFile/lockFile/bundleFile claim sets). `realpathSync`
+// closes that hole when the file already exists;
 // for not-yet-written targets (the common case for a fresh capture's write
 // path), fall back to the lexical `resolve()` -- there's no symlink to follow,
 // and a later writer claiming the realpath of the same target will canonicalize

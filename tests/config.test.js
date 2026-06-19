@@ -348,16 +348,20 @@ test('lockFile requires an active lock mode', (t) => {
     /lockFile requires an active lock mode/)
 })
 
-test('validatePluginOptions accepts lockFile, rejects non-string', (t) => {
-  t.assert.doesNotThrow(() => validatePluginOptions('Plug', { lockFile: '/tmp/my.lock.json' }))
+test('validatePluginOptions rejects lockFile (not a plugin option; the lockfile is always shared)', (t) => {
+  // lockFile was removed as a plugin option: a plugin shares the ambient stasis lockfile
+  // and can never point at its own (the path stays a Config/CLI/env concern). It is now
+  // just an unknown plugin option, caught by the generic check regardless of its type.
+  t.assert.throws(() => validatePluginOptions('Plug', { lockFile: '/tmp/my.lock.json' }),
+    /Unknown Plug options: lockFile/)
   t.assert.throws(() => validatePluginOptions('Plug', { lockFile: 42 }),
-    /lockFile must be a string/)
+    /Unknown Plug options: lockFile/)
 })
 
-test('assertOptionsMatchConfig catches a lockFile mismatch with the active Config', (t) => {
+test('assertOptionsMatchConfig catches an option mismatch with the active Config', (t) => {
   const c = new Config({ lock: 'add', lockFile: '/tmp/my.lock.json' })
-  t.assert.doesNotThrow(() => assertOptionsMatchConfig(c, { lockFile: '/tmp/my.lock.json' }))
-  t.assert.throws(() => assertOptionsMatchConfig(c, { lockFile: '/tmp/other.lock.json' }),
+  t.assert.doesNotThrow(() => assertOptionsMatchConfig(c, { lock: 'add' }))
+  t.assert.throws(() => assertOptionsMatchConfig(c, { lock: 'frozen' }),
     /Plugin options conflict with active stasis state/)
 })
 
