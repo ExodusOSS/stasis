@@ -32,6 +32,7 @@
     "src/lockfile.js",
     "src/metro.js",
     "src/metro-transformer.js",
+    "src/package.cjs",
     "src/plugins.js",
     "src/prune.js",
     "src/state.js",

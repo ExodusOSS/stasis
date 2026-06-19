@@ -44,6 +44,21 @@ test('sidecar shares hashes/entries/modules with parent; sources are independent
   t.assert.equal(sidecar.parent, parent)
 })
 
+test('a child (sidecar) State must exactly match its parent version', (t) => {
+  // A sidecar shares the parent's maps by reference and reads its private fields, so a
+  // version skew between two @exodus/stasis-core copies in one process is rejected up
+  // front -- the version assert is the first thing the parent branch does, so a fake
+  // parent carrying a mismatched `version` trips it before any other field is touched.
+  const fakeParent = { version: '0.0.0-mismatch' }
+  t.assert.throws(
+    () => new State(dir, { parent: fakeParent, lock: 'add', bundle: 'add', bundleFile: join(dir, 'ver-mismatch.br') }),
+    /must exactly match parent version/
+  )
+  // A same-version parent is accepted regardless of WHICH stasis-core copy it came from
+  // (the cross-copy bundled scenario) -- the same-copy case is exercised by every sidecar
+  // test in this file, and the cross-copy case by tests/state-singleton-multi-copy.test.js.
+})
+
 test('sidecar addFile flows hashes/entries through shared maps, sources stay local', (t) => {
   const sidecar = new State(dir, {
     parent,
