@@ -74,6 +74,26 @@ let loadingModule = 0
 // before the entry's load).
 let entryUnseen = true
 
+// Child-process handling, WITHOUT intercepting child_process or adding a flag.
+// EXODUS_STASIS_PID records the ROOT stasis process's pid -- the first stasis process in the
+// tree (the one the CLI launches, or a direct `node --import`). It is unset there, so the
+// root claims the slot with its own pid and is allowed to write. A process that ends up
+// running this loader as a child -- child_process.fork() inherits our `--import` via
+// process.execArgv automatically; a manual `spawn(node, ['--import', <loader>, ...])` does so
+// explicitly -- inherits EXODUS_STASIS_PID through the environment but runs under a different
+// pid. On that mismatch we suppress the bundle/lockfile write for ANY child, fork or not --
+// the root owns the artifact, and a second writer to the same path would race it. We
+// additionally relax the entry-point check for a FORKED child specifically (mismatch AND an
+// IPC channel, which fork() always creates and a non-fork child lacks): its main module is a
+// fork target, not a declared CLI entry, whereas a `node --import` child names its own entry.
+// getFile() still fails closed on anything unattested. (A `stasis run` nested inside an
+// already-running stasis process inherits the pid and is thus treated as a child too -- it
+// won't write; run stasis at a single level.) Resolved once, before any user code runs.
+const OWN_PID = String(process.pid)
+if (!process.env.EXODUS_STASIS_PID) process.env.EXODUS_STASIS_PID = OWN_PID
+const isChildProcess = process.env.EXODUS_STASIS_PID !== OWN_PID
+const forkedChild = isChildProcess && process.channel !== undefined
+
 // Resolve once at module-load: stasis-core's own package root. Passed to State
 // as `preloadRoot` so state.write()'s backfill statically captures stasis-core's
 // internal edges -- the (state.js -> config.js)-shape relative imports that
@@ -117,7 +137,10 @@ function initState(root) {
   // lock=frozen run fails closed on anything missing. Unhandled signals (SIGINT/SIGTERM
   // with no handler) bypass exit hooks entirely; servers own that behavior, we don't touch it.
   const save = () => {
-    if (saved || aborted) return
+    // Any child process (pid mismatch) must never persist -- fork OR a non-fork child that
+    // inherited our loader: the root owns the lockfile/bundle, and a second writer to the
+    // same path would race it.
+    if (saved || aborted || isChildProcess) return
     saved = true
     state.write()
   }
@@ -266,7 +289,10 @@ function resolve(specifier, context, nextResolve) {
     const url = specifier.startsWith('file:')
       ? specifier
       : pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
-    if (!parentURL && state.config.full) state.assertEntry(url)
+    // A forked child's main module is whatever the parent passed to fork(), not a declared
+    // CLI entry, so it need not be in the bundle's entries list -- getFile() below still
+    // rejects anything the bundle doesn't attest. The root run stays strict.
+    if (!parentURL && state.config.full && !forkedChild) state.assertEntry(url)
     const format = state.getFormat(url)
     if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
     return { url, format, importAttributes: undefined, shortCircuit: true }

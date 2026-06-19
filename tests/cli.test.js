@@ -12,6 +12,7 @@ const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cl
 const nmFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm')
 const nmCjsFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm-cjs')
 const jsonAttrFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-json-attr')
+const forkFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-fork')
 
 // strip any inherited stasis env vars so the CLI's env-conflict guard doesn't trip
 const {
@@ -20,6 +21,7 @@ const {
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
+  EXODUS_STASIS_PID: _pid,
   ...cleanEnv
 } = process.env
 
@@ -1860,4 +1862,100 @@ test('run --bundle=load refuses every NON_NODE_SOURCE_LANGUAGE tag (php parallel
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /cannot execute a 'php' bundle/)
   t.assert.doesNotMatch(r.stdout, /hello/, 'php-tagged file must not execute')
+}))
+
+// --- child processes under stasis (no child_process interception, no flag) ----------
+//
+// EXODUS_STASIS_PID records the root's pid. A child that runs the loader -- fork() inherits
+// it via process.execArgv automatically; a `spawn(node, ['--import', loader, ...])` does so
+// explicitly -- also inherits EXODUS_STASIS_PID but runs under a different pid. On that
+// mismatch the loader suppresses the child's bundle/lockfile write (ANY child, fork or not),
+// and additionally relaxes the entry check for a FORKED child (mismatch + an IPC channel,
+// which only fork creates). The fixture's entry.js forks src/worker.js when RUN_WORKER is
+// set and spawns it (with --import) when SPAWN_WORKER is set, so the capture step (no child)
+// and the enforced step share one entry. worker.js prints the modes it sees.
+
+const seedFork = (t, tmp) => {
+  cpSync(forkFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `seed stderr: ${save.stderr}`)
+  return bundlePath
+}
+
+test('run capture: a forked child does not write the lockfile/bundle (no race)', withTmp((t, tmp) => {
+  // Capture once without forking to get the baseline artifacts...
+  const bundlePath = seedFork(t, tmp)
+  const lockBaseline = readFileSync(join(tmp, 'stasis.lock.json'))
+  const bundleBaseline = readFileSync(bundlePath)
+  // ...then capture again WITH the fork happening. The child re-runs the loader (lock=add,
+  // bundle=add inherited) but must persist nothing -- so the artifacts are byte-identical.
+  const r = run(
+    ['run', '--lock=replace', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /WORKER hello, child/, 'the forked child ran')
+  t.assert.deepEqual(readFileSync(join(tmp, 'stasis.lock.json')), lockBaseline, 'child must not rewrite the lockfile')
+  t.assert.deepEqual(readFileSync(bundlePath), bundleBaseline, 'child must not rewrite the bundle')
+}))
+
+test('run --bundle=load: a forked child is served from the bundle (entry need not be declared)', withTmp((t, tmp) => {
+  const bundlePath = seedFork(t, tmp)
+  // Remove every source: the bundle is the only place the entry, worker, and hello can come
+  // from. worker.js is an attested file but NOT a declared entry -- allowed for a fork target.
+  rmSync(join(tmp, 'src'), { recursive: true })
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^WORKER hello, child lock=frozen bundle=load$/m)
+  t.assert.match(r.stdout, /PARENT child-exit=0/)
+}))
+
+test('run --bundle=load: the ROOT entry stays strict (a non-declared entry is rejected)', withTmp((t, tmp) => {
+  const bundlePath = seedFork(t, tmp)
+  // Running worker.js directly as the root entry: it is attested but not a declared entry,
+  // and the root (pid match, no fork) must still enforce the entries list.
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/worker.js'],
+    { cwd: tmp }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Unknown entry point/)
+}))
+
+test('run --lock=frozen: a forked child fails closed on a tampered import', withTmp((t, tmp) => {
+  seedFork(t, tmp)
+  // hello.js is imported by the forked worker; tampering it must be caught (the child runs
+  // the same enforcement) and the tampered code must not run.
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `PWNED ${n}`\n')
+  const r = run(
+    ['run', '--lock=frozen', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.notEqual(r.status, 0)
+  t.assert.doesNotMatch(r.stdout, /PWNED/, 'the tampered code must not run')
+}))
+
+test('run capture: a non-fork child that inherits the loader is also blocked from writing', withTmp((t, tmp) => {
+  const bundlePath = seedFork(t, tmp)
+  const lockBaseline = readFileSync(join(tmp, 'stasis.lock.json'))
+  const bundleBaseline = readFileSync(bundlePath)
+  // entry.js spawns `node --import <loader> worker.js` (a NON-fork child: no IPC channel). It
+  // still inherits EXODUS_STASIS_PID, so the pid mismatch must suppress its write too -- the
+  // safeguard covers any child, not just fork(). Artifacts stay byte-identical to the baseline.
+  const loader = fileURLToPath(import.meta.resolve('@exodus/stasis-core/loader'))
+  const r = run(
+    ['run', '--lock=replace', '--bundle=replace', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, SPAWN_WORKER: '1', STASIS_LOADER: loader } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /WORKER hello, child/, 'the spawned child ran')
+  t.assert.deepEqual(readFileSync(join(tmp, 'stasis.lock.json')), lockBaseline, 'a non-fork child must not rewrite the lockfile')
+  t.assert.deepEqual(readFileSync(bundlePath), bundleBaseline, 'a non-fork child must not rewrite the bundle')
 }))

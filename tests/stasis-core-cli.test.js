@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdtempSync, rmSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,6 +13,7 @@ import { stripVTControlCharacters } from 'node:util'
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis-core', 'bin', 'stasis-core.js')
 const runFixture = join(here, 'fixtures', 'cli-run')
+const forkFixture = join(here, 'fixtures', 'cli-run-fork')
 const pruneFixture = join(here, 'fixtures', 'prune')
 
 const {
@@ -21,6 +22,7 @@ const {
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
+  EXODUS_STASIS_PID: _pid,
   ...cleanEnv
 } = process.env
 
@@ -94,6 +96,26 @@ test('run does not support --mock (tooling-only flag)', (t) => {
   // never proceeds to announce a run config for an unsupported flag
   t.assert.doesNotMatch(r.stderr, /Running stasis with config/)
 })
+
+test('run: a forked child is enforced from the bundle but does not write (via the core loader)', withTmp((t, tmp) => {
+  cpSync(forkFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+  // Capture without forking to seed the lockfile + bundle.
+  const seed = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(seed.status, 0, `seed stderr: ${seed.stderr}`)
+  const lockBaseline = readFileSync(join(tmp, 'stasis.lock.json'))
+
+  // Run from the bundle with the fork happening; the child (worker.js, not a declared entry)
+  // is served from the bundle, and the frozen lockfile must be left untouched by the child.
+  rmSync(join(tmp, 'src'), { recursive: true })
+  const r = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, RUN_WORKER: '1' } }
+  )
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^WORKER hello, child lock=frozen bundle=load$/m)
+  t.assert.deepEqual(readFileSync(join(tmp, 'stasis.lock.json')), lockBaseline, 'child must not rewrite the lockfile')
+}))
 
 test('prune validates and removes against the lockfile', withTmp((t, tmp) => {
   cpSync(pruneFixture, tmp, { recursive: true })
