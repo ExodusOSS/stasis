@@ -15,52 +15,52 @@ writeFileSync(join(dir, 'pnpm-workspace.yaml'), '')
 const parent = new State(dir, { preload: true, lock: 'add', resources: ['png'] })  // no bundle
 process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
 
-test('preload without bundle: plugin bundle=undefined reuses preload', (t) => {
-  const r = resolvePluginState('Test', {}, dir)
+test('preload without bundle: plugin bundle=undefined reuses preload', async (t) => {
+  const r = await resolvePluginState('Test', {}, dir)
   t.assert.equal(r.isNoop, false)
   t.assert.equal(r.state, parent)
 })
 
-test("preload without bundle: plugin bundle='none' reuses preload", (t) => {
-  const r = resolvePluginState('Test', { bundle: 'none' }, dir)
+test("preload without bundle: plugin bundle='none' reuses preload", async (t) => {
+  const r = await resolvePluginState('Test', { bundle: 'none' }, dir)
   t.assert.equal(r.isNoop, false)
   t.assert.equal(r.state, parent)
 })
 
-test("preload without bundle: plugin bundle='ignore' reuses preload", (t) => {
-  const r = resolvePluginState('Test', { bundle: 'ignore' }, dir)
+test("preload without bundle: plugin bundle='ignore' reuses preload", async (t) => {
+  const r = await resolvePluginState('Test', { bundle: 'ignore' }, dir)
   t.assert.equal(r.isNoop, false)
   t.assert.equal(r.state, parent)
 })
 
-test('preload without bundle: plugin bundle=add + bundleFile constructs a sidecar', (t) => {
-  const r = resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'sidecar.br') }, dir)
+test('preload without bundle: plugin bundle=add + bundleFile constructs a sidecar', async (t) => {
+  const r = await resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'sidecar.br') }, dir)
   t.assert.equal(r.isNoop, false)
   t.assert.notEqual(r.state, parent)
   t.assert.equal(r.state.parent, parent)
 })
 
-test('preload without bundle: plugin bundle=add without bundleFile throws', (t) => {
-  t.assert.throws(
-    () => resolvePluginState('Test', { bundle: 'add' }, dir),
+test('preload without bundle: plugin bundle=add without bundleFile throws', async (t) => {
+  await t.assert.rejects(
+    resolvePluginState('Test', { bundle: 'add' }, dir),
     /requires an explicit bundleFile/
   )
 })
 
-test('preload resources: a plugin declaring the same allowlist reuses the preload', (t) => {
-  const r = resolvePluginState('Test', { resources: ['png'] }, dir)
+test('preload resources: a plugin declaring the same allowlist reuses the preload', async (t) => {
+  const r = await resolvePluginState('Test', { resources: ['png'] }, dir)
   t.assert.equal(r.state, parent)
 })
 
-test('preload resources: a plugin declaring a DIFFERENT allowlist throws (no silent widening)', (t) => {
-  t.assert.throws(
-    () => resolvePluginState('Test', { resources: ['svg'] }, dir),
+test('preload resources: a plugin declaring a DIFFERENT allowlist throws (no silent widening)', async (t) => {
+  await t.assert.rejects(
+    resolvePluginState('Test', { resources: ['svg'] }, dir),
     /resources=\[svg\] conflicts with active preload resources=\[png\]/
   )
 })
 
-test('preload resources: a sidecar inherits the preload allowlist', (t) => {
-  const r = resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'sidecar-res.br') }, dir)
+test('preload resources: a sidecar inherits the preload allowlist', async (t) => {
+  const r = await resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'sidecar-res.br') }, dir)
   t.assert.notEqual(r.state, parent)
   t.assert.deepEqual([...r.state.config.resources], ['png'])
 })

@@ -66,15 +66,26 @@ function getBase() {
 // EXODUS_STASIS_* env + stasis.config.json the rest of stasis does) and only act when
 // it resolves to load mode; any other mode -> null -> this transformer is a transparent
 // pass-through, so wiring it permanently in metro.config.js is safe.
-let stateInited = false
-let loadState = null
+// transform() serves attested bytes, so it reads the bundle with strict, ASYNC
+// decompression (rejects trailing garbage) via State.create(); memoized as a promise
+// so concurrent transforms in a worker share one load. getCacheKey() is synchronous
+// (Metro's contract) and only needs config, so it builds a sync State -- whose lenient
+// read affects only the cache-key marker, never served bytes.
+let loadStatePromise
 function getLoadState() {
-  if (!stateInited) {
-    stateInited = true
+  loadStatePromise ??= State.create(process.cwd()).then((state) => (state.config.loadBundle ? state : null))
+  return loadStatePromise
+}
+
+let configStateInited = false
+let configState = null
+function getConfigState() {
+  if (!configStateInited) {
+    configStateInited = true
     const state = new State(process.cwd())
-    loadState = state.config.loadBundle ? state : null
+    configState = state.config.loadBundle ? state : null
   }
-  return loadState
+  return configState
 }
 
 // True iff `absolute` is a path the bundle is supposed to cover under load mode.
@@ -91,8 +102,8 @@ function inScope(state, absolute) {
   return state.inNodeModules(pathToFileURL(absolute).toString())
 }
 
-export function transform(config, projectRoot, filename, data, options) {
-  const state = getLoadState()
+export async function transform(config, projectRoot, filename, data, options) {
+  const state = await getLoadState()
   if (state) {
     // `filename` is project-relative in Metro's transformer contract; resolve against
     // projectRoot (resolvePath ignores projectRoot when filename is already absolute).
@@ -119,7 +130,7 @@ export function getCacheKey(config) {
   // State -- the SAME source of truth as transform() -- not the env var, so load activated
   // via stasis.config.json is keyed correctly too; the bundle path keys it to the bundle.
   const baseKey = typeof getBase().getCacheKey === 'function' ? getBase().getCacheKey(config) : ''
-  const state = getLoadState()
+  const state = getConfigState()
   const marker = state ? `load:${state.config.bundleFile || 'default'}` : 'off'
   return `${baseKey}$stasis-metro-transformer:${marker}`
 }

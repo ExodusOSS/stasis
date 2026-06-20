@@ -115,9 +115,7 @@ const PRELOAD_ROOT = (() => {
   }
 })()
 
-function initState(root) {
-  state = new State(root, { preload: true, preloadRoot: PRELOAD_ROOT })
-
+function installSaveHandlers() {
   // Persist the lockfile/bundle on exit UNLESS a stasis verification rejected something.
   // We deliberately do NOT gate on the exit code: a clean capture that exits non-zero for
   // its own reasons -- a server running its own SIGINT shutdown and exiting 130, or any
@@ -147,6 +145,38 @@ function initState(root) {
 
   process.on('beforeExit', save)
   process.on('exit', save)
+}
+
+// Resolve the preload root the way the lazy hook inits do: full-scope load serves the
+// entry from the bundle (it may not be on disk) so it anchors at cwd; every other mode
+// reads the entry from disk, so it anchors at the entry's (process.argv[1]) package dir.
+function resolvePreloadRoot() {
+  const fullLoad = process.env.EXODUS_STASIS_BUNDLE === 'load' && process.env.EXODUS_STASIS_SCOPE !== 'node_modules'
+  if (fullLoad) return process.cwd()
+  const entry = process.argv[1]
+  if (!entry) return process.cwd()
+  try {
+    return dirname(findPackageJSON(pathToFileURL(resolvePath(entry)).toString()))
+  } catch {
+    return process.cwd()
+  }
+}
+
+// Synchronous, lenient State init -- the fallback used if a load/resolve hook fires
+// before an eager initStateAsync() ran (e.g. a host that calls install() directly).
+function initState(root) {
+  state = new State(root, { preload: true, preloadRoot: PRELOAD_ROOT })
+  installSaveHandlers()
+}
+
+// Eager, ASYNC State init for the runtime loader: reads the bundle with strict async
+// decompression (rejects trailing garbage). loader.js awaits this BEFORE install()
+// registers the synchronous module hooks, so by the time any module loads the State is
+// already built and the synchronous hooks just serve from it. Idempotent.
+export async function initStateAsync(root = resolvePreloadRoot()) {
+  if (state) return
+  state = await State.create(root, { preload: true, preloadRoot: PRELOAD_ROOT })
+  installSaveHandlers()
 }
 
 function load(url, context, nextLoad) {
@@ -303,9 +333,13 @@ function resolve(specifier, context, nextResolve) {
 
   assert.equal(res.importAttributes, undefined) // unsupported yet
   if (parentURL) assert.ok(state)
-  // As in load(): a rejected resolution (frozen redirect mismatch, conflict, ...) must keep
-  // the captured state from being written, swallowed or not.
-  if (state) {
+  // Only non-entry resolutions are import edges; an entry (no parentURL) is recorded via
+  // addFile in load(), not addImport. Under lazy init this was implicit -- state was still
+  // null during the entry's resolve -- but eager initStateAsync() sets state before the
+  // entry resolves, so skip the no-parent case explicitly. As in load(): a rejected
+  // resolution (frozen redirect mismatch, conflict, ...) must keep the captured state from
+  // being written, swallowed or not.
+  if (state && parentURL) {
     try {
       state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
     } catch (err) {

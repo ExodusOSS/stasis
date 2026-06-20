@@ -38,7 +38,7 @@ import { extSetsEqual, parseResourcesOption } from './util.js'
 //  6. Different bundleFile creates a sidecar.
 //  7. Plugin with lock='none' AND bundle='none' and no preload is a no-op (lets framework
 //     plugins be env-controlled off without throwing on the lock=none/bundle=none invariant).
-export function resolvePluginState(label, options, cwd) {
+export async function resolvePluginState(label, options, cwd) {
   validatePluginOptions(label, options)
   const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources } = options
   // Same-instance fast path: the plugin's stasis-core IS the binary's, the
@@ -93,7 +93,7 @@ export function resolvePluginState(label, options, cwd) {
         `pass lock='none' or lock='ignore' to opt out, or run under the stasis loader`
       )
     }
-    return { state: new State(cwd, options), isNoop: false }
+    return { state: await State.create(cwd, options), isNoop: false }
   }
 
   // Preload is active. Since `lockFile` is not a plugin option, the lockfile is
@@ -144,7 +144,7 @@ export function resolvePluginState(label, options, cwd) {
     }
     // Rule 6: different path -- sidecar inherits preload's modes, overrides bundleFile
     // (and resourcesBundleFile if the plugin provided one for a split layout).
-    const sidecar = new State(cwd, {
+    const sidecar = await State.create(cwd, {
       parent: ambient,
       scope: pc.scope,
       lock: pc.lock,

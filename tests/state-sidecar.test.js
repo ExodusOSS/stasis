@@ -238,69 +238,69 @@ test('sidecar requires bundleFile', (t) => {
   )
 })
 
-test('resolvePluginState rule 5: same bundleFile reuses the preload', (t) => {
-  const r = resolvePluginState('Test', { bundle: 'add', bundleFile: parentBundle }, dir)
+test('resolvePluginState rule 5: same bundleFile reuses the preload', async (t) => {
+  const r = await resolvePluginState('Test', { bundle: 'add', bundleFile: parentBundle }, dir)
   t.assert.equal(r.isNoop, false)
   t.assert.equal(r.state, parent)
 })
 
-test('resolvePluginState rule 6: different bundleFile constructs a sidecar', (t) => {
-  const r = resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 't6.br') }, dir)
+test('resolvePluginState rule 6: different bundleFile constructs a sidecar', async (t) => {
+  const r = await resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 't6.br') }, dir)
   t.assert.equal(r.isNoop, false)
   t.assert.notEqual(r.state, parent)
   t.assert.equal(r.state.parent, parent)
 })
 
-test('resolvePluginState rule 2: lock mismatch with preload is rejected', (t) => {
-  t.assert.throws(
-    () => resolvePluginState('Test', { lock: 'frozen' }, dir),
+test('resolvePluginState rule 2: lock mismatch with preload is rejected', async (t) => {
+  await t.assert.rejects(
+    resolvePluginState('Test', { lock: 'frozen' }, dir),
     /lock='frozen' conflicts with active preload lock='add'/
   )
 })
 
-test('resolvePluginState rule 4: cannot disable bundle when preload has it', (t) => {
-  t.assert.throws(
-    () => resolvePluginState('Test', { bundle: 'none' }, dir),
+test('resolvePluginState rule 4: cannot disable bundle when preload has it', async (t) => {
+  await t.assert.rejects(
+    resolvePluginState('Test', { bundle: 'none' }, dir),
     /bundle='none' conflicts with active preload bundle='add'/
   )
 })
 
-test('resolvePluginState scope mismatch with preload is rejected', (t) => {
-  t.assert.throws(
-    () => resolvePluginState('Test', { scope: 'node_modules' }, dir),
+test('resolvePluginState scope mismatch with preload is rejected', async (t) => {
+  await t.assert.rejects(
+    resolvePluginState('Test', { scope: 'node_modules' }, dir),
     /scope='node_modules' conflicts with active preload scope='full'/
   )
 })
 
 // --- lockFile is rejected: a plugin shares the ambient lockfile (no independent State) ----
 
-test('resolvePluginState rejects a plugin lockFile option (the ambient lockfile must be shared)', (t) => {
+test('resolvePluginState rejects a plugin lockFile option (the ambient lockfile must be shared)', async (t) => {
   // Previously a divergent `lockFile` spun up an INDEPENDENT State with its own lockfile
   // (the old "Rule 0" opt-out, which did NOT share hashes/entries/modules with the
   // ambient). That escape hatch is gone: `lockFile` is no longer a plugin option, so when
   // an ambient parent exists the plugin can only reuse it or run as a sidecar -- the
   // lockfile is always shared. A non-default lockfile location is now a process-wide
   // concern (EXODUS_STASIS_LOCK_FILE), not a per-plugin one.
-  t.assert.throws(
-    () => resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'independent.br'), lockFile: join(dir, 'independent.lock.json') }, dir),
+  await t.assert.rejects(
+    resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'independent.br'), lockFile: join(dir, 'independent.lock.json') }, dir),
     /Unknown Test options: lockFile/
   )
   // Even a lockFile naming the ambient's own default path is rejected: the option simply
   // doesn't exist for plugins anymore (there is no "matches the ambient, so allow it").
-  t.assert.throws(
-    () => resolvePluginState('Test', { bundle: 'add', bundleFile: parentBundle, lockFile: join(dir, 'stasis.lock.json') }, dir),
+  await t.assert.rejects(
+    resolvePluginState('Test', { bundle: 'add', bundleFile: parentBundle, lockFile: join(dir, 'stasis.lock.json') }, dir),
     /Unknown Test options: lockFile/
   )
 })
 
-test('resolvePluginState with no lockFile still shares the ambient: same bundleFile reuses, different sidecars', (t) => {
+test('resolvePluginState with no lockFile still shares the ambient: same bundleFile reuses, different sidecars', async (t) => {
   // The positive side of the invariant: without a lockFile the plugin always shares the
   // ambient. Same/unspecified bundleFile reuses the preload; a different bundleFile makes
   // a sidecar that shares the parent's hashes/entries/modules (the unified lockfile).
-  const reuse = resolvePluginState('Test', { bundle: 'add', bundleFile: parentBundle }, dir)
+  const reuse = await resolvePluginState('Test', { bundle: 'add', bundleFile: parentBundle }, dir)
   t.assert.equal(reuse.state, parent, 'same bundleFile reuses the shared preload')
 
-  const sidecar = resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'share-side.br') }, dir).state
+  const sidecar = (await resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'share-side.br') }, dir)).state
   t.assert.notEqual(sidecar, parent, 'different bundleFile splits off a sidecar')
   t.assert.equal(sidecar.parent, parent, 'sidecar is parented to the ambient (shared lockfile)')
   t.assert.equal(sidecar.hashes, parent.hashes, 'sidecar shares the parent hashes')

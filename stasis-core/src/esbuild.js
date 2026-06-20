@@ -17,22 +17,27 @@ import { classifyExtension } from './util.js'
 
 export class StasisEsbuild {
   #seen = new Set()
+  #options
   #state
   #resources
 
   constructor(options = {}) {
-    const { state } = resolvePluginState('StasisEsbuild', options, process.cwd())
-    this.#state = state  // null when plugin should be inert
-    // resources is a Config field now (validated + coordinated against any preload in
-    // resolvePluginState); cache the resolved Set for the per-file classify hot path.
-    this.#resources = state?.config.resources ?? new Set()
+    // esbuild instantiates plugins synchronously, but resolving our State reads the
+    // bundle with strict async decompression -- so defer it to setup() (which may be
+    // async). Just stash the options here.
+    this.#options = options
   }
 
   get name() {
     return 'stasis'
   }
 
-  setup = ({ onResolve, onLoad, onEnd, resolve }) => {
+  setup = async ({ onResolve, onLoad, onEnd, resolve }) => {
+    const { state } = await resolvePluginState('StasisEsbuild', this.#options, process.cwd())
+    this.#state = state  // null when plugin should be inert
+    // resources is a Config field now (validated + coordinated against any preload in
+    // resolvePluginState); cache the resolved Set for the per-file classify hot path.
+    this.#resources = state?.config.resources ?? new Set()
     if (!this.#state) return  // noop plugin
 
     // The stasis preload owns its own write via beforeExit/exit hooks (stasis-core/hooks.js).

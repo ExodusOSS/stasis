@@ -45,24 +45,37 @@ function bundleStat(size, isDir = false) {
 
 export class StasisWebpack {
   #seen = new Set()
+  #options
   #state
   #resources
 
   constructor(options = {}) {
-    const { state } = resolvePluginState('StasisWebpack', options, process.cwd())
-    this.#state = state  // null when plugin should be inert
-    // resources is a Config field now (validated + coordinated against any preload in
-    // resolvePluginState); cache the resolved Set for the per-file classify hot path.
-    this.#resources = state?.config.resources ?? new Set()
+    // webpack instantiates plugins synchronously (during config parse), but resolving
+    // our State reads the bundle with strict async decompression -- so defer it to an
+    // async lifecycle hook in apply(). Just stash the options here.
+    this.#options = options
   }
 
   apply(compiler) {
-    if (!this.#state) return
-    if (this.#state.config.loadBundle) {
-      this.#applyLoadMode(compiler)
-      return
+    // Resolve State + wire the build hooks at run/watch start (async): beforeRun fires
+    // for compiler.run(), watchRun for compiler.watch(); a guard makes init run once.
+    // Both fire before compilation, so wrapping inputFileSystem and tapping
+    // normalModuleFactory / done from here is still early enough.
+    let initialized = false
+    const init = async () => {
+      if (initialized) return
+      initialized = true
+      const { state } = await resolvePluginState('StasisWebpack', this.#options, process.cwd())
+      this.#state = state  // null when plugin should be inert
+      // resources is a Config field now (validated + coordinated against any preload in
+      // resolvePluginState); cache the resolved Set for the per-file classify hot path.
+      this.#resources = state?.config.resources ?? new Set()
+      if (!this.#state) return
+      if (this.#state.config.loadBundle) this.#applyLoadMode(compiler)
+      else this.#applyCaptureMode(compiler)
     }
-    this.#applyCaptureMode(compiler)
+    compiler.hooks.beforeRun.tapPromise('Stasis', init)
+    compiler.hooks.watchRun.tapPromise('Stasis', init)
   }
 
   // Load mode: mirrors `stasis run --bundle=load` for the webpack plugin context.

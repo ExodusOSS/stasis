@@ -10,10 +10,14 @@
 // going through the hooks (so it never becomes the bundle entry), and running it
 // after the lib's snapshots leaves stasis's own bindings untouched. This static
 // composition is what lets core stay mock-agnostic with no env-var coordination.
-import { install } from '@exodus/stasis-core/hooks'
+import { install, initStateAsync } from '@exodus/stasis-core/hooks'
 // `export *` (mock.js has no exports) rather than a bare side-effect import only
 // to satisfy the no-unassigned-import lint rule; ESM still evaluates it here, in
 // source order, after the hooks lib above and before install() below.
 export * from './mock.js'
 
+// Eager async State init (strict bundle decompression) before install(), matching the
+// non-mock loader. State reads through its own real-fs snapshot, so it is unaffected by
+// mock.js neutralizing the fs writers above.
+await initStateAsync()
 install()

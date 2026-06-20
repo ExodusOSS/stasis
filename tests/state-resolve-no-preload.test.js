@@ -17,23 +17,23 @@ const fixture = () => {
   return dir
 }
 
-test('rule 1: lockfile mode without preload is a hard throw', (t) => {
+test('rule 1: lockfile mode without preload is a hard throw', async (t) => {
   const dir = fixture()
   try {
-    t.assert.throws(
-      () => resolvePluginState('Test', { lock: 'add' }, dir),
+    await t.assert.rejects(
+      resolvePluginState('Test', { lock: 'add' }, dir),
       /lockfile mode 'add' requires a stasis preload/
     )
-    t.assert.throws(
-      () => resolvePluginState('Test', { lock: 'frozen' }, dir),
+    await t.assert.rejects(
+      resolvePluginState('Test', { lock: 'frozen' }, dir),
       /lockfile mode 'frozen' requires a stasis preload/
     )
-    t.assert.throws(
-      () => resolvePluginState('Test', { lock: 'replace' }, dir),
+    await t.assert.rejects(
+      resolvePluginState('Test', { lock: 'replace' }, dir),
       /lockfile mode 'replace' requires a stasis preload/
     )
-    t.assert.throws(
-      () => resolvePluginState('Test', {}, dir),
+    await t.assert.rejects(
+      resolvePluginState('Test', {}, dir),
       /the default lockfile mode \('add'\) requires a stasis preload/
     )
   } finally {
@@ -41,10 +41,10 @@ test('rule 1: lockfile mode without preload is a hard throw', (t) => {
   }
 })
 
-test('rule 7: lock=none + bundle=none returns noop', (t) => {
+test('rule 7: lock=none + bundle=none returns noop', async (t) => {
   const dir = fixture()
   try {
-    const r = resolvePluginState('Test', { lock: 'none', bundle: 'none' }, dir)
+    const r = await resolvePluginState('Test', { lock: 'none', bundle: 'none' }, dir)
     t.assert.equal(r.isNoop, true)
     t.assert.equal(r.state, null)
   } finally {
@@ -52,15 +52,15 @@ test('rule 7: lock=none + bundle=none returns noop', (t) => {
   }
 })
 
-test('rule 7 partial opt-out: { lock: "none" } alone (bundle implicit) is a preload-aware throw, not a Config error', (t) => {
+test('rule 7 partial opt-out: { lock: "none" } alone (bundle implicit) is a preload-aware throw, not a Config error', async (t) => {
   const dir = fixture()
   try {
     // Previously this fell through to Config's generic
     // `stasis needs a lockfile or a bundle` RangeError, with no signal that the
     // user's intent (opt out) was almost-but-not-quite satisfied. The plugin
     // resolver now catches the partial case explicitly.
-    t.assert.throws(
-      () => resolvePluginState('Test', { lock: 'none' }, dir),
+    await t.assert.rejects(
+      resolvePluginState('Test', { lock: 'none' }, dir),
       /to opt out of stasis without a preload, pass BOTH lock='none' and bundle='none'/
     )
   } finally {
@@ -68,14 +68,14 @@ test('rule 7 partial opt-out: { lock: "none" } alone (bundle implicit) is a prel
   }
 })
 
-test('rule 7 partial opt-out: { bundle: "none" } alone (lock implicit) is a preload-aware throw, not a Rule 1 throw', (t) => {
+test('rule 7 partial opt-out: { bundle: "none" } alone (lock implicit) is a preload-aware throw, not a Rule 1 throw', async (t) => {
   const dir = fixture()
   try {
     // Without this catch, lock defaults to 'add' and Rule 1 throws about the
     // default lockfile mode -- which is technically true but misleading when
     // the user actually wanted to opt out via bundle='none'.
-    t.assert.throws(
-      () => resolvePluginState('Test', { bundle: 'none' }, dir),
+    await t.assert.rejects(
+      resolvePluginState('Test', { bundle: 'none' }, dir),
       /to opt out of stasis without a preload, pass BOTH lock='none' and bundle='none'/
     )
   } finally {
@@ -83,23 +83,22 @@ test('rule 7 partial opt-out: { bundle: "none" } alone (lock implicit) is a prel
   }
 })
 
-test('lock=none paired with an active bundle mode is NOT a partial opt-out (bundle-as-trust-root)', (t) => {
+test('lock=none paired with an active bundle mode is NOT a partial opt-out (bundle-as-trust-root)', async (t) => {
   // Config explicitly supports lock='none' + bundle=('load' | 'frozen' | 'add'):
   // the bundle is the trust root, no sibling lockfile required. The partial-
   // opt-out catch must NOT misclaim this as "you wanted to opt out" -- the
   // call must fall through to constructing a standalone State.
   const dir = fixture()
   try {
-    for (const bundle of ['load', 'frozen', 'add', 'replace']) {
-      // We don't care whether the State construction itself succeeds (it may
-      // throw later for missing bundleFile or whatever); we only care that the
-      // resolver doesn't intercept with the partial-opt-out message.
-      const callable = () => resolvePluginState('Test', { lock: 'none', bundle }, dir)
-      try { callable() } catch (err) {
+    // We don't care whether the State construction itself succeeds (it may throw later
+    // for missing bundleFile or whatever); we only care that the resolver doesn't
+    // intercept with the partial-opt-out message.
+    await Promise.all(['load', 'frozen', 'add', 'replace'].map(async (bundle) => {
+      try { await resolvePluginState('Test', { lock: 'none', bundle }, dir) } catch (err) {
         t.assert.doesNotMatch(err.message, /to opt out/,
           `lock=none + bundle=${bundle} must not be treated as a partial opt-out`)
       }
-    }
+    }))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

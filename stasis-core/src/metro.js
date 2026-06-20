@@ -114,12 +114,22 @@ function metroDefaultSerializer() {
 //     accepts a mismatched resolution).
 export class StasisMetro {
   #seen = new Set()
+  #options
+  #statePromise
   #state
   #resources
 
   constructor(options = {}) {
-    const { state } = resolvePluginState('StasisMetro', options, process.cwd())
-    this.#state = state // null when the plugin should be inert (Rule 7)
+    // Resolving our State reads the bundle with strict async decompression; defer it to
+    // the serializer hooks (which run async) instead of this synchronous constructor.
+    this.#options = options
+  }
+
+  // Resolve + cache our State on first serializer call (memoized). null = inert (Rule 7).
+  async #ensureState() {
+    this.#statePromise ??= resolvePluginState('StasisMetro', this.#options, process.cwd())
+    const { state } = await this.#statePromise
+    this.#state = state
     // resources is a Config field now (validated + coordinated against any preload in
     // resolvePluginState); cache the resolved Set for the per-file classify hot path.
     this.#resources = state?.config.resources ?? new Set()
@@ -134,7 +144,8 @@ export class StasisMetro {
     if (baseSerializer !== undefined && typeof baseSerializer !== 'function') {
       throw new TypeError('StasisMetro.customSerializer(base?): base must be a function or omitted')
     }
-    return (entryPoint, preModules, graph, options) => {
+    return async (entryPoint, preModules, graph, options) => {
+      await this.#ensureState()
       this.#run(graph, preModules)
       const serialize = baseSerializer ?? metroDefaultSerializer()
       return serialize(entryPoint, preModules, graph, options)
@@ -146,7 +157,8 @@ export class StasisMetro {
   // `customSerializer`. LOWER COVERAGE: the hook's signature is `(graph, delta)`; Metro never
   // passes `preModules` to it, so the prepended polyfills/runtime go UNATTESTED. Prefer
   // withStasis/customSerializer. Bound so it can be passed by reference.
-  serializerHook = (graph, _delta) => {
+  serializerHook = async (graph, _delta) => {
+    await this.#ensureState()
     this.#run(graph)
   }
 

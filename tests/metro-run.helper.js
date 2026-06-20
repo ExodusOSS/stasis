@@ -110,17 +110,19 @@ const mode = process.env.STASIS_TEST_METRO_MODE || 'hook'
 const stasis = new StasisMetro(pluginOptions)
 
 if (mode === 'customSerializer') {
-  const out = stasis.customSerializer(baseSerializer)(entryAbs, preModules, graph, {})
+  // customSerializer's closure is async (it resolves the plugin State, reading any
+  // existing bundle with strict async decompression), so await it before writing.
+  const out = await stasis.customSerializer(baseSerializer)(entryAbs, preModules, graph, {})
   process.stdout.write(typeof out === 'string' ? out : out.code)
 } else if (mode === 'withStasis') {
   // withStasis builds its OWN StasisMetro(pluginOptions) (which reuses the preload) and
   // wires it onto the config's customSerializer, wrapping the base we provide.
   const config = withStasis({ serializer: { customSerializer: baseSerializer } }, pluginOptions ?? {})
-  const out = config.serializer.customSerializer(entryAbs, preModules, graph, {})
+  const out = await config.serializer.customSerializer(entryAbs, preModules, graph, {})
   process.stdout.write(typeof out === 'string' ? out : out.code)
 } else {
-  // experimentalSerializerHook signature: (graph, delta) -- no preModules.
-  stasis.serializerHook(graph, delta)
+  // experimentalSerializerHook signature: (graph, delta) -- no preModules. Async now.
+  await stasis.serializerHook(graph, delta)
 }
 
 if (State.preload) State.preload.write()

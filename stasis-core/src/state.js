@@ -4,13 +4,12 @@ import * as fs from 'node:fs'
 import { join, resolve, relative, basename, dirname, extname, isAbsolute } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findPackageJSON } from 'node:module'
-import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
-import { brotliOptions } from './brotli.js'
+import { compress, decompress, decompressSync } from './brotli.js'
 import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, moduleFileKey, objectToMaps, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
@@ -190,8 +189,17 @@ export class State {
   //     manages its own sources/formats/imports/resources and emits its own bundle file.
   //     write() on a sidecar skips the lockfile (parent owns it) and only writes its bundle.
   //   All other keys forward to Config.
+
+  // Set when constructed via the async `State.create()` factory: bundle reads are
+  // QUEUED during this synchronous constructor (#absorbBundleFile) and applied
+  // afterwards with strict async decompression (rejects trailing garbage). A plain
+  // `new State()` leaves it false and decompresses inline, synchronously + leniently.
+  #deferBundles = false
+  #pendingBundleReads = []
+
   constructor(root, options = {}) {
-    const { preload: isPreload = false, parent: parentState, preloadRoot, ...configOptions } = options
+    const { preload: isPreload = false, parent: parentState, preloadRoot, __deferBundles = false, ...configOptions } = options
+    this.#deferBundles = __deferBundles
     this.config = new Config(configOptions)
     if (isPreload) assert.ok(!State.preload, 'Only one preload Stasis instance is supported')
     assert.ok(!(isPreload && parentState), 'preload and parent are mutually exclusive')
@@ -253,33 +261,11 @@ export class State {
         const sourcesPath = this.config.bundleFile
         const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
         if (sources && !this.config.replaceBundle) {
-          const bundle = Bundle.parse(brotliDecompressSync(sources).toString('utf-8'))
-          // Same v0 refusal as the main load path: a v0 bundle has no per-file
-          // formats and no import map, so serving / verifying one through a
-          // sidecar would silently widen trust.
-          assert.equal(bundle.version, Bundle.VERSION,
-            `stasis sidecar requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
-            `Re-bundle with the current stasis or \`bundle=replace\` against a v0-free starting point.`)
-          assert.equal(bundle.config.scope, this.config.scope)
-          // Cross-check the sidecar bundle's metadata against the parent's lockfile
-          // (or absorb if no lockfile was loaded). hashes/entries/modules are shared
-          // with the parent, so #mergeBundleMetadata's writes -- when no lockfile is
-          // loaded -- propagate into the unified attestation.
-          this.#mergeBundleMetadata(bundle, { lockfileLoaded: this.#lockfileLoaded })
-          for (const [file, content] of bundle.sources) {
-            if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
-            else this.sources.set(file, content)
-          }
-          this.formats = bundle.formats
-          this.imports = bundle.imports
-          if (this.config.frozenBundle) {
-            // Same snapshot the main path takes -- closes the attested set so
-            // addFile/addImport reject anything the bundle didn't carry.
-            this.#bundleSources = new Set(this.sources.keys())
-            this.#bundleResources = new Set(this.resources.keys())
-            this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
-            this.#bundleFormats = new Map(bundle.formats)
-          }
+          // Absorb the sidecar's own bundle. Deferred + strict-decompressed under
+          // State.create(), inline + sync under `new State()`. #applyCodeBundle is
+          // shared with the main path (sidecar:true only swaps the v0-refusal message).
+          this.#absorbBundleFile(sources, (text) =>
+            this.#applyCodeBundle(text, { lockfileLoaded: this.#lockfileLoaded, sourcesPath, sidecar: true }))
         }
 
         // Sidecar split-bundle: same shape as the main path's resources-side load.
@@ -287,28 +273,15 @@ export class State {
           const resourcesPath = this.config.resourcesBundleFile
           const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
           if (resourcesData && !this.config.replaceBundle) {
-            this.#absorbResourcesBundle(resourcesData, { lockfileLoaded: this.#lockfileLoaded, resourcesPath })
+            this.#absorbBundleFile(resourcesData, (text) =>
+              this.#applyResourcesBundle(text, { lockfileLoaded: this.#lockfileLoaded, resourcesPath }))
           }
         }
       }
-      // Mirror the post-discovery invariant from the main path: frozen modes must
-      // have actually loaded their attestation, otherwise the run would fail open.
-      if (this.config.frozenBundle) {
-        assert.ok(this.#bundleSources !== null, 'No bundle, but attempting to run in frozen bundle mode')
-      }
-      // Register with the parent AFTER every fallible step (v0 refusal, scope
-      // equality, #mergeBundleMetadata cross-check, frozenBundle invariant) so a
-      // throw never leaves a dead reference in the parent's #sidecars registry.
-      // Gated on writeBundle: load / frozen sidecars are CONSUMERS -- they read
-      // attestations from their bundle but must not contribute to the parent's
-      // lockfile (the bundle has its own integrity story, and under `lock=add`
-      // with no prior lockfile a load-mode sidecar would otherwise silently make
-      // the bundle's content the lockfile's source of truth). Write-mode sidecars
-      // ARE contributors -- their addImport / addFile observations have to land
-      // in the unified lockfile, otherwise a `lock=frozen` re-run rejects them
-      // as unattested.
-      if (this.config.writeBundle) parentState.registerSidecar(this)
-      liveStates().add(this)
+      // Frozen-bundle invariant, parent registration, and liveStates registration all
+      // run AFTER bundle absorb (a fallible step), so #finishSidecar defers them past
+      // the strict async reads under State.create(); inline otherwise.
+      if (!this.#deferBundles) this.#finishSidecar()
       return
     }
 
@@ -415,40 +388,13 @@ export class State {
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-          // One unified bundle carries both code and resources. Split the flat file
-          // view into this.sources (code) and this.resources (resource payloads --
-          // raw UTF-8 for 'resource', base64 for 'resource:base64') by format.
-          const bundle = Bundle.parse(brotliDecompressSync(sources).toString('utf-8'))
-          // `Bundle.parse` accepts v0 for offline tooling (`stasis extract`, `diff`,
-          // `audit`, `sbom`) -- it has the metadata those commands need. The runtime
-          // path is stricter: a v0 bundle has no per-file `formats` attestation
-          // (resources can't be distinguished from code, the loader can't pick
-          // module-vs-commonjs) and no import map (resolution edges go unchecked),
-          // so serving / verifying one under `stasis run` would silently widen the
-          // trust boundary. Refuse it explicitly and point at the upgrade path.
-          assert.equal(bundle.version, Bundle.VERSION,
-            `stasis run requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
-            `Re-bundle with the current stasis (\`stasis bundle\`) or \`stasis run --bundle=replace\` ` +
-            `against a v0-free starting point to upgrade.`)
-          assert.equal(bundle.config.scope, this.config.scope)
-          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
-          for (const [file, content] of bundle.sources) {
-            if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
-            else this.sources.set(file, content)
-          }
-          this.formats = bundle.formats
-          this.imports = bundle.imports
-          if (this.config.frozenBundle) {
-            // Snapshot the attested sets before addFile/addImport mutate the live maps.
-            // imports is deep-cloned (this.imports shares bundle.imports's nested Maps,
-            // which addImport extends); formats is a flat file->string map, so a shallow
-            // copy suffices. Code and resource file sets are tracked separately to match
-            // addFile's per-kind frozen-bundle membership check.
-            this.#bundleSources = new Set(this.sources.keys())
-            this.#bundleResources = new Set(this.resources.keys())
-            this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
-            this.#bundleFormats = new Map(bundle.formats)
-          }
+          // One unified bundle carries both code and resources; #applyCodeBundle splits
+          // the flat file view into this.sources (code) and this.resources (resource
+          // payloads -- raw UTF-8 for 'resource', base64 for 'resource:base64') by
+          // format. Deferred + strict-decompressed under State.create(), inline + sync
+          // under `new State()`.
+          this.#absorbBundleFile(sources, (text) =>
+            this.#applyCodeBundle(text, { lockfileLoaded, sourcesPath, sidecar: false }))
         }
 
         // Split-bundle layout: when `resourcesBundleFile` is configured, resources
@@ -461,7 +407,8 @@ export class State {
           const resourcesPath = this.config.resourcesBundleFile
           const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
           if (resourcesData && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-            this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
+            this.#absorbBundleFile(resourcesData, (text) =>
+              this.#applyResourcesBundle(text, { lockfileLoaded, resourcesPath }))
           }
         }
       }
@@ -511,7 +458,6 @@ export class State {
     // attested zone (its bytes/format/resolutions aren't checked), letting it execute
     // unverified. A frozen run with nothing to verify against must fail closed instead.
     if (this.config.frozen) assert.ok(lockfileLoaded, 'No lockfile, but attempting to run in frozen mode')
-    if (this.config.frozenBundle) assert.ok(this.#bundleSources !== null, 'No bundle, but attempting to run in frozen bundle mode')
 
     // Claim this State's write targets against the process-wide registry (liveStates),
     // so a sidecar OR an independent top-level State -- in this OR another stasis-core
@@ -540,6 +486,105 @@ export class State {
       this.#preloadRoot = preloadRoot
     }
 
+    // Frozen-bundle invariant + liveStates registration run AFTER bundle absorb, so
+    // #finishMain defers them past the strict async reads under State.create().
+    if (!this.#deferBundles) this.#finishMain()
+  }
+
+  // Async factory mirroring `new State(root, options)` but reading bundles with
+  // strict, ASYNCHRONOUS decompression: trailing bytes after a bundle's brotli stream
+  // are rejected (ERR_TRAILING_JUNK_AFTER_STREAM_END), matching the `brotli` CLI. The
+  // synchronous constructor (offline tooling, tests) stays lenient -- the sync zlib
+  // API can't detect trailing garbage. The four runtime bundle readers -- `stasis run`
+  // and the webpack / esbuild / metro plugins -- construct through here.
+  static async create(root, options = {}) {
+    const state = new State(root, { ...options, __deferBundles: true })
+    await state.#runDeferredBundleReads()
+    return state
+  }
+
+  // Route a bundle file's compressed bytes to `apply(decompressedText)`. Under
+  // State.create() the read is queued and run later (strict, async); otherwise it
+  // decompresses inline (sync, lenient) so the `new State()` path is unchanged.
+  #absorbBundleFile(data, apply) {
+    if (this.#deferBundles) {
+      this.#pendingBundleReads.push({ data, apply })
+      return
+    }
+    apply(decompressSync(data).toString('utf-8'))
+  }
+
+  // State.create()'s async tail: decompress each queued bundle strictly, apply it in
+  // construction order, then run the deferred post-absorb finalizers (kept out of the
+  // constructor because they must follow the now-async reads).
+  async #runDeferredBundleReads() {
+    // Decompress all queued bundles in parallel (strict), then apply them in queue order
+    // -- a resources bundle's absorb depends on the code bundle's having run first.
+    const texts = await Promise.all(
+      this.#pendingBundleReads.map(({ data }) => decompress(data).then((buf) => buf.toString('utf-8')))
+    )
+    this.#pendingBundleReads.forEach(({ apply }, i) => apply(texts[i]))
+    this.#pendingBundleReads = []
+    if (this.#parent) this.#finishSidecar()
+    else this.#finishMain()
+  }
+
+  // Parse + absorb a code bundle's text into this State. Shared by the main and sidecar
+  // paths; `sidecar` only selects the v0-refusal message. `Bundle.parse` accepts v0 for
+  // offline tooling, but the runtime path is stricter: a v0 bundle has no per-file
+  // `formats` attestation and no import map, so serving / verifying one would silently
+  // widen the trust boundary -- refuse it and point at the upgrade path.
+  #applyCodeBundle(text, { lockfileLoaded, sourcesPath, sidecar }) {
+    const bundle = Bundle.parse(text)
+    assert.equal(bundle.version, Bundle.VERSION, sidecar
+      ? `stasis sidecar requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
+        `Re-bundle with the current stasis or \`bundle=replace\` against a v0-free starting point.`
+      : `stasis run requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
+        `Re-bundle with the current stasis (\`stasis bundle\`) or \`stasis run --bundle=replace\` ` +
+        `against a v0-free starting point to upgrade.`)
+    assert.equal(bundle.config.scope, this.config.scope)
+    // Cross-check the bundle's metadata against the lockfile (or absorb it as the source
+    // of truth when none was loaded). hashes/entries/modules are shared with the parent
+    // on a sidecar, so the writes propagate into the unified attestation.
+    this.#mergeBundleMetadata(bundle, { lockfileLoaded })
+    for (const [file, content] of bundle.sources) {
+      if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
+      else this.sources.set(file, content)
+    }
+    this.formats = bundle.formats
+    this.imports = bundle.imports
+    if (this.config.frozenBundle) {
+      // Snapshot the attested sets before addFile/addImport mutate the live maps.
+      // imports is deep-cloned (this.imports shares bundle.imports's nested Maps, which
+      // addImport extends); formats is a flat file->string map, so a shallow copy
+      // suffices. Code and resource file sets are tracked separately to match addFile's
+      // per-kind frozen-bundle membership check.
+      this.#bundleSources = new Set(this.sources.keys())
+      this.#bundleResources = new Set(this.resources.keys())
+      this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
+      this.#bundleFormats = new Map(bundle.formats)
+    }
+  }
+
+  // Post-absorb finalizer for a sidecar State (deferred past the async reads under
+  // State.create()). Registration runs AFTER every fallible step so a throw never
+  // leaves a dead reference in the parent's #sidecars registry. registerSidecar is
+  // gated on writeBundle: load / frozen sidecars are CONSUMERS that read attestations
+  // from their bundle but must not contribute to the parent's lockfile; write-mode
+  // sidecars ARE contributors whose addImport / addFile observations land in it.
+  #finishSidecar() {
+    if (this.config.frozenBundle) {
+      assert.ok(this.#bundleSources !== null, 'No bundle, but attempting to run in frozen bundle mode')
+    }
+    if (this.config.writeBundle) this.#parent.registerSidecar(this)
+    liveStates().add(this)
+  }
+
+  // Post-absorb finalizer for a top-level State (deferred past the async reads under
+  // State.create()). The frozen-bundle invariant fails closed -- a frozen-bundle run
+  // with nothing to verify against is unsafe. liveStates registration is last.
+  #finishMain() {
+    if (this.config.frozenBundle) assert.ok(this.#bundleSources !== null, 'No bundle, but attempting to run in frozen bundle mode')
     liveStates().add(this)
   }
 
@@ -651,8 +696,8 @@ export class State {
   // frozenBundle -- the attestation snapshots. The shape asserts catch a writer
   // that leaked code into the resources file or a tampered file claiming
   // metadata it shouldn't carry.
-  #absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath }) {
-    const bundle = Bundle.parse(brotliDecompressSync(resourcesData).toString('utf-8'))
+  #applyResourcesBundle(text, { lockfileLoaded, resourcesPath }) {
+    const bundle = Bundle.parse(text)
     assert.equal(bundle.version, Bundle.VERSION,
       `stasis run requires a v1 resources bundle; ${resourcesPath} is v${bundle.version}. ` +
       `Re-bundle with the current stasis or \`bundle=replace\` against a v0-free starting point to upgrade.`)
@@ -1864,7 +1909,7 @@ export class State {
     const text = serialize()
     if (text !== lastText) {
       mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, brotliCompressSync(text, brotliOptions()))
+      writeFileSync(path, compress(text))
       return text
     }
     return lastText
