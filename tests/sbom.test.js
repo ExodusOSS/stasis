@@ -398,7 +398,7 @@ test('sbom --format=cyclonedx reads a brotli bundle and streams a valid document
     entries: ['src/entry.js'],
     sources: { '.': { name: 'app', version: '9.9.9', files: { 'src/entry.js': 'export const x = 1\n' } } },
     modules: { 'node_modules/foo': { name: 'foo', version: '2.0.0', ecosystem: 'npm', files: { 'index.js': 'export const f = 1\n' } } },
-    formats: { 'node_modules/foo/index.js': 'module' },
+    formats: { 'node_modules/foo/index.js': 'javascript:module' },
     imports: {},
   }
   const path = join(tmp, 'snapshot.br')

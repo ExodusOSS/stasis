@@ -25,7 +25,7 @@
     }
   },
   "formats": {
-    "src/entry.js": "commonjs",
-    "src/hello.js": "commonjs"
+    "src/entry.js": "javascript:commonjs",
+    "src/hello.js": "javascript:commonjs"
   }
 }

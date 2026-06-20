@@ -495,7 +495,7 @@ test('extractCommand rejects a non-canonical base64 resource (tamper layer below
     } } },
     modules: {},
     formats: {
-      'src/entry.js': 'commonjs',
+      'src/entry.js': 'javascript:commonjs',
       'src/blob.bin': 'resource:base64',
     },
     imports: {},
@@ -552,11 +552,11 @@ test('extractCommand skips a directory-listing entry on disk but keeps it in the
       } }],
     ]),
     formats: new Map([
-      ['src/entry.js', 'module'],
+      ['src/entry.js', 'javascript:module'],
       ['src/assets/a.txt', 'resource'],
       ['src/assets', 'directory'],
       ['node_modules/dep', 'directory'],
-      ['node_modules/dep/index.js', 'commonjs'],
+      ['node_modules/dep/index.js', 'javascript:commonjs'],
     ]),
     imports: new Map([['*', new Map([['src/entry.js', new Map()]])]]),
   })

@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, moduleFileKey, objectToMaps, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, genericCodeFormat, moduleFileKey, objectToMaps, reconcileFormat, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
@@ -729,7 +729,14 @@ export class State {
   #assertAttestedFormat(attestation, file, format, { what, source = 'lockfile' }) {
     const attested = attestation.get(file)
     assert.ok(attested !== undefined, `${what} format for ${file} is not attested by the ${source}`)
-    assert.equal(format, attested, `${what} format for ${file} mismatches the ${source}`)
+    // Reconcilable formats agree: a generic attestation (javascript) accepts the concrete
+    // kind observed (javascript:module) and vice-versa; only a real kind/language mismatch
+    // fails. reconcileFormat throws on conflict, surfaced here as the attestation error.
+    try {
+      reconcileFormat(attested, format)
+    } catch {
+      assert.fail(`${what} format for ${file} mismatches the ${source}: '${format}' vs attested '${attested}'`)
+    }
   }
 
   assertEntry(url) {
@@ -1029,42 +1036,26 @@ export class State {
       const extToFormat = {
         __proto__: null,
         '.json': 'json',
-        '.mjs': 'module',
-        '.cjs': 'commonjs',
-        '.mts': 'module-typescript',
-        '.cts': 'commonjs-typescript',
+        '.mjs': 'javascript:module',
+        '.cjs': 'javascript:commonjs',
+        '.mts': 'typescript:module',
+        '.cts': 'typescript:commonjs',
       }
       if (closestType !== undefined) {
-        extToFormat['.js'] = closestType
-        extToFormat['.ts'] = `${closestType}-typescript`
+        extToFormat['.js'] = `javascript:${closestType}`
+        extToFormat['.ts'] = `typescript:${closestType}`
       }
       const inferredFormat = extToFormat[extname(file)]
       if (inferredFormat !== undefined) {
-        if (format != null) assert.equal(format, inferredFormat)
-        else format = inferredFormat
+        // reconcileFormat upgrades a generic `javascript`/`typescript` the caller passed to
+        // the concrete kind, and throws on a real conflict (e.g. a `module` loader format for
+        // a `.cjs`). With no prior format it's just the inferred one.
+        format = format != null ? reconcileFormat(format, inferredFormat) : inferredFormat
       } else if (format == null) {
-        // No `type` in the nearest package.json: Node decides .js/.ts by
-        // module-syntax detection, so either variant is legitimate and the
-        // caller's reported format wins. When no format was provided at all
-        // (e.g. bundler plugins, whose afterResolve/onLoad pass none), defer to
-        // a format already recorded for this file THIS session before falling
-        // back to the legacy commonjs default. The runtime loader records Node's
-        // authoritative module/commonjs choice (hooks.js's load hook), so a
-        // later no-format capture of the same file must KEEP a known `module`
-        // rather than re-default it to commonjs -- which would both mis-attest
-        // the bundle and collide at the noupsert below (and, for a bundler
-        // sidecar whose formats merge into the parent's unified lockfile, at
-        // #mergedFormats). A sidecar's loader records land in the parent's
-        // formats, so consult it too. Only an extension-appropriate code format
-        // is reused; a stale resource tag from a conflicting prior capture falls
-        // through to the default so the conflict still surfaces at noupsert.
-        const variants = {
-          __proto__: null,
-          '.js': ['commonjs', 'module'],
-          '.ts': ['commonjs-typescript', 'module-typescript'],
-        }[extname(file)]
-        const known = this.formats.get(file) ?? this.#parent?.formats.get(file)
-        format = variants?.includes(known) ? known : variants?.[0]
+        // No package `type` to fix the .js/.ts kind, or a .jsx/.tsx Node can't load: record
+        // the GENERIC language tag (javascript / typescript) -- never undefined. The loader
+        // upgrades it to a concrete kind via reconcileFormat if Node ever loads the file.
+        format = genericCodeFormat(extname(file).slice(1).toLowerCase())
       }
     }
 
@@ -1139,25 +1130,24 @@ export class State {
       }
     }
 
-    if (format) noupsert(this.formats, file, format)
+    if (format) this.formats.set(file, reconcileFormat(this.formats.get(file), format))
   }
 
-  // Record an `fs.readFileSync` capture (`stasis run --fs`, capture side). `source` is
-  // the raw bytes (a Buffer). Classification is the SAME classifyExtension the bundler
-  // plugins use (against this.config.resources), so the two capture paths can't disagree:
-  //  - 'code' (any CODE_EXTENSIONS file) → addFile infers the Node loader format from the
-  //    extension. .js/.ts defer it (inferFormat:false): module-vs-commonjs is Node's
-  //    syntax-detection call, the loader is the authority, and forcing a default here
-  //    would collide (noupsert) with the loader's record when a file is both imported and
-  //    fs-read. .jsx/.tsx are code but have no Node loader format, so none is imposed.
-  //    addFile asserts the bytes are UTF-8 -- a non-UTF-8 code file is malformed input,
-  //    refused there rather than silently re-tagged as a resource.
-  //  - 'resource' (an extension in the resources allowlist) → a 'resource'/'resource:base64'
-  //    payload, encoding chosen from the bytes.
+  // Record an `fs.readFileSync` capture (`stasis run --fs`, capture side). `source` is the
+  // raw bytes (a Buffer). Classification is the SAME classifyExtension the bundler plugins
+  // use (against this.config.resources), so the two capture paths can't disagree:
+  //  - 'code' (any CODE_EXTENSIONS file) → record the GENERIC language format
+  //    (javascript / typescript), or 'json' for .json -- never undefined, never a resource.
+  //    The fs read only sees bytes, not Node's commonjs-vs-module choice, so it records the
+  //    generic tag (inferFormat:false keeps closestType from guessing a kind) and the loader
+  //    upgrades it to the concrete kind via reconcileFormat if the same file is ever
+  //    imported. addFile asserts the bytes are UTF-8 -- a non-UTF-8 code file is refused there.
+  //  - 'resource' (an extension/filename in the resources allowlist) → a
+  //    'resource'/'resource:base64' payload, encoding chosen from the bytes.
   //  - 'unknown' (neither code nor an allowlisted resource) → THROW. Recording it as a
   //    resource would silently widen the attested set (the exact desync this guards); the
-  //    --fs hook catches the throw, warns, and writes nothing. Declare the extension in
-  //    `resources` (the --resources flag / EXODUS_STASIS_RESOURCES / a plugin's resources
+  //    --fs hook catches the throw, warns, and writes nothing. Declare the extension/filename
+  //    in `resources` (the --resources flag / EXODUS_STASIS_RESOURCES / a plugin's resources
   //    option) or stop reading it.
   // Routing through addFile means a file that is BOTH imported and fs-read lands in one
   // consistent, deduped entry, hashed and bucketed exactly like every other file.
@@ -1169,14 +1159,13 @@ export class State {
       this.addFile(url, { source, resource: true })
       return
     }
-    const ext = extname(path).toLowerCase()
     if (kind === 'unknown') {
       throw new Error(
         `addFsFile: ${path} is neither code nor a declared resource; ` +
         `add its extension or filename to the resources allowlist or stop reading it`
       )
     }
-    this.addFile(url, { source, inferFormat: ext !== '.js' && ext !== '.ts' })
+    this.addFile(url, { source, format: genericCodeFormat(extname(path).slice(1).toLowerCase()), inferFormat: false })
   }
 
   // Record an `fs.readdirSync(path)` capture (single-arg form only). The listing is
@@ -1397,7 +1386,7 @@ export class State {
     if (!imports.has(parent)) imports.set(parent, new Map())
     const specifiers = imports.get(parent)
     noupsert(specifiers, specifier, file)
-    if (format) noupsert(this.formats, file, format)
+    if (format) this.formats.set(file, reconcileFormat(this.formats.get(file), format))
   }
 
   getImport(parentURL, specifier, { conditions = '*', importAttributes } = {}) {
@@ -1621,17 +1610,40 @@ export class State {
     return merged
   }
 
-  // Union of lockfile-attested and observed/bundle-served formats, same
-  // append-only stance as #mergedImports: conflicting formats for one file are
-  // fatal (noupsert). Sidecars' formats are unioned in for the same reason.
-  #mergedFormats() {
+  // The family-reconciled format per file: the most-specific format across the carried
+  // lockfile, this State, and any sidecars -- the SINGLE source both the lockfile and every
+  // bundle serialize from, so they can't disagree on a recorded format. Computed on the root
+  // (a sidecar delegates to its parent). reconcileFormat upgrades a generic `javascript` to
+  // the concrete kind the loader observed and throws (before any write) on a real conflict.
+  #reconciledFormats() {
+    if (this.#parent) return this.#parent.#reconciledFormats()
     const merged = new Map()
     if (this.#lockFormats) for (const [file, format] of this.#lockFormats) merged.set(file, format)
-    for (const [file, format] of this.formats) noupsert(merged, file, format)
+    const fold = (file, incoming) => {
+      try {
+        merged.set(file, reconcileFormat(merged.get(file), incoming))
+      } catch (cause) {
+        throw new Error(`format conflict for ${file}`, { cause })
+      }
+    }
+    for (const [file, format] of this.formats) fold(file, format)
     for (const sidecar of this.#sidecars) {
-      for (const [file, format] of sidecar.formats) noupsert(merged, file, format)
+      for (const [file, format] of sidecar.formats) fold(file, format)
     }
     return merged
+  }
+
+  // The formats a bundle this State emits carries: the family-reconciled value for every
+  // file in this State's own formats, filtered (code vs resource split). Sharing
+  // #reconciledFormats with the lockfile is what keeps the two artifacts in lockstep.
+  #bundleFormatsFor(keep) {
+    const family = this.#reconciledFormats()
+    const out = new Map()
+    for (const file of this.formats.keys()) {
+      const format = family.get(file)
+      if (keep(format)) out.set(file, format)
+    }
+    return out
   }
 
   get lockData() {
@@ -1640,7 +1652,7 @@ export class State {
       entries: this.entries,
       modules: this.modules,
       imports: this.#mergedImports(),
-      formats: this.#mergedFormats(),
+      formats: this.#reconciledFormats(),
     }).serialize()
   }
 
@@ -1683,7 +1695,7 @@ export class State {
       config: this.config.values,
       entries: this.entries,
       modules: this.#bundleModules(contents),
-      formats: this.formats,
+      formats: this.#bundleFormatsFor(() => true),
       imports: this.imports,
     })
   }
@@ -1701,26 +1713,18 @@ export class State {
   // module identity (name/version) so each file is verifiable on its own.
   get codeBundle() {
     // Resource files don't appear in `this.sources` (addFile routes by format), so
-    // restricting #bundleModules to `this.sources` automatically yields the code-only
-    // view. Formats and modules are filtered to drop resource-only dirs/files.
-    const codeFormats = new Map()
-    for (const [file, format] of this.formats) {
-      if (!Bundle.isResourceFormat(format)) codeFormats.set(file, format)
-    }
+    // restricting #bundleModules to `this.sources` automatically yields the code-only view.
+    // Formats are the family-reconciled values, filtered to drop resource-only files.
     return new Bundle({
       config: this.config.values,
       entries: this.entries,
       modules: this.#bundleModules(this.sources),
-      formats: codeFormats,
+      formats: this.#bundleFormatsFor((format) => !Bundle.isResourceFormat(format)),
       imports: this.imports,
     })
   }
 
   get resourcesBundle() {
-    const resourceFormats = new Map()
-    for (const [file, format] of this.formats) {
-      if (Bundle.isResourceFormat(format)) resourceFormats.set(file, format)
-    }
     return new Bundle({
       config: this.config.values,
       // Resources bundle carries no entries / imports -- those belong to the code half.
@@ -1728,7 +1732,7 @@ export class State {
       // check sees only resource-format files and waives the requirement).
       entries: new Set(),
       modules: this.#bundleModules(this.resources),
-      formats: resourceFormats,
+      formats: this.#bundleFormatsFor((format) => Bundle.isResourceFormat(format)),
       imports: new Map(),
     })
   }

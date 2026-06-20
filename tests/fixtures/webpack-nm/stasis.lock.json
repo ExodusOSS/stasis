@@ -22,8 +22,8 @@
     }
   },
   "formats": {
-    "src/entry.js": "commonjs",
-    "src/helper.js": "commonjs",
-    "node_modules/fake-cjs-pkg/index.js": "commonjs"
+    "src/entry.js": "javascript:commonjs",
+    "src/helper.js": "javascript:commonjs",
+    "node_modules/fake-cjs-pkg/index.js": "javascript:commonjs"
   }
 }

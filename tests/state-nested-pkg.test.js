@@ -9,7 +9,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'state-ne
 test('addFile on a file under a nested sub-bucket package.json uses the package root', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'lib', 'util.js')).toString()
-  state.addFile(url, { format: 'module' })
+  state.addFile(url, { format: 'javascript:module' })
 
   const module = state.modules.get('node_modules/widget')
   t.assert.ok(module, 'package root entry must be present')
@@ -24,13 +24,13 @@ test('addFile on a file under a nested sub-bucket package.json uses the package 
 test('addFile rejects a nested package.json that disagrees on name/version', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'node_modules', 'conflict', 'lib', 'inner.js')).toString()
-  t.assert.throws(() => state.addFile(url, { format: 'module' }))
+  t.assert.throws(() => state.addFile(url, { format: 'javascript:module' }))
 })
 
 test('addFile walks past a workspace type-only marker to find the project package.json', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'sub', 'foo.cjs')).toString()
-  state.addFile(url, { format: 'commonjs' })
+  state.addFile(url, { format: 'javascript:commonjs' })
 
   const module = state.modules.get('.')
   t.assert.ok(module, 'project root entry must be present')
@@ -45,7 +45,7 @@ test('addFile walks past a workspace type-only marker to find the project packag
 test('addFile walks past an empty workspace package.json to find the project package.json', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'empty', 'foo.cjs')).toString()
-  state.addFile(url, { format: 'commonjs' })
+  state.addFile(url, { format: 'javascript:commonjs' })
 
   const module = state.modules.get('.')
   t.assert.ok(module)
@@ -57,21 +57,21 @@ test('addFile walks past an empty workspace package.json to find the project pac
 test('addFile rejects a workspace package.json missing version but with non-type keys', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'partial', 'file.js')).toString()
-  t.assert.throws(() => state.addFile(url, { format: 'module' }))
+  t.assert.throws(() => state.addFile(url, { format: 'javascript:module' }))
 })
 
 test('addFile infers .js format from the closest package.json type when format is omitted', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'lib', 'util.js')).toString()
   state.addFile(url)
-  t.assert.equal(state.formats.get('node_modules/widget/lib/util.js'), 'module')
+  t.assert.equal(state.formats.get('node_modules/widget/lib/util.js'), 'javascript:module')
 })
 
 test('addFile infers module for a .js file directly under the project root (type=module)', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'root-file.js')).toString()
   state.addFile(url)
-  t.assert.equal(state.formats.get('root-file.js'), 'module')
+  t.assert.equal(state.formats.get('root-file.js'), 'javascript:module')
 })
 
 test('addFile infers json for a .json file under a type=module package.json', (t) => {
@@ -85,13 +85,13 @@ test('addFile infers commonjs for a .cjs file under a type=module package.json',
   const state = new State(root)
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'lib', 'legacy.cjs')).toString()
   state.addFile(url)
-  t.assert.equal(state.formats.get('node_modules/widget/lib/legacy.cjs'), 'commonjs')
+  t.assert.equal(state.formats.get('node_modules/widget/lib/legacy.cjs'), 'javascript:commonjs')
 })
 
 test('addFile rejects an explicit format=commonjs for a .mjs file', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'sub', 'script.mjs')).toString()
-  t.assert.throws(() => state.addFile(url, { format: 'commonjs' }))
+  t.assert.throws(() => state.addFile(url, { format: 'javascript:commonjs' }))
 })
 
 test('addFile tags a UTF-8 resource as plain "resource" (no base64)', (t) => {
@@ -123,13 +123,15 @@ test('addFile rejects a caller-provided format that conflicts with the content-d
   t.assert.throws(() => state.addFile(url, { resource: true, format: 'wasm' }), /resource format mismatch/)
 })
 
-test('addFile defaults .js format to commonjs when the closest package.json omits type', (t) => {
+test('addFile records the generic javascript format when the closest package.json omits type', (t) => {
   const state = new State(root)
-  // node_modules/widget/package.json has no `type` field, so its .js files
-  // default to commonjs even though the project root is type=module.
+  // node_modules/widget/package.json has no `type` field, so the commonjs-vs-module
+  // kind of its .js files is unknown at capture time: addFile records the GENERIC
+  // 'javascript' tag (the loader upgrades it to a concrete kind if Node loads the file),
+  // even though the project root is type=module.
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'index.js')).toString()
   state.addFile(url)
-  t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'commonjs')
+  t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'javascript')
 })
 
 test('addFile keeps a module format already recorded this session for a later no-format .js capture', (t) => {
@@ -141,9 +143,9 @@ test('addFile keeps a module format already recorded this session for a later no
   // format) of the SAME file must KEEP that `module`, not downgrade it to the
   // legacy commonjs default (which would also collide at the formats noupsert).
   const url = pathToFileURL(join(root, 'node_modules', 'widget', 'index.js')).toString()
-  state.addFile(url, { format: 'module' }) // loader observed ESM
+  state.addFile(url, { format: 'javascript:module' }) // loader observed ESM
   t.assert.doesNotThrow(() => state.addFile(url)) // no-format bundler capture
-  t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'module')
+  t.assert.equal(state.formats.get('node_modules/widget/index.js'), 'javascript:module')
 })
 
 test('addFile refuses to record a code file as a resource (resources never admits a code extension)', (t) => {
@@ -160,7 +162,7 @@ test('addFile refuses to record a code file as a resource (resources never admit
 test('addFile rejects an explicit format that disagrees with the inferred one', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'sub', 'foo.cjs')).toString()
-  t.assert.throws(() => state.addFile(url, { format: 'module' }))
+  t.assert.throws(() => state.addFile(url, { format: 'javascript:module' }))
 })
 
 test('addFile infers json for .json files regardless of closest type', (t) => {
@@ -174,7 +176,7 @@ test('addFile infers module for .mjs regardless of closest type', (t) => {
   const state = new State(root)
   const url = pathToFileURL(join(root, 'sub', 'script.mjs')).toString()
   state.addFile(url)
-  t.assert.equal(state.formats.get('sub/script.mjs'), 'module')
+  t.assert.equal(state.formats.get('sub/script.mjs'), 'javascript:module')
 })
 
 test('addFile rejects a package.json type other than module/commonjs', (t) => {

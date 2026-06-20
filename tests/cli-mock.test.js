@@ -107,8 +107,8 @@ test('run --mock denies fs/child_process/network side-effects (fail closed) whil
   t.assert.deepEqual(decoded.entries, ['src/entry.js'])
   t.assert.ok(decoded.sources['.'].files['src/entry.js'])
   t.assert.ok(decoded.sources['.'].files['src/hello.js'])
-  t.assert.equal(decoded.formats['src/entry.js'], 'module')
-  t.assert.equal(decoded.formats['src/hello.js'], 'module')
+  t.assert.equal(decoded.formats['src/entry.js'], 'javascript:module')
+  t.assert.equal(decoded.formats['src/hello.js'], 'javascript:module')
   // The runtime loader keys imports by a conditions string, not "*"; assert the
   // entry->hello edge was captured regardless of which conditions key holds it.
   const captured = Object.values(decoded.imports)

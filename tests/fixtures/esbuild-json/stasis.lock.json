@@ -26,6 +26,6 @@
   },
   "formats": {
     "src/data.json": "json",
-    "src/entry.js": "module"
+    "src/entry.js": "javascript:module"
   }
 }

@@ -23,7 +23,7 @@ test('write emits the lockfile at config.lockFile', withTmp('write', (t, dir) =>
   const lockPath = join(dir, 'sub', 'plugin.lock.json')
 
   const st = new State(dir, { lock: 'add', lockFile: lockPath, bundle: 'none' })
-  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.write()
 
   t.assert.ok(existsSync(lockPath), 'lockfile written at the explicit path')
@@ -38,7 +38,7 @@ test('load reads the lockfile from config.lockFile, ignoring the default path', 
 
   // Capture phase writes to lockPath.
   const cap = new State(dir, { lock: 'add', lockFile: lockPath, bundle: 'none' })
-  cap.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  cap.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   cap.write()
 
   // Plant a stale stasis.lock.json at the default path with bogus content. The explicit
@@ -49,7 +49,7 @@ test('load reads the lockfile from config.lockFile, ignoring the default path', 
     entries: ['bogus.js'],
     sources: { '.': { name: 'fx', version: '0.0.0', files: { 'bogus.js': 'sha512-AAAA' } } },
     modules: {},
-    formats: { 'bogus.js': 'module' },
+    formats: { 'bogus.js': 'javascript:module' },
     imports: {},
   }))
 
@@ -81,7 +81,7 @@ test('an unrelated stasis.lock.json at the root does not gate root-detection whe
     entries: ['ghost.js'],
     sources: { '.': { name: 'fx', version: '0.0.0', files: { 'ghost.js': 'sha512-BBBB' } } },
     modules: {},
-    formats: { 'ghost.js': 'module' },
+    formats: { 'ghost.js': 'javascript:module' },
     imports: {},
   }))
   const lockPath = join(dir, 'real.lock.json')
@@ -91,7 +91,7 @@ test('an unrelated stasis.lock.json at the root does not gate root-detection whe
     entries: ['real.js'],
     sources: { '.': { name: 'fx', version: '0.0.0', files: { 'real.js': 'sha512-CCCC' } } },
     modules: {},
-    formats: { 'real.js': 'module' },
+    formats: { 'real.js': 'javascript:module' },
     imports: {},
   }))
 

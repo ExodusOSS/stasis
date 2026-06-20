@@ -207,8 +207,8 @@ test('run --fs on a CommonJS program: a required module stays code, explicit rea
   const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   const bundle = decode(bundlePath)
-  // the required CJS module is recorded as CODE (commonjs), not an fs resource
-  t.assert.equal(bundle.formats['src/dep.cjs'], 'commonjs')
+  // the required CJS module is recorded as CODE (javascript:commonjs), not an fs resource
+  t.assert.equal(bundle.formats['src/dep.cjs'], 'javascript:commonjs')
   // the explicit reads ARE captured: data.txt as a resource, the dir listing as directory
   t.assert.equal(bundle.formats['src/data.txt'], 'resource')
   t.assert.equal(bundle.sources['.'].files['src/data.txt'], 'DATA\n')
@@ -310,9 +310,10 @@ test('run --fs captures a readdirSync of a bucket root without discarding the ru
 }))
 
 test('run --fs handles a type-less .js that is both imported and readFileSync-read', withTmp((t, tmp) => {
-  // Regression: the loader records 'module' (syntax detection) for a type-less .js,
-  // while the fs read used to impose the legacy 'commonjs' default -> noupsert
-  // conflict -> whole capture silently discarded. Now the fs read records no format.
+  // Regression: the loader records 'javascript:module' (syntax detection) for a
+  // type-less .js, while the fs read used to impose the legacy 'commonjs' default -> noupsert
+  // conflict -> whole capture silently discarded. Now the fs read records the
+  // generic 'javascript' and the loader upgrades it to the concrete kind.
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'stasis-cli-run-fs', version: '0.0.0', private: true }))
   writeFileSync(join(tmp, 'src', 'lib.js'), 'export const greeting = "hi"\n')
   writeFileSync(join(tmp, 'src', 'entry.js'), [
@@ -328,7 +329,7 @@ test('run --fs handles a type-less .js that is both imported and readFileSync-re
   t.assert.equal(r.stdout, 'hi:29\n')
   t.assert.ok(existsSync(bundlePath), 'bundle must be written (no format conflict)')
   // The module loader's format wins; lib.js is served from the bundle on load.
-  t.assert.equal(decode(bundlePath).formats['src/lib.js'], 'module')
+  t.assert.equal(decode(bundlePath).formats['src/lib.js'], 'javascript:module')
 }))
 
 test('run --fs does NOT attest a directory symlink that escapes the project root', withTmp((t, tmp) => {

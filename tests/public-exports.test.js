@@ -122,14 +122,14 @@ test('Lockfile round-trip preserves formats and a legacy lockfile stays without 
     entries: ['src/a.js'],
     sources: { '.': { name: 'x', version: '1.0.0', files: { 'src/a.js': 'sha512-aaa' } } },
     modules: {},
-    formats: { 'src/a.js': 'module' },
+    formats: { 'src/a.js': 'javascript:module' },
   })
   const parsed = Lockfile.parse(withFormats)
-  t.assert.equal(parsed.formats.get('src/a.js'), 'module')
+  t.assert.equal(parsed.formats.get('src/a.js'), 'javascript:module')
   const first = parsed.serialize()
   const second = Lockfile.parse(first).serialize()
   t.assert.equal(first, second)
-  t.assert.deepEqual(JSON.parse(first).formats, { 'src/a.js': 'module' })
+  t.assert.deepEqual(JSON.parse(first).formats, { 'src/a.js': 'javascript:module' })
 
   // A legacy lockfile (no formats key) parses to formats === null and
   // round-trips without gaining the key.
@@ -149,8 +149,8 @@ test('Lockfile.parse rejects malformed formats (escaping path / non-string value
     config: { scope: 'node_modules' },
     modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
   }
-  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { '../evil.js': 'module' } })))
-  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { 'a/../../evil.js': 'module' } })))
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { '../evil.js': 'javascript:module' } })))
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { 'a/../../evil.js': 'javascript:module' } })))
   t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { 'src/a.js': 42 } })))
   t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: [] })))
 })
@@ -193,8 +193,9 @@ test('Bundle.parse rejects an unknown format string (allowlist gate)', (t) => {
 test('Bundle.parse and Lockfile.parse accept every documented KNOWN_FORMAT', (t) => {
   // Exercise every recognized format value through both parsers so the allowlist
   // and the recognized-format documentation stay in lockstep.
-  const all = ['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript',
-    'solidity', 'php', 'bash', 'rust', 'resource', 'resource:base64']
+  const all = ['javascript', 'javascript:commonjs', 'javascript:module',
+    'typescript', 'typescript:commonjs', 'typescript:module', 'json',
+    'solidity', 'php', 'bash', 'rust', 'resource', 'resource:base64', 'directory']
   for (const format of all) {
     const lockBase = {
       version: 0,
@@ -294,7 +295,7 @@ test('Bundle.serialize round-trip preserves entries, modules, formats, imports',
       ['.', { name: 'x', version: '1.0.0', files: { 'src/a.js': 'export const x = 1\n' } }],
       ['node_modules/w', { name: 'w', version: '1.0.0', files: { 'i.js': 'export const y = 2\n' } }],
     ]),
-    formats: new Map([['src/a.js', 'module']]),
+    formats: new Map([['src/a.js', 'javascript:module']]),
     imports: new Map([['*', new Map([['src/a.js', new Map([['./b.js', 'src/b.js']])]])]]),
   })
 
@@ -311,7 +312,7 @@ test('Bundle.serialize round-trip preserves entries, modules, formats, imports',
   t.assert.equal(parsed.modules.get('node_modules/w').files['i.js'], 'export const y = 2\n')
   t.assert.equal(parsed.sources.get('src/a.js'), 'export const x = 1\n')
   t.assert.equal(parsed.sources.get('node_modules/w/i.js'), 'export const y = 2\n')
-  t.assert.equal(parsed.formats.get('src/a.js'), 'module')
+  t.assert.equal(parsed.formats.get('src/a.js'), 'javascript:module')
   t.assert.equal(parsed.imports.get('*').get('src/a.js').get('./b.js'), 'src/b.js')
 })
 
@@ -335,7 +336,7 @@ test('Bundle round-trip carries code and resources side-by-side in one bundle', 
       } }],
     ]),
     formats: new Map([
-      ['src/entry.js', 'module'],
+      ['src/entry.js', 'javascript:module'],
       ['src/icon.svg', 'resource'],
       ['src/logo.png', 'resource:base64'],
     ]),
@@ -350,7 +351,7 @@ test('Bundle round-trip carries code and resources side-by-side in one bundle', 
   t.assert.equal(parsed.sources.get('src/icon.svg'), svg)
   t.assert.equal(parsed.sources.get('src/logo.png'), png)
   // Format tags preserved -- this is the per-file fidelity the collapse provides.
-  t.assert.equal(parsed.formats.get('src/entry.js'), 'module')
+  t.assert.equal(parsed.formats.get('src/entry.js'), 'javascript:module')
   t.assert.equal(parsed.formats.get('src/icon.svg'), 'resource')
   t.assert.equal(parsed.formats.get('src/logo.png'), 'resource:base64')
   // Code entry survives the entries-only-when-code invariant.
@@ -472,7 +473,7 @@ test('Bundle.parse rejects a v1 full-scope bundle that has code but empty entrie
     entries: [],
     sources: { '.': { name: 'x', version: '1.0', files: { 'src/a.js': 'export const x = 1\n' } } },
     modules: {},
-    formats: { 'src/a.js': 'module' },
+    formats: { 'src/a.js': 'javascript:module' },
     imports: {},
   })
   t.assert.throws(() => Bundle.parse(text), /at least one entry/)

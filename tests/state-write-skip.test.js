@@ -26,7 +26,7 @@ test('write() with no state change since the last call does not touch the lockfi
   const lockPath = join(dir, 'plug.lock.json')
   const st = new State(dir, { lock: 'add', lockFile: lockPath, bundle: 'none' })
   writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
-  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.write()
   const mtime1 = filePerturbation(lockPath)
 
@@ -42,11 +42,11 @@ test('write() rewrites the lockfile when state mutates between calls', withTmp('
   const st = new State(dir, { lock: 'add', lockFile: lockPath, bundle: 'none' })
   writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
   writeFileSync(join(dir, 'b.js'), 'export const b = 2\n')
-  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.write()
   const first = readFileSync(lockPath, 'utf-8')
 
-  st.addFile(pathToFileURL(join(dir, 'b.js')).toString(), { format: 'module' })
+  st.addFile(pathToFileURL(join(dir, 'b.js')).toString(), { format: 'javascript:module' })
   st.write()
   const second = readFileSync(lockPath, 'utf-8')
 
@@ -58,7 +58,7 @@ test('write() with no state change does not touch the bundle file', withTmp('bun
   const bundlePath = join(dir, 'code.br')
   const st = new State(dir, { lock: 'add', bundle: 'add', bundleFile: bundlePath })
   writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
-  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.write()
   const mtime1 = filePerturbation(bundlePath)
 
@@ -73,7 +73,7 @@ test('write() with split layout: both halves are independently skipped when unch
   const st = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
   writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
   writeFileSync(join(dir, 'logo.png'), Buffer.from([0xAA]))
-  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.addFile(pathToFileURL(join(dir, 'logo.png')).toString(), { resource: true })
   st.write()
   const codeMtime1 = filePerturbation(codePath)
@@ -91,14 +91,14 @@ test('write() with split layout: rewrites only the half that changed', withTmp('
   writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
   writeFileSync(join(dir, 'b.js'), 'export const b = 2\n')
   writeFileSync(join(dir, 'logo.png'), Buffer.from([0xAA]))
-  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.addFile(pathToFileURL(join(dir, 'logo.png')).toString(), { resource: true })
   st.write()
   const codeFirst = readFileSync(codePath)
   const resFirst = readFileSync(resPath)
 
   // Add only a code file; resources half is unchanged.
-  st.addFile(pathToFileURL(join(dir, 'b.js')).toString(), { format: 'module' })
+  st.addFile(pathToFileURL(join(dir, 'b.js')).toString(), { format: 'javascript:module' })
   st.write()
   const codeSecond = readFileSync(codePath)
   const resSecond = readFileSync(resPath)

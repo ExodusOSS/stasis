@@ -207,8 +207,8 @@ describe('bundle + lockfile on the 10-package set', { concurrency: true }, () =>
     // Both ESM and CJS sources must be present: chalk/nanoid/uuid are ESM,
     // express/lodash/debug are CJS. A missing format would break the loader.
     const formats = new Set(Object.values(decoded.formats))
-    t.assert.ok(formats.has('module'), `bundle should include ESM-format files; got ${[...formats].join(', ')}`)
-    t.assert.ok(formats.has('commonjs'), `bundle should include CJS-format files; got ${[...formats].join(', ')}`)
+    t.assert.ok(formats.has('javascript:module'), `bundle should include ESM-format files; got ${[...formats].join(', ')}`)
+    t.assert.ok(formats.has('javascript:commonjs'), `bundle should include CJS-format files; got ${[...formats].join(', ')}`)
 
     const load = await run(
       ['run', '--lock=none', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
@@ -422,8 +422,8 @@ describe('static bundle (stasis bundle) on the 10-package set', { concurrency: t
     // express/lodash/debug are CJS. A miss here would catch a regression in
     // per-parent format detection.
     const formats = new Set(Object.values(decoded.formats))
-    t.assert.ok(formats.has('module'), `static bundle should include ESM-format files; got ${[...formats].join(', ')}`)
-    t.assert.ok(formats.has('commonjs'), `static bundle should include CJS-format files; got ${[...formats].join(', ')}`)
+    t.assert.ok(formats.has('javascript:module'), `static bundle should include ESM-format files; got ${[...formats].join(', ')}`)
+    t.assert.ok(formats.has('javascript:commonjs'), `static bundle should include CJS-format files; got ${[...formats].join(', ')}`)
     // The static path stores under the wildcard condition key.
     t.assert.ok(decoded.imports['*'], `static bundle should record imports under '*'; got ${Object.keys(decoded.imports).join(', ')}`)
 

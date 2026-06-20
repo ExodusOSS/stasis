@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
+import { nodeFormatToStasis, stasisFormatToNode } from './util.js'
 import { installFsHooks } from './fs.js'
 
 // Snapshot off the namespace so `--fs` (which patches fs.readFileSync and then
@@ -169,6 +170,9 @@ function load(url, context, nextLoad) {
       return nextLoad(url, context)
     }
     const { source, format } = state.getFile(url)
+    // getFile returns the stasis format (javascript:module, generic javascript, ...); map to
+    // Node's own module.format for the cross-check, the executable gate, and the return value.
+    const nodeFormat = stasisFormatToNode(format)
     // context.format may be null when the resolve chain didn't set it (e.g. node_modules
     // scope, where non-nm parents go through nextResolve and Node's default doesn't
     // populate format for the load hook). Only cross-check when the chain provided one.
@@ -178,7 +182,7 @@ function load(url, context, nextLoad) {
     // would make Node strip type-argument-shaped syntax like `f<string>('x')`) for a
     // hash-valid file. Without a lockfile the bundle is self-authoritative for formats
     // just as it is for bytes (see getFile's hash carve-out).
-    if (context.format != null) assert.equal(format, context.format)
+    if (context.format != null) assert.equal(nodeFormat, context.format)
     // Trust gate: the loader will only serve a file whose attested format Node
     // can actually execute. Resource assets (`resource`, `resource:base64`),
     // source-language bundles (solidity/php/bash/rust), and any unknown string
@@ -186,8 +190,8 @@ function load(url, context, nextLoad) {
     // closed here with a contextual message -- never as an opaque assertion.
     // *-typescript formats are in the allowlist: Node's own translators strip
     // the types after this hook returns.
-    if (!NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
-    return { source, format, shortCircuit: true }
+    if (!NODEJS_FORMATS.has(nodeFormat)) refuseNonNodeFormat(format, url)
+    return { source, format: nodeFormat, shortCircuit: true }
   }
 
   // nextLoad runs Node's default loader, which reads a CJS module's source through
@@ -228,7 +232,7 @@ function load(url, context, nextLoad) {
   // it so save() persists nothing, even if user code swallows the rejection (a try/catch
   // around a dynamic import) and the process then exits cleanly.
   try {
-    state.addFile(url, { source, format, isEntry })
+    state.addFile(url, { source, format: nodeFormatToStasis(format), isEntry })
   } catch (err) {
     aborted = true
     throw err
@@ -278,13 +282,14 @@ function resolve(specifier, context, nextResolve) {
     // doesn't need to exist on disk.
     if (parentURL && !specifier.startsWith('file:')) {
       const { url, format } = state.getImport(parentURL, specifier, { conditions, importAttributes })
+      const nodeFormat = stasisFormatToNode(format)
       // Refuse a non-executable target at resolve time too. Catches the same
       // tampered/asset cases load() catches, just earlier and with the parent
       // module's URL in the stack trace for easier diagnosis. The load gate
       // remains the load-bearing one (a sibling resolver could deliver a target
       // that bypasses this branch); we throw here as a friendlier failure point.
-      if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
-      return { url, format, importAttributes: undefined, shortCircuit: true }
+      if (format != null && !NODEJS_FORMATS.has(nodeFormat)) refuseNonNodeFormat(format, url)
+      return { url, format: nodeFormat, importAttributes: undefined, shortCircuit: true }
     }
     const url = specifier.startsWith('file:')
       ? specifier
@@ -294,8 +299,9 @@ function resolve(specifier, context, nextResolve) {
     // rejects anything the bundle doesn't attest. The root run stays strict.
     if (!parentURL && state.config.full && !forkedChild) state.assertEntry(url)
     const format = state.getFormat(url)
-    if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
-    return { url, format, importAttributes: undefined, shortCircuit: true }
+    const nodeFormat = stasisFormatToNode(format)
+    if (format != null && !NODEJS_FORMATS.has(nodeFormat)) refuseNonNodeFormat(format, url)
+    return { url, format: nodeFormat, importAttributes: undefined, shortCircuit: true }
   }
 
   const res = nextResolve(specifier)
@@ -307,7 +313,7 @@ function resolve(specifier, context, nextResolve) {
   // the captured state from being written, swallowed or not.
   if (state) {
     try {
-      state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
+      state.addImport(parentURL, specifier, url, { conditions, format: nodeFormatToStasis(format), importAttributes })
     } catch (err) {
       aborted = true
       throw err

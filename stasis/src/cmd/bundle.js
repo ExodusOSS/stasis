@@ -7,7 +7,7 @@ import { Bundle } from '@exodus/stasis-core/bundle'
 import { scan } from '../scan.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
-import { splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { nodeFormatToStasis, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -667,7 +667,10 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
   const state = new State(baseDir, { bundle: 'replace', lock: 'ignore', ...(scope ? { scope } : {}) })
   for (const [url, info] of scanner.files) {
     const isEntry = scanner.entries.has(url)
-    state.addFile(url, { format: info.format, isEntry })
+    // scan emits Node's module.format strings (module/commonjs/*-typescript); map them to
+    // stasis's `<lang>:<kind>` taxonomy at the State boundary, same as the runtime loader
+    // (hooks.js) does. addFile's inference then agrees (reconcileFormat), not conflicts.
+    state.addFile(url, { format: nodeFormatToStasis(info.format), isEntry })
   }
   // Static bundles can't anticipate the full condition set Node will pass to
   // its resolve hook at load time (Node adds runtime conditions like

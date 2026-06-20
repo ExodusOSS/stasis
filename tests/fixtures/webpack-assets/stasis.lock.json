@@ -20,7 +20,7 @@
   "modules": {},
   "imports": {},
   "formats": {
-    "src/entry.js": "commonjs",
+    "src/entry.js": "javascript:commonjs",
     "src/icon.svg": "resource",
     "src/logo.png": "resource:base64"
   }

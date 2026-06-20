@@ -7,7 +7,15 @@ const sep = '/'
 // parsers reject any value outside this set so a tampered or forward-incompatible
 // artifact fails closed at the schema boundary, not at a later string compare.
 // Categories:
-//   Executable by Node's loader — module, commonjs, json, *-typescript
+//   JavaScript / TypeScript modules — `<lang>:<kind>`, <lang> ∈ {javascript, typescript},
+//     <kind> ∈ {commonjs, module}. The bare language tag (`javascript` / `typescript`)
+//     is the GENERIC form: a capture that saw the bytes but not yet the commonjs-vs-module
+//     kind (a bundler that didn't resolve it, or an fs read). The loader observes Node's
+//     authoritative kind and upgrades the generic to a concrete `<lang>:<kind>` via
+//     reconcileFormat. `run` maps these to/from Node's own module.format strings
+//     (commonjs / module / commonjs-typescript / module-typescript) with
+//     nodeFormatToStasis / stasisFormatToNode.
+//   json — Node's JSON module format.
 //   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
@@ -15,11 +23,13 @@ const sep = '/'
 // Adding a new format is a deliberate schema change: list it here AND extend
 // hooks.js's executable allowlist if Node should serve it from a bundle.
 export const KNOWN_FORMATS = new Set([
-  'module',
-  'commonjs',
+  'javascript',
+  'javascript:commonjs',
+  'javascript:module',
+  'typescript',
+  'typescript:commonjs',
+  'typescript:module',
   'json',
-  'module-typescript',
-  'commonjs-typescript',
   'solidity',
   'php',
   'bash',
@@ -41,6 +51,62 @@ export const KNOWN_FORMATS = new Set([
 // desync: `.jsx`/`.tsx` were code to the plugins but missing from the fs-capture's
 // own set, so an fs-read tagged a `.jsx` 'resource' while the import tagged it code.
 export const CODE_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json', 'mts', 'cts'])
+
+// CODE_EXTENSIONS partitioned by language. A `--fs` read, or a bundler that only sees an
+// extension, records the GENERIC language tag (javascript/typescript) -- never undefined,
+// never a resource -- and the loader upgrades it to a concrete kind if Node loads the file.
+export const JS_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'jsx'])
+export const TS_EXTENSIONS = new Set(['ts', 'mts', 'cts', 'tsx'])
+
+// The generic stasis format for a code extension (dot-less, lowercase): the language tag
+// for JS/TS, 'json' for .json, undefined for a non-code extension. Used by the fs capture
+// and by inference when the commonjs-vs-module kind isn't known.
+export function genericCodeFormat(ext) {
+  if (ext === 'json') return 'json'
+  if (JS_EXTENSIONS.has(ext)) return 'javascript'
+  if (TS_EXTENSIONS.has(ext)) return 'typescript'
+  return undefined
+}
+
+// Node's module.format (commonjs / module / *-typescript) <-> stasis's `<lang>:<kind>`.
+// stasis carries the language as a prefix so a generic capture can be upgraded; the loader
+// records the stasis form and maps back to Node's form when serving a module. Formats with
+// no JS/TS language (json, builtin, ...) pass through unchanged.
+const NODE_TO_STASIS = new Map([
+  ['commonjs', 'javascript:commonjs'],
+  ['module', 'javascript:module'],
+  ['commonjs-typescript', 'typescript:commonjs'],
+  ['module-typescript', 'typescript:module'],
+])
+const STASIS_TO_NODE = new Map([...NODE_TO_STASIS].map(([node, stasis]) => [stasis, node]))
+
+export const nodeFormatToStasis = (format) => NODE_TO_STASIS.get(format) ?? format
+export const stasisFormatToNode = (format) => STASIS_TO_NODE.get(format) ?? format
+
+// The concrete `<lang>:<kind>` formats a generic language tag can be upgraded to.
+const CONCRETE_FOR_GENERIC = {
+  __proto__: null,
+  javascript: new Set(['javascript:commonjs', 'javascript:module']),
+  typescript: new Set(['typescript:commonjs', 'typescript:module']),
+}
+
+// True for a generic, kind-unknown language tag.
+export const isGenericFormat = (format) => format === 'javascript' || format === 'typescript'
+
+// Reconcile a file's recorded format with a newly-observed one, returning the format to
+// keep (the more specific of the two) or throwing on a real conflict:
+//  - equal, or one side undefined -> the defined value
+//  - generic <lang> + concrete <lang>:<kind> (either order) -> the concrete kind (upgrade)
+//  - any other disagreement (kind vs kind, or javascript vs typescript) -> conflict
+// The SINGLE home of the "javascript -> javascript:module" upgrade and the fatal-mismatch
+// rule, used by addFile and by the pre-write family reconciliation.
+export function reconcileFormat(existing, incoming) {
+  if (existing === incoming || incoming === undefined) return existing
+  if (existing === undefined) return incoming
+  if (isGenericFormat(existing) && CONCRETE_FOR_GENERIC[existing]?.has(incoming)) return incoming
+  if (isGenericFormat(incoming) && CONCRETE_FOR_GENERIC[incoming]?.has(existing)) return existing
+  throw new Error(`format conflict: '${existing}' vs '${incoming}'`)
+}
 
 // Lowercased, dot-less extension of a path, or '' if none.
 export function pathExt(filePath) {

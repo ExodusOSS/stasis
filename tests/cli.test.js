@@ -323,7 +323,7 @@ test('run --bundle=replace ignores stale sources in the existing bundle', withTm
   // forge a stale entry by re-saving a tampered bundle
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
   decoded.sources['.'].files['src/orphan.js'] = 'export const x = 0\n'
-  decoded.formats['src/orphan.js'] = 'module'
+  decoded.formats['src/orphan.js'] = 'javascript:module'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
 
   const r = run(
@@ -369,8 +369,8 @@ test('run --bundle=add --bundle-file writes the bundle at the chosen path/filena
   t.assert.equal(decoded.sources['.'].name, 'stasis-cli-run')
   t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
   t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(runFixture, 'src/hello.js'), 'utf-8'))
-  t.assert.equal(decoded.formats['src/entry.js'], 'module')
-  t.assert.equal(decoded.formats['src/hello.js'], 'module')
+  t.assert.equal(decoded.formats['src/entry.js'], 'javascript:module')
+  t.assert.equal(decoded.formats['src/hello.js'], 'javascript:module')
 }))
 
 test('run --bundle=load --bundle-file round-trips through a save', withTmp((t, tmp) => {
@@ -423,8 +423,8 @@ test('run --lock=frozen --bundle=add writes the bundle without rewriting the loc
   t.assert.deepEqual(decoded.entries, ['src/entry.js'])
   t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(runFixture, 'src/entry.js'), 'utf-8'))
   t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(runFixture, 'src/hello.js'), 'utf-8'))
-  t.assert.equal(decoded.formats['src/entry.js'], 'module')
-  t.assert.equal(decoded.formats['src/hello.js'], 'module')
+  t.assert.equal(decoded.formats['src/entry.js'], 'javascript:module')
+  t.assert.equal(decoded.formats['src/hello.js'], 'javascript:module')
 }))
 
 test('run --lock=frozen --bundle=add round-trips through --bundle=load', withTmp((t, tmp) => {
@@ -509,8 +509,8 @@ test('run --bundle=frozen rejects a brand new file the bundle never recorded', w
 
 test('run --bundle=frozen rejects an on-disk format flip (tampered package.json type)', withTmp((t, tmp) => {
   const bundlePath = seedFrozenBundle(t, tmp)
-  // entry.js is attested as `module` in the bundle's formats. Flipping the
-  // workspace package.json `type` makes Node treat the same hash-valid bytes as
+  // entry.js is attested as `javascript:module` in the bundle's formats. Flipping
+  // the workspace package.json `type` makes Node treat the same hash-valid bytes as
   // commonjs -- `type` is not itself hash-attested, so only the format
   // cross-check against the frozen bundle can catch this.
   const pkgPath = join(tmp, 'package.json')
@@ -1375,12 +1375,12 @@ test('run --lock=add records loader formats in the lockfile formats map', withTm
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
 
   const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
-  t.assert.deepEqual(lock.formats, { 'src/entry.js': 'module', 'src/hello.js': 'module' })
+  t.assert.deepEqual(lock.formats, { 'src/entry.js': 'javascript:module', 'src/hello.js': 'javascript:module' })
 }))
 
 test('run --lock=frozen rejects an on-disk format flip (tampered package.json type)', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
-  // entry.js is attested as `module`. Flipping the workspace package.json's
+  // entry.js is attested as `javascript:module`. Flipping the workspace package.json's
   // `type` makes Node resolve the same hash-valid .js bytes as commonjs --
   // package.json `type` is not itself hash-attested, so only the format
   // cross-check can catch this. The same bytes would run under a different
@@ -1405,11 +1405,11 @@ test('run --lock=frozen --bundle=load rejects a bundle that flips a hash-valid f
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
-  // Flip hello.js's format module -> commonjs in the bundle. Bytes still match
-  // the lockfile hash; only the loader format the file runs under changes.
+  // Flip hello.js's format javascript:module -> javascript:commonjs in the bundle.
+  // Bytes still match the lockfile hash; only the loader format the file runs under changes.
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.formats['src/hello.js'], 'module')
-  decoded.formats['src/hello.js'] = 'commonjs'
+  t.assert.equal(decoded.formats['src/hello.js'], 'javascript:module')
+  decoded.formats['src/hello.js'] = 'javascript:commonjs'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
   rmSync(join(tmp, 'src'), { recursive: true })
 
@@ -1431,12 +1431,12 @@ test('run --lock=frozen --bundle=load rejects a bundle that flips a .js file to 
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
-  // The scariest flip: module -> module-typescript makes Node strip
+  // The scariest flip: javascript:module -> typescript:module makes Node strip
   // type-shaped syntax from the SAME bytes (`f<string>('x')` becomes a call,
   // not two comparisons), changing how the file parses -- not just which
   // module system runs it. Must be rejected, like any other format mismatch.
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  decoded.formats['src/hello.js'] = 'module-typescript'
+  decoded.formats['src/hello.js'] = 'typescript:module'
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(decoded)))
   rmSync(join(tmp, 'src'), { recursive: true })
 
@@ -1458,8 +1458,8 @@ test('run --lock=frozen --dependencies does not enforce a workspace file format 
   // a regression that over-enforced the workspace zone would fail here.
   const lockPath = join(tmp, 'stasis.lock.json')
   const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
-  t.assert.equal(lock.formats['src/entry.js'], 'module')
-  lock.formats['src/entry.js'] = 'commonjs'
+  t.assert.equal(lock.formats['src/entry.js'], 'javascript:module')
+  lock.formats['src/entry.js'] = 'javascript:commonjs'
   writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
 
   const r = run(['run', '--lock=frozen', '--dependencies', 'src/entry.js'], { cwd: tmp })

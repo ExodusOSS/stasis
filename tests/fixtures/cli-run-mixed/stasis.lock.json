@@ -40,8 +40,8 @@
     }
   },
   "formats": {
-    "src/entry.js": "module",
-    "node_modules/fake-cjs-pkg/index.js": "commonjs",
-    "node_modules/fake-esm-pkg/index.js": "module"
+    "src/entry.js": "javascript:module",
+    "node_modules/fake-cjs-pkg/index.js": "javascript:commonjs",
+    "node_modules/fake-esm-pkg/index.js": "javascript:module"
   }
 }

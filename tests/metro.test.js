@@ -189,7 +189,7 @@ test('bundle=add writes a bundle whose sources match disk', withTmp((t, tmp) => 
   t.assert.deepEqual(decoded.entries, ['src/entry.js'])
   t.assert.equal(decoded.sources['.'].files['src/entry.js'], readFileSync(join(tmp, 'src/entry.js'), 'utf-8'))
   t.assert.equal(decoded.sources['.'].files['src/hello.js'], readFileSync(join(tmp, 'src/hello.js'), 'utf-8'))
-  t.assert.equal(decoded.formats['src/entry.js'], 'module')
+  t.assert.equal(decoded.formats['src/entry.js'], 'javascript:module')
 }))
 
 test('bundle=load on the serializer is rejected and points at the worker transformer', withTmp((t, tmp) => {

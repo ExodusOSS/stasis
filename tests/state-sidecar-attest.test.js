@@ -23,7 +23,7 @@ writeFileSync(join(dir, 'pnpm-workspace.yaml'), '')
 writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
 
 // Phase 1: bootstrap a real lockfile on disk via a throwaway non-preload State.
-// This populates stasis.lock.json with `a.js` attested as format='module'.
+// This populates stasis.lock.json with `a.js` attested as format='javascript:module'.
 {
   const bootstrap = new State(dir, { lock: 'add' })
   bootstrap.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { isEntry: true })
@@ -49,7 +49,7 @@ const v1Bundle = (overrides = {}) => brotliCompressSync(JSON.stringify({
   entries: ['a.js'],
   sources: { '.': { name: 'fx', version: '0.0.0', files: { 'a.js': 'export const a = 1\n' } } },
   modules: {},
-  formats: { 'a.js': 'module' },
+  formats: { 'a.js': 'javascript:module' },
   imports: {},
   ...overrides,
 }))
@@ -67,7 +67,7 @@ test('sidecar load: tampered format (commonjs vs lockfile module) is rejected', 
   // loader format. Without #mergeBundleMetadata, the sidecar would silently flip
   // a.js from module to commonjs at serve time.
   const path = join(dir, 'tampered-format.br')
-  writeFileSync(path, v1Bundle({ formats: { 'a.js': 'commonjs' } }))
+  writeFileSync(path, v1Bundle({ formats: { 'a.js': 'javascript:commonjs' } }))
   t.assert.throws(
     () => new State(dir, { parent, lock: 'frozen', bundle: 'load', bundleFile: path }),
     // #assertAttestedFormat phrasing: "bundle format for a.js mismatches the lockfile"
@@ -102,7 +102,7 @@ test('load-mode sidecar does NOT contribute attestations to the parent-owned loc
   writeFileSync(path, v1Bundle({
     // Smuggle an extra format the parent's lockfile doesn't have. If the
     // load-mode sidecar were contributing, this would show up in parent.lockData.
-    formats: { 'a.js': 'module', 'never-attested.js': 'commonjs' },
+    formats: { 'a.js': 'javascript:module', 'never-attested.js': 'javascript:commonjs' },
   }))
   // The bundle's `never-attested.js` format isn't in the parent's lockfile;
   // #mergeBundleMetadata cross-check fires and refuses the sidecar bundle

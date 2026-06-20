@@ -29,7 +29,7 @@ test('write splits code into bundleFile and resources into resourcesBundleFile',
   const codePath = join(dir, 'out', 'code.br')
   const resPath = join(dir, 'out', 'res.br')
   const st = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
-  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.addFile(pathToFileURL(join(dir, 'logo.png')).toString(), { resource: true })
   st.addFile(pathToFileURL(join(dir, 'note.txt')).toString(), { resource: true })
   st.write()
@@ -48,7 +48,7 @@ test('write splits code into bundleFile and resources into resourcesBundleFile',
   t.assert.deepEqual(codeFiles, ['entry.js'], 'code bundle carries only code files')
   t.assert.deepEqual(resFiles, ['logo.png', 'note.txt'], 'resources bundle carries only resource files')
 
-  t.assert.equal(code.formats.get('entry.js'), 'module')
+  t.assert.equal(code.formats.get('entry.js'), 'javascript:module')
   t.assert.equal(code.formats.get('logo.png'), undefined, 'resource formats absent from code bundle')
   t.assert.equal(res.formats.get('logo.png'), 'resource:base64')
   t.assert.equal(res.formats.get('note.txt'), 'resource')
@@ -67,7 +67,7 @@ test('load reads both halves and reconstructs the unified state', withTmp('load'
 
   // Capture phase.
   const cap = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
-  cap.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  cap.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   cap.addFile(pathToFileURL(join(dir, 'logo.png')).toString(), { resource: true })
   cap.write()
 
@@ -75,7 +75,7 @@ test('load reads both halves and reconstructs the unified state', withTmp('load'
   const load = new State(dir, { lock: 'frozen', bundle: 'load', bundleFile: codePath, resourcesBundleFile: resPath })
   t.assert.ok(load.sources.has('entry.js'), 'code file restored from code bundle')
   t.assert.ok(load.resources.has('logo.png'), 'resource file restored from resources bundle')
-  t.assert.equal(load.formats.get('entry.js'), 'module')
+  t.assert.equal(load.formats.get('entry.js'), 'javascript:module')
   t.assert.equal(load.formats.get('logo.png'), 'resource:base64')
 }))
 
@@ -88,8 +88,8 @@ test('load round-trip: re-serializing a loaded State reproduces both bundles', w
   const resPath = join(dir, 'res.br')
 
   const cap = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
-  cap.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'module', isEntry: true })
-  cap.addFile(pathToFileURL(join(dir, 'b.js')).toString(), { format: 'module' })
+  cap.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { format: 'javascript:module', isEntry: true })
+  cap.addFile(pathToFileURL(join(dir, 'b.js')).toString(), { format: 'javascript:module' })
   cap.addFile(pathToFileURL(join(dir, 'icon.svg')).toString(), { resource: true })
   cap.write()
 
@@ -110,7 +110,7 @@ test('resources bundle containing entries is rejected on load', withTmp('forge-e
   const resPath = join(dir, 'res.br')
 
   const cap = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
-  cap.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  cap.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   cap.addFile(pathToFileURL(join(dir, 'logo.png')).toString(), { resource: true })
   cap.write()
 
@@ -120,7 +120,7 @@ test('resources bundle containing entries is rejected on load', withTmp('forge-e
   forged.sources = forged.sources || {}
   forged.sources['.'] = { name: 'fx', version: '0.0.0', files: { 'evil.js': 'console.log("pwn")' } }
   forged.entries = ['evil.js']
-  forged.formats['evil.js'] = 'module'
+  forged.formats['evil.js'] = 'javascript:module'
   writeFileSync(resPath, brotliCompressSync(JSON.stringify(forged)))
 
   t.assert.throws(() => new State(dir, { lock: 'frozen', bundle: 'load', bundleFile: codePath, resourcesBundleFile: resPath }),
@@ -147,7 +147,7 @@ test('loading without resourcesBundleFile (no on-disk file) is fine for add mode
 
   // First run: no resources tracked. write() should still emit both halves (resources file is empty bundle).
   const st = new State(dir, { lock: 'add', bundle: 'add', bundleFile: codePath, resourcesBundleFile: resPath })
-  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.write()
   t.assert.ok(existsSync(codePath))
   t.assert.ok(existsSync(resPath), 'resources file emitted even when no resources are tracked')
@@ -184,7 +184,7 @@ test('bundle=replace deletes a stale resourcesBundleFile when the run captures n
   // Replace run with no resources: the code half (has content) is written, the resources
   // half (empty) is deleted -- not kept as the old file, not left as an empty bundle.
   const st = new State(dir, { lock: 'replace', bundle: 'replace', bundleFile: codePath, resourcesBundleFile: resPath })
-  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.write()
   t.assert.ok(existsSync(codePath), 'code half (has content) is written')
   t.assert.equal(existsSync(resPath), false, 'stale resources half is deleted')
@@ -222,7 +222,7 @@ test('bundle=replace re-writes a half on a later write() after an empty write() 
   // One long-lived State across two write()s (a watch-mode plugin reuses its State): the
   // deletion must reset the per-artifact cache so a later non-empty write() re-emits the file.
   const st = new State(dir, { lock: 'replace', bundle: 'replace', bundleFile: codePath, resourcesBundleFile: resPath })
-  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })
+  st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'javascript:module', isEntry: true })
   st.write()
   t.assert.equal(existsSync(resPath), false, 'no resources captured yet: resources half absent')
 

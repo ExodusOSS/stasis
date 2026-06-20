@@ -30,7 +30,7 @@
     }
   },
   "formats": {
-    "src/entry.cjs": "commonjs",
-    "src/hello.cjs": "commonjs"
+    "src/entry.cjs": "javascript:commonjs",
+    "src/hello.cjs": "javascript:commonjs"
   }
 }

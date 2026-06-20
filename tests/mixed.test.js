@@ -144,9 +144,9 @@ test('run --bundle=add records module and commonjs formats side by side', withTm
   t.assert.ok(existsSync(bundlePath))
 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
-  t.assert.equal(decoded.formats['src/entry.js'], 'module')
-  t.assert.equal(decoded.formats['node_modules/fake-esm-pkg/index.js'], 'module')
-  t.assert.equal(decoded.formats['node_modules/fake-cjs-pkg/index.js'], 'commonjs')
+  t.assert.equal(decoded.formats['src/entry.js'], 'javascript:module')
+  t.assert.equal(decoded.formats['node_modules/fake-esm-pkg/index.js'], 'javascript:module')
+  t.assert.equal(decoded.formats['node_modules/fake-cjs-pkg/index.js'], 'javascript:commonjs')
 }))
 
 test('run --bundle=load executes the mixed program from a saved bundle', withTmp((t, tmp) => {

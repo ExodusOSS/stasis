@@ -184,21 +184,22 @@ test('sidecar addImport / addFile formats flow to the parent-owned lockfile', (t
   t.assert.equal(lock.imports?.['*']?.['a.js']?.['./c.js'], 'c.js',
     'sidecar.addImport must reach parent.lockData')
   // The format sidecar.addFile recorded must be in the parent's lockfile.
-  // c.js has no package.json `type` override in the fixture, so addFile infers
-  // commonjs (the legacy default when the nearest package.json is type-less).
-  t.assert.equal(lock.formats?.['c.js'], 'commonjs',
+  // c.js has no package.json `type` override in the fixture, so its commonjs-vs-module
+  // kind is unknown at capture time: addFile records the GENERIC 'javascript' tag.
+  t.assert.equal(lock.formats?.['c.js'], 'javascript',
     'sidecar.addFile format must reach parent.lockData')
 })
 
-test('sidecar no-format addFile defers to the module format the parent already recorded', (t) => {
+test('sidecar no-format addFile records generic javascript; the unified lockfile upgrades it to the parent module', (t) => {
   // A bundler sidecar's afterResolve passes no format. For a type-less .js the
-  // legacy default is commonjs -- but the runtime loader records Node's
-  // authoritative `module` into the PARENT (sidecars share the parent's
-  // lockfile, and the loader records there). The sidecar capture must keep
-  // `module`, not re-default to commonjs and then collide when the parent merges
-  // sidecar formats into the unified lockfile (#mergedFormats). Built against a
-  // fresh, isolated parent so the assertion on the merged lockfile is unaffected
-  // by state the shared module-level preload accumulates across tests.
+  // commonjs-vs-module kind is unknown, so the sidecar records the GENERIC
+  // 'javascript' locally -- but the runtime loader records Node's authoritative
+  // `javascript:module` into the PARENT (sidecars share the parent's lockfile, and
+  // the loader records there). When the parent merges sidecar formats into the
+  // unified lockfile (#mergedFormats), reconcileFormat upgrades the generic to the
+  // concrete `javascript:module` -- conflict-free, not a re-default to commonjs.
+  // Built against a fresh, isolated parent so the assertion on the merged lockfile
+  // is unaffected by state the shared module-level preload accumulates across tests.
   const isoDir = mkdtempSync(join(tmpdir(), 'stasis-sidecar-iso-'))
   t.after(() => rmSync(isoDir, { recursive: true, force: true }))
   writeFileSync(join(isoDir, 'package.json'), JSON.stringify({ name: 'iso', version: '0.0.0' }))
@@ -207,15 +208,16 @@ test('sidecar no-format addFile defers to the module format the parent already r
 
   const isoParent = new State(isoDir, { lock: 'add', bundle: 'add', bundleFile: join(isoDir, 'iso-parent.br') })
   const url = pathToFileURL(join(isoDir, 'app.js')).toString()
-  isoParent.addFile(url, { format: 'module' }) // loader observed ESM, recorded on the parent
+  isoParent.addFile(url, { format: 'javascript:module' }) // loader observed ESM, recorded on the parent
 
   const side = new State(isoDir, { parent: isoParent, lock: 'add', bundle: 'add', bundleFile: join(isoDir, 'iso-side.br') })
   t.assert.doesNotThrow(() => side.addFile(url)) // sidecar no-format (webpack-style) capture
-  t.assert.equal(side.formats.get('app.js'), 'module', 'sidecar keeps the parent-attested module format')
-  // The unified lockfile unions parent + sidecar formats; with the fix both say
-  // module, so the merge is conflict-free and attests module.
+  t.assert.equal(side.formats.get('app.js'), 'javascript', 'sidecar records the generic JS tag locally')
+  // The unified lockfile unions parent + sidecar formats; reconcileFormat upgrades
+  // the sidecar's generic 'javascript' to the parent's 'javascript:module', so the
+  // merge is conflict-free and attests javascript:module.
   t.assert.doesNotThrow(() => isoParent.lockData)
-  t.assert.equal(JSON.parse(isoParent.lockData).formats?.['app.js'], 'module')
+  t.assert.equal(JSON.parse(isoParent.lockData).formats?.['app.js'], 'javascript:module')
 })
 
 test('sidecar in read-only mode (load / frozen) does NOT claim a bundleFile slot', (t) => {

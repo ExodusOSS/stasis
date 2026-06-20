@@ -21,8 +21,8 @@
     }
   },
   "formats": {
-    "src/entry.js": "module",
-    "src/helper.js": "module",
-    "node_modules/fake-esm-pkg/index.js": "module"
+    "src/entry.js": "javascript:module",
+    "src/helper.js": "javascript:module",
+    "node_modules/fake-esm-pkg/index.js": "javascript:module"
   }
 }

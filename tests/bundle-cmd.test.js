@@ -849,8 +849,8 @@ test('CLI: bundle accepts a .ts entry and records type-stripping formats', withT
     parsed.modules.get('.').files['src/hello.ts'],
     readFileSync(join(tsFixture, 'src/hello.ts'), 'utf8'),
   )
-  t.assert.equal(parsed.formats.get('src/entry.ts'), 'module-typescript')
-  t.assert.equal(parsed.formats.get('src/hello.ts'), 'module-typescript')
+  t.assert.equal(parsed.formats.get('src/entry.ts'), 'typescript:module')
+  t.assert.equal(parsed.formats.get('src/hello.ts'), 'typescript:module')
   t.assert.equal(parsed.imports.get('*').get('src/entry.ts').get('./hello.ts'), 'src/hello.ts')
 }))
 
@@ -864,8 +864,8 @@ test('CLI: bundle allows mixing .ts and .js entries (both are JS-family)', withT
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries].toSorted(), ['a.ts', 'b.js'])
-  t.assert.equal(parsed.formats.get('a.ts'), 'module-typescript')
-  t.assert.equal(parsed.formats.get('b.js'), 'module')
+  t.assert.equal(parsed.formats.get('a.ts'), 'typescript:module')
+  t.assert.equal(parsed.formats.get('b.js'), 'javascript:module')
 }))
 
 test('CLI: bundle rejects mixing .sol and .ts entries', (t) => {
@@ -893,7 +893,7 @@ test('CLI: a bundled .ts entry runs via --bundle=load, serving ESM TS sources fr
 
 test('CLI: a .ts entry with ESM syntax in a typeless package bundles with the detected format and runs via --bundle=load', withTmp((t, tmp) => {
   // No `type` field: Node decides by module-syntax detection. The bundle must
-  // record module-typescript (matching Node), not commonjs-typescript derived
+  // record typescript:module (matching Node), not typescript:commonjs derived
   // from the package default — the CJS-TS translator would throw
   // "Cannot use import statement outside a module" on these sources.
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-detect', version: '0.0.0' }))
@@ -906,8 +906,8 @@ test('CLI: a .ts entry with ESM syntax in a typeless package bundles with the de
   const build = runCli(['bundle', `--output=${bundlePath}`, 'entry.ts'], { cwd: tmp })
   t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
   const parsed = Bundle.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
-  t.assert.equal(parsed.formats.get('entry.ts'), 'module-typescript')
-  t.assert.equal(parsed.formats.get('hello.ts'), 'module-typescript')
+  t.assert.equal(parsed.formats.get('entry.ts'), 'typescript:module')
+  t.assert.equal(parsed.formats.get('hello.ts'), 'typescript:module')
 
   const load = runCli(
     ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'entry.ts'],
@@ -918,7 +918,7 @@ test('CLI: a .ts entry with ESM syntax in a typeless package bundles with the de
 }))
 
 test('CLI: a commonjs-typescript bundle (.ts requiring .cts) runs via --bundle=load', withTmp((t, tmp) => {
-  // No `type` in package.json → .ts is commonjs-typescript, like .js → commonjs.
+  // No `type` in package.json → .ts is typescript:commonjs, like .js → javascript:commonjs.
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-cjs', version: '0.0.0' }))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
   writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
@@ -929,8 +929,8 @@ test('CLI: a commonjs-typescript bundle (.ts requiring .cts) runs via --bundle=l
   const build = runCli(['bundle', `--output=${bundlePath}`, 'entry.ts'], { cwd: tmp })
   t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
   const parsed = Bundle.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
-  t.assert.equal(parsed.formats.get('entry.ts'), 'commonjs-typescript')
-  t.assert.equal(parsed.formats.get('hello.cts'), 'commonjs-typescript')
+  t.assert.equal(parsed.formats.get('entry.ts'), 'typescript:commonjs')
+  t.assert.equal(parsed.formats.get('hello.cts'), 'typescript:commonjs')
 
   const load = runCli(
     ['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'entry.ts'],
@@ -1195,7 +1195,7 @@ test('CLI: bundle (JS) honors Node module-syntax detection for ambiguous .js and
   const r = runCli(['bundle', `--output=${outPath}`, 'entry.mjs'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
-  t.assert.equal(decoded.formats['dep.js'], 'module',
+  t.assert.equal(decoded.formats['dep.js'], 'javascript:module',
     'ambiguous .js with module syntax must be recorded as ESM, matching plain node')
 
   const load = runCli(
@@ -1220,7 +1220,7 @@ test('CLI: bundle (JS) detects module via top-level await in ambiguous .js and t
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.doesNotMatch(r.stderr, /parse error/, 'a clean module re-parse must not surface as a parse error')
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
-  t.assert.equal(decoded.formats['entry.js'], 'module',
+  t.assert.equal(decoded.formats['entry.js'], 'javascript:module',
     'TLA-only ambiguous .js must be recorded as ESM, matching plain node')
 
   const load = runCli(
@@ -1689,7 +1689,7 @@ test('buildBundle builds a JS Bundle identical to what bundleCommand writes, wit
   t.assert.ok(bundle instanceof Bundle)
   t.assert.deepEqual([...bundle.entries], ['a.js'])
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['a.js', 'b.js'])
-  t.assert.equal(bundle.formats.get('a.js'), 'module')
+  t.assert.equal(bundle.formats.get('a.js'), 'javascript:module')
   // Static JS bundles store edges under the wildcard '*' condition key
   t.assert.equal(bundle.imports.get('*').get('a.js').get('./b.js'), 'b.js')
   // In-memory only: no bundle/lockfile artifacts were written

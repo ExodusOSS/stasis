@@ -89,13 +89,14 @@ test('addFsFile records a .jsx fs-read as code, never a resource', withProject((
   // .jsx/.tsx are code extensions with no Node loader format. The old fs-capture set
   // omitted them, so they fell through to the resource branch and tripped addFile's
   // code-can't-be-a-resource guard. Now classifyExtension calls them code: hashed +
-  // stored in this.sources, no format imposed.
+  // stored in this.sources, with the GENERIC language tag ('javascript' for .jsx)
+  // as the format -- never a resource, never undefined.
   const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
   writeFileSync(join(dir, 'comp.jsx'), 'export const C = () => null\n')
   state.addFsFile(fileURL(dir, 'comp.jsx'), Buffer.from('export const C = () => null\n'))
   t.assert.equal(state.sources.get('comp.jsx'), 'export const C = () => null\n')
   t.assert.equal(state.resources.has('comp.jsx'), false)
-  t.assert.equal(state.formats.get('comp.jsx'), undefined, 'no Node loader format for .jsx')
+  t.assert.equal(state.formats.get('comp.jsx'), 'javascript', 'generic JS format for a .jsx fs-read')
   t.assert.match(state.hashes.get('comp.jsx'), /^sha512-/)
 }))
 
@@ -182,23 +183,23 @@ test('addFsDir resolves the bucket for a directory captured AT a package/project
   t.assert.deepEqual(state.getFsDir(pathToFileURL(dir).toString()), ['assets', 'package.json'])
 }))
 
-test('addFsFile records a type-less .js without a format so the loader stays authoritative', withProject((t, dir) => {
-  // package.json has type:"module" here, but the point is order-independence: a
-  // type-less .js the loader detects as ESM ('module') must not collide with the
-  // commonjs default addFile would otherwise impose for a no-format call. addFsFile
-  // records the bytes with inferFormat:false (no format), so a later loader-style
-  // addFile(format:'module') for the SAME file is a clean no-conflict upsert.
+test('addFsFile records a type-less .js as generic javascript, upgraded by the loader', withProject((t, dir) => {
+  // package.json has type:"module" here, but the point is order-independence: the
+  // fs read sees only bytes, not Node's commonjs-vs-module choice, so addFsFile
+  // records the GENERIC tag 'javascript' (inferFormat:false keeps it from guessing
+  // a kind). A later loader-style addFile(format:'javascript:module') for the SAME
+  // file is a clean upsert -- reconcileFormat upgrades the generic to the concrete kind.
   writeFileSync(join(dir, 'lib.js'), 'export const x = 1\n')
   const url = fileURL(dir, 'lib.js')
   const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
 
   state.addFsFile(url, Buffer.from('export const x = 1\n')) // fs read first (the harder order)
-  t.assert.equal(state.formats.get('lib.js'), undefined, 'no format imposed by the fs read')
-  // getFsFile still serves the bytes even with no recorded format.
+  t.assert.equal(state.formats.get('lib.js'), 'javascript', 'fs read records the generic JS tag')
+  // getFsFile still serves the bytes.
   t.assert.deepEqual(state.getFsFile(url), Buffer.from('export const x = 1\n'))
-  // The loader records the authoritative format afterwards -- must not conflict.
-  t.assert.doesNotThrow(() => state.addFile(url, { source: 'export const x = 1\n', format: 'module' }))
-  t.assert.equal(state.formats.get('lib.js'), 'module')
+  // The loader records the authoritative concrete kind afterwards -- upgrades the generic.
+  t.assert.doesNotThrow(() => state.addFile(url, { source: 'export const x = 1\n', format: 'javascript:module' }))
+  t.assert.equal(state.formats.get('lib.js'), 'javascript:module')
 }))
 
 test('getFsStat classifies recorded files and directories, undefined otherwise', withProject((t, dir) => {

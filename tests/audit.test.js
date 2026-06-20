@@ -53,7 +53,7 @@ const writeBundle = (dir, name = 'snapshot.br') => {
       'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': 'export const f = 1\n' } },
       'node_modules/baz': { name: 'baz', version: '0.0.1', files: { 'index.js': 'export const b = 1\n' } },
     },
-    formats: { 'node_modules/foo/index.js': 'module' },
+    formats: { 'node_modules/foo/index.js': 'javascript:module' },
     imports: {},
   }
   writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(bundle))))

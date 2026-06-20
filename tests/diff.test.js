@@ -56,7 +56,7 @@ test('normalizeArtifact rehashes a code bundle into the SRI digests a lockfile r
     entries: ['src/index.js'],
     sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/index.js': src } } },
     modules: {},
-    formats: { 'src/index.js': 'module' },
+    formats: { 'src/index.js': 'javascript:module' },
     imports: {},
   }), HASH)
   t.assert.equal(norm.modules.get('.').files.get('src/index.js'), sha512integrity(src))
@@ -454,7 +454,7 @@ test('diffCommand compares a lockfile against a brotli code bundle on disk', wit
   const bundle = writeBundle(tmp, {
     version: 1, config: { scope: 'full' }, entries: ['src/index.js'],
     sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/index.js': src } } },
-    modules: {}, formats: { 'src/index.js': 'module' }, imports: {},
+    modules: {}, formats: { 'src/index.js': 'javascript:module' }, imports: {},
   }, 'stasis.code.br')
   const sink = { write() {} }
   const { differences } = diffCommand({ left: lock, right: bundle, stat: true, out: sink })
@@ -527,7 +527,7 @@ test('diff --stat reads a brotli bundle as either operand', withTmp((t, tmp) => 
   const bundle = writeBundle(tmp, {
     version: 1, config: { scope: 'full' }, entries: ['src/index.js'],
     sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/index.js': src } } },
-    modules: {}, formats: { 'src/index.js': 'module' }, imports: {},
+    modules: {}, formats: { 'src/index.js': 'javascript:module' }, imports: {},
   }, 'stasis.code.br')
   const r = runCli(['diff', '--stat', lock, bundle])
   t.assert.equal(r.status, 0, r.stderr)

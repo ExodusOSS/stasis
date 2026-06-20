@@ -49,13 +49,13 @@ test('relative rejects paths outside root', (t) => {
 
 test('addFile records the file, hash, source and module info', (t) => {
   const url = pathToFileURL(fileAbs).toString()
-  state.addFile(url, { format: 'module', isEntry: true })
+  state.addFile(url, { format: 'javascript:module', isEntry: true })
 
   const rel = 'src/foo.js'
   t.assert.ok(state.hashes.has(rel))
   t.assert.match(state.hashes.get(rel), /^sha512-/)
   t.assert.ok(state.entries.has(rel))
-  t.assert.equal(state.formats.get(rel), 'module')
+  t.assert.equal(state.formats.get(rel), 'javascript:module')
   t.assert.equal(state.sources.get(rel), 'export const a = 1\n')
 
   // dir is dirname('package.json') === '.'
@@ -71,26 +71,26 @@ test('addFile records the file, hash, source and module info', (t) => {
 
 test('addFile is idempotent for identical content', (t) => {
   const url = pathToFileURL(fileAbs).toString()
-  t.assert.doesNotThrow(() => state.addFile(url, { format: 'module', isEntry: true }))
+  t.assert.doesNotThrow(() => state.addFile(url, { format: 'javascript:module', isEntry: true }))
 })
 
 test('getFile returns recorded source and format', (t) => {
   const url = pathToFileURL(fileAbs).toString()
   const { source, format } = state.getFile(url)
   t.assert.equal(source, 'export const a = 1\n')
-  t.assert.equal(format, 'module')
+  t.assert.equal(format, 'javascript:module')
 })
 
 test('addImport / getImport roundtrip', (t) => {
   const parentURL = pathToFileURL(fileAbs2).toString()
   const childURL = pathToFileURL(fileAbs).toString()
 
-  state.addFile(parentURL, { format: 'module' })
-  state.addImport(parentURL, './foo.js', childURL, { format: 'module' })
+  state.addFile(parentURL, { format: 'javascript:module' })
+  state.addImport(parentURL, './foo.js', childURL, { format: 'javascript:module' })
 
   const got = state.getImport(parentURL, './foo.js')
   t.assert.equal(got.url, childURL)
-  t.assert.equal(got.format, 'module')
+  t.assert.equal(got.format, 'javascript:module')
 })
 
 test('addImport with conditions array stores under joined key', (t) => {
@@ -232,8 +232,8 @@ test('a frozen bundle attests an absolute-specifier edge: match passes, redirect
 
   // Capture: require(absolute path) recorded as a parent-relative edge, serialized to a bundle.
   const cap = new State(tmp, { scope: 'full', bundle: 'add' })
-  cap.addFile(parentURL, { format: 'commonjs', isEntry: true })
-  cap.addFile(childURL, { format: 'commonjs' })
+  cap.addFile(parentURL, { format: 'javascript:commonjs', isEntry: true })
+  cap.addFile(childURL, { format: 'javascript:commonjs' })
   cap.addImport(parentURL, childAbs, childURL, { conditions: ['require', 'node'] })
   writeFileSync(join(tmp, 'stasis.code.br'), brotliCompressSync(cap.sourceData))
 
@@ -330,7 +330,7 @@ test('sourceData is JSON text in v1 format', (t) => {
   t.assert.equal(parsed.sources['.'].name, 'stasis-test-root')
   t.assert.equal(parsed.sources['.'].files['src/foo.js'], 'export const a = 1\n')
   t.assert.deepEqual(parsed.modules, {})
-  t.assert.equal(parsed.formats['src/foo.js'], 'module')
+  t.assert.equal(parsed.formats['src/foo.js'], 'javascript:module')
 })
 
 // A workspace dependency that pnpm links into node_modules (a symlink whose real
@@ -356,7 +356,7 @@ function workspaceLinkTree(t, config) {
 test('a node_modules symlink to a workspace source is classified as a source, not a dependency', (t) => {
   const tmp = workspaceLinkTree(t, { scope: 'full' })
   const st = new State(tmp)
-  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString(), { format: 'module' })
+  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString(), { format: 'javascript:module' })
 
   // recorded under the real workspace path, not the node_modules symlink path
   t.assert.ok(st.modules.has('packages/lib'), 'recorded as a source under its real path')
@@ -370,8 +370,8 @@ test('a node_modules symlink to a workspace source is classified as a source, no
 test('node_modules-scope bundle excludes a workspace source symlinked into node_modules', (t) => {
   const tmp = workspaceLinkTree(t, { scope: 'node_modules', bundle: 'add' })
   const st = new State(tmp)
-  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'dep', 'index.js')).toString(), { format: 'module' })
-  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString(), { format: 'module' })
+  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'dep', 'index.js')).toString(), { format: 'javascript:module' })
+  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString(), { format: 'javascript:module' })
 
   const parsed = JSON.parse(st.sourceData)
   t.assert.ok(parsed.modules['node_modules/dep'], 'the real dependency is bundled')
@@ -397,9 +397,9 @@ test('getImport reads an edge recorded under a symlinked workspace parent (canon
   const st = new State(tmp)
   const parentSym = pathToFileURL(join(tmp, 'node_modules', 'lib', 'index.js')).toString()
   const childSym = pathToFileURL(join(tmp, 'node_modules', 'lib', 'util.js')).toString()
-  st.addFile(parentSym, { format: 'module' })
-  st.addFile(childSym, { format: 'module' })
-  st.addImport(parentSym, './util.js', childSym, { format: 'module' })
+  st.addFile(parentSym, { format: 'javascript:module' })
+  st.addFile(childSym, { format: 'javascript:module' })
+  st.addImport(parentSym, './util.js', childSym, { format: 'javascript:module' })
 
   // looked up through the SAME node_modules symlink parent: addImport and getImport
   // both canonicalize, so the edge resolves to the real workspace-source path.
