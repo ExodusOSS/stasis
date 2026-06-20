@@ -21,12 +21,16 @@ const dir = mkdtempSync(join(tmpdir(), 'stasis-sidecar-attest-'))
 writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fx', version: '0.0.0', type: 'module' }))
 writeFileSync(join(dir, 'pnpm-workspace.yaml'), '')
 writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
+writeFileSync(join(dir, 'g.js'), 'export const g = 2\n')
 
 // Phase 1: bootstrap a real lockfile on disk via a throwaway non-preload State.
-// This populates stasis.lock.json with `a.js` attested as format='javascript:module'.
+// This populates stasis.lock.json with `a.js` attested concrete ('javascript:module', it's
+// imported) and `g.js` attested generic ('javascript', it's only fs-read).
 {
   const bootstrap = new State(dir, { lock: 'add' })
   bootstrap.addFile(pathToFileURL(join(dir, 'a.js')).toString(), { isEntry: true })
+  // g.js is fs-READ (not imported) -> attested only GENERICALLY (the kind was never observed).
+  bootstrap.addFsFile(pathToFileURL(join(dir, 'g.js')).toString(), Buffer.from('export const g = 2\n'))
   bootstrap.write()
 }
 
@@ -73,6 +77,24 @@ test('sidecar load: tampered format (commonjs vs lockfile module) is rejected', 
     // #assertAttestedFormat phrasing: "bundle format for a.js mismatches the lockfile"
     // when the lockfile attests a different format for the same file (our case).
     /bundle format for a\.js mismatches the lockfile/
+  )
+})
+
+test('sidecar load: a concrete format for a GENERICALLY-attested file is rejected (frozen kind-pin)', (t) => {
+  // The lockfile attests g.js only GENERICALLY ('javascript'). A bundle that PINS it to a
+  // concrete kind would let the bundle decide commonjs-vs-module the lockfile never committed
+  // to -- and since package `type` isn't hash-attested, that's a kind flip on hash-valid bytes.
+  // Frozen verification refuses it (reconcileFormat's generic<->concrete leniency is capture-only).
+  // Keep the bundle's entry set equal to the lockfile's (['a.js']) so the earlier
+  // entries cross-check passes and we actually reach the per-file format check for g.js.
+  const path = join(dir, 'generic-pinned.br')
+  writeFileSync(path, v1Bundle({
+    sources: { '.': { name: 'fx', version: '0.0.0', files: { 'a.js': 'export const a = 1\n', 'g.js': 'export const g = 2\n' } } },
+    formats: { 'a.js': 'javascript:module', 'g.js': 'javascript:commonjs' },
+  }))
+  t.assert.throws(
+    () => new State(dir, { parent, lock: 'frozen', bundle: 'load', bundleFile: path }),
+    /is generic but the run observed concrete/
   )
 })
 

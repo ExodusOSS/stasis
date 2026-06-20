@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
-import { nodeFormatToStasis, stasisFormatToNode } from './util.js'
+import { isGenericFormat, nodeFormatToStasis, stasisFormatToNode } from './util.js'
 import { installFsHooks } from './fs.js'
 
 // Snapshot off the namespace so `--fs` (which patches fs.readFileSync and then
@@ -48,6 +48,14 @@ function refuseNonNodeFormat(format, url) {
     throw new Error(
       `[stasis] cannot import a directory listing ('directory'): a captured ` +
       `fs.readdirSync result is not executable JavaScript. Read it with fs.readdirSync instead (${url})`
+    )
+  }
+  if (isGenericFormat(format)) {
+    throw new Error(
+      `[stasis] cannot execute '${url}': format '${format}' is generic -- its commonjs-vs-module ` +
+      `kind was never observed (the file was captured by '--fs', or by a bundler that didn't ` +
+      `resolve it, and never imported). Import it during capture so the loader records the ` +
+      `concrete kind, or run without '--bundle=load'.`
     )
   }
   // Unknown format string: usually a tampered or forward-incompatible bundle.
@@ -205,8 +213,20 @@ function load(url, context, nextLoad) {
     loadingModule--
   }
   let { source } = result
-  const { format } = result
+  let { format } = result
   assert.notEqual(format, 'builtin')
+
+  // Node >=24's default loader no longer reports `format` for a module pulled in through the
+  // classic CommonJS loader (a require()'d dependency): result.format is undefined even though
+  // Node is loading it as CommonJS. Recover the kind from the resolution conditions -- a load
+  // carrying the `require` condition is a CommonJS load -- so the file is recorded with its
+  // concrete kind (Node 22 reported 'commonjs' here directly; this realigns the two). Without
+  // it the file would fall back to the generic 'javascript' tag, which the bundle=load gate
+  // later refuses since the commonjs-vs-module kind was "never observed". The gap is only the
+  // ambiguous type-less .js: .cjs/.json/.mjs still report their own format under `require`, and
+  // a require(esm) of ES-module syntax reports 'module' -- so a null format here is genuinely a
+  // CommonJS load. (An explicit `type` is then reconciled by State, which throws on a clash.)
+  if (format == null && context.conditions?.includes('require')) format = 'commonjs'
 
   // Node's CJS loader may return source=null and read from disk itself; capture it for the bundle
   if (source == null && format === 'commonjs') source = readFileSync(fileURLToPath(url))

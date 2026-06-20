@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, genericCodeFormat, moduleFileKey, objectToMaps, reconcileFormat, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, genericCodeFormat, isGenericFormat, moduleFileKey, objectToMaps, reconcileFormat, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
@@ -729,14 +729,23 @@ export class State {
   #assertAttestedFormat(attestation, file, format, { what, source = 'lockfile' }) {
     const attested = attestation.get(file)
     assert.ok(attested !== undefined, `${what} format for ${file} is not attested by the ${source}`)
-    // Reconcilable formats agree: a generic attestation (javascript) accepts the concrete
-    // kind observed (javascript:module) and vice-versa; only a real kind/language mismatch
-    // fails. reconcileFormat throws on conflict, surfaced here as the attestation error.
+    // A real kind/language conflict (javascript:module vs javascript:commonjs, or js vs ts)
+    // fails -- reconcileFormat throws, surfaced here as the attestation error.
     try {
       reconcileFormat(attested, format)
     } catch {
       assert.fail(`${what} format for ${file} mismatches the ${source}: '${format}' vs attested '${attested}'`)
     }
+    // reconcileFormat's generic<->concrete leniency is for capture/merge only. In frozen
+    // VERIFICATION it would let a GENERIC attestation vouch for a file the run executes as a
+    // concrete kind -- and since package `type` isn't hash-attested, the same hash-valid bytes
+    // could run as commonjs OR module undetected. Pin the kind: a concrete observation needs a
+    // concrete attestation (a generic one means the kind was never verified -> fail closed).
+    assert.ok(
+      !(isGenericFormat(attested) && !isGenericFormat(format)),
+      `${what} format for ${file}: attested '${attested}' is generic but the run observed ` +
+      `concrete '${format}' -- the ${source} doesn't pin the module kind; re-capture to record it`
+    )
   }
 
   assertEntry(url) {
@@ -986,12 +995,11 @@ export class State {
   // UTF-8 (stored raw, human-readable in the bundle) or 'resource:base64' for binary
   // (base64-encoded). Code files keep their inferred loader format.
   //
-  // `inferFormat: false` records the bytes WITHOUT inferring or recording any loader
-  // format (an existing recorded format, if any, is left intact). addFsFile uses it
-  // for `.js`/`.ts`, whose module-vs-commonjs is Node's syntax-detection call (not
-  // knowable from bytes): the module loader is the authority, so the fs-read capture
-  // must not impose the legacy `commonjs` default and collide with a `module` the
-  // loader records for the same file when it is both imported and read.
+  // `inferFormat: false` skips extension/`type`-based KIND inference; it does NOT suppress a
+  // format the caller passed. addFsFile passes a generic `javascript`/`typescript` (so an
+  // fs-read is never undefined and never a resource); module-vs-commonjs is Node's
+  // syntax-detection call, not knowable from bytes, so the fs capture records the generic
+  // kind and the loader upgrades it (reconcileFormat) to the concrete kind on import.
   addFile(url, { source, format, isEntry, isBinary, resource, inferFormat = true } = {}) {
     const asResource = resource === true || isBinary === true
     // A resource format must not arrive on the code path: 'resource' /
@@ -1045,7 +1053,7 @@ export class State {
         extToFormat['.js'] = `javascript:${closestType}`
         extToFormat['.ts'] = `typescript:${closestType}`
       }
-      const inferredFormat = extToFormat[extname(file)]
+      const inferredFormat = extToFormat[extname(file).toLowerCase()]
       if (inferredFormat !== undefined) {
         // reconcileFormat upgrades a generic `javascript`/`typescript` the caller passed to
         // the concrete kind, and throws on a real conflict (e.g. a `module` loader format for
@@ -1055,6 +1063,10 @@ export class State {
         // No package `type` to fix the .js/.ts kind, or a .jsx/.tsx Node can't load: record
         // the GENERIC language tag (javascript / typescript) -- never undefined. The loader
         // upgrades it to a concrete kind via reconcileFormat if Node ever loads the file.
+        // (On Node >=24 the loader's classic CommonJS path stopped reporting a format for a
+        // require()'d dep, so the load hook fills in 'commonjs' from the `require` condition
+        // before the file reaches here -- a type-less .js dep is recorded concrete, not left
+        // generic for a kind the load gate would then refuse.)
         format = genericCodeFormat(extname(file).slice(1).toLowerCase())
       }
     }
@@ -1612,11 +1624,16 @@ export class State {
 
   // The family-reconciled format per file: the most-specific format across the carried
   // lockfile, this State, and any sidecars -- the SINGLE source both the lockfile and every
-  // bundle serialize from, so they can't disagree on a recorded format. Computed on the root
-  // (a sidecar delegates to its parent). reconcileFormat upgrades a generic `javascript` to
-  // the concrete kind the loader observed and throws (before any write) on a real conflict.
-  #reconciledFormats() {
-    if (this.#parent) return this.#parent.#reconciledFormats()
+  // bundle serialize from, so they can't disagree on a recorded format. reconcileFormat
+  // upgrades a generic `javascript` to the concrete kind the loader observed and throws
+  // (before any write) on a real conflict.
+  //   PUBLIC (not #private) on purpose: a sidecar delegates here to its parent, and the
+  //   parent may be a DIFFERENT stasis-core module copy (a bundle carrying its own
+  //   stasis-core under `stasis run`). JS private methods are brand-checked per class object,
+  //   so `this.#parent.#reconciledFormats()` throws across copies; the cross-brand contract
+  //   is the public surface (mirrors reading a sidecar via its public `.formats`/`.imports`).
+  reconciledFormats() {
+    if (this.#parent) return this.#parent.reconciledFormats()
     const merged = new Map()
     if (this.#lockFormats) for (const [file, format] of this.#lockFormats) merged.set(file, format)
     const fold = (file, incoming) => {
@@ -1635,9 +1652,9 @@ export class State {
 
   // The formats a bundle this State emits carries: the family-reconciled value for every
   // file in this State's own formats, filtered (code vs resource split). Sharing
-  // #reconciledFormats with the lockfile is what keeps the two artifacts in lockstep.
+  // reconciledFormats with the lockfile is what keeps the two artifacts in lockstep.
   #bundleFormatsFor(keep) {
-    const family = this.#reconciledFormats()
+    const family = this.reconciledFormats()
     const out = new Map()
     for (const file of this.formats.keys()) {
       const format = family.get(file)
@@ -1652,7 +1669,7 @@ export class State {
       entries: this.entries,
       modules: this.modules,
       imports: this.#mergedImports(),
-      formats: this.#reconciledFormats(),
+      formats: this.reconciledFormats(),
     }).serialize()
   }
 
