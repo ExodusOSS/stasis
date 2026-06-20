@@ -27,10 +27,20 @@
 //     stat while the file is still on disk, and a benign synthetic default (0 / epoch
 //     / file-or-dir mode) once it's gone -- so fs wrappers that read more than
 //     isFile()/isDirectory() (graceful-fs reads stats.uid/gid) keep working under
-//     bundle=load instead of re-throwing ENOENT. Never patched in capture mode (the
-//     file is on disk there, so the real Stats is correct). statSync vs lstatSync
-//     differ only in symlink following, which matters solely for that on-disk
-//     passthrough -- each falls back to its own real implementation.
+//     bundle=load instead of re-throwing ENOENT. Not patched in capture mode (the file
+//     is on disk there, so the real Stats is correct), except to report a skipped
+//     source-map sidecar as absent (next bullet). statSync vs lstatSync differ only in
+//     symlink following, which matters solely for that on-disk passthrough -- each falls
+//     back to its own real implementation.
+//   - Source-map sidecars (`*.map`): build-time debug artifacts that never affect a
+//     program's output, yet tools read them unconditionally -- regardless of any
+//     "sourcemaps off" setting (e.g. @babel/core's normalizeFile reads a file's sibling
+//     `.js.map` to chain an INPUT source map no matter the bundler's devtool, and skips
+//     it when absent). Under --fs every in-root `*.map` is therefore treated as
+//     NON-EXISTENT -- never captured, never served, ENOENT to the reader -- in BOTH
+//     capture and load (returning ENOENT at capture too is what keeps a captured build
+//     byte-identical to a hermetic replay). Opt in by adding `map` to the resources
+//     allowlist; then it's captured/served like any other declared resource.
 //   - Only paths inside the project root -- whose REAL path (symlinks resolved)
 //     also stays inside the root -- are captured/served; anything else (a system
 //     path, a symlink escaping the root, an fd, a non-file URL) falls through to
@@ -133,6 +143,49 @@ function decode(buf, options) {
   return buf.toString(encoding)
 }
 
+// Source-map sidecars (`*.map`) are build-time debug artifacts that never affect a
+// program's emitted output, yet tools read them opportunistically and INDEPENDENTLY of
+// any "sourcemaps off" setting -- @babel/core's normalizeFile, for one, reads a
+// transformed file's sibling `.js.map` to chain an INPUT source map no matter the
+// bundler's devtool, and simply skips it (try/catch) when the file is absent. Under --fs
+// we therefore treat such a map as NON-EXISTENT: never captured (so a stray map read
+// can't abort a capture or bloat the lockfile/bundle) and never served, handing the
+// reader a faithful ENOENT in BOTH capture and load. Returning ENOENT at CAPTURE too --
+// not just load -- keeps a captured build byte-identical to a hermetic replay.
+//
+// NOT gated on bundle mode: --fs capture writes the lockfile (hashes, via addFile) as
+// well as the bundle, so the skip must be identical whether or not a bundle is written
+// -- lockfile attestation can't depend on bundle mode. (The hook only runs under --fs,
+// which always has a bundle mode, so no explicit mode check is needed.)
+//
+// Two opt-outs keep this from hiding a map a user genuinely wants:
+//   - `map` in the resources allowlist -> captured + served as a normal resource
+//     (classifyExtension tags `.map` 'resource' once `map` is allowed).
+//   - at load, a map the bundle actually CARRIES is served regardless of the load run's
+//     resources flag -- bundle membership wins, exactly like every other recorded
+//     resource, so a map captured under `--resources=map` still loads even if the load
+//     run forgets the flag (getFsStat is undefined for a map that was skipped, so the
+//     common "never captured" case still falls through to the ENOENT below).
+function isSkippedSourceMap(state, abs) {
+  if (!abs.toLowerCase().endsWith('.map')) return false
+  if (state.config.resources?.has('map')) return false
+  if (state.config.loadBundle && state.getFsStat(pathToFileURL(abs).toString()) !== undefined) return false
+  return true
+}
+
+// A faithful Node-shaped ENOENT, so a skipped source map is indistinguishable from a
+// genuinely absent file to the caller (code/errno/syscall/path all set, exactly what a
+// real failed open/stat throws). Callers like @babel/core catch it and carry on.
+function enoent(syscall, path) {
+  const p = typeof path === 'string' ? path : Buffer.isBuffer(path) ? path.toString() : String(path)
+  const err = new Error(`ENOENT: no such file or directory, ${syscall} '${p}'`)
+  err.code = 'ENOENT'
+  err.errno = -2
+  err.syscall = syscall
+  err.path = p
+  return err
+}
+
 // File-type bits, so code that derives the kind from stats.mode (rather than the
 // is*() methods) still sees file-vs-directory for an absent bundle-served path.
 const S_IFREG = 0o100000
@@ -204,6 +257,9 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     if (state) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
+        // Source-map sidecars are absent in both modes (see isSkippedSourceMap) -- before
+        // any serve/capture so a `.js.map` is neither read from the bundle nor recorded.
+        if (isSkippedSourceMap(state, abs)) throw enoent('open', path)
         const url = pathToFileURL(abs).toString()
         if (state.config.loadBundle) {
           // Serve the captured bytes; a path the bundle never recorded (or one
@@ -261,12 +317,16 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
   fs.lstatSync = function lstatSync(path, options) {
     const state = getState()
     // Serve-only, single-argument form. Capture mode is left to the real lstatSync
-    // (the file is on disk, so its Stats is correct and complete).
-    if (state?.config.loadBundle && options == null) {
+    // (the file is on disk, so its Stats is correct and complete) -- the lone exception
+    // being a skipped source-map sidecar, reported absent in both modes.
+    if (state && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        const kind = state.getFsStat(pathToFileURL(abs).toString())
-        if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
+        if (isSkippedSourceMap(state, abs)) throw enoent('lstat', path)
+        if (state.config.loadBundle) {
+          const kind = state.getFsStat(pathToFileURL(abs).toString())
+          if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
+        }
       }
     }
     return realLstatSync(path, options)
@@ -278,11 +338,14 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
   // case, so it falls back to the real statSync rather than lstatSync.
   fs.statSync = function statSync(path, options) {
     const state = getState()
-    if (state?.config.loadBundle && options == null) {
+    if (state && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        const kind = state.getFsStat(pathToFileURL(abs).toString())
-        if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
+        if (isSkippedSourceMap(state, abs)) throw enoent('stat', path)
+        if (state.config.loadBundle) {
+          const kind = state.getFsStat(pathToFileURL(abs).toString())
+          if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
+        }
       }
     }
     return realStatSync(path, options)
@@ -303,6 +366,9 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (!state) return null
       const abs = toAbsPath(path)
       if (abs === null || !withinRoot(state.root, abs)) return null
+      // Source-map sidecars are absent in both modes (see isSkippedSourceMap); 'absent'
+      // makes the read/stat wrappers below hand back ENOENT instead of serving/capturing.
+      if (isSkippedSourceMap(state, abs)) return { mode: 'absent', abs }
       const url = pathToFileURL(abs).toString()
       if (state.config.loadBundle) return { mode: 'serve', state, url, abs }
       if (state.config.writeBundle && !isLoadingModule()) return { mode: 'capture', state, url, abs }
@@ -324,6 +390,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const cb = typeof options === 'function' ? options : callback
       const opts = typeof options === 'function' ? undefined : options
       const t = typeof cb === 'function' ? fsTarget(path) : null
+      if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('open', path))); return }
       if (t?.mode === 'serve') {
         const buf = t.state.getFsFile(t.url)
         if (buf !== undefined) { queueMicrotask(() => decodeToCb(cb, buf, opts)); return }
@@ -340,6 +407,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
 
     fs.promises.readFile = async function readFile(path, options) {
       const t = fsTarget(path)
+      if (t?.mode === 'absent') throw enoent('open', path)
       if (t?.mode === 'serve') {
         const buf = t.state.getFsFile(t.url)
         if (buf !== undefined) return decode(buf, options)
@@ -395,6 +463,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       // count as "no options" -- otherwise its reads never hit the bundle (the exact
       // gap that made --fs=async fail for enhanced-resolve's async file system).
       const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
+      if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('lstat', path))); return }
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realLstatSync, path, kind === 'directory'))); return }
@@ -409,6 +478,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       // count as "no options" -- otherwise its reads never hit the bundle (the exact
       // gap that made --fs=async fail for enhanced-resolve's async file system).
       const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
+      if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('stat', path))); return }
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realStatSync, path, kind === 'directory'))); return }
@@ -418,6 +488,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
 
     fs.promises.lstat = async function lstat(path, options) {
       const t = options == null ? fsTarget(path) : null
+      if (t?.mode === 'absent') throw enoent('lstat', path)
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
@@ -427,6 +498,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
 
     fs.promises.stat = async function stat(path, options) {
       const t = options == null ? fsTarget(path) : null
+      if (t?.mode === 'absent') throw enoent('stat', path)
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStat(t.url)
         if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')

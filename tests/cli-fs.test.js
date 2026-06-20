@@ -644,3 +644,192 @@ test('run --fs=async: real graceful-fs async readFile/stat/readdir survive bundl
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'readFile:1\nstat:true\nreaddir:a.json,b.txt\n')
 }))
+
+// ----- source-map sidecars (`*.map`) are skipped under --fs --------------------------
+// A program (e.g. @babel/core's normalizeFile) reads a transformed file's sibling
+// `.js.map` to chain an INPUT source map regardless of any "sourcemaps off" setting.
+// Those maps don't affect emitted output, so --fs treats every in-root `*.map` as
+// non-existent (ENOENT) in BOTH capture and load -- never recorded, never aborting a
+// capture -- unless `map` is added to the resources allowlist.
+
+test('run --fs treats a *.map read as NON-EXISTENT in capture (skipped, never recorded, capture not aborted)', withTmp((t, tmp) => {
+  // The sibling map EXISTS on disk; stasis still hands the reader ENOENT (proving the
+  // capture returns "non-existent" rather than reading + recording it), the capture is
+  // not tainted, and nothing about the map lands in the bundle.
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3,"sources":["mod.ts"]}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const p = join(import.meta.dirname, "mod.js.map")',
+    'let out',
+    'try { out = `bytes:${readFileSync(p, "utf8").trim()}` } catch (e) { out = `code:${e.code}` }',
+    'console.log(out)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'code:ENOENT\n', 'a *.map read returns ENOENT even though the file is on disk')
+  t.assert.doesNotMatch(r.stderr, /capture aborted/, 'a *.map read must not taint the capture')
+  t.assert.ok(existsSync(bundlePath), 'bundle written')
+  t.assert.ok(existsSync(join(tmp, 'src', 'mod.js.map')), 'precondition: the map is on disk (so the ENOENT is synthetic)')
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/mod.js.map'], undefined, 'the source map is not recorded')
+  t.assert.equal(bundle.sources['.'].files['src/mod.js.map'], undefined)
+}))
+
+test('run --fs --bundle=load serves a *.map as non-existent (hermetic: ENOENT even when present on disk)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'let out',
+    'try { out = `bytes:${readFileSync(join(import.meta.dirname, "mod.js.map"), "utf8").trim()}` } catch (e) { out = `code:${e.code}` }',
+    'console.log(out)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'code:ENOENT\n')
+
+  // The map is left on disk; load must STILL report it absent (a hermetic skip, no disk
+  // fallback) so replay matches capture byte-for-byte.
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'code:ENOENT\n', 'load returns ENOENT for the skipped map despite it being on disk')
+}))
+
+test('run --fs=async treats a *.map read as non-existent too', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFile } from 'node:fs/promises'",
+    "import { join } from 'node:path'",
+    'let out',
+    'try { out = `bytes:${(await readFile(join(import.meta.dirname, "mod.js.map"), "utf8")).trim()}` } catch (e) { out = `code:${e.code}` }',
+    'console.log(out)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'code:ENOENT\n')
+  t.assert.equal(decode(bundlePath).formats['src/mod.js.map'], undefined)
+}))
+
+test('run --fs --resources=map opts source maps back in (captured + served as a resource)', withTmp((t, tmp) => {
+  // Adding `map` to the allowlist disables the skip: the *.map is read for real and
+  // captured as a resource, exactly like any other declared asset, then served on load.
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'console.log(`map:${readFileSync(join(import.meta.dirname, "mod.js.map"), "utf8").trim()}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', '--resources=map', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'map:{"version":3}\n', 'with map allowlisted the bytes are read, not ENOENT')
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/mod.js.map'], 'resource', 'allowlisted map captured as a resource')
+  t.assert.equal(bundle.sources['.'].files['src/mod.js.map'], '{"version":3}\n')
+
+  rmSync(join(tmp, 'src', 'mod.js.map')) // gone from disk; must be served from the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', '--resources=map', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'map:{"version":3}\n')
+}))
+
+test('run --fs reports a *.map as ENOENT via statSync/lstatSync (capture and load)', withTmp((t, tmp) => {
+  // The stat path must agree with the read path: a skipped *.map is absent to
+  // statSync/lstatSync too, in both modes (the map is on disk, so the ENOENT is synthetic).
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { statSync, lstatSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const p = join(import.meta.dirname, "mod.js.map")',
+    'const probe = (fn) => { try { fn(p); return "ok" } catch (e) { return e.code } }',
+    'console.log(`stat:${probe(statSync)} lstat:${probe(lstatSync)}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'stat:ENOENT lstat:ENOENT\n', 'stat/lstat of a *.map are ENOENT even though it is on disk')
+
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'stat:ENOENT lstat:ENOENT\n')
+}))
+
+test('run --fs captures a sibling read while skipping the *.map in the same run (skip is surgical)', withTmp((t, tmp) => {
+  // The fixture allowlists `txt`; the .txt read is captured as a resource while the
+  // sibling .js.map is skipped -- proving the skip doesn't taint or suppress the rest of
+  // the capture (a non-map read in the same run still lands in the bundle).
+  writeFileSync(join(tmp, 'src', 'note.txt'), 'NOTE\n')
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const d = import.meta.dirname',
+    'const txt = readFileSync(join(d, "note.txt"), "utf8").trim()',
+    'let map',
+    'try { map = readFileSync(join(d, "mod.js.map"), "utf8") } catch (e) { map = e.code }',
+    'console.log(`txt:${txt} map:${map}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'txt:NOTE map:ENOENT\n')
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/note.txt'], 'resource', 'the real read is still captured')
+  t.assert.equal(bundle.sources['.'].files['src/note.txt'], 'NOTE\n')
+  t.assert.equal(bundle.formats['src/mod.js.map'], undefined, 'the map is skipped')
+}))
+
+test('run --fs --bundle=load serves a *.map recorded under --resources=map even when load omits the flag', withTmp((t, tmp) => {
+  // A map deliberately captured (`map` in resources) is recorded as a resource and must
+  // serve on load by bundle membership -- like every other resource -- WITHOUT the load
+  // run repeating --resources=map. Regression guard: the skip must not shadow a recorded map.
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'console.log(`map:${readFileSync(join(import.meta.dirname, "mod.js.map"), "utf8").trim()}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', '--resources=map', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(decode(bundlePath).formats['src/mod.js.map'], 'resource')
+
+  rmSync(join(tmp, 'src', 'mod.js.map')) // gone from disk; only the bundle can serve it
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp }) // NOTE: no --resources=map
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'map:{"version":3}\n', 'a recorded map serves on load by membership, without repeating --resources=map')
+}))
+
+test('run --fs=async --resources=map captures + serves a *.map (async opt-in, membership wins on load)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  writeFileSync(join(tmp, 'src', 'mod.js.map'), '{"version":3}\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFile } from 'node:fs/promises'",
+    "import { join } from 'node:path'",
+    'console.log(`map:${(await readFile(join(import.meta.dirname, "mod.js.map"), "utf8")).trim()}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', '--resources=map', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'map:{"version":3}\n')
+  t.assert.equal(decode(bundlePath).formats['src/mod.js.map'], 'resource')
+
+  rmSync(join(tmp, 'src', 'mod.js.map'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp }) // no --resources=map
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'map:{"version":3}\n')
+}))

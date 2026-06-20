@@ -363,6 +363,21 @@ Captures live in the usual `sources`/`modules` buckets, tagged in `formats`:
   `ENOENT`. Any path the bundle does not carry passes straight through to the real
   call.
 
+Source-map sidecars (`*.map`) are an exception: they are build-time debug artifacts
+that never affect a program's emitted output, yet tools read them regardless of any
+"sourcemaps off" setting (e.g. `@babel/core` reads a transformed file's sibling
+`.js.map` to chain an *input* source map no matter the bundler's `devtool`). So under
+`--fs` every in-root `*.map` is treated as **non-existent** — never captured, never
+served, an `ENOENT` to the reader (`readFileSync`/`readFile` *and* `statSync`/`lstatSync`
+alike) — in **both** capture and load, so a stray map read neither aborts a capture nor
+bloats the lockfile/bundle, and a captured build stays byte-identical to a hermetic
+replay. This is independent of bundle mode: `--fs` attests reads in the lockfile whether
+or not a bundle is written, so a map is excluded from the lockfile the same way either
+way. To capture a `.map` instead (e.g. you genuinely ship one as data), add `map` to the
+`resources` allowlist; it is then recorded and served like any other declared resource —
+and once a `.map` is in the bundle it is served on load by membership, even if that run
+omits `--resources=map`.
+
 The two recorded kinds are hashed like any other content (the `directory` integrity
 is the sha512 of its JSON text), so the lockfile attests them and a frozen run
 verifies them. `--fs` (either mode) requires an active bundle mode (`add`, `replace`, or `load`).
