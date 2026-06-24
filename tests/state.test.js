@@ -574,3 +574,56 @@ test('shardSnapshot forwards imports/formats for observed files only, not a bund
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('addFile throws on a format flip in lock=add (attested format changed, bytes unchanged)', (t) => {
+  // lock=add must not silently absorb a format flip: same bytes (hash matches) but a different loader
+  // format (e.g. a package.json `type` change). A frozen run rejects it; lock=add now does too,
+  // pointing at --lock=replace to re-attest, instead of recording a half-update / surprising frozen.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-format-flip-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    const src = 'const x = 1\n'
+    writeFileSync(join(dir, 'mod.js'), src)
+
+    // Prior capture attests mod.js as commonjs.
+    const seed = new State(dir, { scope: 'full', lock: 'add' })
+    seed.addFile(pathToFileURL(join(dir, 'mod.js')).toString(), { source: Buffer.from(src), format: 'commonjs' })
+    writeFileSync(join(dir, 'stasis.lock.json'), seed.lockData)
+
+    // lock=add re-run observing the SAME bytes but a FLIPPED format must throw.
+    const rerun = new State(dir, { scope: 'full', lock: 'add' })
+    t.assert.throws(
+      () => rerun.addFile(pathToFileURL(join(dir, 'mod.js')).toString(), { source: Buffer.from(src), format: 'module' }),
+      /format flip for mod\.js/,
+    )
+
+    // Same bytes + SAME format is fine (no flip).
+    const ok = new State(dir, { scope: 'full', lock: 'add' })
+    ok.addFile(pathToFileURL(join(dir, 'mod.js')).toString(), { source: Buffer.from(src), format: 'commonjs' })
+    t.assert.equal(JSON.parse(ok.lockData).formats?.['mod.js'], 'commonjs', 'matching format re-attested without error')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('addFile still verifies a caller-provided source against disk (integrity check preserved)', (t) => {
+  // The double-read was removed only for the disk-sourced path (where it was tautological). A
+  // CALLER-PROVIDED source must still be checked against the file on disk and reject a mismatch.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-srccheck-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
+    const url = pathToFileURL(join(dir, 'a.js')).toString()
+
+    const s = new State(dir, { scope: 'full', lock: 'add' })
+    // Provided source that DIFFERS from disk -> still throws (loader serving bytes != the file).
+    t.assert.throws(() => s.addFile(url, { source: Buffer.from('export const a = 999\n'), format: 'module' }))
+
+    // No source -> reads disk itself, no spurious throw, records the file.
+    const s2 = new State(dir, { scope: 'full', lock: 'add' })
+    s2.addFile(url, { format: 'module' })
+    t.assert.ok(JSON.parse(s2.lockData).sources?.['.']?.files?.['a.js'], 'disk-read addFile records the file')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

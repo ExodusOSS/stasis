@@ -1074,16 +1074,21 @@ export class State {
       }
     }
 
+    let sourceFromDisk = false
     if (typeof source === 'string') {
       assert.ok(source.isWellFormed())
     } else {
-      if (source === undefined || source === null) source = readFileSync(absolute)
+      if (source === undefined || source === null) { source = readFileSync(absolute); sourceFromDisk = true }
       assert.ok(Buffer.isBuffer(source))
       if (!asResource) assert.ok(isUtf8(source), `File is not UTF-8: ${file}`)
     }
 
     const buf = typeof source === 'string' ? Buffer.from(source) : source
-    assert.deepStrictEqual(readFileSync(absolute), buf)
+    // Verify a CALLER-PROVIDED source against disk (the loader passes the bytes it is about to
+    // execute; this catches a loader serving bytes that differ from the file on disk). When we
+    // just read `source` from disk ourselves, that comparison is against the same read -- it is
+    // tautological -- so skip the redundant second read.
+    if (!sourceFromDisk) assert.deepStrictEqual(readFileSync(absolute), buf)
 
     // Resource format is content-driven: raw UTF-8 stays 'resource' (don't base64
     // bytes that are already text); anything else is 'resource:base64'.
@@ -1131,6 +1136,21 @@ export class State {
     }
     if (this.config.frozenBundle && this.#bundleFormats !== null && format != null && inAttestedZone) {
       this.#assertAttestedFormat(this.#bundleFormats, file, format, { what: 'observed', source: 'frozen bundle' })
+    }
+
+    // A WRITING lock capture (lock=add) must catch a format flip on already-attested bytes EARLY.
+    // The lockfile baseline lives in #lockFormats -- separate from this.formats -- so addFile's own
+    // noupsert below won't see the clash; it would otherwise surface only later at write(), when
+    // #mergedFormats unions the baseline with the session formats and noupsert throws a bare
+    // `Conflict for <file>` with no cause or remedy. Detect it here and throw a clear, actionable
+    // error instead. (A frozen run rejects it via the format check above; lock=replace discards the
+    // baseline, so #lockFormats is null; and bundle=add seeds the bundle's formats into this.formats,
+    // so a bundle-side flip already conflicts at the noupsert below. Re-attest a genuine change with
+    // --lock=replace / --bundle=replace.)
+    if (this.config.writeLockfile && this.#lockFormats !== null && format != null && inAttestedZone) {
+      const attested = this.#lockFormats.get(file)
+      assert.ok(attested === undefined || attested === format,
+        `format flip for ${file}: lockfile attests '${attested}', observed '${format}' (bytes unchanged) -- re-run with --lock=replace to re-attest`)
     }
 
     if (!Object.hasOwn(module.files, rel)) module.files[rel] = integrity
