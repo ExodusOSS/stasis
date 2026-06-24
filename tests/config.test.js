@@ -13,6 +13,7 @@ const ENV_KEYS = [
   'EXODUS_STASIS_RESOURCES',
   'EXODUS_STASIS_DEBUG',
   'EXODUS_STASIS_CHILD_PROCESS',
+  'EXODUS_STASIS_FS',
 ]
 const withEnv = (vars, fn) => (t) => {
   const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
@@ -621,6 +622,99 @@ test('Config childProcess=true option conflicts with env childProcess=0', withEn
     t.assert.throws(() => new Config({ childProcess: true }), /Config options can not override stasis env/)
   }
 ))
+
+// fs mirrors lock/bundle: a 'sync'|'async' enum read from --fs / EXODUS_STASIS_FS / "fs" in
+// stasis.config.json, requiring an active read/write bundle mode (add|replace|load), and -- like
+// debug/childProcess -- NOT serialized. The runtime loader installs the fs reader patches from
+// config.fs on State init. Like lockFile, it's a loader/CLI concern, not a plugin option.
+test('Config defaults fs to undefined', (t) => {
+  t.assert.equal(new Config().fs, undefined)
+})
+
+test('Config(options) sets fs=sync (requires a bundle mode)', (t) => {
+  t.assert.equal(new Config({ bundle: 'add', fs: 'sync' }).fs, 'sync')
+})
+
+test('Config(options) sets fs=async', (t) => {
+  t.assert.equal(new Config({ bundle: 'load', lock: 'frozen', fs: 'async' }).fs, 'async')
+})
+
+test('Config(options) rejects invalid fs', (t) => {
+  t.assert.throws(() => new Config({ bundle: 'add', fs: 'maybe' }), /Invalid fs: maybe/)
+})
+
+test('Config(options) fs requires bundle=(add|replace|load)', (t) => {
+  // default bundle is 'none'; 'ignore'/'frozen' likewise have nothing to capture into / serve from.
+  for (const bundle of [undefined, 'none', 'ignore', 'frozen']) {
+    t.assert.throws(() => new Config({ lock: 'add', ...(bundle && { bundle }), fs: 'sync' }),
+      /fs requires bundle=\(add\|replace\|load\)/)
+  }
+  // the three read/write bundle modes are accepted
+  t.assert.equal(new Config({ bundle: 'add', fs: 'sync' }).fs, 'sync')
+  t.assert.equal(new Config({ bundle: 'replace', fs: 'sync' }).fs, 'sync')
+  t.assert.equal(new Config({ lock: 'frozen', bundle: 'load', fs: 'sync' }).fs, 'sync')
+})
+
+test('loadConfig fs=sync', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ bundle: 'add', fs: 'sync' }))
+  t.assert.equal(c.fs, 'sync')
+})
+
+test('loadConfig fs=async', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'frozen', bundle: 'load', fs: 'async' }))
+  t.assert.equal(c.fs, 'async')
+})
+
+test('loadConfig rejects invalid fs', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ bundle: 'add', fs: 'maybe' })), /Invalid fs: maybe/)
+})
+
+test('loadConfig fs requires an active read/write bundle mode', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ fs: 'sync' })), /fs requires bundle=\(add\|replace\|load\)/)
+  t.assert.throws(() => c.loadConfig(json({ lock: 'none', bundle: 'frozen', fs: 'sync' })),
+    /fs requires bundle=\(add\|replace\|load\)/)
+})
+
+test('fs is not serialized into json (a how-to-run flag, like debug/childProcess)', (t) => {
+  const c = new Config({ bundle: 'add', fs: 'async' })
+  t.assert.equal(JSON.parse(c.json).fs, undefined, 'no fs key in the serialized config')
+})
+
+test('Config reads EXODUS_STASIS_FS at construction time', withEnv(
+  { EXODUS_STASIS_FS: 'async', EXODUS_STASIS_BUNDLE: 'add' },
+  (t) => { t.assert.equal(new Config().fs, 'async') }
+))
+
+test('Config fs option conflicting with the env var throws', withEnv(
+  { EXODUS_STASIS_FS: 'sync', EXODUS_STASIS_BUNDLE: 'add' },
+  (t) => {
+    t.assert.throws(() => new Config({ fs: 'async' }), /Config options can not override stasis env/)
+  }
+))
+
+test('Config fs option agreeing with the env var is accepted', withEnv(
+  { EXODUS_STASIS_FS: 'sync', EXODUS_STASIS_BUNDLE: 'add' },
+  (t) => { t.assert.equal(new Config({ fs: 'sync' }).fs, 'sync') }
+))
+
+test('Config fs: stasis.config.json conflicting with the env var throws', withEnv(
+  { EXODUS_STASIS_FS: 'sync', EXODUS_STASIS_BUNDLE: 'add' },
+  (t) => {
+    const c = new Config()
+    t.assert.throws(() => c.loadConfig(json({ fs: 'async' })), /can not override stasis\.config\.json/)
+  }
+))
+
+test('validatePluginOptions rejects fs (not a plugin option; --fs is a loader/CLI concern)', (t) => {
+  // Like lockFile: the fs reader patches are a `stasis run` loader feature, never a plugin's to
+  // set, so fs is an unknown plugin option caught by the generic check regardless of its value.
+  t.assert.throws(() => validatePluginOptions('Plug', { fs: 'sync' }), /Unknown Plug options: fs/)
+  t.assert.throws(() => validatePluginOptions('Plug', { fs: 42 }), /Unknown Plug options: fs/)
+})
 
 // validatePluginOptions: standalone helper for plugin constructors. Mirrors Config's per-field
 // validation without side effects.
