@@ -9,3 +9,5 @@
 See `@exodus/stasis` [Readme](stasis/README.md).
 
 </div>
+
+![](/doc/workflows.svg)
