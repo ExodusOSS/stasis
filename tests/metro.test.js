@@ -56,14 +56,17 @@ const {
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
+  EXODUS_STASIS_CHILD_PROCESS: _cp,
   ...cleanEnv
 } = process.env
 
+// StasisMetro now asserts child-process capture is enabled (Metro transforms in workers), so
+// every run sets it by default; a test below overrides it to '' to prove the assert fires.
 const run = (entry, { cwd, env = {}, graph = FULL_GRAPH }) => {
   const r = spawnSync(process.execPath, [helper, entry], {
     encoding: 'utf-8',
     cwd,
-    env: { ...cleanEnv, STASIS_TEST_METRO_GRAPH: JSON.stringify(graph), ...env },
+    env: { ...cleanEnv, EXODUS_STASIS_CHILD_PROCESS: '1', STASIS_TEST_METRO_GRAPH: JSON.stringify(graph), ...env },
   })
   r.stdout = stripVTControlCharacters(r.stdout)
   r.stderr = stripVTControlCharacters(r.stderr)
@@ -312,6 +315,59 @@ test('invalid plugin option value is rejected', withTmp((t, tmp) => {
   const r = run('src/entry.js', { cwd: tmp, env: withOpts({ lock: 'bogus' }) })
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /Invalid lock/)
+}))
+
+test('capture without child-process is refused (Metro transforms in workers)', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  // The helper enables child-process by default; clear it to prove the plugin fails closed rather
+  // than silently emit a lockfile missing the toolchain Metro's worker processes load.
+  const r = run('src/entry.js', { cwd: tmp, env: { ...withOpts({ lock: 'add' }), EXODUS_STASIS_CHILD_PROCESS: '' } })
+  t.assert.notEqual(r.status, 0, 'capture without child-process must fail')
+  t.assert.match(r.stderr, /child-process capture must be enabled/)
+}))
+
+test('frozen verify is EXEMPT from the child-process assert (no shards minted in a verify run)', withTmp((t, tmp) => {
+  // The StasisMetro assert fires only on a capture-that-writes (lock/bundle add|replace); a frozen
+  // verify is per-process and channel-independent, so it must succeed even with child-process OFF.
+  // The helper forces EXODUS_STASIS_CHILD_PROCESS=1 by default; clear it to prove the exemption.
+  cpSync(fullFixture, tmp, { recursive: true })
+  const r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full', EXODUS_STASIS_CHILD_PROCESS: '' } })
+  t.assert.equal(r.status, 0, `frozen verify must not require --child-process; stderr: ${r.stderr}`)
+}))
+
+test('a Rule-6 sidecar inherits childProcess from the preload (env-less programmatic option)', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  // Empty env => no env opinion, so childProcess is driven purely by the explicit preload option.
+  // The plugin asks for its OWN bundle path (different from the preload's) => Rule-6 sidecar. The
+  // sidecar must copy childProcess from the preload; before that fix it defaulted false and the
+  // StasisMetro assert threw despite the user enabling it. (Capture mode: lock=add writes.)
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: {
+      EXODUS_STASIS_CHILD_PROCESS: '',
+      STASIS_TEST_PRELOAD_OPTIONS: JSON.stringify({ lock: 'add', scope: 'full', bundle: 'add', bundleFile: join(tmp, 'preload.br'), childProcess: true }),
+      STASIS_TEST_PLUGIN_OPTIONS: JSON.stringify({ lock: 'add', scope: 'full', bundle: 'add', bundleFile: join(tmp, 'sidecar.br') }),
+    },
+  })
+  t.assert.equal(r.status, 0, `sidecar must inherit childProcess and not trip the assert; stderr: ${r.stderr}`)
+}))
+
+test('a Rule-6 sidecar (preload WITHOUT a bundle) inherits childProcess from the preload', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  // The OTHER sidecar branch: the PRELOAD writes a lockfile but NO bundle, while the plugin asks
+  // for its OWN bundle => the "bundle alongside a preload without bundle" sidecar. It must copy
+  // childProcess from the preload too (the bundled-preload branch already did); before the fix this
+  // branch omitted it, so on this env-less programmatic path the sidecar defaulted childProcess=false
+  // and the StasisMetro assert threw despite the user enabling it.
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: {
+      EXODUS_STASIS_CHILD_PROCESS: '',
+      STASIS_TEST_PRELOAD_OPTIONS: JSON.stringify({ lock: 'add', scope: 'full', bundle: 'none', childProcess: true }),
+      STASIS_TEST_PLUGIN_OPTIONS: JSON.stringify({ lock: 'add', scope: 'full', bundle: 'add', bundleFile: join(tmp, 'sidecar.br') }),
+    },
+  })
+  t.assert.equal(r.status, 0, `branch-2 sidecar must inherit childProcess and not trip the assert; stderr: ${r.stderr}`)
 }))
 
 // ----- Plugin↔preload coordination paths ----------------------------------------------

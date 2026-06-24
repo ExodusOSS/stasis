@@ -15,14 +15,14 @@ export const DEFAULT_LOCK = 'add'
 export const DEFAULT_BUNDLE = 'none'
 export const DEFAULT_SCOPE = 'full'
 
-const envDebugBool = (value) => Boolean(value && value !== '0')
+const envBool = (value) => Boolean(value && value !== '0')
 
 // EXODUS_STASIS_RESOURCES is a comma-separated extension list; split + trim + drop
 // empties so '' and ' png , svg ' normalize predictably (parseResourcesOption then
 // validates each entry). An empty/unset env var means "no allowlist".
 const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
 
-const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources']
+const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources', 'childProcess']
 
 // Plugins accept the same options as Config but want to validate without constructing one,
 // since constructing State has side effects. Mirror Config's per-field validation.
@@ -30,13 +30,14 @@ export function validatePluginOptions(label, options) {
   const rest = { ...options }
   for (const key of OPTION_KEYS) delete rest[key]
   assert.equal(Object.keys(rest).length, 0, `Unknown ${label} options: ${Object.keys(rest).join(', ')}`)
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess } = options
   if (scope !== undefined) assert.ok(VALID_SCOPE.has(scope), `Invalid scope: ${scope}`)
   if (lock !== undefined) assert.ok(VALID_LOCK.has(lock), `Invalid lock: ${lock}`)
   if (bundle !== undefined) assert.ok(VALID_BUNDLE.has(bundle), `Invalid bundle: ${bundle}`)
   if (bundleFile !== undefined) assert.equal(typeof bundleFile, 'string', 'bundleFile must be a string')
   if (resourcesBundleFile !== undefined) assert.equal(typeof resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
   if (debug !== undefined) assert.equal(typeof debug, 'boolean', 'debug must be a boolean')
+  if (childProcess !== undefined) assert.equal(typeof childProcess, 'boolean', 'childProcess must be a boolean')
   // parseResourcesOption is the validator: it throws on a non-array, non-string entries,
   // malformed extensions, or a code extension (those are always tracked, never resources).
   if (resources !== undefined) parseResourcesOption(label, resources)
@@ -45,7 +46,7 @@ export function validatePluginOptions(label, options) {
 // When a plugin runs against a State that already exists (preload path), the active Config
 // is authoritative. Any options the plugin was given must agree with it.
 export function assertOptionsMatchConfig(config, options) {
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, childProcess } = options
   // `resources` is intentionally NOT cross-checked here: it's a Set (needs set-equality,
   // which assert.equal can't express) and is coordinated explicitly in resolvePluginState
   // before this runs -- don't "fix" the omission with assert.equal(config.resources, ...).
@@ -56,6 +57,7 @@ export function assertOptionsMatchConfig(config, options) {
     if (bundleFile !== undefined) assert.equal(config.bundleFile, bundleFile)
     if (resourcesBundleFile !== undefined) assert.equal(config.resourcesBundleFile, resourcesBundleFile)
     if (debug !== undefined) assert.equal(config.debug, debug)
+    if (childProcess !== undefined) assert.equal(config.childProcess, childProcess)
   } catch (cause) {
     // Re-throw with the underlying assertion message folded into the top-level
     // text -- a plugin author hitting this gets the offending field's name and
@@ -75,8 +77,10 @@ export class Config {
   #resourcesBundleFile
   #resources
   #debug
+  #childProcess
 
-  // Options match the CLI flags (lock/lockFile/bundle/bundleFile/resourcesBundleFile/scope/debug).
+  // Options match the CLI flags (scope/lock/lockFile/bundle/bundleFile/resourcesBundleFile/debug/
+  // resources/childProcess).
   // Env vars take effect at construction time; if both env and an option are set they must
   // agree. Likewise, any explicit constructor option is treated as authoritative: a later
   // `loadConfig` call (which reads stasis.config.json) must agree with it -- the alternative
@@ -84,9 +88,9 @@ export class Config {
   // was a footgun the CLI couldn't detect, since the flag was happily accepted
   // and then quietly ignored.
   constructor(options = {}) {
-    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
-    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources }
+    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
@@ -97,6 +101,7 @@ export class Config {
       resourcesBundleFile: process.env.EXODUS_STASIS_RESOURCES_BUNDLE_FILE || undefined,
       debug: process.env.EXODUS_STASIS_DEBUG || undefined,
       resources: process.env.EXODUS_STASIS_RESOURCES || undefined,
+      childProcess: process.env.EXODUS_STASIS_CHILD_PROCESS || undefined,
     }
 
     try {
@@ -113,7 +118,10 @@ export class Config {
         assert.equal(this.#env.resourcesBundleFile, resourcesBundleFile)
       }
       if (this.#env.debug !== undefined && debug !== undefined) {
-        assert.equal(envDebugBool(this.#env.debug), debug)
+        assert.equal(envBool(this.#env.debug), debug)
+      }
+      if (this.#env.childProcess !== undefined && childProcess !== undefined) {
+        assert.equal(envBool(this.#env.childProcess), childProcess)
       }
       // Compare parsed sets, not the raw strings: ['png','svg'] and 'svg,png' are the
       // same allowlist. An empty/unset env var is "no env opinion" (handled by `||
@@ -134,7 +142,8 @@ export class Config {
     this.#bundle = this.#env.bundle || bundle || DEFAULT_BUNDLE
     this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
-    this.#debug = this.#env.debug !== undefined ? envDebugBool(this.#env.debug) : (debug ?? false)
+    this.#debug = this.#env.debug !== undefined ? envBool(this.#env.debug) : (debug ?? false)
+    this.#childProcess = this.#env.childProcess !== undefined ? envBool(this.#env.childProcess) : (childProcess ?? false)
     // env wins over the option (it's the process-wide signal); parseResourcesOption
     // normalizes both to a Set of lowercase extensions/filenames, or empty when neither set.
     this.#resources = parseResourcesOption(
@@ -152,6 +161,7 @@ export class Config {
     assert.ok(VALID_LOCK.has(this.#lock), `Invalid lock: ${this.#lock}`)
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
+    assert.equal(typeof this.#childProcess, 'boolean', 'childProcess must be a boolean')
     if (this.#bundleFile !== undefined) assert.equal(typeof this.#bundleFile, 'string', 'bundleFile must be a string')
     if (this.#lockFile !== undefined) {
       assert.equal(typeof this.#lockFile, 'string', 'lockFile must be a string')
@@ -217,6 +227,7 @@ export class Config {
       lock = this.#lock,
       bundle = this.#bundle,
       debug = this.#debug,
+      childProcess = this.#childProcess,
       resources,
       ...rest
     } = JSON.parse(json)
@@ -225,6 +236,7 @@ export class Config {
     this.#lock = lock
     this.#bundle = bundle
     this.#debug = debug
+    this.#childProcess = childProcess
     if (resources !== undefined) this.#resources = parseResourcesOption('stasis.config.json', resources)
     this.#checkInvariants()
 
@@ -232,7 +244,8 @@ export class Config {
       if (this.#env.scope !== undefined) assert.equal(this.#scope, this.#env.scope)
       if (this.#env.lock !== undefined) assert.equal(this.#lock, this.#env.lock)
       if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
-      if (this.#env.debug !== undefined) assert.equal(this.#debug, envDebugBool(this.#env.debug))
+      if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool(this.#env.debug))
+      if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool(this.#env.childProcess))
       if (this.#env.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('env', envList(this.#env.resources))),
           'resources in stasis.config.json must match EXODUS_STASIS_RESOURCES')
@@ -244,6 +257,7 @@ export class Config {
       if (this.#explicit.lock !== undefined) assert.equal(this.#lock, this.#explicit.lock)
       if (this.#explicit.bundle !== undefined) assert.equal(this.#bundle, this.#explicit.bundle)
       if (this.#explicit.debug !== undefined) assert.equal(this.#debug, this.#explicit.debug)
+      if (this.#explicit.childProcess !== undefined) assert.equal(this.#childProcess, this.#explicit.childProcess)
       if (this.#explicit.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('options', this.#explicit.resources)),
           'resources in stasis.config.json must match the resources option')
@@ -282,6 +296,16 @@ export class Config {
 
   get debug() {
     return this.#debug
+  }
+
+  // Opt-in (CLI --child-process / EXODUS_STASIS_CHILD_PROCESS / "childProcess": true in
+  // stasis.config.json): enable cross-process capture forwarding. A forked child (e.g. a
+  // Metro transform worker) writes a shard of what it captured into a root-owned dir, and
+  // the root merges it before writing -- so files only a child loads (a worker's babel
+  // toolchain) are attested. Off by default: the shard dir is a process-coordination channel,
+  // so it's only created when explicitly enabled. Not attested (not in `values`), like debug.
+  get childProcess() {
+    return this.#childProcess
   }
 
   get values() {

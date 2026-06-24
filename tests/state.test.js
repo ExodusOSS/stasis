@@ -406,3 +406,171 @@ test('getImport reads an edge recorded under a symlinked workspace parent (canon
   const got = st.getImport(parentSym, './util.js')
   t.assert.equal(got.url, pathToFileURL(join(tmp, 'packages', 'lib', 'util.js')).toString())
 })
+
+test('mergeShard carries child-only resource + directory captures, not just code', (t) => {
+  // A forked child under `--fs --child-process` captures resource reads and readdir listings too.
+  // mergeShard must route each by its recorded format -- a resource via addFile({resource:true})
+  // and a directory via addFsDir -- not blindly through the code path (which rejects both and,
+  // best-effort, would silently drop them).
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-mergeshard-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    writeFileSync(join(dir, 'asset.bin'), Buffer.from([0, 1, 2, 3, 255])) // binary -> resource:base64
+    mkdirSync(join(dir, 'sub'))
+    writeFileSync(join(dir, 'sub', 'a.txt'), 'hi')
+
+    const child = new State(dir, { scope: 'full', lock: 'add', resources: ['bin'], childProcess: true })
+    child.addFile(pathToFileURL(join(dir, 'asset.bin')).toString(), { resource: true })
+    child.addFsDir(pathToFileURL(join(dir, 'sub')).toString(), ['a.txt'])
+
+    const rootState = new State(dir, { scope: 'full', lock: 'add', resources: ['bin'] })
+    rootState.mergeShard(child.shardSnapshot()) // re-reads bytes/listing from disk
+
+    const lock = JSON.parse(rootState.lockData)
+    t.assert.equal(lock.formats['asset.bin'], 'resource:base64', 'child-only resource attested, not dropped')
+    t.assert.equal(lock.formats['sub'], 'directory', 'child-only directory listing attested, not dropped')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('mergeShard does NOT impose commonjs on a child fs-read .js (no recorded format)', (t) => {
+  // A forked child that only fs-READ a `.js` (e.g. Babel reading a worker's source to transform
+  // it) records the bytes but NO format -- module-vs-commonjs is the loader's call, so addFsFile
+  // defers. mergeShard must replay that as a no-format file, NOT re-default it to commonjs: a
+  // baked-in commonjs would collide with the `module` the loader records if the file is later
+  // imported, failing a frozen run. The package.json has no `type`, so `.js` is genuinely ambiguous.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-mergeshard-fmt-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' })) // no "type"
+    const src = 'export const x = 1\n' // ESM source, only ever fs-read here
+    writeFileSync(join(dir, 'worker.js'), src)
+
+    const child = new State(dir, { scope: 'full', lock: 'add', childProcess: true })
+    child.addFsFile(pathToFileURL(join(dir, 'worker.js')).toString(), Buffer.from(src))
+    const snapshot = child.shardSnapshot()
+    // Precondition: addFsFile recorded the file with no format (inferFormat:false for .js).
+    t.assert.equal(JSON.parse(snapshot).formats?.['worker.js'], undefined,
+      'precondition: child records the fs-read .js with no format')
+
+    const rootState = new State(dir, { scope: 'full', lock: 'add' })
+    rootState.mergeShard(snapshot)
+
+    const lock = JSON.parse(rootState.lockData)
+    t.assert.equal(lock.formats?.['worker.js'], undefined,
+      'merged code file keeps NO format (deferred to the loader), not a commonjs default')
+    t.assert.ok([...rootState.hashes.keys()].some((k) => k.endsWith('worker.js')),
+      'the file bytes/hash are still attested, just without a format')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('mergeShard carries a child-recorded module format (imported .js in a no-type package)', (t) => {
+  // The flip side: when the child DID load the file as ESM (recording `module` for a no-`type`
+  // package `.js`), mergeShard must CARRY that format -- otherwise the root re-defaults to commonjs
+  // and a frozen run rejects the flip. This is the case the format carry was originally written for.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-mergeshard-mod-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' })) // no "type"
+    const src = 'export const x = 1\n'
+    writeFileSync(join(dir, 'esm.js'), src)
+
+    const child = new State(dir, { scope: 'full', lock: 'add', childProcess: true })
+    child.addFile(pathToFileURL(join(dir, 'esm.js')).toString(), { source: Buffer.from(src), format: 'module' })
+    const snapshot = child.shardSnapshot()
+    t.assert.equal(JSON.parse(snapshot).formats['esm.js'], 'module', 'precondition: child recorded module')
+
+    const rootState = new State(dir, { scope: 'full', lock: 'add' })
+    rootState.mergeShard(snapshot)
+
+    t.assert.equal(JSON.parse(rootState.lockData).formats['esm.js'], 'module',
+      'child-recorded module format carried, not re-defaulted to commonjs')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('shardSnapshot forwards only this-session observations, not the seeded lockfile baseline', (t) => {
+  // A forked child seeds the existing lockfile at construction; its shard must carry only what IT
+  // observed (child-only files), NOT re-ship the whole baseline -- which would bloat every worker's
+  // shard (toward MAX_SHARD_BYTES) and make the root re-read the entire lockfile from disk per
+  // worker at merge.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-shard-scope-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    writeFileSync(join(dir, 'baseline.js'), 'export const a = 1\n')
+    writeFileSync(join(dir, 'childonly.js'), 'export const b = 2\n')
+
+    // Prior capture: write a lockfile that already attests baseline.js.
+    const seed = new State(dir, { scope: 'full', lock: 'add' })
+    seed.addFile(pathToFileURL(join(dir, 'baseline.js')).toString(), { source: Buffer.from('export const a = 1\n'), format: 'module' })
+    writeFileSync(join(dir, 'stasis.lock.json'), seed.lockData)
+
+    // A child that SEEDS that lockfile (baseline.js) at construction, then observes only childonly.js.
+    const child = new State(dir, { scope: 'full', lock: 'add', childProcess: true })
+    child.addFile(pathToFileURL(join(dir, 'childonly.js')).toString(), { source: Buffer.from('export const b = 2\n'), format: 'module' })
+    const shard = JSON.parse(child.shardSnapshot())
+
+    t.assert.deepEqual(Object.keys(shard.sources?.['.']?.files ?? {}), ['childonly.js'],
+      'shard carries only the observed child-only file, not the seeded baseline.js')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('mergeShard carries a child format even when the root already recorded the file format-less', (t) => {
+  // The merge-skip (root already has the hash) must NOT drop a concrete format the child recorded.
+  // Here the root fs-READ shared.js (so it has the hash but addFsFile records NO format for a .js),
+  // and the child IMPORTED it as `module`. Dropping the format would leave the lockfile format-less
+  // and make a later frozen run -- loading it as a module -- reject the unattested format.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-shard-fmtskip-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    const src = 'export const x = 1\n'
+    writeFileSync(join(dir, 'shared.js'), src)
+
+    const rootState = new State(dir, { scope: 'full', lock: 'add' })
+    rootState.addFsFile(pathToFileURL(join(dir, 'shared.js')).toString(), Buffer.from(src)) // fs-read: hash, no format
+    t.assert.equal(JSON.parse(rootState.lockData).formats?.['shared.js'], undefined, 'precondition: root has the file with no format')
+
+    const child = new State(dir, { scope: 'full', lock: 'add', childProcess: true })
+    child.addFile(pathToFileURL(join(dir, 'shared.js')).toString(), { source: Buffer.from(src), format: 'module' }) // imported as module
+    rootState.mergeShard(child.shardSnapshot())
+
+    t.assert.equal(JSON.parse(rootState.lockData).formats?.['shared.js'], 'module',
+      'child-recorded module format carried through the hash-skip, not dropped')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('shardSnapshot forwards imports/formats for observed files only, not a bundle-seeded baseline', (t) => {
+  // this.imports/this.formats are session-only for a lock=add run, but a bundle load seeds them
+  // wholesale (this.formats = bundle.formats; this.imports = bundle.imports). shardSnapshot must
+  // still forward ONLY what this process observed -- else every worker re-ships the whole app graph
+  // (and a big enough graph pushes the shard past MAX_SHARD_BYTES and is silently dropped at merge).
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-shard-bundleseed-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    const src = 'export const x = 1\n'
+    writeFileSync(join(dir, 'observed.js'), src)
+
+    const child = new State(dir, { scope: 'full', lock: 'add', childProcess: true })
+    // Simulate a bundle seed: a baseline format + edge for files this process never observed.
+    child.formats.set('baseline.js', 'module')
+    child.imports.set('*', new Map([['baseline.js', new Map([['./dep.js', 'dep.js']])]]))
+    // Now actually observe one file and one edge from it.
+    const observedUrl = pathToFileURL(join(dir, 'observed.js')).toString()
+    child.addFile(observedUrl, { source: Buffer.from(src), format: 'module' })
+    child.addImport(observedUrl, './self.js', observedUrl)
+
+    const shard = JSON.parse(child.shardSnapshot())
+    t.assert.equal(shard.formats?.['baseline.js'], undefined, 'bundle-seeded format (unobserved) NOT forwarded')
+    t.assert.equal(shard.formats?.['observed.js'], 'module', 'observed format forwarded')
+    t.assert.equal(shard.imports?.['*']?.['baseline.js'], undefined, 'bundle-seeded edge (unobserved parent) NOT forwarded')
+    t.assert.ok(shard.imports?.['*']?.['observed.js'], 'observed edge (observed parent) forwarded')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

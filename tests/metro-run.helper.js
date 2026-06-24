@@ -50,7 +50,7 @@ const manifest = JSON.parse(graphRaw)
 const pluginOptionsRaw = process.env.STASIS_TEST_PLUGIN_OPTIONS
 const pluginOptions = pluginOptionsRaw ? JSON.parse(pluginOptionsRaw) : undefined
 
-const KNOWN_OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'debug', 'resources']
+const KNOWN_OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'debug', 'resources', 'childProcess']
 const preloadOptionsRaw = process.env.STASIS_TEST_PRELOAD_OPTIONS
 const preloadOverrides = preloadOptionsRaw ? JSON.parse(preloadOptionsRaw) : undefined
 const preloadOptions = { preload: true }

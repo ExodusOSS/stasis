@@ -1,11 +1,12 @@
 import { test } from 'node:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'stasis', 'bin', 'stasis.js')
 const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run')
@@ -13,6 +14,7 @@ const nmFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli
 const nmCjsFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-nm-cjs')
 const jsonAttrFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-json-attr')
 const forkFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-fork')
+const forkShardFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-fork-shard')
 
 // strip any inherited stasis env vars so the CLI's env-conflict guard doesn't trip
 const {
@@ -22,6 +24,9 @@ const {
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
   EXODUS_STASIS_PID: _pid,
+  EXODUS_STASIS_CHILD_PROCESS: _cp,
+  EXODUS_STASIS_SHARD_DIR: _sd,
+  EXODUS_STASIS_SHARD_KEY: _sk,
   ...cleanEnv
 } = process.env
 
@@ -1958,4 +1963,209 @@ test('run capture: a non-fork child that inherits the loader is also blocked fro
   t.assert.match(r.stdout, /WORKER hello, child/, 'the spawned child ran')
   t.assert.deepEqual(readFileSync(join(tmp, 'stasis.lock.json')), lockBaseline, 'a non-fork child must not rewrite the lockfile')
   t.assert.deepEqual(readFileSync(bundlePath), bundleBaseline, 'a non-fork child must not rewrite the bundle')
+}))
+
+// --- child→root capture forwarding (shards, --child-process) -------------------------
+//
+// A forked child captures into its own State but can't write (the root owns the artifact).
+// Without forwarding, files only the child loads -- a Metro transform worker's babel.config.js
+// + babel preset/plugins -- are never attested, so a later frozen/load run rejects them. The
+// cli-run-fork-shard fixture reproduces that minimally: the parent forks worker.js by path and
+// never imports it, so worker.js and its childdep.js import are loaded ONLY in the child.
+// Forwarding is OPT-IN via --child-process (it stands up a process-coordination channel).
+
+test('run --child-process: a forked child contributes its child-only modules to the lockfile', withTmp((t, tmp) => {
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /WORKER extra=child-only-dep/, 'the forked child ran')
+  t.assert.match(r.stdout, /PARENT child-exit=0/)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const files = Object.keys(lock.sources['.'].files)
+  // Neither is reachable from the root process -- only the forked child loaded them.
+  t.assert.ok(files.includes('src/worker.js'), 'child-only worker.js attested via the shard merge')
+  t.assert.ok(files.includes('src/childdep.js'), 'child-only childdep.js attested via the shard merge')
+  t.assert.ok(lock.sources['.'].files['src/childdep.js'].startsWith('sha512-'))
+  // The child loaded these as ESM (Node syntax detection -- the fixture has no package "type"),
+  // and the ROOT never loaded them, so their format is known ONLY from the child's shard.
+  // mergeShard must carry it; without that they'd default to commonjs and the frozen run below
+  // would reject the format flip.
+  t.assert.equal(lock.formats['src/worker.js'], 'module', 'child-only worker.js attested as module')
+  t.assert.equal(lock.formats['src/childdep.js'], 'module', 'child-only childdep.js attested as module')
+}))
+
+test('run --child-process: the shard dir is minted in tmpdir and removed on exit (clean AND aborted)', withTmp((t, tmp) => {
+  // Two properties: (1) the dir lives in the OS tmpdir, not under the project/write-target tree (so
+  // it can't pollute an `--fs` readdir of the root or litter the repo); (2) it is removed on every
+  // exit path. Point TMPDIR at a fresh dir so we can assert it's empty of `stasis-shard-*` after --
+  // a regressed rmSync, or a re-introduced under-project mint, would leave one behind.
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const tmpHome = mkdtempSync(join(tmpdir(), 'stasis-shard-home-'))
+  const shardDirs = () => readdirSync(tmpHome).filter((n) => n.startsWith('stasis-shard-'))
+  try {
+    // Clean capture: channel exercised, dir gone afterward, and never minted under the project.
+    const ok = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp, env: { ...cleanEnv, TMPDIR: tmpHome } })
+    t.assert.equal(ok.status, 0, `stderr: ${ok.stderr}`)
+    t.assert.match(ok.stdout, /WORKER extra=child-only-dep/, 'the shard channel was exercised')
+    t.assert.deepEqual(shardDirs(), [], 'shard dir removed after a clean run')
+    t.assert.deepEqual(readdirSync(tmp).filter((n) => n.includes('stasis-shard')), [], 'never minted under the project')
+
+    // Aborted capture: drifting a recorded file makes the re-run's lock=add conflict (addFile throws
+    // -> aborted) AFTER the dir is minted. Cleanup lives in save()'s finally (not gated on a clean
+    // write), so the dir must STILL be gone -- and the aborted run must not rewrite the lockfile.
+    const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+    writeFileSync(join(tmp, 'src', 'entry.js'), `${readFileSync(join(tmp, 'src', 'entry.js'), 'utf-8')}\n// drift\n`)
+    const aborted = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp, env: { ...cleanEnv, TMPDIR: tmpHome } })
+    t.assert.notEqual(aborted.status, 0, 'the drifted re-run must abort (lock=add conflict on the entry)')
+    t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore, 'aborted run must not rewrite the lockfile')
+    t.assert.deepEqual(shardDirs(), [], 'shard dir removed even after an aborted run')
+  } finally {
+    rmSync(tmpHome, { recursive: true, force: true })
+  }
+}))
+
+test('run --child-process: a worker pool (2 forks) -- both contribute without conflict on shared modules', withTmp((t, tmp) => {
+  // Two concurrent children each write a pid-named shard into the root's dir; the root merges both
+  // and the module they BOTH loaded is attested without a noupsert conflict. (The merge-skip dedups
+  // the second copy, but that's a perf optimization with no observable output -- equal bytes noupsert
+  // cleanly either way -- so this pins "both contribute, no conflict", NOT the skip itself.)
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp, env: { ...cleanEnv, WORKER_COUNT: '2' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal((r.stdout.match(/WORKER extra=child-only-dep/g) ?? []).length, 2, 'both forked workers ran')
+  const files = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).sources['.'].files
+  t.assert.ok(files['src/worker.js'] && files['src/childdep.js'], 'child-only modules from both worker shards attested, no conflict')
+}))
+
+test('run --child-process: a subprocess that spawns a subprocess -- grandchild observations recorded', withTmp((t, tmp) => {
+  // The shard channel (dir+key) rides process.env, so it propagates to the WHOLE descendant tree: a
+  // forked worker that itself forks a grandchild passes the channel onward, and the grandchild's
+  // depth-2 child-only module is merged into the root's lockfile. (This is exactly why the bins must
+  // NOT scrub the inherited shard vars -- that would sever capture for legitimately-spawned subtrees.)
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp, env: { ...cleanEnv, SPAWN_GRANDCHILD: '1' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /GRANDCHILD deep=grandchild-only-dep/, 'the grandchild ran')
+  const files = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).sources['.'].files
+  t.assert.ok(files['src/grandchilddep.js'], 'depth-2 grandchild-only module attested in the root lockfile')
+}))
+
+test('run --child-process: a forged shard (signed with a foreign key) is rejected', withTmp((t, tmp) => {
+  // The channel authenticates each shard with the root's per-build ed25519 key. The PUBLIC key
+  // names every shard file (a peer enumerating the dir can read it), but only the PRIVATE key --
+  // env-passed to descendants, never written to the dir -- can sign. src/forge.js plays the peer:
+  // it drops a file with the right public-key prefix but a FOREIGN signature, claiming decoy.js.
+  // The signature check (against the root's own public key) must reject it.
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp, env: { ...cleanEnv, FORGE_SHARD: '1' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /FORGE wrote a forged shard/, 'the attacker actually dropped a forged shard')
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const files = Object.keys(lock.sources['.'].files)
+  t.assert.ok(!files.includes('src/decoy.js'), 'forged shard rejected: decoy.js must NOT be attested')
+  // The genuine child's real (root-signed) shard is still accepted alongside it.
+  t.assert.ok(files.includes('src/childdep.js'), 'the genuine child shard still merged')
+}))
+
+test('run --child-process: an unsigned shard is rejected', withTmp((t, tmp) => {
+  // A shard with no `signature` field at all -- the typeof-string guard drops it before verify.
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp, env: { ...cleanEnv, FORGE_SHARD: 'unsigned' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /FORGE wrote a forged shard/, 'the attacker dropped a forged shard under the root pubId prefix (so it passes the pre-filter and reaches the signature gate)')
+  const files = Object.keys(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).sources['.'].files)
+  t.assert.ok(!files.includes('src/decoy.js'), 'unsigned shard rejected: decoy.js must NOT be attested')
+  t.assert.ok(files.includes('src/childdep.js'), 'the genuine child shard still merged')
+}))
+
+test('run --child-process: a shard tampered after a valid signature is rejected', withTmp((t, tmp) => {
+  // A genuine root signature over a decoy-FREE payload, reused over a decoy-bearing one. Proves
+  // verify() covers the shard bytes, not merely that the signer held the key.
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp, env: { ...cleanEnv, FORGE_SHARD: 'tampered' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /FORGE wrote a forged shard/, 'the attacker dropped a forged shard under the root pubId prefix (so it passes the pre-filter and reaches the signature gate)')
+  const files = Object.keys(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).sources['.'].files)
+  t.assert.ok(!files.includes('src/decoy.js'), 'tampered shard rejected: decoy.js must NOT be attested')
+  t.assert.ok(files.includes('src/childdep.js'), 'the genuine child shard still merged')
+}))
+
+test('run capture: WITHOUT --child-process a child-only module is NOT captured (opt-in gate)', withTmp((t, tmp) => {
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /WORKER extra=child-only-dep/, 'the forked child still ran')
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const files = Object.keys(lock.sources['.'].files)
+  // Default off: the child's observations are not forwarded, so its modules stay unattested.
+  t.assert.ok(!files.includes('src/worker.js'), 'child-only worker.js NOT captured without the flag')
+  t.assert.ok(!files.includes('src/childdep.js'), 'child-only childdep.js NOT captured without the flag')
+}))
+
+test('run --child-process: an inherited shard DIR+KEY is ignored -- a shard valid under them is not merged, dir untouched', withTmp((t, tmp) => {
+  // Hardening: the root must ALWAYS mint its OWN dir+key and never honor an inherited
+  // EXODUS_STASIS_SHARD_DIR/_KEY (which would let a peer feed forged shards and make the root rm an
+  // external path). Hand it an attacker dir AND key, and plant a shard that is genuinely VALID under
+  // that key (signed by it, named with its public prefix) claiming src/decoy.js with decoy's REAL
+  // hash -- so if the root honored the inherited channel it WOULD verify + merge it. It must not:
+  // decoy.js stays unattested, the genuine child-only module is still captured (own channel), and
+  // the attacker dir + sentinel are left intact (no confused-deputy rm).
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const attackerDir = mkdtempSync(join(tmpdir(), 'stasis-attacker-'))
+  const sentinel = join(attackerDir, 'sentinel')
+  writeFileSync(sentinel, 'do not touch')
+  try {
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+    const pubId = publicKey.export({ format: 'jwk' }).x
+    const realHash = `sha512-${createHash('sha512').update(readFileSync(join(tmp, 'src', 'decoy.js'))).digest('base64')}`
+    const shard = JSON.stringify({
+      version: 0, config: { scope: 'full' }, entries: [],
+      sources: { '.': { name: 'stasis-cli-run-fork-shard', version: '0.0.0', files: { 'src/decoy.js': realHash } } },
+      modules: {},
+    })
+    const signature = sign(null, Buffer.from(shard), privateKey).toString('base64url')
+    writeFileSync(join(attackerDir, `${pubId}-12345.json`), JSON.stringify({ shard, signature }))
+    const keyB64 = privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64')
+
+    const r = run(['run', '--lock=add', '--child-process', 'src/entry.js'], {
+      cwd: tmp,
+      env: { ...cleanEnv, EXODUS_STASIS_SHARD_DIR: attackerDir, EXODUS_STASIS_SHARD_KEY: keyB64 },
+    })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    const files = Object.keys(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).sources['.'].files)
+    t.assert.ok(!files.includes('src/decoy.js'), 'a shard valid under the INHERITED key is not merged (inherited channel ignored)')
+    t.assert.ok(files.includes('src/childdep.js'), 'the genuine child-only module is still captured via the root-minted channel')
+    t.assert.ok(existsSync(sentinel), 'inherited shard dir must not be removed (no confused-deputy rm)')
+  } finally {
+    rmSync(attackerDir, { recursive: true, force: true })
+  }
+}))
+
+test('run --lock=frozen: a child-only dependency verifies after a --child-process capture', withTmp((t, tmp) => {
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  // Capture first WITH --child-process so the lockfile includes the child-only modules.
+  const cap = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+  // Frozen re-run (no flag needed): the forked child re-loads worker.js + childdep.js and
+  // verifies them against the now-complete lockfile -- per-process verification, independent of
+  // the shard channel. Before forwarding this rejected childdep.js (the babel-toolchain symptom).
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `frozen stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /WORKER extra=child-only-dep/)
+}))
+
+test('run --lock=frozen: a tampered child-only dependency is still rejected (fail-closed preserved)', withTmp((t, tmp) => {
+  cpSync(forkShardFixture, tmp, { recursive: true })
+  const cap = run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+  // The child verifies its own observations against the lockfile regardless of shards, so a
+  // tampered child-only file must fail the frozen run.
+  writeFileSync(join(tmp, 'src', 'childdep.js'), "export const extra = 'TAMPERED'\n")
+  const r = run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0, 'frozen must reject a tampered child-only dependency')
+  // Pin the rejection reason so this can't pass on an unrelated failure: the child-only file's
+  // bytes no longer match the lockfile-attested hash.
+  t.assert.match(r.stderr, /childdep|Conflict|integrity|mismatch/i, 'must fail on the tampered child file specifically')
 }))

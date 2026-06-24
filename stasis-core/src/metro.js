@@ -94,14 +94,26 @@ function metroDefaultSerializer() {
 //   const { withStasis } = require('@exodus/stasis/metro')
 //   module.exports = withStasis(require('./metro.config.base'), { /* scope, lock, ... */ })
 //
-//   withStasis wires the STABLE `serializer.customSerializer`, which is the only Metro
-//   surface that receives `preModules` (the polyfills/runtime Metro prepends to every
+//   Then CAPTURE with child-process forwarding ON -- Metro transforms in worker processes, so
+//   `--child-process` is REQUIRED on a capture run to attest the toolchain those workers load
+//   (babel.config.js, @babel/core, the RN preset + plugins). The plugin throws at config time if
+//   you forget it on a writing run:  `stasis run --lock=add --child-process -- <metro build cmd>`.
+//   A later `--lock=frozen` verify needs NO flag (verification is per-process, independent of the
+//   shard channel). withStasis wires the STABLE `serializer.customSerializer`, which is the only
+//   Metro surface that receives `preModules` (the polyfills/runtime Metro prepends to every
 //   bundle -- real shipped files). It wraps an existing customSerializer if you have one,
 //   otherwise reproduces Metro's default output. For manual wiring use
 //   `new StasisMetro(opts).customSerializer(base?)`. `serializerHook` (the experimental
 //   hook) is a lower-coverage fallback -- see its note.
 //
 // KNOWN LIMITATIONS (Metro-specific coverage gaps -- documented, not silently ignored):
+//   - Child-process capture is best-effort and one-shot-build only. A worker KILLED by signal
+//     before its exit hook (jest-worker forceExit / pool overflow) loses its shard SILENTLY at
+//     capture time -- a later frozen run still catches the gap (fail-closed), but nothing warns
+//     during capture. And it relies on the loader's exit-time write: a dev server (`metro start`,
+//     pool kept warm, killed by signal) never gets there, and standalone (no stasis loader) Metro
+//     mints no shard dir -- neither produces a toolchain-complete lockfile. Use a one-shot
+//     `metro build` under `stasis run --child-process` to capture, then verify with `--lock=frozen`.
 //   - Scaled asset variants: `import x from './logo.png'` is ONE module in the graph, keyed
 //     by the base path; Metro discovers `logo@2x.png` / `@3x` via its AssetData (parallel
 //     scales/files arrays), NOT as separate graph modules, so only the base file is attested
@@ -120,6 +132,25 @@ export class StasisMetro {
   constructor(options = {}) {
     const { state } = resolvePluginState('StasisMetro', options, process.cwd())
     this.#state = state // null when the plugin should be inert (Rule 7)
+    // A CAPTURE-THAT-WRITES requires child-process forwarding: Metro transforms every file in a
+    // pool of worker processes (see the class note), and the toolchain those workers load --
+    // babel.config.js, @babel/core, the React Native preset + its plugins -- is observed only
+    // there. Without --child-process those workers can't report back, so that toolchain goes
+    // unattested and a later frozen/load run rejects it. Fail loudly at config time rather than
+    // silently emit an incomplete lockfile. Gate on the SAME predicate as the shard channel itself
+    // (writeLockfile || writeBundle, i.e. lock/bundle add|replace) so the flag is demanded exactly
+    // when forwarding does something: a frozen/ignore/none run verifies per-process and needs no
+    // channel (the CLI frozen tests pass without the flag), and load mode reads the bundle via the
+    // companion transformer -- none of those should be forced to pass --child-process.
+    if (state && (state.config.writeLockfile || state.config.writeBundle)) {
+      assert.ok(
+        state.config.childProcess,
+        'StasisMetro: child-process capture must be enabled -- Metro transforms in worker processes, ' +
+        'and without it the toolchain they load (babel.config.js, @babel/core, the RN preset + plugins) ' +
+        'is never attested. Enable it: `stasis run --child-process ...`, EXODUS_STASIS_CHILD_PROCESS=1, ' +
+        'or "childProcess": true in stasis.config.json.'
+      )
+    }
     // resources is a Config field now (validated + coordinated against any preload in
     // resolvePluginState); cache the resolved Set for the per-file classify hot path.
     this.#resources = state?.config.resources ?? new Set()

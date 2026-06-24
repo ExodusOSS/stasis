@@ -1,7 +1,9 @@
 import Module, { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
-import { basename, dirname, extname, resolve as resolvePath } from 'node:path'
+import { basename, dirname, extname, join, resolve as resolvePath } from 'node:path'
 import * as fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import assert from 'node:assert/strict'
 
 import { State } from './state.js'
@@ -9,8 +11,10 @@ import { installFsHooks } from './fs.js'
 
 // Snapshot off the namespace so `--fs` (which patches fs.readFileSync and then
 // syncBuiltinESMExports()s for user code) can't redirect the read the CJS-source
-// capture below relies on. Same rationale as state.js / state-util.js.
-const { readFileSync } = fs
+// capture below relies on. Same rationale as state.js / state-util.js. The shard
+// readers/writers below are snapshotted for the same reason (and writes aren't patched
+// by --fs anyway, but reads are).
+const { mkdtempSync, opendirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } = fs
 
 // Warning: only covers code imports, not file reads
 
@@ -58,6 +62,15 @@ function refuseNonNodeFormat(format, url) {
 }
 
 let state
+// The shard dir + per-build ed25519 keypair THIS process created (root only). The PRIVATE key
+// is exported to descendants via env (each capturing child signs its shard with it); the PUBLIC
+// key (createdShardPub, a KeyObject) is what the root verifies every shard's signature against,
+// and its base64url form (createdShardPubId) prefixes each shard's filename. Tracked so the root
+// merges from / removes ONLY a dir it minted, and accepts ONLY shards that carry a valid
+// signature under the keypair it minted -- never an inherited/attacker dir or a foreign-signed file.
+let createdShardDir
+let createdShardPub
+let createdShardPubId
 let saved = false
 // Set when stasis's own capture/verification rejects something (see the hooks around
 // addFile/addImport below). Distinct from "the run exited non-zero": a clean capture is
@@ -115,8 +128,173 @@ const PRELOAD_ROOT = (() => {
   }
 })()
 
+// --- Child-process capture forwarding (shards) --------------------------------------
+// A forked child (e.g. a Metro transform worker) runs this loader and captures into its OWN
+// State -- including files ONLY it loads, like babel.config.js and the babel preset/plugins
+// the transformer requires per file. But a child must never write the real lockfile/bundle
+// (the root owns it; two writers race -- see save()). So each capturing child instead writes
+// a per-pid SHARD -- its shardSnapshot(), a lockfile-shaped record of what it captured -- into
+// a shared dir the ROOT creates and exports as EXODUS_STASIS_SHARD_DIR (inherited through the
+// env by every descendant). Just before the root writes, it merges every shard back into its
+// State (re-reading each file's bytes from disk), so observations only a child made are still
+// attested. Best-effort throughout: a missing/partial shard (a child killed mid-write) or an
+// unreadable dir is skipped, never fatal -- the root's own capture is unaffected.
+//
+// OPT-IN: gated behind --child-process (config.childProcess). The shard dir is a
+// process-coordination channel, not part of normal capture, so it exists only when a user
+// explicitly enables cross-process capture (e.g. for Metro). A default run never creates it.
+//
+// TRUST (defense in depth against shard-channel injection):
+//   - the channel only exists under the --child-process opt-in;
+//   - the dir is minted in the OS tmpdir via mkdtemp, which creates it mode 0700 (owner-only), so
+//     a different-uid process can't read its contents; trust does NOT rest on the dir being secret
+//     (its path travels to children in env) -- it rests on the signature gate below;
+//   - the root ALWAYS mints its own dir + a per-build ed25519 keypair, overwriting any
+//     inherited/attacker-set EXODUS_STASIS_SHARD_DIR/_KEY, and merges from / removes ONLY
+//     that dir. Only the PRIVATE key reaches descendants (via env); each child SIGNS its shard
+//     with it, and the root verifies every shard against its own PUBLIC key, accepting only a
+//     valid signature. The filename carries the public key (non-secret) purely to pre-filter;
+//     trust comes from the signature, NOT the filename -- a file signed by some other keypair,
+//     or unsigned, is rejected even if it's named with the right public-key prefix;
+//   - shards carry NO bytes -- mergeShard re-reads each file from disk and re-hashes -- so a shard
+//     can never inject forged file CONTENT (bytes); it can only over-attest a file already on disk.
+//   Because the dir holds only public-keyed, signed shards, a peer who can read the (owner-only)
+//   dir but NOT this process's env cannot forge one. The residual is broader than a /proc snooper:
+//   the private key rides in the environment, so ANY code the build itself executes -- a postinstall
+//   script, codegen, a transitive dependency -- inherits it and can mint a valid shard. And a valid
+//   shard does more than over-attest bytes: mergeShard replays its resolution edges via addImport
+//   WITHOUT re-deriving them on disk, so a key-holder can also forge resolution edges (and formats).
+//   All of that is within the build's own trust domain -- that code already runs with the build's
+//   privileges -- which is the line this opt-in deliberately draws.
+
+function shardForwardingEnabled() {
+  return Boolean(state) && state.config.childProcess && (state.config.writeLockfile || state.config.writeBundle)
+}
+
+function writeChildShard() {
+  if (!shardForwardingEnabled()) return
+  const dir = process.env.EXODUS_STASIS_SHARD_DIR
+  const keyB64 = process.env.EXODUS_STASIS_SHARD_KEY
+  if (!dir || !keyB64) return
+  try {
+    // Sign the snapshot with the env-passed private key so the root can authenticate it. We sign
+    // the snapshot's exact bytes and store them verbatim next to the signature in an envelope
+    // ({ shard, signature }) -- signing the string directly, rather than mutating + re-stringifying
+    // the parsed object, makes verification independent of JSON key ordering and robust against a
+    // future top-level `signature` lockfile key. The PUBLIC key (base64url) names the file --
+    // <base64url(public)>-<pid>-<rand>.json: the public prefix lets the root cheaply pre-filter to
+    // its own build; the pid + random suffix keep workers from colliding even if the OS recycles an
+    // exited worker's pid within one build. Write to a dot-prefixed temp then rename: the merge
+    // filter ignores the temp, so the root never reads a half-written shard.
+    const privateKey = createPrivateKey({ key: Buffer.from(keyB64, 'base64'), format: 'der', type: 'pkcs8' })
+    const pubId = createPublicKey(privateKey).export({ format: 'jwk' }).x
+    const shard = state.shardSnapshot() // serialized lockfile string
+    const signature = sign(null, Buffer.from(shard), privateKey).toString('base64url')
+    const unique = `${OWN_PID}-${randomBytes(6).toString('hex')}` // pid + random: no collision even on pid reuse
+    const tmpPath = join(dir, `.${pubId}-${unique}.tmp`)
+    writeFileSync(tmpPath, JSON.stringify({ shard, signature }))
+    renameSync(tmpPath, join(dir, `${pubId}-${unique}.json`))
+  } catch {
+    // A child that can't snapshot/sign/write just doesn't contribute; the root still persists
+    // its own capture, and a later frozen run fails closed on anything genuinely missing.
+  }
+}
+
+// Defense-in-depth bounds on a merge: cap the count + per-shard size so a hostile/runaway set
+// of shards can't OOM the root. Generous -- a real toolchain shard is a small lockfile.
+const MAX_SHARDS = 4096
+const MAX_SHARD_BYTES = 64 * 1024 * 1024
+
+// Merge the shards THIS root's children wrote into `dir` (the dir we created). We pre-filter to
+// filenames carrying our public key, then AUTHENTICATE each: the file is an { shard, signature }
+// envelope; verify the shard's exact bytes against our own PUBLIC key (createdShardPub -- never a
+// key derived from the filename) and merge only those verified bytes. So a file that's unsigned,
+// foreign-signed, or tampered after signing (e.g. dropped by a non-descendant that doesn't hold
+// the private key) is ignored even if it's named with our prefix. The caller (save) removes `dir`
+// afterward in a finally, so a partial read here never leaves it behind. We iterate with opendir
+// (not readdirSync) so the listing is streamed, never materialized -- MEMORY stays bounded even for
+// a dir stuffed with entries -- and stop parsing/verifying after MAX_SHARDS matching shards.
+function mergeChildShards(dir) {
+  let handle
+  try { handle = opendirSync(dir) } catch { return }
+  const prefix = `${createdShardPubId}-`
+  let count = 0
+  try {
+    let dirent
+    while ((dirent = handle.readSync()) !== null) {
+      const name = dirent.name
+      if (!name.startsWith(prefix) || !name.endsWith('.json')) continue
+      if (++count > MAX_SHARDS) break
+      const path = join(dir, name)
+      try {
+        if (statSync(path).size > MAX_SHARD_BYTES) continue // skip an over-large shard
+        const { shard, signature } = JSON.parse(readFileSync(path, 'utf-8'))
+        if (typeof shard !== 'string' || typeof signature !== 'string') continue // unsigned/malformed: reject
+        if (!verify(null, Buffer.from(shard), createdShardPub, Buffer.from(signature, 'base64url'))) continue
+        state.mergeShard(shard) // the exact bytes we just verified
+      } catch {
+        // A malformed/partial shard (a child SIGKILLed mid-write) is skipped; the rest merge.
+      }
+    }
+  } finally {
+    try { handle.closeSync() } catch { /* best-effort */ }
+  }
+}
+
 function initState(root) {
   state = new State(root, { preload: true, preloadRoot: PRELOAD_ROOT })
+
+  // Root + opt-in: create the shard dir forked children report into, BEFORE any child can fork
+  // (initState fires on the first load, ahead of user code spawning workers). Mint it in the OS
+  // tmpdir via mkdtemp (mode 0700, owner-only) -- NOT under the project/write-target tree, where a
+  // dir would pollute an `--fs` readdir of the root and, on a SIGKILL that skips our exit cleanup,
+  // litter the repo (a later `--fs` run could even re-capture it). tmpdir keeps the scaffolding out
+  // of the captured tree and lets the OS reap it if we're hard-killed. The location is not a secret
+  // (its path travels to children in env); forgery is stopped by the signature, and the 0700 mode
+  // keeps a different-uid peer from reading the dir's contents. ALWAYS mint our own dir + per-build
+  // ed25519 keypair, overwriting any inherited/attacker-set EXODUS_STASIS_SHARD_DIR/_KEY, so the
+  // root only ever merges from -- and rm's -- a dir it created, and only shards it can
+  // authenticate. The PRIVATE key is exported so descendants inherit it and sign their shards; the
+  // root keeps the PUBLIC key to verify. The dir is removed on every exit path (see `save`). Only
+  // the root mints (children are isChildProcess); a non-opt-in or non-capturing run creates
+  // nothing, so children no-op. NB: the dir lives under os.tmpdir(), so capture integrity assumes a
+  // trustworthy TMPDIR -- a TMPDIR an attacker controls (or a non-sticky shared one) reopens the
+  // classic tmpdir symlink race; that is outside the threat model (we defend a dir READER, not a
+  // TMPDIR controller), and /tmp's sticky bit defeats it in the normal case.
+  if (!isChildProcess && shardForwardingEnabled()) {
+    try {
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+      createdShardDir = mkdtempSync(join(tmpdir(), 'stasis-shard-'))
+      createdShardPub = publicKey
+      createdShardPubId = publicKey.export({ format: 'jwk' }).x // base64url(raw public key)
+      process.env.EXODUS_STASIS_SHARD_DIR = createdShardDir
+      // Only the private key travels to children: the dir then holds only public-keyed, signed
+      // shards, so reading the dir (without this env) is not enough to forge one. These two vars
+      // ride process.env, so EVERY transitive descendant inherits them -- a child that itself
+      // forks/spawns a subprocess (or re-invokes a stasis bin) propagates the channel onward, and
+      // those grandchildren contribute shards too. Do NOT scrub them anywhere downstream: that would
+      // sever capture for whole subtrees the build legitimately spawns.
+      process.env.EXODUS_STASIS_SHARD_KEY = privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64')
+    } catch {
+      // Shard reporting is a best-effort enhancement; capture still works without it. If we threw
+      // BEFORE overwriting the env, an inherited (possibly attacker-set) dir/key is still in it --
+      // clear both so descendants don't fall back to a channel we never minted or validated. If
+      // mkdtemp already created the dir before a later step threw, remove the (empty) dir too.
+      if (createdShardDir) { try { rmSync(createdShardDir, { recursive: true, force: true }) } catch { /* best-effort */ } }
+      createdShardDir = undefined
+      createdShardPub = undefined
+      createdShardPubId = undefined
+      delete process.env.EXODUS_STASIS_SHARD_DIR
+      delete process.env.EXODUS_STASIS_SHARD_KEY
+    }
+  } else if (!isChildProcess) {
+    // Non-capturing root (--lock=frozen, or --child-process off): we never mint or merge a shard
+    // dir, so shed any inherited (possibly attacker-set) EXODUS_STASIS_SHARD_DIR/_KEY rather than
+    // leave them in our env. A non-capturing root's descendants can't capture either (they inherit
+    // our non-writing config), so this severs no legitimate channel -- it just drops dead weight.
+    delete process.env.EXODUS_STASIS_SHARD_DIR
+    delete process.env.EXODUS_STASIS_SHARD_KEY
+  }
 
   // Persist the lockfile/bundle on exit UNLESS a stasis verification rejected something.
   // We deliberately do NOT gate on the exit code: a clean capture that exits non-zero for
@@ -137,12 +315,39 @@ function initState(root) {
   // lock=frozen run fails closed on anything missing. Unhandled signals (SIGINT/SIGTERM
   // with no handler) bypass exit hooks entirely; servers own that behavior, we don't touch it.
   const save = () => {
-    // Any child process (pid mismatch) must never persist -- fork OR a non-fork child that
-    // inherited our loader: the root owns the lockfile/bundle, and a second writer to the
-    // same path would race it.
-    if (saved || aborted || isChildProcess) return
+    if (saved) return
     saved = true
-    state.write()
+    // A child process (pid mismatch) must never write the real artifact -- fork OR a non-fork
+    // child that inherited our loader: the root owns the lockfile/bundle, and a second writer
+    // would race it. Instead it forwards what it captured via a shard the root merges below.
+    // writeChildShard no-ops unless the channel is on AND a shard dir was inherited: a child of a
+    // non---child-process run (no dir minted) contributes nothing, while a child under
+    // --child-process (forked or a spawned `node --import` loader) inherits the dir+key and does.
+    if (isChildProcess) {
+      // An aborted child (its own addFile/addImport rejected something) forwards nothing -- the
+      // same fail-stance the root takes when `aborted`. The root re-reads + noupserts every shard
+      // so a partial one couldn't taint it, but there's no value in shipping a rejected capture.
+      if (!aborted) writeChildShard()
+      return
+    }
+    try {
+      // A stasis rejection (addFile/addImport threw -> aborted) must NOT write -- that would bake
+      // the rejected drift into the lockfile/bundle, so a later frozen run would accept it. We
+      // still tear down the shard dir in the finally below.
+      if (aborted) return
+      // Root: fold in every forked child's shard before writing, so files/edges only a child
+      // observed (e.g. a Metro worker's babel.config.js + preset/plugins) are attested too. Only
+      // when we minted a shard dir (opt-in + capturing); merges from that dir alone.
+      if (createdShardDir) mergeChildShards(createdShardDir)
+      state.write()
+    } finally {
+      // Always remove the shard dir we minted -- clean exit, abort, or a throwing write. This is
+      // the single owner of that cleanup (mergeChildShards no longer self-removes). A SIGKILL
+      // bypasses exit hooks, but the dir is in the OS tmpdir, so the OS reaps it.
+      if (createdShardDir) {
+        try { rmSync(createdShardDir, { recursive: true, force: true }) } catch { /* best-effort */ }
+      }
+    }
   }
 
   process.on('beforeExit', save)

@@ -40,7 +40,7 @@ import { extSetsEqual, parseResourcesOption } from './util.js'
 //     plugins be env-controlled off without throwing on the lock=none/bundle=none invariant).
 export function resolvePluginState(label, options, cwd) {
   validatePluginOptions(label, options)
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, childProcess, resources } = options
   // Same-instance fast path: the plugin's stasis-core IS the binary's, the
   // hooks are installed, but the lazy initState hasn't fired yet (plugin
   // ran AHEAD of the first user-file load -- webpack constructs plugins
@@ -103,7 +103,7 @@ export function resolvePluginState(label, options, cwd) {
   if (lock !== undefined && lock !== pc.lock) {
     throw new Error(`${label}: lock='${lock}' conflicts with active preload lock='${pc.lock}'`)
   }
-  // scope/debug must agree with the preload on every preload-coupled path -- reuse
+  // scope/debug/childProcess must agree with the preload on every preload-coupled path -- reuse
   // adopts preload's config wholesale, and sidecar copies it field by field. Catch a
   // disagreement here rather than silently overriding the user's value.
   if (scope !== undefined && scope !== pc.scope) {
@@ -111,6 +111,9 @@ export function resolvePluginState(label, options, cwd) {
   }
   if (debug !== undefined && debug !== pc.debug) {
     throw new Error(`${label}: debug=${debug} conflicts with active preload debug=${pc.debug}`)
+  }
+  if (childProcess !== undefined && childProcess !== pc.childProcess) {
+    throw new Error(`${label}: childProcess=${childProcess} conflicts with active preload childProcess=${pc.childProcess}`)
   }
   // resources is process-wide (a Config field), so a plugin's allowlist must agree with
   // the preload's -- reuse adopts it wholesale, a sidecar inherits it. Compare the parsed
@@ -152,6 +155,7 @@ export function resolvePluginState(label, options, cwd) {
       bundleFile,
       resourcesBundleFile,
       debug: pc.debug,
+      childProcess: pc.childProcess,
       resources: [...pc.resources],
     })
     return { state: sidecar, isNoop: false }
@@ -187,6 +191,7 @@ export function resolvePluginState(label, options, cwd) {
     bundleFile,
     resourcesBundleFile,
     debug: pc.debug,
+    childProcess: pc.childProcess,
     resources: [...pc.resources],
   })
   return { state: sidecar, isNoop: false }

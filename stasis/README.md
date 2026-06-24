@@ -50,6 +50,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --lock=add --bundle=add app.js` | build a lockfile and bundle together |
 | `stasis run --lock=frozen --bundle=load app.js` | run from the bundle, verified against the lockfile |
 | `stasis run --lock=add --bundle=add --mock app.js` | build without the app's side effects (network, fs writes) |
+| `stasis run --lock=add --child-process app.js` | also attest modules loaded in forked child processes (e.g. Metro transform workers) |
 | `stasis run --bundle=add --fs=sync app.js` | build a bundle that also captures sync `fs.readFileSync`/`readdirSync` reads |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |

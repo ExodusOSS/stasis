@@ -45,12 +45,14 @@ const cleanEnv = Object.fromEntries(
   Object.entries(process.env).filter(([k]) => !k.startsWith('EXODUS_STASIS_') && !k.startsWith('STASIS_TEST_'))
 )
 
-// Capture a bundle via the StasisMetro serializer path (writes lockfile + bundle).
+// Capture a bundle via the StasisMetro serializer path (writes lockfile + bundle). The serializer
+// asserts child-process capture is enabled (Metro transforms in workers), so set it here; the
+// transform/load side below is unaffected (load mode captures nothing, so the assert is skipped).
 const capture = (entry, { cwd, graph, env }) => {
   const r = spawnSync(process.execPath, [captureHelper, entry], {
     encoding: 'utf-8',
     cwd,
-    env: { ...cleanEnv, STASIS_TEST_METRO_GRAPH: JSON.stringify(graph), ...env },
+    env: { ...cleanEnv, EXODUS_STASIS_CHILD_PROCESS: '1', STASIS_TEST_METRO_GRAPH: JSON.stringify(graph), ...env },
   })
   r.stderr = stripVTControlCharacters(r.stderr)
   return r

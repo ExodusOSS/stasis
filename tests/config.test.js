@@ -12,6 +12,7 @@ const ENV_KEYS = [
   'EXODUS_STASIS_RESOURCES_BUNDLE_FILE',
   'EXODUS_STASIS_RESOURCES',
   'EXODUS_STASIS_DEBUG',
+  'EXODUS_STASIS_CHILD_PROCESS',
 ]
 const withEnv = (vars, fn) => (t) => {
   const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
@@ -570,6 +571,54 @@ test('Config debug=true option conflicts with env debug=0', withEnv(
   { EXODUS_STASIS_DEBUG: '0' },
   (t) => {
     t.assert.throws(() => new Config({ debug: true }), /Config options can not override stasis env/)
+  }
+))
+
+// childProcess mirrors debug: a boolean, env EXODUS_STASIS_CHILD_PROCESS, not serialized. These
+// pin the validation/parse/conflict paths the --child-process feature added across Config's surface
+// (previously covered end-to-end via the CLI/metro suites, but never at the Config unit level).
+test('loadConfig rejects non-boolean childProcess', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ childProcess: 1 })), /childProcess must be a boolean/)
+  t.assert.throws(() => c.loadConfig(json({ childProcess: 'true' })), /childProcess must be a boolean/)
+})
+
+test('loadConfig childProcess=true', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ childProcess: true }))
+  t.assert.equal(c.childProcess, true)
+})
+
+test('Config(options) sets childProcess', (t) => {
+  t.assert.equal(new Config({ childProcess: true }).childProcess, true)
+})
+
+test('Config defaults childProcess to false', (t) => {
+  t.assert.equal(new Config().childProcess, false)
+})
+
+test('Config(options) rejects non-boolean childProcess', (t) => {
+  t.assert.throws(() => new Config({ childProcess: 'yes' }), /childProcess must be a boolean/)
+})
+
+test('validatePluginOptions rejects non-boolean childProcess', (t) => {
+  t.assert.throws(() => validatePluginOptions('StasisFoo', { childProcess: 1 }), /childProcess must be a boolean/)
+})
+
+test('Config childProcess env "0" is falsy', withEnv(
+  { EXODUS_STASIS_CHILD_PROCESS: '0' },
+  (t) => { t.assert.equal(new Config().childProcess, false) }
+))
+
+test('Config childProcess env "1" is true', withEnv(
+  { EXODUS_STASIS_CHILD_PROCESS: '1' },
+  (t) => { t.assert.equal(new Config().childProcess, true) }
+))
+
+test('Config childProcess=true option conflicts with env childProcess=0', withEnv(
+  { EXODUS_STASIS_CHILD_PROCESS: '0' },
+  (t) => {
+    t.assert.throws(() => new Config({ childProcess: true }), /Config options can not override stasis env/)
   }
 ))
 

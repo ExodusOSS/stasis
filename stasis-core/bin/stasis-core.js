@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
+ stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)
@@ -49,6 +49,7 @@ if (command === '-v' || command === '--version') {
     'bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
+    'child-process': { type: 'boolean' },
     fs: { type: 'string' },
     resources: { type: 'string' },
   }
@@ -80,13 +81,17 @@ if (command === '-v' || command === '--version') {
   // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
-  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
+  // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
+  // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
+  const childProcess = values['child-process'] ? '1' : ''
+  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
+  setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]

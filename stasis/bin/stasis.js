@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--mock] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -60,6 +60,7 @@ if (command === '-v' || command === '--version') {
     'bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
+    'child-process': { type: 'boolean' },
     mock: { type: 'boolean' },
     fs: { type: 'string' },
     resources: { type: 'string' },
@@ -94,13 +95,17 @@ if (command === '-v' || command === '--version') {
   // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
+  // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
+  // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
+  const childProcess = values['child-process'] ? '1' : ''
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(childProcess && { childProcess: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
+  setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
   // --mock: capture imports by running user code with side-effects denied,

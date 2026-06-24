@@ -64,10 +64,10 @@ export class Lockfile {
     }
 
     for (const [dir, { files }] of modules) {
-      assert(!dir.startsWith('..'))
+      assert(!posixPathEscapes(dir))
       assert(files)
       for (const name of Object.keys(files)) {
-        assert(!name.startsWith('..'))
+        assert(!posixPathEscapes(name))
       }
     }
 
