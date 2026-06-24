@@ -717,6 +717,109 @@ test('run --fs=async treats a *.map read as non-existent too', withTmp((t, tmp) 
   t.assert.equal(decode(bundlePath).formats['src/mod.js.map'], undefined)
 }))
 
+// ----- existence / realpath PROBES served from the bundle (bundle=load) ---------------
+// Build tools check a file's existence (and canonical path) on a channel that never reads
+// its bytes -- @babel/core guards config loading with fs.existsSync(babel.config.js) and
+// realpath-canonicalizes the path BEFORE it require()s the file. The byte readers alone
+// don't cover that: without serving existsSync/accessSync/realpathSync too, a
+// bundled-but-absent file reads as missing on disk and the tool silently skips it (an empty
+// babel.config.js "works" only because its existence passes the probe -- its bytes then come
+// from the bundle). These two tests pin the probes to the bundle's record.
+
+test('run --fs=async --bundle=load serves existsSync/accessSync/realpathSync for a recorded file absent from disk', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'src', 'cfg.json'), '{ "k": "v" }\n')
+  // The entry reads cfg.json (so it is captured) AND probes it -- sync and async forms.
+  // `missing:` proves an UNrecorded path still falls through to the real fs (not blanket-true).
+  // realpath is reported by basename so a tmpdir symlink prefix (e.g. macOS /var -> /private)
+  // can't make capture and load diverge.
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { existsSync, accessSync, realpathSync, readFileSync, constants } from 'node:fs'",
+    "import { access as accessP, realpath as realpathP } from 'node:fs/promises'",
+    "import { basename, join } from 'node:path'",
+    "const p = join(import.meta.dirname, 'cfg.json')",
+    "const out = []",
+    "out.push(`data:${JSON.parse(readFileSync(p, 'utf8')).k}`)",
+    "out.push(`exists:${existsSync(p)}`)",
+    "out.push(`missing:${existsSync(join(import.meta.dirname, 'nope.json'))}`)",
+    "try { accessSync(p, constants.R_OK); out.push('access:ok') } catch (e) { out.push(`access:${e.code}`) }",
+    "out.push(`realpath:${basename(realpathSync(p))}`)",
+    "try { await accessP(p); out.push('accessP:ok') } catch (e) { out.push(`accessP:${e.code}`) }",
+    "out.push(`realpathP:${basename(await realpathP(p))}`)",
+    "console.log(out.join('\\n'))",
+    "",
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const EXPECTED = ['data:v', 'exists:true', 'missing:false', 'access:ok', 'realpath:cfg.json', 'accessP:ok', 'realpathP:cfg.json', ''].join('\n')
+
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, EXPECTED)
+
+  rmSync(join(tmp, 'src', 'cfg.json')) // gone; the probes must answer from the bundle
+  t.assert.ok(!existsSync(join(tmp, 'src', 'cfg.json')), 'precondition: cfg.json is really gone from disk')
+
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, EXPECTED, 'existence/access/realpath of the bundled-but-absent file match capture')
+}))
+
+test('run --fs=async --bundle=load existence-probes an imported code module absent from disk (the babel.config.js shape)', withTmp((t, tmp) => {
+  // sib.js is captured as a CODE module (imported) -- exactly how babel.config.js lands in
+  // the bundle. At load it is gone from disk: the import is served by the loader and the
+  // existence/realpath probe by the --fs hooks. Without the latter, existsSync returns false
+  // and realpathSync throws, i.e. a tool like @babel/core would conclude there is no config.
+  writeFileSync(join(tmp, 'src', 'sib.js'), 'export const k = "v"\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { existsSync, realpathSync } from 'node:fs'",
+    "import { basename, join } from 'node:path'",
+    "import { k } from './sib.js'",
+    "const p = join(import.meta.dirname, 'sib.js')",
+    "let rp; try { rp = basename(realpathSync(p)) } catch (e) { rp = e.code }",
+    "console.log([`k:${k}`, `exists:${existsSync(p)}`, `realpath:${rp}`].join('\\n'))",
+    "",
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const EXPECTED = ['k:v', 'exists:true', 'realpath:sib.js', ''].join('\n')
+
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, EXPECTED)
+
+  rmSync(join(tmp, 'src', 'sib.js')) // gone; both the import and the probes serve from the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, EXPECTED, 'a code module absent from disk is both imported and existence-probed from the bundle')
+}))
+
+test('run --fs=async --bundle=load serves accessSync READ-ONLY (F_OK/R_OK ok, W_OK/X_OK deny)', withTmp((t, tmp) => {
+  // The bundle is read-only: an existence/read probe of a bundle-only file succeeds, but a
+  // write/exec probe must NOT be granted from the bundle -- it defers to the real fs, which
+  // reports the absent-on-disk file as ENOENT. Asserted on the LOAD run only (at capture the
+  // file is on disk, so W_OK/X_OK there reflect real disk permissions, not the bundle).
+  writeFileSync(join(tmp, 'src', 'cfg.json'), '{ "k": "v" }\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { accessSync, readFileSync, constants } from 'node:fs'",
+    "import { join } from 'node:path'",
+    "const p = join(import.meta.dirname, 'cfg.json')",
+    "readFileSync(p) // ensure cfg.json is captured into the bundle",
+    "const probe = (m) => { try { accessSync(p, m); return 'ok' } catch (e) { return e.code } }",
+    // r/w/x: read serves, write/exec deny. o: an out-of-range mode must defer to the real fs
+    // and surface its ERR_OUT_OF_RANGE (the read-class allowlist, not a W_OK|X_OK denylist).
+    "console.log([`r:${probe(constants.R_OK)}`, `w:${probe(constants.W_OK)}`, `x:${probe(constants.X_OK)}`, `o:${probe(8)}`].join('\\n'))",
+    "",
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`) // capture: file on disk, probes reflect disk
+
+  rmSync(join(tmp, 'src', 'cfg.json')) // bundle-only now
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'r:ok\nw:ENOENT\nx:ENOENT\no:ERR_OUT_OF_RANGE\n',
+    'bundle-served file is read-only: read OK, write/exec deny, out-of-range mode defers to real fs')
+}))
+
 test('run --fs --resources=map opts source maps back in (captured + served as a resource)', withTmp((t, tmp) => {
   // Adding `map` to the allowlist disables the skip: the *.map is read for real and
   // captured as a resource, exactly like any other declared asset, then served on load.

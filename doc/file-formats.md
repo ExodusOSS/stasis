@@ -320,19 +320,23 @@ a frozen run verifies a copied asset byte-for-byte just as it does code.
 ## Filesystem captures (`stasis run --fs=sync` / `--fs=async`)
 
 The loader hooks capture the module graph; `--fs=sync` additionally monkey-patches the
-**sync** readers `fs.readFileSync` and `fs.readdirSync`, plus `fs.lstatSync`/`fs.statSync`
-(and only those — no streams, `fs.opendir`, …) so a program's explicit file reads are
-recorded into the bundle (`--bundle=add|replace`) and served back from it
-(`--bundle=load`). The same `--fs=…` flag is needed on the load run for the patch to
-serve; an un-captured read falls through to the real disk read.
+**sync** readers `fs.readFileSync` and `fs.readdirSync`, plus the metadata/existence probes
+`fs.lstatSync`/`fs.statSync`/`fs.existsSync`/`fs.accessSync`/`fs.realpathSync` (and only
+those — no streams, `fs.opendir`, `fs.readlink` (a resolver probe that already treats a read
+error as "not a symlink", so an absent recorded file resolves correctly unserved), the
+deprecated callback `fs.exists`, …) so a program's
+explicit file reads are recorded into the bundle (`--bundle=add|replace`) and served back
+from it (`--bundle=load`). The same `--fs=…` flag is needed on the load run for the patch
+to serve; an un-captured read falls through to the real disk read.
 
 `--fs=async` patches everything `--fs=sync` does **and** the async counterparts —
-the callback forms `fs.readFile`/`fs.readdir`/`fs.lstat`/`fs.stat` and the promise
-forms `fs.promises.*` (which is `node:fs/promises`, so `import … from 'node:fs/promises'`
-is covered too). Each async wrapper records/serves identically to its sync sibling; a
-served callback is always invoked asynchronously. The captured bytes and `directory`
-listings are the same regardless of mode — a bundle built with `--fs=async` is read by
-either mode (the load run just won't intercept async reads under `--fs=sync`).
+the callback forms `fs.readFile`/`fs.readdir`/`fs.lstat`/`fs.stat`/`fs.access`/`fs.realpath`
+and the promise forms `fs.promises.*` (which is `node:fs/promises`, so
+`import … from 'node:fs/promises'` is covered too). Each async wrapper records/serves
+identically to its sync sibling; a served callback is always invoked asynchronously. The
+captured bytes and `directory` listings are the same regardless of mode — a bundle built
+with `--fs=async` is read by either mode (the load run just won't intercept async reads
+under `--fs=sync`).
 
 Captures live in the usual `sources`/`modules` buckets, tagged in `formats`:
 
@@ -362,14 +366,35 @@ Captures live in the usual `sources`/`modules` buckets, tagged in `formats`:
   `uid`/`gid`, for example) keep working under `--bundle=load` instead of re-throwing
   `ENOENT`. Any path the bundle does not carry passes straight through to the real
   call.
+- `fs.existsSync(path)`, `fs.accessSync(path)` and `fs.realpathSync(path)` (plus the async
+  `fs.access`/`fs.realpath` and `fs.promises.*` forms) are **existence/canonical-path
+  probes**, served (load run, for a path the bundle carries) and otherwise passed through.
+  Like `lstat`/`stat` they are **serve-only — never captured**: a probe records nothing, so a
+  file that is *only* existence-probed (never read or imported) is not in the bundle and its
+  probe falls through to disk on load. They matter because build tools check a file *before*
+  reading it on a channel that never touches its bytes: `@babel/core`, for one, guards config
+  loading with `fs.existsSync(babel.config.js)` and realpath-canonicalizes the path **before**
+  it `require()`s the file — so without serving the probe, a bundled-but-absent `babel.config.js`
+  reads as missing and Babel silently runs with no config (an empty on-disk `babel.config.js`
+  "works" only because its existence passes the probe; its bytes then come from the bundle via
+  the module loader — and because Babel both probes *and* `require()`s the config, it is recorded
+  in `sources`, so the probe answers from the bundle on load). `existsSync` answers `true`/`false`;
+  `accessSync` serves a carried path **read-only** — `F_OK`/`R_OK` (existence/readable) succeed,
+  but `W_OK`/`X_OK` (writable/executable) defer to the real fs, which reports a bundle-only file
+  as not writable (the bundle is read-only); `realpathSync` returns the real symlink-resolved path while the file is on
+  disk, and falls back to the **lexically**-resolved request path once it is bundle-only (so a
+  symlink in a surviving ancestor directory is not re-resolved — for the absent-config case this
+  is moot, but a tool that canonicalizes-then-compares a path under a symlinked ancestor could see
+  capture/load divergence). Its `.native` variant is covered too.
 
 Source-map sidecars (`*.map`) are an exception: they are build-time debug artifacts
 that never affect a program's emitted output, yet tools read them regardless of any
 "sourcemaps off" setting (e.g. `@babel/core` reads a transformed file's sibling
 `.js.map` to chain an *input* source map no matter the bundler's `devtool`). So under
 `--fs` every in-root `*.map` is treated as **non-existent** — never captured, never
-served, an `ENOENT` to the reader (`readFileSync`/`readFile` *and* `statSync`/`lstatSync`
-alike) — in **both** capture and load, so a stray map read neither aborts a capture nor
+served, an `ENOENT` to the reader (`readFileSync`/`readFile`, `statSync`/`lstatSync`,
+`accessSync`/`realpathSync`, and `false` from `existsSync`) — in **both** capture and load,
+so a stray map read neither aborts a capture nor
 bloats the lockfile/bundle, and a captured build stays byte-identical to a hermetic
 replay. This is independent of bundle mode: `--fs` attests reads in the lockfile whether
 or not a bundle is written, so a map is excluded from the lockfile the same way either

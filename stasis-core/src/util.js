@@ -1,5 +1,13 @@
-import { realpathSync } from 'node:fs'
+import * as fs from 'node:fs'
 import { basename, isAbsolute, join, posix, relative } from 'node:path'
+
+// Snapshot realpathSync at module-eval, BEFORE `stasis run --fs` patches fs.realpathSync.
+// The patch + syncBuiltinESMExports() repoint a LIVE `import { realpathSync }` binding to the
+// bundle-serving wrapper, which (by design, for user code) does NOT throw ENOENT for a
+// recorded-but-absent path -- which would silently defeat assertRealPathWithinBase's reliance
+// on that throw (see its comment). Stasis's own reads must stay on the genuine builtin, so we
+// snapshot here exactly like state.js / state-util.js / fs.js do for the other patched readers.
+const { realpathSync } = fs
 
 const sep = '/'
 
