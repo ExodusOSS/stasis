@@ -203,7 +203,7 @@ export class StasisEsbuild {
         // is the user's responsibility (symmetric with file-loader being required).
         if (!this.#seen.has(path)) {
           this.#seen.add(path)
-          this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, resource: true })
+          this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, resource: true, reason: 'StasisEsbuild' })
         }
         return undefined
       }
@@ -215,7 +215,7 @@ export class StasisEsbuild {
 
       if (!this.#seen.has(path)) {
         this.#seen.add(path)
-        this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry })
+        this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, reason: 'StasisEsbuild' })
       }
 
       return { contents: source, loader: this.#loaderFor(path) }

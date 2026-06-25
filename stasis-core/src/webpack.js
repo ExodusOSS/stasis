@@ -463,7 +463,7 @@ export class StasisWebpack {
           if (kind === 'code') {
             assert.ok(isUtf8(source), `StasisWebpack: code-classified file has non-UTF-8 bytes: ${filePath}`)
           }
-          this.#state.addFile(url, { source, isEntry, resource: kind === 'resource' })
+          this.#state.addFile(url, { source, isEntry, resource: kind === 'resource', reason: 'StasisWebpack' })
         }
       })
     })

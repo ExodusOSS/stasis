@@ -53,8 +53,13 @@ export class Bundle {
   modules
   formats
   imports
+  // Informational only (NOT attested): maps each consumer that recorded a bundled file --
+  // 'run' (the loader/CLI), 'StasisWebpack', 'StasisMetro', etc. -- to the files it contributed.
+  // Present only when a single bundle had MORE THAN ONE consumer (e.g. `run` plus a plugin sharing
+  // the same bundleFile); a single-consumer bundle omits it. Never consulted for verification.
+  reason
 
-  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, version = VERSION } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, reason, version = VERSION } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
     assert(['node_modules', 'full'].includes(config.scope))
     this.version = version
@@ -63,6 +68,7 @@ export class Bundle {
     this.modules = modules ?? new Map()
     this.formats = formats ?? new Map()
     this.imports = imports ?? new Map()
+    this.reason = reason
   }
 
   // Flat project-relative view of file contents collected from this.modules.
@@ -211,6 +217,7 @@ export class Bundle {
       modules,
       formats,
       imports,
+      reason: isPlainObject(json.reason) ? json.reason : undefined, // informational, preserved for round-trip
     })
   }
 
@@ -242,6 +249,8 @@ export class Bundle {
     const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
+    // Informational provenance, last: only present when set (more than one consumer).
+    if (this.reason !== undefined) data.reason = this.reason
     return JSON.stringify(data, undefined, 2)
   }
 }

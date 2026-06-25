@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { brotliCompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
+import { Bundle } from '@exodus/stasis-core/bundle'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'state')
 const fileAbs = join(root, 'src', 'foo.js')
@@ -623,6 +624,40 @@ test('addFile still verifies a caller-provided source against disk (integrity ch
     const s2 = new State(dir, { scope: 'full', lock: 'add' })
     s2.addFile(url, { format: 'module' })
     t.assert.ok(JSON.parse(s2.lockData).sources?.['.']?.files?.['a.js'], 'disk-read addFile records the file')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('bundle records a `reason` map only when more than one consumer contributes', (t) => {
+  // When a single bundle is fed by more than one consumer -- e.g. the loader (`run`) plus a plugin
+  // (StasisMetro/StasisWebpack/...) sharing the same bundleFile -- the bundle gets an informational
+  // `reason` map of consumer -> the files it recorded. A single-consumer bundle omits it entirely.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-reason-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    for (const f of ['a.js', 'b.js', 'c.js']) writeFileSync(join(dir, f), `export const x = '${f}'\n`)
+    const url = (f) => pathToFileURL(join(dir, f)).toString()
+    const src = (f) => Buffer.from(`export const x = '${f}'\n`)
+
+    // Single consumer (the loader, default reason 'run') -> NO reason field.
+    const solo = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
+    solo.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true })
+    t.assert.equal(JSON.parse(solo.sourceData).reason, undefined, 'a single-consumer bundle omits reason')
+
+    // Two consumers sharing one bundle: the loader ('run') + a plugin ('StasisMetro').
+    const shared = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
+    shared.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true })        // run (default)
+    shared.addFile(url('b.js'), { source: src('b.js'), format: 'module', reason: 'StasisMetro' })
+    shared.addFile(url('c.js'), { source: src('c.js'), format: 'module', reason: 'StasisMetro' })
+    const expected = { run: ['a.js'], StasisMetro: ['b.js', 'c.js'] }
+    t.assert.deepEqual(JSON.parse(shared.sourceData).reason, expected,
+      'reason maps each consumer to the files it recorded (whichever are used)')
+    // Consumer keys are SORTED for reproducible output, not in record order (here 'run' is recorded
+    // first but sorts after 'StasisMetro') -- every other bundle map is sorted, so this must be too.
+    t.assert.deepEqual(Object.keys(JSON.parse(shared.sourceData).reason), ['StasisMetro', 'run'])
+    // Informational, preserved across a Bundle.parse round-trip.
+    t.assert.deepEqual(Bundle.parse(shared.sourceData).reason, expected)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

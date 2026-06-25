@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, moduleFileKey, objectToMaps, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, moduleFileKey, objectToMaps, sortPaths, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
@@ -125,6 +125,10 @@ export class State {
   // only these, so a forked child's shard carries what it observed -- not a re-ship of the whole
   // seeded lockfile.
   #observed = new Set()
+  // file -> set of consumers that recorded it, for the bundle's informational `reason` field.
+  // Keyed by consumer ('run' for the loader/CLI; a plugin label like 'StasisMetro' for a plugin
+  // sharing this State). Populated only when bundling. See #recordReason / #bundleReason.
+  #reasonFiles = new Map()
 
   // Files, resolutions, and formats attested by a frozen bundle (bundle=frozen),
   // or null when no frozen bundle was loaded. A frozen bundle plays the same
@@ -1034,7 +1038,7 @@ export class State {
   // knowable from bytes): the module loader is the authority, so the fs-read capture
   // must not impose the legacy `commonjs` default and collide with a `module` the
   // loader records for the same file when it is both imported and read.
-  addFile(url, { source, format, isEntry, isBinary, resource, inferFormat = true } = {}) {
+  addFile(url, { source, format, isEntry, isBinary, resource, inferFormat = true, reason = 'run' } = {}) {
     const asResource = resource === true || isBinary === true
     // A resource format must not arrive on the code path: 'resource' /
     // 'resource:base64' identifies asset payloads, which State stores in
@@ -1145,6 +1149,7 @@ export class State {
     const integrity = sha512integrity(source)
     noupsert(this.hashes, file, integrity)
     if (this.config.childProcess) this.#observed.add(file) // only a child's shardSnapshot reads it; skip when the channel is off
+    if (this.config.bundle && reason !== null) this.#recordReason(reason, file) // provenance for the bundle's `reason` field (null = not a consumer observation, e.g. write-time backfill)
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
 
@@ -1265,6 +1270,7 @@ export class State {
     const integrity = sha512integrity(content)
     noupsert(this.hashes, file, integrity)
     if (this.config.childProcess) this.#observed.add(file) // only a child's shardSnapshot reads it; skip when the channel is off
+    if (this.config.bundle) this.#recordReason('run', file) // directory captures come only from the loader's --fs
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
 
@@ -1688,6 +1694,32 @@ export class State {
     return modules
   }
 
+  // Record which consumer (`reason`) observed `file`, for the bundle's informational `reason` map.
+  #recordReason(reason, file) {
+    let set = this.#reasonFiles.get(reason)
+    if (set === undefined) this.#reasonFiles.set(reason, set = new Set())
+    set.add(file)
+  }
+
+  // Build the bundle's informational `reason` map, restricted to `bundledFiles` (this bundle's own
+  // file set): { consumer: [files] } for each consumer that recorded at least one file in it.
+  // Returned ONLY when more than one consumer contributed -- a single-consumer bundle (plain `run`,
+  // or a standalone plugin) omits it. Never attested; purely for humans / tooling.
+  #bundleReason(bundledFiles) {
+    const inBundle = bundledFiles instanceof Set ? bundledFiles : new Set(bundledFiles)
+    const reason = {}
+    let consumers = 0
+    // Sort consumer keys AND each file list, like every other map in the bundle (sortPaths, via
+    // fileMapToObject etc.): the emitted JSON must be byte-reproducible across runs regardless of
+    // loader-vs-plugin record order, else #emitBundle's compare-and-skip would see spurious diffs.
+    for (const who of [...this.#reasonFiles.keys()].toSorted()) {
+      const files = []
+      for (const file of this.#reasonFiles.get(who)) if (inBundle.has(file)) files.push(file)
+      if (files.length > 0) { reason[who] = files.toSorted(sortPaths); consumers += 1 }
+    }
+    return consumers > 1 ? reason : undefined
+  }
+
   get sourceBundle() {
     // One bundle holds both code and resources; merge the two content maps (their key
     // sets are disjoint -- a file is either code or a resource) and let `formats` tag
@@ -1707,6 +1739,7 @@ export class State {
       modules: this.#bundleModules(contents),
       formats: this.formats,
       imports: this.imports,
+      reason: this.#bundleReason(contents.keys()),
     })
   }
 
@@ -1735,6 +1768,7 @@ export class State {
       modules: this.#bundleModules(this.sources),
       formats: codeFormats,
       imports: this.imports,
+      reason: this.#bundleReason(this.sources.keys()),
     })
   }
 
@@ -1752,6 +1786,7 @@ export class State {
       modules: this.#bundleModules(this.resources),
       formats: resourceFormats,
       imports: new Map(),
+      reason: this.#bundleReason(this.resources.keys()),
     })
   }
 
@@ -2126,7 +2161,7 @@ export class State {
       assert.ok(isStasisCoreFile(file),
         `state.write() backfill refused: '${file}' is not a stasis-core source file ` +
         `(expected '.../@exodus/stasis-core/src/<name>.js')`)
-      this.addFile(pathToFileURL(resolve(this.root, file)).toString(), {})
+      this.addFile(pathToFileURL(resolve(this.root, file)).toString(), { reason: null }) // backfill is a write-time self-containment step, not a consumer observation -- don't attribute it
     }
 
     // BFS through stasis-core's module graph. Seed:

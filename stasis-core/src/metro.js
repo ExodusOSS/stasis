@@ -267,7 +267,7 @@ export class StasisMetro {
       if (kind === 'code') {
         assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${modPath}`)
       }
-      this.#state.addFile(url, { source, isEntry: entries.has(modPath), resource: kind === 'resource' })
+      this.#state.addFile(url, { source, isEntry: entries.has(modPath), resource: kind === 'resource', reason: 'StasisMetro' })
     }
   }
 }
