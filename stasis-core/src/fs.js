@@ -90,6 +90,11 @@ import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+// The genuine sync source reader (snapshotted before any --fs patch). Lives in
+// state-util.js so there's a single source of truth shared with the bundler plugins;
+// see that module for why it must not be a patched `node:fs` named import.
+import { realReadFileSync } from './state-util.js'
+
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
 
@@ -98,7 +103,9 @@ const fs = require('node:fs')
 // capture always sees real bytes, and the patched lstatSync/statSync/realpathSync fall
 // back to the real impls here. realRealpathSync also backs realRootOf/realContained, whose
 // containment checks must stay on the genuine builtin even after realpathSync is patched.
-const realReadFileSync = fs.readFileSync
+// (The sync source reader, realReadFileSync, is imported from state-util.js above -- the
+// single source of truth shared with the bundler plugins; only the dir/stat/realpath
+// readers are snapshotted here, since only the --fs hook needs them.)
 const realReaddirSync = fs.readdirSync
 const realLstatSync = fs.lstatSync
 const realStatSync = fs.statSync
@@ -228,12 +235,14 @@ function encodeRealpath(abs, options) {
 //   - at load, a map the bundle actually CARRIES is served regardless of the load run's
 //     resources flag -- bundle membership wins, exactly like every other recorded
 //     resource, so a map captured under `--resources=map` still loads even if the load
-//     run forgets the flag (getFsStat is undefined for a map that was skipped, so the
+//     run forgets the flag (getFsStatFamily returns undefined for a map that was skipped, so the
 //     common "never captured" case still falls through to the ENOENT below).
+// Uses getFsStatFamily, matching the serve paths: a map a bundler-plugin sidecar carries
+// counts as carried by the family, not just by main.
 function isSkippedSourceMap(state, abs) {
   if (!abs.toLowerCase().endsWith('.map')) return false
   if (state.config.resources?.has('map')) return false
-  if (state.config.loadBundle && state.getFsStat(pathToFileURL(abs).toString()) !== undefined) return false
+  if (state.config.loadBundle && state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) return false
   return true
 }
 
@@ -326,9 +335,10 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
         if (isSkippedSourceMap(state, abs)) throw enoent('open', path)
         const url = pathToFileURL(abs).toString()
         if (state.config.loadBundle) {
-          // Serve the captured bytes; a path the bundle never recorded (or one
-          // recorded as a directory) returns undefined and falls back to disk.
-          const buf = state.getFsFile(url)
+          // Serve the captured bytes (consulting sidecar bundles too -- a bundler-plugin
+          // sidecar may carry it). A path no family bundle recorded (or one recorded as a
+          // directory) returns undefined and falls back to disk.
+          const buf = state.getFsFileFamily(url)
           if (buf !== undefined) return decode(buf, options)
         } else if (state.config.writeBundle && !isLoadingModule()) {
           // (Skip while Node's loader is reading a module's source -- that's captured
@@ -340,7 +350,11 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
           // (in-tree symlink) is read but NOT recorded -- its content isn't in-bundle
           // and must not be attested.
           const buf = realReadFileSync(path)
-          if (realContained(state.root, abs)) {
+          // Skip a read a bundler-plugin sidecar already attests (the module graph webpack
+          // reads through inputFileSystem) -- recording it here would duplicate the graph
+          // into this (main) bundle. Reads no sidecar owns (the plugin's manual non-JS
+          // file reads, etc.) ARE recorded here.
+          if (realContained(state.root, abs) && !state.attestedBySidecar(url)) {
             try { state.addFsFile(url, buf) } catch (err) { markAborted(err) }
           }
           return decode(buf, options)
@@ -359,7 +373,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (abs !== null && withinRoot(state.root, abs)) {
         const url = pathToFileURL(abs).toString()
         if (state.config.loadBundle) {
-          const names = state.getFsDir(url)
+          const names = state.getFsDirFamily(url)
           if (names !== undefined) return names // sorted at capture time
         } else if (state.config.writeBundle && !isLoadingModule()) {
           // (Node's loader doesn't readdir to load a module, but skip during a load
@@ -388,7 +402,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (abs !== null && withinRoot(state.root, abs)) {
         if (isSkippedSourceMap(state, abs)) throw enoent('lstat', path)
         if (state.config.loadBundle) {
-          const kind = state.getFsStat(pathToFileURL(abs).toString())
+          const kind = state.getFsStatFamily(pathToFileURL(abs).toString())
           if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
         }
       }
@@ -407,7 +421,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (abs !== null && withinRoot(state.root, abs)) {
         if (isSkippedSourceMap(state, abs)) throw enoent('stat', path)
         if (state.config.loadBundle) {
-          const kind = state.getFsStat(pathToFileURL(abs).toString())
+          const kind = state.getFsStatFamily(pathToFileURL(abs).toString())
           if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
         }
       }
@@ -422,16 +436,18 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
   // require()s the file. Under bundle=load the bytes come from the bundle (via the module
   // loader, or readFileSync above), but without serving these probes too the file still has
   // to exist on disk or the tool concludes it is absent and silently skips it. Serve-only,
-  // like lstat/stat: a recorded path answers from getFsStat; everything else -- and all of
-  // capture mode, where the file is on disk -- falls through to the real call. A skipped
-  // source-map sidecar is reported absent in both modes, matching readFileSync/statSync.
+  // like lstat/stat: a recorded path answers from getFsStatFamily (so a file a bundler-plugin
+  // sidecar carries answers here too, matching the byte/stat readers -- a check-then-read tool
+  // sees it); everything else -- and all of capture mode, where the file is on disk -- falls
+  // through to the real call. A skipped source-map sidecar is reported absent in both modes,
+  // matching readFileSync/statSync.
   fs.existsSync = function existsSync(path) {
     const state = getState()
     if (state) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
         if (isSkippedSourceMap(state, abs)) return false
-        if (state.config.loadBundle && state.getFsStat(pathToFileURL(abs).toString()) !== undefined) return true
+        if (state.config.loadBundle && state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) return true
       }
     }
     return realExistsSync(path)
@@ -448,7 +464,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
         // ours to grant, so it falls through to the real fs (which reports a bundle-only,
         // absent-on-disk file as not writable). Unrecorded paths and capture mode also defer.
         if (state.config.loadBundle && isReadOnlyAccessMode(mode) &&
-            state.getFsStat(pathToFileURL(abs).toString()) !== undefined) {
+            state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) {
           return undefined
         }
       }
@@ -466,7 +482,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
         if (isSkippedSourceMap(state, abs)) throw enoent('realpath', path)
-        if (state.config.loadBundle && state.getFsStat(pathToFileURL(abs).toString()) !== undefined) {
+        if (state.config.loadBundle && state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) {
           try { return realFn(path, options) } catch { return encodeRealpath(abs, options) }
         }
       }
@@ -517,12 +533,13 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const t = typeof cb === 'function' ? fsTarget(path) : null
       if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('open', path))); return }
       if (t?.mode === 'serve') {
-        const buf = t.state.getFsFile(t.url)
+        const buf = t.state.getFsFileFamily(t.url)
         if (buf !== undefined) { queueMicrotask(() => decodeToCb(cb, buf, opts)); return }
       } else if (t?.mode === 'capture') {
         realReadFile(path, (err, buf) => {
           if (err) return cb(err)
-          if (realContained(t.state.root, t.abs)) { try { t.state.addFsFile(t.url, buf) } catch (e) { markAborted(e) } }
+          // Skip what a sidecar already attests (see readFileSync); record only the rest.
+          if (realContained(t.state.root, t.abs) && !t.state.attestedBySidecar(t.url)) { try { t.state.addFsFile(t.url, buf) } catch (e) { markAborted(e) } }
           decodeToCb(cb, buf, opts)
         })
         return
@@ -534,11 +551,12 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const t = fsTarget(path)
       if (t?.mode === 'absent') throw enoent('open', path)
       if (t?.mode === 'serve') {
-        const buf = t.state.getFsFile(t.url)
+        const buf = t.state.getFsFileFamily(t.url)
         if (buf !== undefined) return decode(buf, options)
       } else if (t?.mode === 'capture') {
         const buf = await realReadFileP(path)
-        if (realContained(t.state.root, t.abs)) { try { t.state.addFsFile(t.url, buf) } catch (e) { markAborted(e) } }
+        // Skip what a sidecar already attests (see readFileSync); record only the rest.
+        if (realContained(t.state.root, t.abs) && !t.state.attestedBySidecar(t.url)) { try { t.state.addFsFile(t.url, buf) } catch (e) { markAborted(e) } }
         return decode(buf, options)
       }
       return realReadFileP(path, options)
@@ -553,7 +571,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       // gap that made --fs=async fail for enhanced-resolve's async file system).
       const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
       if (t?.mode === 'serve') {
-        const names = t.state.getFsDir(t.url)
+        const names = t.state.getFsDirFamily(t.url)
         if (names !== undefined) { queueMicrotask(() => cb(null, names)); return }
       } else if (t?.mode === 'capture') {
         realReaddir(path, (err, names) => {
@@ -569,7 +587,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     fs.promises.readdir = async function readdir(path, options) {
       const t = options == null ? fsTarget(path) : null
       if (t?.mode === 'serve') {
-        const names = t.state.getFsDir(t.url)
+        const names = t.state.getFsDirFamily(t.url)
         if (names !== undefined) return names
       } else if (t?.mode === 'capture') {
         const names = await realReaddirP(path)
@@ -590,7 +608,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
       if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('lstat', path))); return }
       if (t?.mode === 'serve') {
-        const kind = t.state.getFsStat(t.url)
+        const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realLstatSync, path, kind === 'directory'))); return }
       }
       return realLstat(path, options, callback)
@@ -605,7 +623,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const t = ((options == null || typeof options === 'function') && typeof cb === 'function') ? fsTarget(path) : null
       if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('stat', path))); return }
       if (t?.mode === 'serve') {
-        const kind = t.state.getFsStat(t.url)
+        const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realStatSync, path, kind === 'directory'))); return }
       }
       return realStat(path, options, callback)
@@ -615,7 +633,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const t = options == null ? fsTarget(path) : null
       if (t?.mode === 'absent') throw enoent('lstat', path)
       if (t?.mode === 'serve') {
-        const kind = t.state.getFsStat(t.url)
+        const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
       }
       return realLstatP(path, options)
@@ -625,7 +643,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const t = options == null ? fsTarget(path) : null
       if (t?.mode === 'absent') throw enoent('stat', path)
       if (t?.mode === 'serve') {
-        const kind = t.state.getFsStat(t.url)
+        const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
       }
       return realStatP(path, options)
@@ -640,7 +658,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const accessMode = typeof mode === 'function' ? undefined : mode
       const t = typeof cb === 'function' ? fsTarget(path) : null
       if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('access', path))); return }
-      if (t?.mode === 'serve' && isReadOnlyAccessMode(accessMode) && t.state.getFsStat(t.url) !== undefined) {
+      if (t?.mode === 'serve' && isReadOnlyAccessMode(accessMode) && t.state.getFsStatFamily(t.url) !== undefined) {
         queueMicrotask(() => cb(null)); return
       }
       return realAccess(path, mode, callback)
@@ -650,7 +668,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const t = fsTarget(path)
       if (t?.mode === 'absent') throw enoent('access', path)
       // Read-only serve: a W_OK/X_OK probe is deferred to the real fs (see accessSync).
-      if (t?.mode === 'serve' && isReadOnlyAccessMode(mode) && t.state.getFsStat(t.url) !== undefined) return undefined
+      if (t?.mode === 'serve' && isReadOnlyAccessMode(mode) && t.state.getFsStatFamily(t.url) !== undefined) return undefined
       return realAccessP(path, mode)
     }
 
@@ -659,7 +677,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const opts = typeof options === 'function' ? undefined : options
       const t = typeof cb === 'function' ? fsTarget(path) : null
       if (t?.mode === 'absent') { queueMicrotask(() => cb(enoent('realpath', path))); return }
-      if (t?.mode === 'serve' && t.state.getFsStat(t.url) !== undefined) {
+      if (t?.mode === 'serve' && t.state.getFsStatFamily(t.url) !== undefined) {
         // Real first (symlink resolution while present); lexically-resolved abs once gone.
         realFn(path, opts, (err, resolved) => (err ? cb(null, encodeRealpath(t.abs, opts)) : cb(null, resolved)))
         return
@@ -672,7 +690,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     fs.promises.realpath = async function realpath(path, options) {
       const t = fsTarget(path)
       if (t?.mode === 'absent') throw enoent('realpath', path)
-      if (t?.mode === 'serve' && t.state.getFsStat(t.url) !== undefined) {
+      if (t?.mode === 'serve' && t.state.getFsStatFamily(t.url) !== undefined) {
         try { return await realRealpathP(path, options) } catch { return encodeRealpath(t.abs, options) }
       }
       return realRealpathP(path, options)

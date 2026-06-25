@@ -223,3 +223,70 @@ test('getFsStat reports ancestor directories implied by a recorded file', withPr
   t.assert.equal(state.getFsStat(pathToFileURL(dir).toString()), 'directory') // root
   t.assert.equal(state.getFsStat(fileURL(dir, 'assets', 'other')), undefined) // not implied
 }))
+
+test('--fs skips capturing a write-mode sidecar\'s graph file (attestedBySidecar / #sidecars)', withProject((t, dir) => {
+  // The split a `bundleFile` plugin produces during CAPTURE: a parent (preload/"main")
+  // bundle + a write-mode sidecar (StasisWebpack/StasisEsbuild/StasisMetro). The plugin
+  // captures the bundler's MODULE GRAPH into the sidecar; --fs must NOT re-record those
+  // graph reads into main, which is what attestedBySidecar (consulting the write-mode
+  // contributors in #sidecars) gates.
+  const parent = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'main.br') })
+  const sidecar = new State(dir, { parent, scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'sidecar.br') })
+
+  mkdirSync(join(dir, 'src'))
+  writeFileSync(join(dir, 'src', 'lib.js'), 'export const x = 1\n') // addFile canonicalizes against disk
+  const libURL = fileURL(dir, 'src', 'lib.js')     // a graph file the plugin captured -> sidecar
+  const dataURL = fileURL(dir, 'src', 'data.txt')  // a file no sidecar owns (e.g. a --fs read)
+  sidecar.addFile(libURL, { source: 'export const x = 1\n', isEntry: true })
+
+  // attestedBySidecar: true only for a file a WRITE-mode SIDECAR carries (so --fs skips
+  // re-capturing the graph into main); a parent-only / unknown path is false (--fs records
+  // it as usual).
+  t.assert.equal(parent.attestedBySidecar(libURL), true)
+  t.assert.equal(parent.attestedBySidecar(dataURL), false)
+
+  // The serve path (getFs*Family) consults #readSidecars only -- a WRITE-mode sidecar isn't
+  // there (it's a lockfile contributor; at load the bundler serves the graph through its own
+  // loader, not --fs). So at capture the family-serve doesn't see it; the load-mode
+  // round-trip below exercises the serving path.
+  t.assert.equal(parent.getFsStatFamily(libURL), undefined)
+  t.assert.equal(parent.getFsFileFamily(libURL), undefined)
+}))
+
+test('--fs serves a load-mode sidecar\'s graph file via the family (getFs*Family / #readSidecars)', withProject((t, dir) => {
+  const mainFile = join(dir, 'main.br')
+  const sidecarFile = join(dir, 'sidecar.br')
+  mkdirSync(join(dir, 'src'))
+  writeFileSync(join(dir, 'src', 'lib.js'), 'export const x = 1\n')    // graph file -> sidecar
+  writeFileSync(join(dir, 'src', 'helper.js'), 'export const y = 2\n') // a non-graph --fs read -> main
+  const libURL = fileURL(dir, 'src', 'lib.js')
+  const helperURL = fileURL(dir, 'src', 'helper.js')
+
+  // Capture: the bundler's graph file goes into the SIDECAR (an entry), while a non-graph
+  // --fs read lands in MAIN (mirrors the real split: main always carries the bundler's own
+  // dev/runtime reads). Persist both -- the parent's lockfile unions the sidecar's edges.
+  const parent = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: mainFile })
+  const sidecar = new State(dir, { parent, scope: 'full', lock: 'add', bundle: 'add', bundleFile: sidecarFile })
+  sidecar.addFile(libURL, { source: 'export const x = 1\n', isEntry: true })
+  parent.addFsFile(helperURL, Buffer.from('export const y = 2\n'))
+  sidecar.write()
+  parent.write()
+
+  // Reload both in load mode. The load-mode sidecar registers into the parent's READ-ONLY
+  // #readSidecars (not #sidecars), so getFs*Family serves its bytes while it never feeds the
+  // lockfile.
+  const loadParent = new State(dir, { scope: 'full', lock: 'frozen', bundle: 'load', bundleFile: mainFile })
+  const loadSidecar = new State(dir, { parent: loadParent, scope: 'full', lock: 'frozen', bundle: 'load', bundleFile: sidecarFile })
+
+  // main carries the non-graph read directly; the graph file is absent from main but served
+  // through the family from the load-mode sidecar.
+  t.assert.deepEqual(loadParent.getFsFile(helperURL), Buffer.from('export const y = 2\n'))
+  t.assert.equal(loadParent.getFsFile(libURL), undefined)            // not in main
+  t.assert.equal(loadParent.getFsStat(libURL), undefined)            // ...nor stat-able from main alone
+  t.assert.equal(loadParent.getFsStatFamily(libURL), 'file')          // but the family has it
+  t.assert.deepEqual(loadParent.getFsFileFamily(libURL), Buffer.from('export const x = 1\n'))
+  t.assert.deepEqual(loadSidecar.getFsFile(libURL), Buffer.from('export const x = 1\n')) // the sidecar itself carries it
+
+  // attestedBySidecar is a CAPTURE concern (write-mode contributors); at load there are none.
+  t.assert.equal(loadParent.attestedBySidecar(libURL), false)
+}))

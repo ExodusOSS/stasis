@@ -3,21 +3,25 @@ import { hash } from 'node:crypto'
 import * as fs from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
-// Snapshot off the namespace (not `import { readFileSync } from 'node:fs'`) so
-// `stasis run --fs` -- which monkey-patches fs.readFileSync and then calls
-// module.syncBuiltinESMExports() to reach user code's ESM imports -- can't swap
-// the binding stasis itself reads config/lockfile/bundle/package.json through.
-// Matches state.js's identical snapshot of the real fs writers/readers.
-const { readFileSync, realpathSync } = fs
-
-// Async counterpart, snapshotted off the namespace for the same reason and exported
-// for the bundler plugins (esbuild.js): under `--fs=async` fs.promises.readFile is
-// patched too, and a plugin module loads AFTER the patch, so importing
-// `node:fs/promises` directly there would route the bundler's OWN source reads
-// through the --fs capture hook. This pre-patch snapshot keeps them genuine. This
-// module is evaluated during stasis's `--import` preload (via state.js), before any
-// patch, so the snapshot is always the real builtin.
+// The genuine fs readers, snapshotted off the namespace before any --fs patch. This
+// module is the single source of truth for "the real reader" -- imported by stasis's
+// own internals (here; and fs.js's --fs hook imports realReadFileSync so its capture
+// path sees real bytes and never recurses) AND by every bundler plugin (webpack.js /
+// esbuild.js / metro.js; esbuild uses the async realReadFile for its async onLoad). A
+// plugin's capture read is stasis-internal bookkeeping, NOT a program fs
+// read, so routing it through the patched fs would re-record the bundler's module graph
+// into the preload/main bundle -- duplicating into main what the plugin captured into
+// its own sidecar. `import { readFileSync } from 'node:fs'` would NOT do: `stasis run
+// --fs` monkey-patches fs.readFileSync then calls module.syncBuiltinESMExports(), which
+// rebinds that named import to the patched fn -- and a plugin loads AFTER the patch.
+// Snapshotting off the namespace dodges that. state-util.js is the lowest-level module
+// (a leaf with no internal imports), evaluated during the `--import` preload before any
+// patch, so these are always the real builtins -- and the snapshot is taken as early as
+// possible. (`fs.promises` IS node:fs/promises, the same object, so realReadFile also
+// covers `import { readFile } from 'node:fs/promises'`.)
+export const realReadFileSync = fs.readFileSync
 export const realReadFile = fs.promises.readFile
+const { realpathSync } = fs
 
 assert.equal(sep, '/', 'Not tested on Windows')
 
@@ -25,7 +29,7 @@ export const sha512integrity = (x) => `sha512-${hash('sha512', x, 'base64')}`
 
 export function readFileSyncMaybe(dir, file, encoding) {
   try {
-    return readFileSync(join(dir, file), encoding)
+    return realReadFileSync(join(dir, file), encoding)
   } catch (err) {
     if (err.code === 'ENOENT') return null
     throw err

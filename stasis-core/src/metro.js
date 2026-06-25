@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { resolvePluginState } from './plugins.js'
 import { State } from './state.js'
+import { realReadFileSync } from './state-util.js'
 import { classifyExtension } from './util.js'
 
 const require = createRequire(import.meta.url)
@@ -253,8 +254,13 @@ export class StasisMetro {
 
       // Read the bytes from disk rather than `module.getSource()` -- addFile re-reads disk
       // and asserts byte-equality against what we pass, and disk is the thing stasis attests.
-      // (webpack and esbuild likewise read the file themselves.)
-      const source = readFileSync(modPath)
+      // Use the REAL reader (state-util.js), like webpack/esbuild: this capture read is the
+      // plugin's own bookkeeping, NOT a program fs read. `import { readFileSync } from
+      // 'node:fs'` (the named binding above, before this fix) is rebound to the patched
+      // reader by `stasis run --fs`'s syncBuiltinESMExports(), so reading through it would
+      // re-record the whole Metro module graph into the preload/main bundle -- it belongs to
+      // THIS plugin's sidecar instead.
+      const source = realReadFileSync(modPath)
       // Code-classified files must be UTF-8. A code extension carrying non-UTF-8 bytes is
       // malformed input; refuse it rather than silently encoding it as a resource. Resource-
       // classified files pass through as-is -- State derives 'resource' vs 'resource:base64'.

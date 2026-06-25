@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { resolvePluginState } from './plugins.js'
 import { State } from './state.js'
+import { realReadFileSync } from './state-util.js'
 import { classifyExtension } from './util.js'
 
 // Synthetic stat for files served from the bundle in load mode. Webpack's resolver
@@ -332,7 +333,10 @@ export class StasisWebpack {
 
         if (!this.#seen.has(filePath)) {
           this.#seen.add(filePath)
-          const source = readFileSync(filePath)
+          // Read through the REAL reader: this capture read is the plugin's own bookkeeping,
+          // not a program fs read, so under `stasis run --fs` it must not be recorded into
+          // the preload/main bundle (it belongs to THIS plugin's bundle). See state-util.js.
+          const source = realReadFileSync(filePath)
           // Code-classified files must be UTF-8. A code extension with non-UTF-8
           // bytes is malformed input (e.g. a .json mis-saved as UTF-16); refuse
           // it rather than silently encoding it as a resource. Resource-classified

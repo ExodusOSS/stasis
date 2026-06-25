@@ -413,6 +413,11 @@ The two recorded kinds are hashed like any other content (the `directory` integr
 is the sha512 of its JSON text), so the lockfile attests them and a frozen run
 verifies them. `--fs` (either mode) requires an active bundle mode (`add`, `replace`, or `load`).
 
+When a bundler plugin runs with its own `bundleFile` (a *sidecar*), `--fs` coordinates with
+it so the bundler's module graph isn't duplicated into the main bundle: a read the sidecar
+already attests is skipped at capture and served from the sidecar at load, while only
+non-graph reads land in main.
+
 ## Discovery
 
 Stasis walks up from the run's cwd looking for `package.json`, stopping at a

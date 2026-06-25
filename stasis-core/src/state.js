@@ -82,15 +82,26 @@ export class State {
   // #claimWritePath can consult States from other stasis-core copies.
   #claims = new Map()
 
-  // For a parent: the set of sidecar States constructed against it. The unified
-  // lockfile (built by the parent's lockData via #mergedImports/#mergedFormats)
-  // must union the parent's own imports / formats with every sidecar's, otherwise
-  // resolution edges and format attestations a sidecar bundler-plugin observed
-  // (sidecar.addImport / addFile populate sidecar-local this.imports/this.formats)
-  // would never reach the lockfile. Hashes / entries / modules are already shared
-  // by reference; this closes the same gap for imports and formats. Unused on
-  // sidecars themselves.
+  // For a parent: WRITE-mode sidecar States constructed against it -- the lockfile
+  // CONTRIBUTORS. The unified lockfile (built by the parent's lockData via
+  // #mergedImports/#mergedFormats) must union the parent's own imports / formats with
+  // every sidecar's, otherwise resolution edges and format attestations a sidecar
+  // bundler-plugin observed (sidecar.addImport / addFile populate sidecar-local
+  // this.imports/this.formats) would never reach the lockfile. Hashes / entries /
+  // modules are already shared by reference; this closes the same gap for imports and
+  // formats. Also the set attestedBySidecar consults, so --fs skips re-capturing a
+  // read the bundler plugin already records here. Unused on sidecars themselves.
   #sidecars = new Set()
+
+  // For a parent: LOAD-mode sidecar States -- read-only family members, NOT lockfile
+  // contributors. A bundler plugin's load-mode sidecar carries the module graph in its
+  // bundle; getFs*Family consults this set so a --fs read at load of a graph file the
+  // sidecar carries is served from it (the symmetric counterpart to the #sidecars
+  // capture-skip). Kept separate from #sidecars precisely so these never enter
+  // #mergedImports/#mergedFormats -- a load-mode sidecar contributes no resolution edges
+  // or formats (the lockfile's trust-bearing content) to the unified lockfile (the boundary
+  // the writeBundle gate on registration enforces; see the constructor and registerReadSidecar).
+  #readSidecars = new Set()
 
   // Resolutions attested by the loaded lockfile (conditions -> parent ->
   // specifier -> file), or null when no lockfile was loaded / it predates
@@ -304,16 +315,21 @@ export class State {
       }
       // Register with the parent AFTER every fallible step (v0 refusal, scope
       // equality, #mergeBundleMetadata cross-check, frozenBundle invariant) so a
-      // throw never leaves a dead reference in the parent's #sidecars registry.
-      // Gated on writeBundle: load / frozen sidecars are CONSUMERS -- they read
-      // attestations from their bundle but must not contribute to the parent's
-      // lockfile (the bundle has its own integrity story, and under `lock=add`
-      // with no prior lockfile a load-mode sidecar would otherwise silently make
-      // the bundle's content the lockfile's source of truth). Write-mode sidecars
-      // ARE contributors -- their addImport / addFile observations have to land
-      // in the unified lockfile, otherwise a `lock=frozen` re-run rejects them
-      // as unattested.
+      // throw never leaves a dead reference in the parent's registries.
+      // Write-mode sidecars are lockfile CONTRIBUTORS -- their addImport / addFile
+      // observations have to land in the unified lockfile, otherwise a `lock=frozen`
+      // re-run rejects them as unattested -- so they join #sidecars (which feeds
+      // #mergedImports/#mergedFormats and attestedBySidecar). Load-mode sidecars are
+      // CONSUMERS: they must NOT contribute to the parent's lockfile (the bundle has
+      // its own integrity story, and under `lock=add` with no prior lockfile a
+      // load-mode sidecar would otherwise silently make the bundle's content the
+      // lockfile's source of truth), but they DO carry bundle bytes that --fs serves at
+      // load, so they join the read-only #readSidecars (consulted by getFs*Family only).
+      // Frozen sidecars join neither: --fs neither captures nor serves in frozen-bundle
+      // mode (fs.js gates capture on writeBundle and serve on loadBundle), and their
+      // lockfile cross-check already happened in #mergeBundleMetadata above.
       if (this.config.writeBundle) parentState.registerSidecar(this)
+      else if (this.config.loadBundle) parentState.registerReadSidecar(this)
       liveStates().add(this)
       return
     }
@@ -804,12 +820,22 @@ export class State {
     }
   }
 
-  // Register a child (sidecar) so this parent's unified lockData unions its
-  // imports/formats. Public (not a direct `#sidecars.add`) for the same cross-copy
-  // reason as sidecarInheritance: the call runs on the parent, touching the parent's
-  // own #sidecars, so it works even when the sidecar is a foreign-copy instance.
+  // Register a WRITE-mode child (sidecar) so this parent's unified lockData unions its
+  // imports/formats (and attestedBySidecar sees its captures). Public (not a direct
+  // `#sidecars.add`) for the same cross-copy reason as sidecarInheritance: the call runs
+  // on the parent, touching the parent's own #sidecars, so it works even when the sidecar
+  // is a foreign-copy instance.
   registerSidecar(sidecar) {
     this.#sidecars.add(sidecar)
+  }
+
+  // Register a LOAD-mode child as a read-only family member: getFs*Family serves bundle
+  // bytes from it (a --fs read at load of a file the sidecar carries) but, unlike
+  // registerSidecar, it never enters #mergedImports/#mergedFormats, so a load-mode sidecar
+  // contributes no resolution edges or formats (the lockfile's trust-bearing content) to the
+  // unified lockfile. Public for the same cross-copy reason as registerSidecar.
+  registerReadSidecar(sidecar) {
+    this.#readSidecars.add(sidecar)
   }
 
   absolute(url) {
@@ -1309,6 +1335,64 @@ export class State {
     if (this.formats.get(file) === 'directory') return 'directory'
     if (this.sources.has(file) || this.resources.has(file)) return 'file'
     if (this.#impliedDirs().has(file)) return 'directory'
+    return undefined
+  }
+
+  // --fs <-> bundler-plugin coordination. A StasisWebpack/StasisEsbuild/StasisMetro SIDECAR
+  // (its own bundleFile) captures the bundler's MODULE GRAPH into its OWN bundle. But the
+  // bundler also reads every module's source through node:fs (webpack's inputFileSystem is
+  // graceful-fs -> node:fs), which the --fs hook would otherwise RE-record into THIS
+  // (preload/"main") bundle -- copying the whole graph into main and defeating the
+  // bundleFile split. So --fs consults the family in two symmetric ways:
+  //   - CAPTURE (write mode): attestedBySidecar SKIPS recording a read a write-mode sidecar
+  //     already attests (the graph). Only reads no sidecar owns -- a babel plugin's manual
+  //     non-JS file reads, etc. -- are recorded into main.
+  //   - LOAD (load mode): getFs*Family SERVES a graph file from a load-mode sidecar's bundle
+  //     when main doesn't carry it (a program raw-reading a graph file via --fs at load).
+  // The two paths consult DIFFERENT registries because a sidecar is a contributor XOR a
+  // consumer (its bundle mode is the parent's): write-mode sidecars (#sidecars) feed the
+  // lockfile; load-mode sidecars (#readSidecars) must not. readdir capture has no skip --
+  // bundler plugins record files (addFile), never directory LISTINGS (addFsDir), so a
+  // sidecar never owns a readdir result; a readdir is a genuine program read for main.
+  //
+  // attestedBySidecar consults #sidecars (write-mode contributors) and excludes THIS State
+  // on purpose: a file only this State has stays subject to --fs's own dedup / byte-conflict
+  // detection (addFsFile's noupsert); the skip applies solely to a file a *sidecar* carries.
+  attestedBySidecar(url) {
+    // `=== 'file'` (not merely `!== undefined`): the skip targets a FILE a sidecar carries (the
+    // graph the bundler reads through node:fs). getFsStat also returns 'directory' for an implied
+    // ancestor of a carried file; matching that would over-skip. Inert today (a readFileSync of a
+    // directory throws EISDIR before this is consulted) but `=== 'file'` states the intent exactly.
+    for (const s of this.#sidecars) if (s.getFsStat(url) === 'file') return true
+    return false
+  }
+
+  // getFs* variants that also consult load-mode sidecars (#readSidecars; this State first),
+  // so a file/dir a sidecar carries in its bundle is served by --fs reads at load even when
+  // main doesn't carry it. Only #readSidecars (not #sidecars): write-mode sidecars exist
+  // only during capture, where --fs records rather than serves, so they're never consulted
+  // here -- and they're kept out of the lockfile-contributing path regardless.
+  getFsFileFamily(url) {
+    const own = this.getFsFile(url)
+    if (own !== undefined) return own
+    for (const s of this.#readSidecars) { const v = s.getFsFile(url); if (v !== undefined) return v }
+    return undefined
+  }
+
+  getFsStatFamily(url) {
+    const own = this.getFsStat(url)
+    if (own !== undefined) return own
+    for (const s of this.#readSidecars) { const v = s.getFsStat(url); if (v !== undefined) return v }
+    return undefined
+  }
+
+  getFsDirFamily(url) {
+    const own = this.getFsDir(url)
+    if (own !== undefined) return own
+    // The sidecar loop is inert in practice: bundler plugins record files (addFile), never
+    // directory LISTINGS (addFsDir), so a sidecar's bundle has no `directory` entry and
+    // s.getFsDir always returns undefined. Kept for symmetry with the file/stat families.
+    for (const s of this.#readSidecars) { const v = s.getFsDir(url); if (v !== undefined) return v }
     return undefined
   }
 
