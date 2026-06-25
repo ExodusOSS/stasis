@@ -53,6 +53,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --lock=add --child-process app.js` | also attest modules loaded in forked child processes (e.g. Metro transform workers) |
 | `stasis run --bundle=add --fs=sync app.js` | build a bundle that also captures sync `fs.readFileSync`/`readdirSync` reads |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
+| `stasis bundle --conditions=react-native,browser app.js` | statically bundle, asserting extra `exports`/`imports` resolution conditions |
 | `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |
 | `stasis diff --stat a.lock.json b.stasis.code.br` | summarize module/file differences between two lockfiles/bundles |
 | `stasis prune` | trim `node_modules` to the lockfile, verifying the rest |

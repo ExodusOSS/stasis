@@ -24,6 +24,7 @@ const fixtures = join(here, 'fixtures', 'solidity-bundle')
 const bashFixtures = join(here, 'fixtures', 'bash-bundle')
 const rustFixtures = join(here, 'fixtures', 'rust-bundle')
 const phpFixtures = join(here, 'fixtures', 'php-bundle')
+const conditionsFixture = join(here, 'fixtures', 'bundle-conditions')
 
 const withTmp = (fn) => async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-cmd-'))
@@ -1000,6 +1001,97 @@ test('CLI: bundle --scope conflicting with stasis.config.json errors instead of 
   t.assert.notEqual(r.status, 0, 'should error on --scope vs config disagreement')
   t.assert.match(r.stderr, /Flags\/env can not override stasis\.config\.json|node_modules.*full|full.*node_modules/,
     `expected conflict error in stderr, got: ${r.stderr}`)
+}))
+
+// --- Conditions-aware JS bundling (`--conditions`) ---
+//
+// `--conditions` adds resolution conditions on top of the base set Node always
+// asserts, so a package whose `exports` gate on them resolves to a different file
+// -- and a different file lands in the bundle. The bundle-conditions fixture's
+// `rnpkg` exports { react-native, browser, default }; with no extra conditions the
+// scan falls through to `default`, matching plain Node. (Conditions alone don't
+// reproduce Metro resolution, which also uses mainFields + platform suffixes.)
+const rnpkgFiles = (bundle) => [...bundle.sources.keys()].filter((f) => f.includes('rnpkg'))
+
+test('buildBundle (JS) follows the default exports branch when no conditions are given', async (t) => {
+  const bundle = await buildBundle({ cwd: conditionsFixture, entries: ['src/entry.js'] })
+  t.assert.deepEqual(rnpkgFiles(bundle), ['node_modules/rnpkg/default.js'],
+    'no extra conditions -> resolves like plain Node (default branch)')
+})
+
+test('buildBundle (JS) follows the react-native exports branch under conditions=[react-native]', async (t) => {
+  const bundle = await buildBundle({ cwd: conditionsFixture, entries: ['src/entry.js'], conditions: ['react-native'] })
+  t.assert.deepEqual(rnpkgFiles(bundle), ['node_modules/rnpkg/rn.js'],
+    'the react-native condition selects the react-native export, not default')
+})
+
+test('buildBundle (JS) follows the browser exports branch under conditions=[browser]', async (t) => {
+  const bundle = await buildBundle({ cwd: conditionsFixture, entries: ['src/entry.js'], conditions: ['browser'] })
+  t.assert.deepEqual(rnpkgFiles(bundle), ['node_modules/rnpkg/browser.js'])
+})
+
+test('buildBundle rejects conditions for non-JS entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], conditions: ['react-native'] }),
+    /--conditions is only valid for JS bundles/,
+  )
+})
+
+test('CLI: bundle --conditions selects the matching exports branch', withTmp((t, tmp) => {
+  const out = join(tmp, 'snap.br')
+  const r = runCli(['bundle', '--conditions=react-native,browser', `--output=${out}`, 'src/entry.js'], { cwd: conditionsFixture })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  const files = [...parsed.sources.keys()].filter((f) => f.includes('rnpkg'))
+  // react-native is listed before browser in rnpkg's exports, so it wins.
+  t.assert.deepEqual(files, ['node_modules/rnpkg/rn.js'])
+}))
+
+test('CLI: bundle without --conditions resolves like plain Node (default branch)', withTmp((t, tmp) => {
+  const out = join(tmp, 'snap.br')
+  const r = runCli(['bundle', `--output=${out}`, 'src/entry.js'], { cwd: conditionsFixture })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  const files = [...parsed.sources.keys()].filter((f) => f.includes('rnpkg'))
+  t.assert.deepEqual(files, ['node_modules/rnpkg/default.js'])
+}))
+
+test('CLI: bundle rejects --conditions for .sol entries', (t) => {
+  const r = runCli(['bundle', '--conditions=react-native', 'a.sol'])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--conditions is only valid for JS bundles/)
+})
+
+test('CLI: bundle rejects an empty --conditions value', (t) => {
+  const r = runCli(['bundle', '--conditions=', 'src/entry.js'], { cwd: conditionsFixture })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--conditions must list at least one condition name/)
+})
+
+test('CLI: a --conditions bundle round-trips through --bundle=load with the selected file', withTmp((t, tmp) => {
+  // Build under react-native, then delete the branches it did NOT select; the bundle
+  // must still load and run from its own bytes. This is exactly the wildcard-`*` keying
+  // guarantee -- plain node at load never passes the react-native condition, so load
+  // depends on getImport's `*` fallback resolving to the conditions-selected file.
+  cpSync(conditionsFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'stasis.code.br')
+  const build = runCli(['bundle', '--conditions=react-native', `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
+  rmSync(join(tmp, 'node_modules', 'rnpkg', 'default.js'))
+  rmSync(join(tmp, 'node_modules', 'rnpkg', 'browser.js'))
+  const load = runCli(['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'RN\n')
+}))
+
+test('CLI: bundle --conditions --lockfile attests the conditions-selected resolution', withTmp((t, tmp) => {
+  const bundlePath = join(tmp, 'snap.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const r = runCli(['bundle', '--conditions=react-native', `--lockfile=${lockPath}`, `--output=${bundlePath}`, 'src/entry.js'], { cwd: conditionsFixture })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  // The companion lockfile records the react-native target, not the default branch.
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
+  t.assert.equal(lock.imports['*']['src/entry.js'].rnpkg, 'node_modules/rnpkg/rn.js')
 }))
 
 // Regression: state.getImport used to `assert.ok(file)` on a missing edge,

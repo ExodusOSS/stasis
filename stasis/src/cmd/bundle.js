@@ -550,9 +550,21 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
 // unresolved require()/dynamic import() edges, including entire subtrees
 // behind such a boundary -- only warn (see below).
 //
-// Scope and per-edge conditions come from the project's stasis.config.json
-// (or `EXODUS_STASIS_SCOPE`); pass `scope` explicitly to override.
-export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}) {
+// Scope comes from the project's stasis.config.json (or `EXODUS_STASIS_SCOPE`);
+// pass `scope` explicitly to override.
+//
+// `conditions` are extra `exports`/`imports` resolution conditions, merged on top
+// of the format-derived base set Node always asserts (`node`, `import`/`require`,
+// `module-sync`, `node-addons`). They change which branch of a package's
+// conditional `exports` the static scan follows -- and therefore which file lands
+// in the bundle -- exactly as if Node resolved with those conditions active. Empty
+// (the default) reproduces plain Node resolution.
+//
+// NOTE: conditions are only one input to module resolution. On their own they do
+// NOT reproduce a Metro/React Native build: Metro also honours legacy package
+// `mainFields` (`react-native`/`browser`/`main`) and platform suffixes
+// (`.ios`/`.android`/`.native`), neither of which the `exports` field expresses.
+export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [] } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
@@ -563,7 +575,13 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
 
-  const scanner = scan(absEntries)
+  // Normalize conditions the way the CLI already does (trim, drop empties), so the
+  // programmatic API (`buildBundle({ conditions })`) tolerates the same sloppy input.
+  // A '' or whitespace-only condition never matches an `exports` key, so dropping it
+  // is a no-op for clean input -- this just stops a bogus token reaching the resolver.
+  const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
+
+  const scanner = scan(absEntries, { conditions: scanConditions })
 
   // Fail closed exactly where the bundle is GUARANTEED broken (or silently
   // divergent from plain node) at load time; warn where runtime code can catch
@@ -687,7 +705,7 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope } = {}
 // Classify entries into the single bundle language they all share and check
 // option applicability. Shared by buildBundle and bundleCommand; `name`
 // prefixes error messages with the caller.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -709,6 +727,12 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile }) {
   if (lockfile !== undefined && kind !== 'js') {
     throw new Error(`${name}: --lockfile is only valid for JS bundles`)
   }
+  // Conditions only steer Node's `exports`/`imports` resolution, which the other
+  // languages' resolvers don't consult -- reject them rather than accept a flag
+  // that would silently do nothing.
+  if (Array.isArray(conditions) && conditions.length > 0 && kind !== 'js') {
+    throw new Error(`${name}: --conditions is only valid for JS bundles`)
+  }
   return kind
 }
 
@@ -722,14 +746,15 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile }) {
 // scan), .sh/.bash (Bash), or .rs (Rust); mixing fails fast. `mappingFile` is
 // the optional Solidity remappings file (foundry.toml or remappings.txt) and
 // is only valid for .sol entries; `scope` overrides the configured bundle
-// scope and is only valid for JS/TS entries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope })
+// scope and is only valid for JS/TS entries; `conditions` are extra `exports`
+// resolution conditions (e.g. `['react-native']`) and are JS/TS-only too.
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
   if (kind === 'rust') return buildRustBundle({ cwd, entries })
-  const state = await buildJsBundle({ cwd, entries, scope })
+  const state = await buildJsBundle({ cwd, entries, scope, conditions })
   return state.sourceBundle
 }
 
@@ -749,7 +774,13 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // Dispatch by extension: all entries must be one language — .sol (Solidity),
 // .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static scan), .sh/.bash
 // (Bash, via source/exec graph walk), or .rs (Rust, via mod-declaration walk).
-// Mixing fails fast; --mapping is .sol only, --scope/--lockfile are JS/TS only.
+// Mixing fails fast; --mapping is .sol only, --scope/--lockfile/--conditions are
+// JS/TS only.
+//
+// `conditions` are extra Node `exports`/`imports` resolution conditions to assert
+// during the static scan (e.g. `['react-native']` or `['browser']`). They only
+// affect `exports`/`imports` condition matching -- not mainFields or platform
+// suffixes -- so on their own they don't reproduce Metro resolution. See buildJsBundle.
 //
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
@@ -757,19 +788,25 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // else require('./node')`), so the runtime lockfile from `stasis run --lock=add`
 // won't attest the unused branch -- if the user wants `lock=frozen` against a
 // statically-built bundle, they need this companion lockfile.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile })
+//
+// With `--conditions`, that companion lockfile attests the conditions-SELECTED
+// resolution graph. A plain `stasis run --lock=frozen` doesn't replay `--conditions`,
+// so it resolves different files on disk and fails closed (correctly -- the lockfile
+// genuinely attests a different graph). Pair such a lockfile with `--bundle=load`, or
+// replay the same `--conditions` at run time, so the attested and observed graphs agree.
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions })
 
   let bundle
   let lockData
   if (kind === 'js' && lockfile) {
     // The companion lockfile attests file hashes, which only State carries —
     // a Bundle holds sources, not digests — so this path keeps the State.
-    const state = await buildJsBundle({ cwd, entries, scope })
+    const state = await buildJsBundle({ cwd, entries, scope, conditions })
     bundle = state.sourceBundle
     lockData = state.lockData
   } else {
-    bundle = await buildBundle({ cwd, entries, mappingFile, scope })
+    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions })
   }
   const serialized = bundle.serialize()
   const files = [...bundle.sources.keys()]
