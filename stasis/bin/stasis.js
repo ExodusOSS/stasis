@@ -22,7 +22,7 @@ function usage(prefix = '') {
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout)
@@ -163,7 +163,7 @@ if (command === '-v' || command === '--version') {
   process.exitCode = code
 } else if (command === 'bundle') {
   const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '-o'])
+  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '-o'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -173,6 +173,7 @@ if (command === '-v' || command === '--version') {
     scope: { type: 'string' },
     lockfile: { type: 'string' },
     conditions: { type: 'string' },
+    mainFields: { type: 'string' },
   }
   let values
   try {
@@ -195,17 +196,32 @@ if (command === '-v' || command === '--version') {
     usage('Error: --scope must be node_modules or full')
   }
   if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
+  // --scope selects a bundle subset; the field resolver (--mainFields) always emits
+  // a full-scope bundle, so the two together would silently ignore --scope.
+  if (values.scope !== undefined && values.mainFields !== undefined) {
+    usage('Error: --scope is not supported with --mainFields')
+  }
   // --conditions: comma-separated extra `exports`/`imports` resolution conditions
   // (e.g. react-native,browser) merged on top of the conditions Node always asserts.
   // They steer which branch of a package's conditional `exports` the static scan
-  // follows. NOTE: conditions alone do not reproduce Metro resolution, which also
-  // uses package `mainFields` and platform suffixes.
+  // follows. NOTE: conditions alone do not honour legacy package `mainFields` or
+  // platform-specific file suffixes -- see --mainFields.
   if (values.conditions !== undefined && !allJs) usage('Error: --conditions is only valid for JS bundles')
   const conditions = values.conditions === undefined
     ? []
     : values.conditions.split(',').map((s) => s.trim()).filter(Boolean)
   if (values.conditions !== undefined && conditions.length === 0) {
     usage('Error: --conditions must list at least one condition name (e.g. --conditions=react-native,browser)')
+  }
+  // --mainFields: comma-separated legacy package entry fields (e.g.
+  // react-native,browser,main). Drives the legacy-field resolver for non-`exports`
+  // packages -- the entry it picks plus the browser-field-spec object redirection.
+  if (values.mainFields !== undefined && !allJs) usage('Error: --mainFields is only valid for JS bundles')
+  const mainFields = values.mainFields === undefined
+    ? undefined
+    : values.mainFields.split(',').map((s) => s.trim()).filter(Boolean)
+  if (values.mainFields !== undefined && mainFields.length === 0) {
+    usage('Error: --mainFields must list at least one field (e.g. --mainFields=react-native,browser,main)')
   }
   const { bundleCommand } = await import('../src/cmd/bundle.js')
   await bundleCommand({
@@ -216,6 +232,7 @@ if (command === '-v' || command === '--version') {
     scope: values.scope,
     lockfile: values.lockfile,
     conditions,
+    mainFields,
   })
 } else if (command === 'extract') {
   const flags = []

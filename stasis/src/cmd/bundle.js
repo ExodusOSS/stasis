@@ -1,13 +1,17 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { isUtf8 } from 'node:buffer'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliCompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { scan } from '../scan.js'
+import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
-import { splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { sha512integrity } from '@exodus/stasis-core/state-util'
+import { assertRealPathWithinBase, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -261,8 +265,13 @@ function makeRustClassifier(baseDir) {
 // directly, which is how non-node_modules ecosystems are attributed (e.g.
 // Solidity's Soldeer `dependencies/` and github submodules). Returning null (or
 // omitting the hook) defers to the node_modules/package.json/workspace logic.
+// `format` tags every file uniformly (the single-language non-JS callers); pass
+// `formats` (a Map<path, format>) instead to tag per file, as the JS resolver path
+// does (a graph mixes module / commonjs / *-typescript / json). `resolutions`
+// values are target strings (one flat edge per specifier) that round-trip through
+// the bundle's recursive serializer untouched.
 function assembleCodeBundle({
-  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, conditionKey, classifyDep,
+  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep,
 }) {
   const modules = new Map()
   const ensureBucket = (dir, name, version, bucketEcosystem) => {
@@ -296,8 +305,8 @@ function assembleCodeBundle({
     }
   }
 
-  const formats = new Map()
-  for (const path of sources.keys()) formats.set(path, format)
+  const formatsMap = new Map()
+  for (const path of sources.keys()) formatsMap.set(path, formats?.get(path) ?? format)
 
   const importsForKey = new Map()
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
@@ -307,7 +316,7 @@ function assembleCodeBundle({
     config: { scope: 'full' },
     entries: new Set(entries),
     modules,
-    formats,
+    formats: formatsMap,
     imports,
   })
 }
@@ -532,6 +541,80 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   })
 }
 
+// Classify a scanner's unresolved edges + parse errors into `fatal` (the bundle
+// would be broken, or silently divergent from plain node, at load) vs tolerated
+// (a miss runtime code can catch). The rationale for each rule lives at the call
+// site in buildJsBundle; this is the shared computation so the plain and the
+// resolver-driven (`--mainFields`) JS paths gate identically.
+function analyzeScanner(scanner) {
+  // Static reachability: files reached from an entry through static ESM
+  // `import`/`export ... from` edges load eagerly, before any user code runs, so
+  // a failure there is uncatchable; below a require()/dynamic-import() boundary it
+  // surfaces as a catchable miss and only warns.
+  const staticKinds = new Set(['import', 'export-from'])
+  const staticReachable = new Set(scanner.entries)
+  const walk = [...scanner.entries]
+  while (walk.length > 0) {
+    for (const e of scanner.files.get(walk.shift())?.edges ?? []) {
+      if (staticKinds.has(e.kind) && e.child && !staticReachable.has(e.child)) {
+        staticReachable.add(e.child)
+        walk.push(e.child)
+      }
+    }
+  }
+  const fatalUnresolved = (u) => staticKinds.has(u.kind) && staticReachable.has(u.parentURL)
+  const fatal = scanner.unresolved
+    .filter((u) => fatalUnresolved(u))
+    .map((u) => `unresolved ${u.kind} ${u.spec} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
+  // Parse failures whose edges are genuinely unknown: a module-family file in the
+  // eagerly-linked set, or any file the parser couldn't process at all.
+  const fatalParse = (p) => staticReachable.has(p.url) && (p.format?.startsWith('module') === true || !p.recovered)
+  for (const p of scanner.parseErrors) {
+    if (fatalParse(p)) fatal.push(`parse error in ${fileURLToPath(p.url)}: ${p.message}`)
+  }
+  // Edges resolving to a file a source bundle can't carry (extensionless, .node,
+  // .wasm): scan records the edge but never queues the child, so load would die.
+  for (const [, byParent] of scanner.imports) {
+    for (const [parentURL, specMap] of byParent) {
+      for (const [spec, childURL] of specMap) {
+        if (!scanner.files.has(childURL)) {
+          fatal.push(`${spec} from ${fileURLToPath(parentURL)} resolves to ${fileURLToPath(childURL)}, which a source bundle can't carry`)
+        }
+      }
+    }
+  }
+  const tolerated = scanner.unresolved.filter((u) => !fatalUnresolved(u))
+  const toleratedParse = scanner.parseErrors.filter((p) => !fatalParse(p))
+  return { fatal, tolerated, toleratedParse }
+}
+
+// Throw on any fatal scan issue (the bundle can't be written); warn on tolerated
+// ones. `label`, when set, tags the scan pass in the message.
+function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '' } = {}) {
+  const where = label ? ` (${label})` : ''
+  if (fatal.length > 0) {
+    const shown = fatal.slice(0, 10).map((s) => `  ${s}`).join('\n')
+    const more = fatal.length > 10 ? `\n  ... and ${fatal.length - 10} more` : ''
+    throw new Error(`JS bundle would be broken at load time${where}:\n${shown}${more}`)
+  }
+  if (tolerated.length > 0) {
+    const summary = tolerated
+      .slice(0, 10)
+      .map((u) => `  ${u.kind} ${u.spec ?? '<dynamic>'} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
+      .join('\n')
+    const more = tolerated.length > 10 ? `\n  ... and ${tolerated.length - 10} more` : ''
+    console.warn(`[stasis] Bundle has ${tolerated.length} unresolved import(s)${where}; they will fall through at load time:\n${summary}${more}`)
+  }
+  if (toleratedParse.length > 0) {
+    const summary = toleratedParse
+      .slice(0, 10)
+      .map((p) => `  ${fileURLToPath(p.url)}: ${p.message}`)
+      .join('\n')
+    const more = toleratedParse.length > 10 ? `\n  ... and ${toleratedParse.length - 10} more` : ''
+    console.warn(`[stasis] Bundle has ${toleratedParse.length} file(s) with parse errors${where}; their recorded imports may be incomplete:\n${summary}${more}`)
+  }
+}
+
 // Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs (or
 // .ts/.cts/.mts) files by statically scanning the require/import graph and
 // reading reachable file contents from disk -- no user code is ever loaded or
@@ -561,9 +644,10 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
 // (the default) reproduces plain Node resolution.
 //
 // NOTE: conditions are only one input to module resolution. On their own they do
-// NOT reproduce a Metro/React Native build: Metro also honours legacy package
-// `mainFields` (`react-native`/`browser`/`main`) and platform suffixes
-// (`.ios`/`.android`/`.native`), neither of which the `exports` field expresses.
+// NOT honour legacy package `mainFields` (`react-native`/`browser`/`main`) or
+// platform-specific file suffixes (`.ios`/`.android`/`.native`), neither of which
+// the `exports` field expresses; `--mainFields` (see buildResolvedJsBundle) adds
+// the former.
 export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [] } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
@@ -585,91 +669,15 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
 
   // Fail closed exactly where the bundle is GUARANTEED broken (or silently
   // divergent from plain node) at load time; warn where runtime code can catch
-  // the miss the same way it would without a bundle.
-  //
-  // Static reachability: files linked from an entry through static ESM
-  // `import`/`export ... from` edges alone load eagerly, before any user code
-  // runs, so no try/catch can intercept a failure there. Below a require()/
-  // dynamic import() boundary the same failure surfaces at the callsite as a
-  // catchable error, so the optional-dependency pattern (`try { impl = await
-  // import('optional-impl') } catch { fallback }`) keeps bundling with a
-  // warning -- exactly like `try { require('supports-color') } catch {}`: the
-  // runtime loader never records those edges either, because Node's resolver
-  // throws before the resolve hook can record them, and at load time
-  // state.getImport throws a miss the user's catch handles just like
-  // MODULE_NOT_FOUND in the non-bundled path. (`require` calls found in ESM
-  // files also stay warn-only: the identifier may be a user-defined function
-  // rather than CJS require, so refusing on it would reject valid code.)
-  const staticKinds = new Set(['import', 'export-from'])
-  const staticReachable = new Set(scanner.entries)
-  const walk = [...scanner.entries]
-  while (walk.length > 0) {
-    for (const e of scanner.files.get(walk.shift())?.edges ?? []) {
-      if (staticKinds.has(e.kind) && e.child && !staticReachable.has(e.child)) {
-        staticReachable.add(e.child)
-        walk.push(e.child)
-      }
-    }
-  }
-
-  // Fatal: unresolved static ESM edges in the eagerly-linked set.
-  const fatalUnresolved = (u) => staticKinds.has(u.kind) && staticReachable.has(u.parentURL)
-  const fatal = scanner.unresolved
-    .filter((u) => fatalUnresolved(u))
-    .map((u) => `unresolved ${u.kind} ${u.spec} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
-
-  // Fatal: parse failures whose edges are genuinely unknown. Script (CJS)
-  // files only warn: oxc's recovered AST keeps their require()/import() calls
-  // (Node's module wrapper accepts code oxc rejects, e.g. a top-level `return`
-  // guard), so scan salvages the edges. A module-family file ('module' /
-  // 'module-typescript') in the eagerly-linked set is a hole we can't
-  // enumerate; so is any file the parser couldn't process at all
-  // (recovered=false -- nothing was salvaged, and format may even be null).
-  const fatalParse = (p) => staticReachable.has(p.url) && (p.format?.startsWith('module') === true || !p.recovered)
-  for (const p of scanner.parseErrors) {
-    if (fatalParse(p)) fatal.push(`parse error in ${fileURLToPath(p.url)}: ${p.message}`)
-  }
-
-  // Fatal: edges that resolved to a file a source bundle can't carry
-  // (extensionless, .node, .wasm -- scan records the edge but never queues the
-  // child). Plain node loads these fine, so the written bundle would silently
-  // diverge: the edge sits in the import map with no source behind it, and
-  // load dies on state.getFile's assertion -- regardless of try/catch and of
-  // where in the graph it sits, so reachability doesn't soften this one.
-  for (const [, byParent] of scanner.imports) {
-    for (const [parentURL, specMap] of byParent) {
-      for (const [spec, childURL] of specMap) {
-        if (!scanner.files.has(childURL)) {
-          fatal.push(`${spec} from ${fileURLToPath(parentURL)} resolves to ${fileURLToPath(childURL)}, which a source bundle can't carry`)
-        }
-      }
-    }
-  }
-
-  if (fatal.length > 0) {
-    const shown = fatal.slice(0, 10).map((s) => `  ${s}`).join('\n')
-    const more = fatal.length > 10 ? `\n  ... and ${fatal.length - 10} more` : ''
-    throw new Error(`JS bundle would be broken at load time:\n${shown}${more}`)
-  }
-
-  const tolerated = scanner.unresolved.filter((u) => !fatalUnresolved(u))
-  if (tolerated.length > 0) {
-    const summary = tolerated
-      .slice(0, 10)
-      .map((u) => `  ${u.kind} ${u.spec ?? '<dynamic>'} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
-      .join('\n')
-    const more = tolerated.length > 10 ? `\n  ... and ${tolerated.length - 10} more` : ''
-    console.warn(`[stasis] Bundle has ${tolerated.length} unresolved import(s); they will fall through at load time:\n${summary}${more}`)
-  }
-  const toleratedParse = scanner.parseErrors.filter((p) => !fatalParse(p))
-  if (toleratedParse.length > 0) {
-    const summary = toleratedParse
-      .slice(0, 10)
-      .map((p) => `  ${fileURLToPath(p.url)}: ${p.message}`)
-      .join('\n')
-    const more = toleratedParse.length > 10 ? `\n  ... and ${toleratedParse.length - 10} more` : ''
-    console.warn(`[stasis] Bundle has ${toleratedParse.length} file(s) with parse errors; their recorded imports may be incomplete:\n${summary}${more}`)
-  }
+  // the miss the same way it would without a bundle. Static ESM edges load
+  // eagerly (uncatchable) so unresolved ones / unknown parse holes there are
+  // fatal; require()/dynamic-import() misses surface at the callsite and only
+  // warn -- the optional-dependency pattern (`try { require(x) } catch {}`) keeps
+  // bundling, because the runtime loader never records those edges either and
+  // state.getImport throws the same catchable MODULE_NOT_FOUND at load. Edges
+  // resolving to a file a source bundle can't carry are always fatal. (See
+  // analyzeScanner for the precise rules.)
+  reportScanIssues(analyzeScanner(scanner))
 
   // Use a non-preload State to materialise the bundle: addFile bucketizes by
   // package.json + records hashes/sources/formats, and addImport replays the
@@ -702,10 +710,131 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   return state
 }
 
+// Source extensions probed when a resolved entry/redirect target names no extension.
+// Limited to what a source bundle can actually carry (scan's RESOLVABLE_EXTS), so the
+// resolver never resolves a file the bundle would then reject. `--mainFields` lets a
+// caller pick its own fields, and `--conditions` its own extra exports conditions.
+const SOURCE_EXTS = ['js', 'json', 'ts']
+// Synthetic, project-relative path for the empty module a browser/react-native
+// `false` redirect resolves to. Carried in the bundle as a real (empty) CJS file
+// so the edge points at attestable bytes rather than a sentinel.
+const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
+
+// Build a JS/TS Bundle (and companion Lockfile) through the legacy-field resolver
+// (src/resolve-fields.js) rather than Node's resolver -- the `--mainFields` path.
+// The graph is scanned once and every `(parent, specifier)` edge is recorded flat
+// (a single target). A browser/react-native `false` redirect resolves to a
+// synthetic empty module carried in the bundle. Returns { bundle, lockfile } (the
+// lockfile attests the same files + edges, by integrity).
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, conditions = [] }) {
+  const baseDir = resolve(cwd)
+  const absEntries = entries.map((e) => resolve(baseDir, e))
+  const normalized = normalizeEntries(entries, cwd)
+
+  const toRel = (abs) => {
+    const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      throw new Error(`Bundle would reach a file outside the project root: ${abs}`)
+    }
+    return rel
+  }
+
+  // Normalize conditions like buildJsBundle does, so a sloppy programmatic caller
+  // (stray '' / whitespace) can't push a bogus token into the resolver.
+  const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
+  const resolver = createFieldResolver({
+    mainFields,
+    sourceExts: SOURCE_EXTS,
+    conditions: resolveConditions('commonjs', scanConditions),
+  })
+  const scanner = scan(absEntries, { conditions: scanConditions, resolve: resolver })
+  reportScanIssues(analyzeScanner(scanner))
+
+  const formatsByRel = new Map()
+  const reached = new Set() // absolute paths of every real file reached
+  const resolutions = new Map() // parentRel -> specifier -> targetRel
+  let usesEmpty = false
+  for (const [url, info] of scanner.files) {
+    const rel = toRel(fileURLToPath(url))
+    reached.add(fileURLToPath(url))
+    formatsByRel.set(rel, info.format)
+    for (const e of info.edges) {
+      if (e.builtin || e.dynamic) continue
+      let target
+      if (e.empty) { usesEmpty = true; target = EMPTY_MODULE_PATH }
+      else if (e.child) target = toRel(fileURLToPath(e.child))
+      else continue // unresolved (already warned/thrown by reportScanIssues)
+      if (!resolutions.has(rel)) resolutions.set(rel, new Map())
+      resolutions.get(rel).set(e.spec, target)
+    }
+  }
+
+  // Read every reached file's bytes once: content for the bundle, integrity for
+  // the lockfile (hash the raw bytes so it matches `stasis run --lock=frozen`).
+  // The stored source is UTF-8 text, so the bytes must BE valid UTF-8 -- otherwise
+  // toString('utf8') would lossily diverge from the hashed bytes.
+  const sources = new Map()
+  const integrities = new Map()
+  const realBase = realpathSync(baseDir)
+  for (const abs of reached) {
+    const rel = toRel(abs)
+    // A bundle must carry only in-tree, attestable bytes. The field resolver returns the
+    // lexical path it probed, so an in-tree-named symlink whose real target escapes the
+    // project root would slip past toRel's textual check -- realpath it and fail closed,
+    // the same way the State-based JS path and the non-JS loaders do.
+    assertRealPathWithinBase(realBase, baseDir, rel)
+    const buf = readFileSync(abs)
+    if (!isUtf8(buf)) throw new Error(`JS bundle source is not valid UTF-8: ${rel}`)
+    sources.set(rel, buf.toString('utf8'))
+    integrities.set(rel, sha512integrity(buf))
+  }
+  if (usesEmpty) {
+    // The empty module is synthetic; refuse to shadow a real reached file that
+    // happens to sit at the reserved path rather than silently clobber it.
+    if (formatsByRel.has(EMPTY_MODULE_PATH)) {
+      throw new Error(`Bundle needs the reserved empty-module path ${EMPTY_MODULE_PATH}, but the project has a real file there`)
+    }
+    sources.set(EMPTY_MODULE_PATH, '')
+    formatsByRel.set(EMPTY_MODULE_PATH, 'commonjs')
+    integrities.set(EMPTY_MODULE_PATH, sha512integrity(Buffer.alloc(0)))
+  }
+
+  const rootPkg = readJson(join(baseDir, 'package.json')) ?? {}
+  const bundle = assembleCodeBundle({
+    baseDir,
+    entries: normalized,
+    sources,
+    resolutions,
+    formats: formatsByRel,
+    workspaceName: rootPkg.name ?? 'workspace',
+    workspaceVersion: rootPkg.version ?? '0.0.0',
+    conditionKey: '*',
+  })
+
+  // The companion lockfile mirrors the bundle exactly, swapping file content for
+  // its integrity. modules/imports/formats/entries are shared shapes, so a frozen
+  // lockfile attests the same resolution graph the bundle carries.
+  const lockModules = new Map()
+  for (const [dir, m] of bundle.modules) {
+    const files = Object.create(null)
+    for (const rel of Object.keys(m.files)) files[rel] = integrities.get(moduleFileKey(dir, rel))
+    lockModules.set(dir, { name: m.name, version: m.version, ...(m.ecosystem === undefined ? {} : { ecosystem: m.ecosystem }), files })
+  }
+  const lockfile = new Lockfile({
+    config: bundle.config,
+    entries: bundle.entries,
+    modules: lockModules,
+    imports: bundle.imports,
+    formats: bundle.formats,
+  })
+
+  return { bundle, lockfile }
+}
+
 // Classify entries into the single bundle language they all share and check
 // option applicability. Shared by buildBundle and bundleCommand; `name`
 // prefixes error messages with the caller.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -733,6 +862,16 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (Array.isArray(conditions) && conditions.length > 0 && kind !== 'js') {
     throw new Error(`${name}: --conditions is only valid for JS bundles`)
   }
+  // --mainFields honours legacy package entry fields (plus the browser-field object
+  // redirection) for non-`exports` packages; JS-only too.
+  if (mainFields !== undefined && kind !== 'js') {
+    throw new Error(`${name}: --mainFields is only valid for JS bundles`)
+  }
+  // The field resolver always emits a full-scope bundle (it has no node_modules-only
+  // mode), so --scope alongside --mainFields would be silently ignored -- reject it.
+  if (scope !== undefined && mainFields !== undefined) {
+    throw new Error(`${name}: --scope is not supported with --mainFields`)
+  }
   return kind
 }
 
@@ -748,12 +887,21 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // is only valid for .sol entries; `scope` overrides the configured bundle
 // scope and is only valid for JS/TS entries; `conditions` are extra `exports`
 // resolution conditions (e.g. `['react-native']`) and are JS/TS-only too.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions })
+//
+// `mainFields` (an array of legacy package fields, e.g. `['react-native','browser','main']`)
+// selects the legacy-field resolver -- see buildResolvedJsBundle. It resolves
+// non-`exports` packages via those fields, including the browser-field object
+// redirection, and composes with `conditions`. JS/TS-only.
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
   if (kind === 'rust') return buildRustBundle({ cwd, entries })
+  if (mainFields !== undefined) {
+    const { bundle } = await buildResolvedJsBundle({ cwd, entries, mainFields, conditions })
+    return bundle
+  }
   const state = await buildJsBundle({ cwd, entries, scope, conditions })
   return state.sourceBundle
 }
@@ -779,8 +927,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 //
 // `conditions` are extra Node `exports`/`imports` resolution conditions to assert
 // during the static scan (e.g. `['react-native']` or `['browser']`). They only
-// affect `exports`/`imports` condition matching -- not mainFields or platform
-// suffixes -- so on their own they don't reproduce Metro resolution. See buildJsBundle.
+// affect `exports`/`imports` condition matching -- not legacy mainFields -- so on
+// their own they don't honour a package's legacy entry fields. See buildJsBundle.
 //
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
@@ -794,12 +942,19 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // so it resolves different files on disk and fails closed (correctly -- the lockfile
 // genuinely attests a different graph). Pair such a lockfile with `--bundle=load`, or
 // replay the same `--conditions` at run time, so the attested and observed graphs agree.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields })
 
   let bundle
   let lockData
-  if (kind === 'js' && lockfile) {
+  if (kind === 'js' && mainFields !== undefined) {
+    // The legacy-field resolver path builds the Bundle (and the matching Lockfile)
+    // directly -- it carries a synthetic empty module (for a browser/react-native
+    // `false` redirect) that State's disk-reading addFile can't represent.
+    const built = await buildResolvedJsBundle({ cwd, entries, mainFields, conditions })
+    bundle = built.bundle
+    if (lockfile) lockData = built.lockfile.serialize()
+  } else if (kind === 'js' && lockfile) {
     // The companion lockfile attests file hashes, which only State carries —
     // a Bundle holds sources, not digests — so this path keeps the State.
     const state = await buildJsBundle({ cwd, entries, scope, conditions })

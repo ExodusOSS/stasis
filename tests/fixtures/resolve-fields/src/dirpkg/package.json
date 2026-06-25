@@ -1,0 +1,1 @@
+{ "main": "./real.js", "exports": "./exp.js" }

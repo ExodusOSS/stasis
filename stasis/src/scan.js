@@ -126,8 +126,17 @@ export class Scan {
   // user-supplied conditions (e.g. 'browser', 'development') merged in. This
   // matches what the runtime loader records when Node reports conditions for an
   // edge -- different edges in the same scan can end up under different keys.
-  constructor({ conditions = [] } = {}) {
+  //
+  // `resolve` optionally replaces Node's own resolver with a custom one (the
+  // legacy-field resolver in resolve-fields.js drives `stasis bundle --mainFields`).
+  // It is called `(parentFile, specifier, conditions)` and returns
+  // `{ url } | { empty: true } | { builtin: true } | null` -- `empty` marks a
+  // browser/react-native `false` redirect (an empty-module stub the caller
+  // materialises), the rest mirror Node resolution. When set, it also handles
+  // builtins, so the built-in `isBuiltin` short-circuit is skipped.
+  constructor({ conditions = [], resolve = null } = {}) {
     this.extraConditions = [...conditions]
+    this.customResolve = resolve
   }
 
   walk(entries) {
@@ -283,6 +292,26 @@ export class Scan {
       if (s.dynamic) {
         edges.push(s)
         this.unresolved.push({ parentURL: url, kind: s.kind, reason: 'dynamic' })
+        continue
+      }
+      // Custom (legacy-field) resolver: it owns builtin handling and adds the
+      // `empty` outcome (a browser/react-native `false` redirect). An empty edge
+      // is recorded but neither queued (an empty module has no edges) nor counted
+      // as unresolved (it resolved -- to nothing).
+      if (this.customResolve) {
+        const r = this.customResolve(file, s.spec, conditions)
+        if (r?.builtin) {
+          edges.push({ ...s, builtin: true })
+        } else if (r?.empty) {
+          edges.push({ ...s, empty: true })
+        } else if (r?.url) {
+          edges.push({ ...s, child: r.url })
+          specMap.set(s.spec, r.url)
+          if (RESOLVABLE_EXTS.has(extname(fileURLToPath(r.url)))) queue.push(r.url)
+        } else {
+          edges.push({ ...s, error: 'MODULE_NOT_FOUND' })
+          this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: 'MODULE_NOT_FOUND' })
+        }
         continue
       }
       if (isBuiltin(s.spec)) {

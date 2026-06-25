@@ -25,6 +25,7 @@ const bashFixtures = join(here, 'fixtures', 'bash-bundle')
 const rustFixtures = join(here, 'fixtures', 'rust-bundle')
 const phpFixtures = join(here, 'fixtures', 'php-bundle')
 const conditionsFixture = join(here, 'fixtures', 'bundle-conditions')
+const fieldsFixture = join(here, 'fixtures', 'resolve-fields')
 
 const withTmp = (fn) => async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-cmd-'))
@@ -1010,7 +1011,7 @@ test('CLI: bundle --scope conflicting with stasis.config.json errors instead of 
 // -- and a different file lands in the bundle. The bundle-conditions fixture's
 // `rnpkg` exports { react-native, browser, default }; with no extra conditions the
 // scan falls through to `default`, matching plain Node. (Conditions alone don't
-// reproduce Metro resolution, which also uses mainFields + platform suffixes.)
+// honour legacy package mainFields or platform-specific file suffixes.)
 const rnpkgFiles = (bundle) => [...bundle.sources.keys()].filter((f) => f.includes('rnpkg'))
 
 test('buildBundle (JS) follows the default exports branch when no conditions are given', async (t) => {
@@ -1092,6 +1093,144 @@ test('CLI: bundle --conditions --lockfile attests the conditions-selected resolu
   // The companion lockfile records the react-native target, not the default branch.
   const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
   t.assert.equal(lock.imports['*']['src/entry.js'].rnpkg, 'node_modules/rnpkg/rn.js')
+}))
+
+// --- Legacy-field resolution (`--mainFields`) ---
+//
+// These drive the legacy-field resolver (tests/resolve-fields.test.js covers it in
+// isolation). The relevant fixtures live under tests/fixtures/resolve-fields:
+// `entryfields` (mainFields entry), `redir` (browser object map incl. false->empty),
+// and `exportswins` (exports beats a browser main field). Edges are always flat
+// (a single target per specifier).
+const importTarget = (bundle, parent, spec) => bundle.imports.get('*').get(parent).get(spec)
+
+test('buildBundle --mainFields resolves entry fields, browser redirects, and empty stubs (flat edges)', async (t) => {
+  const bundle = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], mainFields: ['react-native', 'browser', 'main'] })
+  const files = new Set(bundle.sources.keys())
+  // entryfields picks its react-native entry; exportswins' exports beats its browser field.
+  t.assert.ok(files.has('node_modules/entryfields/rn.js'))
+  t.assert.ok(files.has('node_modules/exportswins/def.js'), 'no react-native condition here -> exports default')
+  // browser object map: ./node-only.js -> browser-only.js; ./gone.js (relative) and the
+  // bare `leftpad` (false) -> the synthetic empty module.
+  t.assert.equal(importTarget(bundle, 'node_modules/redir/index.js', './node-only.js'), 'node_modules/redir/browser-only.js')
+  t.assert.equal(importTarget(bundle, 'node_modules/redir/index.js', './gone.js'), '.stasis/empty-module.js')
+  t.assert.equal(importTarget(bundle, 'node_modules/redir/index.js', 'leftpad'), '.stasis/empty-module.js')
+  // The empty module is carried as a real, empty CJS file (attestable bytes).
+  t.assert.equal(bundle.sources.get('.stasis/empty-module.js'), '')
+  t.assert.equal(bundle.formats.get('.stasis/empty-module.js'), 'commonjs')
+})
+
+test('CLI: bundle --mainFields rejects a non-JS bundle and an empty value', (t) => {
+  t.assert.match(runCli(['bundle', '--mainFields=browser', 'a.sol']).stderr, /--mainFields is only valid for JS bundles/)
+  const empty = runCli(['bundle', '--mainFields=', 'src/entry.js'], { cwd: fieldsFixture })
+  t.assert.notEqual(empty.status, 0)
+  t.assert.match(empty.stderr, /--mainFields must list at least one field/)
+})
+
+test('--mainFields rejects --scope (the field resolver always builds a full-scope bundle)', async (t) => {
+  const r = runCli(['bundle', '--scope=node_modules', '--mainFields=browser', 'src/entry.js'], { cwd: fieldsFixture })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--scope is not supported with --mainFields/)
+  await t.assert.rejects(
+    () => buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], mainFields: ['browser'], scope: 'node_modules' }),
+    /--scope is not supported with --mainFields/,
+  )
+})
+
+test('CLI: bundle --mainFields --lockfile attests the resolved (incl. empty-stub) edges', withTmp((t, tmp) => {
+  const bundlePath = join(tmp, 'snap.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const r = runCli(['bundle', '--mainFields=react-native,browser,main', `--lockfile=${lockPath}`, `--output=${bundlePath}`, 'src/entry.js'], { cwd: fieldsFixture })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
+  const redir = lock.imports['*']['node_modules/redir/index.js']
+  t.assert.equal(redir['./node-only.js'], 'node_modules/redir/browser-only.js')
+  t.assert.equal(redir['./gone.js'], '.stasis/empty-module.js')
+  t.assert.equal(redir['leftpad'], '.stasis/empty-module.js')
+  // The empty module is attested as a real (empty) file in the workspace bucket.
+  t.assert.ok(lock.sources['.'].files['.stasis/empty-module.js'], 'empty module carries an integrity')
+}))
+
+test('CLI: a --mainFields bundle round-trips through --bundle=load (empty module + redirects from bundle)', withTmp((t, tmp) => {
+  cpSync(fieldsFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'stasis.code.br')
+  const build = runCli(['bundle', '--mainFields=react-native,browser,main', `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(build.status, 0, `bundle stderr: ${build.stderr}`)
+  // Prove the browser redirect and the synthetic empty module come from the bundle, not
+  // disk: drop the redirected-away file (its target browser-only.js stays), and note
+  // `leftpad` was never installed -- its `false` redirect can only resolve to the
+  // bundle's empty module.
+  rmSync(join(tmp, 'node_modules', 'redir', 'node-only.js'))
+  const load = runCli(['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'ok\n')
+}))
+
+test('--mainFields fails closed on a node_modules symlink whose target escapes the project root', withTmp((t, tmp) => {
+  // A dependency symlinked to a real file OUTSIDE the project root must not pull
+  // out-of-tree bytes into the bundle: the resolved path is realpath'd and rejected,
+  // the same way the State-based JS path and the non-JS loaders do.
+  const outside = mkdtempSync(join(tmpdir(), 'stasis-outside-'))
+  try {
+    writeFileSync(join(outside, 'evil.js'), 'module.exports = "external"\n')
+    mkdirSync(join(tmp, 'node_modules', 'extdep'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'extdep', 'package.json'), JSON.stringify({ name: 'extdep', version: '1.0.0', main: './index.js' }))
+    symlinkSync(join(outside, 'evil.js'), join(tmp, 'node_modules', 'extdep', 'index.js'))
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0' }))
+    writeFileSync(join(tmp, 'app.js'), "require('extdep')\n")
+    const r = runCli(['bundle', '--mainFields=browser,main', '--output=out.br', 'app.js'], { cwd: tmp })
+    t.assert.notEqual(r.status, 0)
+    t.assert.match(r.stderr, /escaping bundle root/)
+    t.assert.ok(!existsSync(join(tmp, 'out.br')), 'no bundle is written when a source escapes the root')
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+}))
+
+test('--mainFields bundles a dependency whose main is a directory or a broken path (no silent hole)', withTmp(async (t, tmp) => {
+  // Node's LOAD_AS_DIRECTORY: main "./inner/" -> inner/index.js, and a main pointing at a
+  // missing file falls back to the package index. A require() of such a package must be
+  // BUNDLED -- not dropped with only a warning, which would ship a silently-incomplete bundle.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'app.js'), "require('./local')\nrequire('barebad')\n")
+  mkdirSync(join(tmp, 'local', 'inner'), { recursive: true })
+  writeFileSync(join(tmp, 'local', 'package.json'), JSON.stringify({ main: './inner/' }))
+  writeFileSync(join(tmp, 'local', 'inner', 'index.js'), "module.exports = 'local'\n")
+  mkdirSync(join(tmp, 'node_modules', 'barebad'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'barebad', 'package.json'), JSON.stringify({ name: 'barebad', version: '1.0.0', main: './build/index.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'barebad', 'index.js'), "module.exports = 'barebad'\n")
+  const bundle = await buildBundle({ cwd: tmp, entries: ['app.js'], mainFields: ['browser', 'main'] })
+  const files = new Set(bundle.sources.keys())
+  t.assert.ok(files.has('local/inner/index.js'), 'directory-main dependency is bundled')
+  t.assert.ok(files.has('node_modules/barebad/index.js'), 'broken-main dependency falls back to index and is bundled')
+}))
+
+test('--mainFields fails closed when a real reached file occupies the reserved empty-module path', withTmp((t, tmp) => {
+  // A `false` browser redirect materialises a synthetic .stasis/empty-module.js; if the
+  // project already has a real file there AND it is reached, the bundle must refuse rather
+  // than clobber the real bytes with an empty module.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', browser: { leftpad: false } }))
+  mkdirSync(join(tmp, '.stasis'), { recursive: true })
+  writeFileSync(join(tmp, '.stasis', 'empty-module.js'), "module.exports = 'REAL'\n")
+  writeFileSync(join(tmp, 'app.js'), "require('./.stasis/empty-module.js')\nrequire('leftpad')\n")
+  const r = runCli(['bundle', '--mainFields=browser,main', '--output=out.br', 'app.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /reserved empty-module path/)
+}))
+
+test('--mainFields fails closed on a malformed package.json (does not resolve past it)', withTmp((t, tmp) => {
+  // Node throws ERR_INVALID_PACKAGE_CONFIG on a malformed manifest; the field resolver
+  // must fail closed too, not silently fall back to index.js (which would resolve where
+  // real Node rejects).
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'app.js'), "require('broken')\n")
+  mkdirSync(join(tmp, 'node_modules', 'broken'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'broken', 'package.json'), '{ not valid json')
+  writeFileSync(join(tmp, 'node_modules', 'broken', 'index.js'), "module.exports = 'broken'\n")
+  const r = runCli(['bundle', '--mainFields=browser,main', '--output=out.br', 'app.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Invalid package\.json/)
+  t.assert.ok(!existsSync(join(tmp, 'out.br')), 'no bundle written on a malformed manifest')
 }))
 
 // Regression: state.getImport used to `assert.ok(file)` on a missing edge,
