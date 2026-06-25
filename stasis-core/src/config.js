@@ -6,6 +6,7 @@ import { extSetsEqual, parseResourcesOption } from './util.js'
 const VALID_SCOPE = new Set(['node_modules', 'full'])
 const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])
 const VALID_BUNDLE = new Set(['none', 'ignore', 'add', 'replace', 'load', 'frozen'])
+const VALID_FS = new Set(['sync', 'async'])
 
 // The defaults Config applies when neither env nor options specify a value.
 // Exported so callers (plugins.js error messages) can reference the same source of
@@ -78,9 +79,10 @@ export class Config {
   #resources
   #debug
   #childProcess
+  #fs
 
   // Options match the CLI flags (scope/lock/lockFile/bundle/bundleFile/resourcesBundleFile/debug/
-  // resources/childProcess).
+  // resources/childProcess/fs).
   // Env vars take effect at construction time; if both env and an option are set they must
   // agree. Likewise, any explicit constructor option is treated as authoritative: a later
   // `loadConfig` call (which reads stasis.config.json) must agree with it -- the alternative
@@ -88,9 +90,9 @@ export class Config {
   // was a footgun the CLI couldn't detect, since the flag was happily accepted
   // and then quietly ignored.
   constructor(options = {}) {
-    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
-    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess }
+    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
@@ -102,6 +104,7 @@ export class Config {
       debug: process.env.EXODUS_STASIS_DEBUG || undefined,
       resources: process.env.EXODUS_STASIS_RESOURCES || undefined,
       childProcess: process.env.EXODUS_STASIS_CHILD_PROCESS || undefined,
+      fs: process.env.EXODUS_STASIS_FS || undefined,
     }
 
     try {
@@ -123,6 +126,7 @@ export class Config {
       if (this.#env.childProcess !== undefined && childProcess !== undefined) {
         assert.equal(envBool(this.#env.childProcess), childProcess)
       }
+      if (this.#env.fs !== undefined && fs !== undefined) assert.equal(this.#env.fs, fs)
       // Compare parsed sets, not the raw strings: ['png','svg'] and 'svg,png' are the
       // same allowlist. An empty/unset env var is "no env opinion" (handled by `||
       // undefined` above), so this only fires on two genuinely different non-empty lists.
@@ -144,6 +148,8 @@ export class Config {
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envBool(this.#env.debug) : (debug ?? false)
     this.#childProcess = this.#env.childProcess !== undefined ? envBool(this.#env.childProcess) : (childProcess ?? false)
+    // env wins over the option, like scope/lock/bundle; undefined means "fs untouched" (off).
+    this.#fs = this.#env.fs || fs || undefined
     // env wins over the option (it's the process-wide signal); parseResourcesOption
     // normalizes both to a Set of lowercase extensions/filenames, or empty when neither set.
     this.#resources = parseResourcesOption(
@@ -162,6 +168,15 @@ export class Config {
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
     assert.equal(typeof this.#childProcess, 'boolean', 'childProcess must be a boolean')
+    if (this.#fs !== undefined) {
+      assert.ok(VALID_FS.has(this.#fs), `Invalid fs: ${this.#fs}`)
+      // --fs patches the fs readers to capture into the bundle (add/replace) or serve them
+      // from it (load); with any other bundle mode it has nothing to record into or read from.
+      // Mirrors the CLI's "--fs requires --bundle=(add|replace|load)" guard.
+      if (this.#bundle !== 'add' && this.#bundle !== 'replace' && this.#bundle !== 'load') {
+        throw new RangeError(`fs requires bundle=(add|replace|load) (got bundle='${this.#bundle}')`)
+      }
+    }
     if (this.#bundleFile !== undefined) assert.equal(typeof this.#bundleFile, 'string', 'bundleFile must be a string')
     if (this.#lockFile !== undefined) {
       assert.equal(typeof this.#lockFile, 'string', 'lockFile must be a string')
@@ -228,6 +243,7 @@ export class Config {
       bundle = this.#bundle,
       debug = this.#debug,
       childProcess = this.#childProcess,
+      fs = this.#fs,
       resources,
       ...rest
     } = JSON.parse(json)
@@ -237,6 +253,7 @@ export class Config {
     this.#bundle = bundle
     this.#debug = debug
     this.#childProcess = childProcess
+    this.#fs = fs
     if (resources !== undefined) this.#resources = parseResourcesOption('stasis.config.json', resources)
     this.#checkInvariants()
 
@@ -246,6 +263,7 @@ export class Config {
       if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
       if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool(this.#env.debug))
       if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool(this.#env.childProcess))
+      if (this.#env.fs !== undefined) assert.equal(this.#fs, this.#env.fs)
       if (this.#env.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('env', envList(this.#env.resources))),
           'resources in stasis.config.json must match EXODUS_STASIS_RESOURCES')
@@ -258,6 +276,7 @@ export class Config {
       if (this.#explicit.bundle !== undefined) assert.equal(this.#bundle, this.#explicit.bundle)
       if (this.#explicit.debug !== undefined) assert.equal(this.#debug, this.#explicit.debug)
       if (this.#explicit.childProcess !== undefined) assert.equal(this.#childProcess, this.#explicit.childProcess)
+      if (this.#explicit.fs !== undefined) assert.equal(this.#fs, this.#explicit.fs)
       if (this.#explicit.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('options', this.#explicit.resources)),
           'resources in stasis.config.json must match the resources option')
@@ -306,6 +325,15 @@ export class Config {
   // so it's only created when explicitly enabled. Not attested (not in `values`), like debug.
   get childProcess() {
     return this.#childProcess
+  }
+
+  // The --fs hook mode: 'sync' patches the sync fs readers, 'async' additionally patches
+  // their async (callback + fs.promises) counterparts, undefined leaves fs untouched. Set via
+  // --fs / EXODUS_STASIS_FS / "fs" in stasis.config.json; the runtime loader (hooks.js) reads
+  // this on State init to decide whether (and how) to install the fs hooks. Not serialized --
+  // a how-to-run flag like debug/childProcess, not an attested property of the bundle.
+  get fs() {
+    return this.#fs
   }
 
   get values() {

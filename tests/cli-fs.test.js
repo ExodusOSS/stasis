@@ -936,3 +936,55 @@ test('run --fs=async --resources=map captures + serves a *.map (async opt-in, me
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'map:{"version":3}\n')
 }))
+
+// --- fs settable via stasis.config.json ("fs": "sync" | "async") ------------------
+// fs is a Config field like scope/lock/bundle, so the mode can live in stasis.config.json
+// instead of the --fs CLI flag. The bundle mode still comes from the CLI here (the bundle
+// file is a per-test tmp path); only `fs` moves into the config. The fixture's config sets
+// resources=[bin,txt], which the per-kind format assertions below depend on, so preserve it.
+const writeFsConfig = (tmp, extra) =>
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full', resources: ['bin', 'txt'], ...extra }))
+
+test('"fs":"sync" in stasis.config.json captures fs reads without the --fs flag', withTmp((t, tmp) => {
+  writeFsConfig(tmp, { fs: 'sync' })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp }) // no --fs
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, EXPECTED_STDOUT)
+  // Identical captures to the --fs=sync flag: the directory listing + per-kind formats + bytes.
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/assets'], 'directory')
+  t.assert.equal(bundle.formats['src/assets/blob.bin'], 'resource:base64')
+  t.assert.equal(bundle.sources['.'].files['src/assets/message.txt'], 'hello from txt\n')
+}))
+
+test('"fs":"async" in stasis.config.json routes async install without the --fs flag', withTmp((t, tmp) => {
+  // 'async' is a superset of 'sync', so the entry's sync reads are still captured; this pins
+  // that the config value is forwarded as the install mode (async: fs === 'async'), not just sync.
+  writeFsConfig(tmp, { fs: 'async' })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, EXPECTED_STDOUT)
+  t.assert.equal(decode(bundlePath).formats['src/assets'], 'directory')
+}))
+
+test('"fs":"sync" in stasis.config.json serves bundle=load without the --fs flag', withTmp((t, tmp) => {
+  writeFsConfig(tmp, { fs: 'sync' })
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  rmSync(join(tmp, 'src', 'assets'), { recursive: true }) // gone from disk: must be served from the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, EXPECTED_STDOUT)
+}))
+
+test('"fs" in stasis.config.json requires an active bundle mode', withTmp((t, tmp) => {
+  // No --bundle (defaults to none): Config rejects fs, which has nothing to capture into / serve from.
+  writeFsConfig(tmp, { fs: 'sync' })
+  const r = run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /fs requires bundle=\(add\|replace\|load\)/)
+}))

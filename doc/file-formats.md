@@ -28,6 +28,7 @@ directory holding the lockfile; none may start with `..`.
 | `lock` | `"ignore"`, `"add"`, `"replace"`, `"frozen"` | `"add"` | `EXODUS_STASIS_LOCK` |
 | `bundle` | `"ignore"`, `"add"`, `"replace"`, `"load"`, `"frozen"` | unset | `EXODUS_STASIS_BUNDLE` |
 | `debug` | boolean | `false` | `EXODUS_STASIS_DEBUG` |
+| `fs` | `"sync"`, `"async"` | unset | `EXODUS_STASIS_FS` |
 
 `add` loads existing data and refuses to modify it; `replace` ignores it and
 rebuilds from scratch; `frozen` loads it read-only and requires every
@@ -39,9 +40,12 @@ additionally *serves* the recorded bytes in place of reading disk, whereas
 itself the attestation, so a frozen bundle needs no sibling lockfile (it
 "operates as a lockfile"). `bundle = load` is incompatible with
 `lock = add | replace`; `bundle = frozen` composes with any `lock` mode; and at
-least one of `lock`/`bundle` must be set. Unknown keys are rejected. If both the file
-and env var set a key, they must match. Only `scope` is persisted into the
-lockfile/bundle `config` block.
+least one of `lock`/`bundle` must be set. `fs` is the filesystem-capture mode
+(equivalent to the `--fs` CLI flag; see "Filesystem captures" below) and requires a
+read/write bundle mode (`bundle = add | replace | load`). Unknown keys are rejected.
+If both the file and env var set a key, they must match. Only `scope` is persisted
+into the lockfile/bundle `config` block (`debug`, `childProcess` and `fs` are run-time
+flags, not attested).
 
 ## `stasis.lock.json`
 
@@ -327,7 +331,9 @@ error as "not a symlink", so an absent recorded file resolves correctly unserved
 deprecated callback `fs.exists`, …) so a program's
 explicit file reads are recorded into the bundle (`--bundle=add|replace`) and served back
 from it (`--bundle=load`). The same `--fs=…` flag is needed on the load run for the patch
-to serve; an un-captured read falls through to the real disk read.
+to serve; an un-captured read falls through to the real disk read. The mode can equivalently
+be set as `"fs": "sync" | "async"` in `stasis.config.json` (or `EXODUS_STASIS_FS`), which
+both the capture and load runs then pick up without repeating the flag.
 
 `--fs=async` patches everything `--fs=sync` does **and** the async counterparts —
 the callback forms `fs.readFile`/`fs.readdir`/`fs.lstat`/`fs.stat`/`fs.access`/`fs.realpath`

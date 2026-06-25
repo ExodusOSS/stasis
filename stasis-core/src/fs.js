@@ -1,4 +1,5 @@
-// `stasis run --fs=sync|async` (EXODUS_STASIS_FS): monkey-patch the filesystem readers
+// `stasis run --fs=sync|async` (EXODUS_STASIS_FS, or "fs" in stasis.config.json): monkey-patch
+// the filesystem readers
 // fs.readFileSync, fs.readdirSync, fs.lstatSync, fs.statSync so that, alongside the
 // module graph the loader hooks already capture, a program's explicit file/directory
 // reads are recorded into the bundle (bundle=add|replace) and served back from it
