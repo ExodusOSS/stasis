@@ -709,6 +709,26 @@ test('Config fs: stasis.config.json conflicting with the env var throws', withEn
   }
 ))
 
+test('loadConfig keeps an env-set fs when the file omits the key', withEnv(
+  { EXODUS_STASIS_FS: 'sync', EXODUS_STASIS_BUNDLE: 'add' },
+  (t) => {
+    // The interaction the feature enables: --fs/env set the mode, a stasis.config.json without
+    // an `fs` key must preserve it (fs = this.#fs default) and the env cross-check must still pass.
+    const c = new Config()
+    t.assert.equal(c.fs, 'sync')
+    c.loadConfig(json({ scope: 'node_modules' }))
+    t.assert.equal(c.fs, 'sync', 'env-set fs survives a config load that omits it')
+    t.assert.equal(c.scope, 'node_modules')
+  }
+))
+
+test('loadConfig fs agreeing with the constructor option is accepted', (t) => {
+  // Exercises the explicit-option cross-check's pass branch (config agrees with new Config({fs})).
+  const c = new Config({ bundle: 'add', fs: 'sync' })
+  c.loadConfig(json({ fs: 'sync' }))
+  t.assert.equal(c.fs, 'sync')
+})
+
 test('validatePluginOptions rejects fs (not a plugin option; --fs is a loader/CLI concern)', (t) => {
   // Like lockFile: the fs reader patches are a `stasis run` loader feature, never a plugin's to
   // set, so fs is an unknown plugin option caught by the generic check regardless of its value.
