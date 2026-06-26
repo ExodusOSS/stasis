@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -235,6 +235,35 @@ test('run honors a bundleFile set only in stasis.config.json (capture + load rou
   const r = run(['run', '--lock=none', '--bundle=load', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `load stderr: ${r.stderr}`)
   t.assert.match(r.stdout, /hello, world/, 'code must have been served from the config-specified bundle')
+}))
+
+test('run honors a config-only bundleFile in a nested-package (monorepo) layout', withTmp((t, tmp) => {
+  // Regression: the discovery loop did not break after committing to the inner package, so the
+  // OUTER repo root re-detected the same (rootDir-independent) bundleFile at its own probe and
+  // threw 'Stasis config already loaded' on bundle=load/frozen. Layout below yields
+  // potentialRoots = [packages/foo, <tmp>] (the .git at <tmp> stops the upward walk there).
+  mkdirSync(join(tmp, '.git'))
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'root', version: '1.0.0' }))
+  const foo = join(tmp, 'packages', 'foo')
+  mkdirSync(join(foo, 'src'), { recursive: true })
+  writeFileSync(join(foo, 'package.json'), JSON.stringify({ name: 'foo', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(foo, 'src', 'entry.js'), "import { hello } from './hello.js'\nconsole.log(hello)\n")
+  writeFileSync(join(foo, 'src', 'hello.js'), "export const hello = 'HELLO-MONO'\n")
+  const configPath = join(foo, 'stasis.config.json')
+  const writeConfig = (bundle) =>
+    writeFileSync(configPath, JSON.stringify({ scope: 'full', lock: 'none', bundle, bundleFile: 'custom.code.br' }))
+
+  writeConfig('add')
+  const save = run(['run', '--lock=none', '--bundle=add', 'src/entry.js'], { cwd: foo })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.ok(existsSync(join(foo, 'custom.code.br')), 'bundle written under the leaf package')
+
+  writeConfig('load')
+  rmSync(join(foo, 'src'), { recursive: true })
+  const r = run(['run', '--lock=none', '--bundle=load', 'src/entry.js'], { cwd: foo })
+  t.assert.equal(r.status, 0, `load stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /HELLO-MONO/, 'code served from the config-specified bundle under the leaf package')
+  t.assert.doesNotMatch(r.stderr, /Stasis config already loaded/, 'outer root must not re-detect the bundle')
 }))
 
 test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp((t, tmp) => {

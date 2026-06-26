@@ -152,7 +152,6 @@ if (command === '-v' || command === '--version') {
         usage(`Error: no existing parent directory for ${flag}=${file}; create one first or choose a path under an existing directory`)
       }
       if (!writeAllow.includes(p)) writeAllow.push(p) // both targets often share a parent dir
-
     }
     nodeArgs.push('--permission', '--allow-fs-read=*')
     for (const p of writeAllow) nodeArgs.push(`--allow-fs-write=${p}`)

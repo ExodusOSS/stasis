@@ -522,6 +522,13 @@ export class State {
             this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
           }
         }
+
+        // The innermost matching rootDir is authoritative (per-dir opt-in, see above), so stop
+        // scanning once committed. An explicit/config `bundleFile` is rootDir-independent: without
+        // this break an outer candidate root re-detects the SAME bundle file at its own probe and
+        // trips the `loaded` guard above -- which crashed bundle=load/frozen in any nested-package
+        // (monorepo) layout where a leaf package sits under an ancestor that also has a package.json.
+        break
       }
     }
 

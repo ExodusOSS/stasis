@@ -146,6 +146,36 @@ test('run --fs --resources-bundle-file splits resources into a separate bundle (
   t.assert.equal(load.stdout, EXPECTED_STDOUT)
 }))
 
+test('run --fs splits resources when bundleFile + resourcesBundleFile come only from stasis.config.json', withTmp((t, tmp) => {
+  // Symmetric with the flag-based split above, but both bundle paths are set ONLY in
+  // stasis.config.json (no --bundle-file / --resources-bundle-file flags) -- exercising the
+  // config.json read path for resourcesBundleFile end-to-end through a load round-trip.
+  const codePath = join(tmp, 'code.br')
+  const resPath = join(tmp, 'resources.br')
+  const configPath = join(tmp, 'stasis.config.json')
+  const writeConfig = (lock, bundle) =>
+    writeFileSync(configPath, JSON.stringify(
+      { scope: 'full', resources: ['bin', 'txt'], lock, bundle, bundleFile: 'code.br', resourcesBundleFile: 'resources.br' }))
+
+  writeConfig('add', 'add')
+  const save = run(['run', '--lock=add', '--bundle=add', '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, EXPECTED_STDOUT)
+  t.assert.ok(existsSync(codePath) && existsSync(resPath), 'both halves written to the config-specified paths')
+
+  const code = decode(codePath)
+  const res = decode(resPath)
+  t.assert.deepEqual(Object.keys(code.sources['.'].files).toSorted(), ['src/assets/data.json', 'src/entry.js'])
+  t.assert.deepEqual(Object.keys(res.sources['.'].files).toSorted(), ['src/assets', 'src/assets/blob.bin', 'src/assets/message.txt'])
+  t.assert.equal(res.formats['src/assets'], 'directory')
+
+  writeConfig('frozen', 'load')
+  rmSync(join(tmp, 'src'), { recursive: true })
+  const load = run(['run', '--lock=frozen', '--bundle=load', '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, EXPECTED_STDOUT)
+}))
+
 test('run --bundle=load WITHOUT --fs does not serve fs reads (falls back to disk)', withTmp((t, tmp) => {
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
