@@ -128,6 +128,12 @@ export function resolvePluginState(label, options, cwd) {
     }
   }
 
+  // A plugin instance is attaching to the preload now (its constructor called us). Mark it so the
+  // preload's bundle `reason` map can tell apart files run merely fs-READS during the build (the
+  // plugin's modules, e.g. webpack+babel reading app source through --fs) from genuine run
+  // dependencies recorded before any plugin existed. See State#bundleReason.
+  ambient.markPluginAttached()
+
   if (pc.bundle) {
     // Preload has bundle on -- plugin can't disable, must match mode.
     if (bundle === 'none' || bundle === 'ignore') {
