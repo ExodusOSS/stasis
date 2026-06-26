@@ -129,6 +129,12 @@ export class State {
   // Keyed by consumer ('run' for the loader/CLI; a plugin label like 'StasisMetro' for a plugin
   // sharing this State). Populated only when bundling. See #recordReason / #bundleReason.
   #reasonFiles = new Map()
+  // Supporting state so the bundle `reason` map's "run" entry stays accurate (see #bundleReason):
+  // files run loaded as a MODULE (#runImported), files run merely fs-READ after a plugin attached
+  // (#fsReadPostPlugin), and whether a bundler plugin has attached to this State (#pluginAttached).
+  #runImported = new Set()
+  #fsReadPostPlugin = new Set()
+  #pluginAttached = false
 
   // Files, resolutions, and formats attested by a frozen bundle (bundle=frozen),
   // or null when no frozen bundle was loaded. A frozen bundle plays the same
@@ -1038,7 +1044,7 @@ export class State {
   // knowable from bytes): the module loader is the authority, so the fs-read capture
   // must not impose the legacy `commonjs` default and collide with a `module` the
   // loader records for the same file when it is both imported and read.
-  addFile(url, { source, format, isEntry, isBinary, resource, inferFormat = true, reason = 'run' } = {}) {
+  addFile(url, { source, format, isEntry, isBinary, resource, inferFormat = true, reason = 'run', fsRead = false } = {}) {
     const asResource = resource === true || isBinary === true
     // A resource format must not arrive on the code path: 'resource' /
     // 'resource:base64' identifies asset payloads, which State stores in
@@ -1149,7 +1155,15 @@ export class State {
     const integrity = sha512integrity(source)
     noupsert(this.hashes, file, integrity)
     if (this.config.childProcess) this.#observed.add(file) // only a child's shardSnapshot reads it; skip when the channel is off
-    if (this.config.bundle && reason !== null) this.#recordReason(reason, file) // provenance for the bundle's `reason` field (null = not a consumer observation, e.g. write-time backfill)
+    if (this.config.bundle && reason !== null) {
+      this.#recordReason(reason, file) // provenance for the bundle's `reason` field (null = not a consumer observation, e.g. backfill)
+      // Track HOW 'run' saw this file so #bundleReason can drop files run merely fs-READ after a
+      // plugin attached that a plugin actually bundles (e.g. webpack+babel reading app source).
+      if (reason === 'run') {
+        if (!fsRead) this.#runImported.add(file)
+        else if (this.#pluginAttached) this.#fsReadPostPlugin.add(file)
+      }
+    }
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
 
@@ -1241,7 +1255,7 @@ export class State {
     const path = fileURLToPath(url)
     const kind = classifyExtension(path, this.config.resources)
     if (kind === 'resource') {
-      this.addFile(url, { source, resource: true })
+      this.addFile(url, { source, resource: true, fsRead: true })
       return
     }
     const ext = extname(path).toLowerCase()
@@ -1251,7 +1265,7 @@ export class State {
         `add its extension or filename to the resources allowlist or stop reading it`
       )
     }
-    this.addFile(url, { source, inferFormat: ext !== '.js' && ext !== '.ts' })
+    this.addFile(url, { source, inferFormat: ext !== '.js' && ext !== '.ts', fsRead: true })
   }
 
   // Record an `fs.readdirSync(path)` capture (single-arg form only). The listing is
@@ -1270,7 +1284,10 @@ export class State {
     const integrity = sha512integrity(content)
     noupsert(this.hashes, file, integrity)
     if (this.config.childProcess) this.#observed.add(file) // only a child's shardSnapshot reads it; skip when the channel is off
-    if (this.config.bundle) this.#recordReason('run', file) // directory captures come only from the loader's --fs
+    // Directory captures come only from the loader's --fs, and a plugin never records a readdir
+    // listing (plugins only addFile), so a directory key is never in #bundleReason's pluginFiles
+    // and can never be dropped from 'run' -- no need to track it in #fsReadPostPlugin.
+    if (this.config.bundle) this.#recordReason('run', file)
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
 
@@ -1694,6 +1711,15 @@ export class State {
     return modules
   }
 
+  // A bundler plugin instance has attached to this State (called from resolvePluginState at the
+  // plugin's construction). Files this run merely fs-READS *after* this point that a plugin also
+  // bundles are the plugin's modules, not run's -- see #bundleReason. Idempotent. Public so it
+  // works across stasis-core copies (the plugin may be a foreign-copy instance), like
+  // registerSidecar / sidecarInheritance.
+  markPluginAttached() {
+    this.#pluginAttached = true
+  }
+
   // Record which consumer (`reason`) observed `file`, for the bundle's informational `reason` map.
   #recordReason(reason, file) {
     let set = this.#reasonFiles.get(reason)
@@ -1707,6 +1733,17 @@ export class State {
   // or a standalone plugin) omits it. Never attested; purely for humans / tooling.
   #bundleReason(bundledFiles) {
     const inBundle = bundledFiles instanceof Set ? bundledFiles : new Set(bundledFiles)
+    // Files some PLUGIN bundles (any consumer other than 'run'). A file run merely fs-READ (never
+    // imported) after a plugin attached, that a plugin also bundles, is the plugin's module -- e.g.
+    // webpack+babel reading app source through --fs to transform it -- so 'run' must not claim it.
+    const pluginFiles = new Set()
+    for (const [who, recorded] of this.#reasonFiles) {
+      if (who === 'run') continue
+      for (const file of recorded) pluginFiles.add(file)
+    }
+    const runOverclaims = (file) =>
+      this.#fsReadPostPlugin.has(file) && !this.#runImported.has(file) && pluginFiles.has(file)
+
     const reason = {}
     let consumers = 0
     // Sort consumer keys AND each file list, like every other map in the bundle (sortPaths, via
@@ -1714,7 +1751,11 @@ export class State {
     // loader-vs-plugin record order, else #emitBundle's compare-and-skip would see spurious diffs.
     for (const who of [...this.#reasonFiles.keys()].toSorted()) {
       const files = []
-      for (const file of this.#reasonFiles.get(who)) if (inBundle.has(file)) files.push(file)
+      for (const file of this.#reasonFiles.get(who)) {
+        if (!inBundle.has(file)) continue
+        if (who === 'run' && runOverclaims(file)) continue
+        files.push(file)
+      }
       if (files.length > 0) { reason[who] = files.toSorted(sortPaths); consumers += 1 }
     }
     return consumers > 1 ? reason : undefined

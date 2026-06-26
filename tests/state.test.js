@@ -662,3 +662,34 @@ test('bundle records a `reason` map only when more than one consumer contributes
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('bundle `reason`: run does not claim a file it only fs-reads AFTER a plugin attaches that the plugin bundles', (t) => {
+  // webpack+babel under `stasis run`: babel reads app source through --fs to transform it, so the
+  // loader's --fs hook records those files as 'run' -- but they are the plugin's bundled modules,
+  // not run dependencies. Such a file is dropped from 'run' iff it was (1) only fs-READ (never
+  // imported by run), (2) read AFTER a plugin attached, and (3) bundled by a plugin.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-reason-fs-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    for (const f of ['entry.js', 'early.js', 'app.js']) writeFileSync(join(dir, f), `export const x = '${f}'\n`)
+    const url = (f) => pathToFileURL(join(dir, f)).toString()
+    const src = (f) => Buffer.from(`export const x = '${f}'\n`)
+
+    const s = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
+    s.addFile(url('entry.js'), { source: src('entry.js'), format: 'module', isEntry: true })         // run IMPORTS (module)
+    s.addFsFile(url('early.js'), src('early.js'))                                                      // run fs-reads BEFORE any plugin
+    s.addFile(url('early.js'), { source: src('early.js'), format: 'module', reason: 'StasisWebpack' }) // ...and a plugin bundles it
+
+    s.markPluginAttached()                                                                             // a plugin instance is created
+    s.addFsFile(url('app.js'), src('app.js'))                                                          // run fs-reads AFTER (babel transform)
+    s.addFile(url('app.js'), { source: src('app.js'), format: 'module', reason: 'StasisWebpack' })     // ...and the plugin bundles it
+
+    const reason = JSON.parse(s.sourceData).reason
+    // app.js is dropped from run (fs-only, post-plugin, bundled); early.js stays (fs-read BEFORE the
+    // plugin); entry.js stays (a genuine run import). The plugin keeps everything it bundled.
+    t.assert.deepEqual(reason.run, ['early.js', 'entry.js'])
+    t.assert.deepEqual(reason.StasisWebpack, ['app.js', 'early.js'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
