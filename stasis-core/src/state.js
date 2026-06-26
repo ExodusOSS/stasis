@@ -198,7 +198,8 @@ export class State {
   //     write() on a sidecar skips the lockfile (parent owns it) and only writes its bundle.
   //   All other keys forward to Config.
   constructor(root, options = {}) {
-    const { preload: isPreload = false, parent: parentState, preloadRoot, ...configOptions } = options
+    // skipDiscovery: build a caller-populated, in-memory State with NO filesystem discovery -- root is the passed `root` arg, and sources/imports/formats/entries are filled in by the caller after construction (no package.json walk, no on-disk config/lockfile/bundle reads). For artifact-driven tooling like `stasis build`, which serves a parsed bundle (or a lockfile reconstructed + verified in memory) and must not depend on a project's stasis.config.json or read a stray stasis.code.br. Read-only (load/ignore) modes only.
+    const { preload: isPreload = false, parent: parentState, preloadRoot, skipDiscovery = false, ...configOptions } = options
     this.config = new Config(configOptions)
     if (isPreload) assert.ok(!State.preload, 'Only one preload Stasis instance is supported')
     assert.ok(!(isPreload && parentState), 'preload and parent are mutually exclusive')
@@ -320,6 +321,25 @@ export class State {
       // lockfile cross-check already happened in #mergeBundleMetadata above.
       if (this.config.writeBundle) parentState.registerSidecar(this)
       else if (this.config.loadBundle) parentState.registerReadSidecar(this)
+      liveStates().add(this)
+      return
+    }
+
+    // skipDiscovery (see the constructor comment): a caller-populated, in-memory State.
+    // Skip the entire filesystem-discovery path -- anchor at the given root, read nothing --
+    // and let the caller fill in the maps. Only sound for read-only load/ignore modes:
+    // there is no on-disk attestation to load or verify, so frozen modes are rejected.
+    if (skipDiscovery) {
+      // Read-only by contract: a caller-populated in-memory State has no on-disk baseline,
+      // so neither frozen verification (nothing to verify against) nor write modes (nothing
+      // discovered to write) are meaningful. `stasis build` uses bundle:'load', lock:'ignore'.
+      assert.ok(!this.config.frozen && !this.config.frozenBundle && !this.config.writeBundle && !this.config.writeLockfile,
+        'skipDiscovery is read-only: incompatible with frozen and write (add/replace) lock/bundle modes')
+      this.root = resolve(root)
+      if (preloadRoot !== undefined) {
+        assert.equal(typeof preloadRoot, 'string', 'preloadRoot must be a string')
+        this.#preloadRoot = preloadRoot
+      }
       liveStates().add(this)
       return
     }

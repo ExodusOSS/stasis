@@ -47,6 +47,9 @@ importers:
       '@exodus/stasis-core':
         specifier: 1.0.0-alpha.3
         version: link:../stasis-core
+      esbuild:
+        specifier: '*'
+        version: 0.27.3
       oxc-parser:
         specifier: ^0.94.0
         version: 0.94.0(@emnapi/core@1.11.0)(@emnapi/runtime@1.11.0)

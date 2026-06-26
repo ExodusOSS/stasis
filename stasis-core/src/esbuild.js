@@ -19,13 +19,30 @@ export class StasisEsbuild {
   #seen = new Set()
   #state
   #resources
+  #loaders
 
-  constructor(options = {}) {
-    const { state } = resolvePluginState('StasisEsbuild', options, process.cwd())
+  constructor(options = {}, { loaders } = {}) {
+    // A caller that owns a State (e.g. `stasis build`) can pass it directly to drive the plugin, bypassing resolvePluginState; mode follows that State's config, and a foreign-copy State fails closed via the instanceof miss.
+    const state = options instanceof State
+      ? options
+      : resolvePluginState('StasisEsbuild', options, process.cwd()).state
     this.#state = state  // null when plugin should be inert
     // resources is a Config field now (validated + coordinated against any preload in
     // resolvePluginState); cache the resolved Set for the per-file classify hot path.
     this.#resources = state?.config.resources ?? new Set()
+    // Per-extension esbuild loader overrides (e.g. { '.js' -> 'jsx' } so a .js file
+    // carrying JSX -- the React Native convention -- parses; esbuild's default 'js'
+    // loader rejects JSX). Keyed by extname WITH the dot; falls back to the
+    // extension-derived loader (see #loaderFor) when an extension isn't overridden.
+    this.#loaders = loaders ?? new Map()
+  }
+
+  // The esbuild loader for a served file: an explicit per-extension override if the
+  // caller configured one, else derived from the extension (.cjs/.mjs/.cts/.mts strip
+  // their leading module letter to js/ts; other code extensions map 1:1 to a loader).
+  #loaderFor(path) {
+    const ext = extname(path)
+    return this.#loaders.get(ext) ?? ext.replace(/^\.[cm]?/u, '')
   }
 
   get name() {
@@ -170,8 +187,7 @@ export class StasisEsbuild {
       if (this.#state.config.loadBundle) {
         const { source } = this.#state.getFile(pathToFileURL(path).toString())
         if (kind === 'resource') return { contents: source }
-        const loader = extname(path).replace(/^\.[cm]?/, '')
-        return { contents: source, loader }
+        return { contents: source, loader: this.#loaderFor(path) }
       }
 
       const source = await realReadFile(path)
@@ -202,10 +218,7 @@ export class StasisEsbuild {
         this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry })
       }
 
-      // .cjs/.mjs/.cts/.mts strip to 'js'/'ts' via the leading-letter peel; the other
-      // code extensions map 1:1 to esbuild's loader names.
-      const loader = extname(path).replace(/^\.[cm]?/, '')
-      return { contents: source, loader }
+      return { contents: source, loader: this.#loaderFor(path) }
     })
   }
 }

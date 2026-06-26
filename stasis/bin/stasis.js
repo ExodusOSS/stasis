@@ -27,6 +27,7 @@ function usage(prefix = '') {
  stasis bundle [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout)
+ stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
@@ -258,6 +259,75 @@ if (command === '-v' || command === '--version') {
     mainFields,
     metro,
     platforms,
+  })
+} else if (command === 'build') {
+  const flags = []
+  const valueFlags = new Set(['--output', '-o', '--format', '--platform', '--define', '--external', '--loader'])
+  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
+    flags.push(argv.shift())
+  }
+  const options = {
+    output: { type: 'string', short: 'o' },
+    format: { type: 'string' },
+    platform: { type: 'string' },
+    minify: { type: 'boolean' },
+    sourcemap: { type: 'boolean' },
+    // Repeatable esbuild passthroughs: --define=K=V (one substitution each),
+    // --external=PATTERN (one external each), and --loader=.ext:name (one extension
+    // loader override each). Each collects into an array.
+    define: { type: 'string', multiple: true },
+    external: { type: 'string', multiple: true },
+    loader: { type: 'string', multiple: true },
+  }
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
+  if (argv.length === 0) usage('Nothing to build: no bundle or lockfile given')
+  if (argv.length > 2) usage('Error: build takes a bundle or lockfile and an optional entry point')
+  // esbuild output knobs; the import graph itself is fixed by the artifact, not these.
+  if (values.format !== undefined && !['esm', 'cjs', 'iife'].includes(values.format)) {
+    usage('Error: --format must be esm, cjs, or iife')
+  }
+  if (values.platform !== undefined && !['node', 'browser', 'neutral'].includes(values.platform)) {
+    usage('Error: --platform must be node, browser, or neutral')
+  }
+  if (!values.output) usage('Error: --output is required (a .js/.cjs/.mjs file, or a directory)')
+  // `-` is the stdout sentinel for `bundle`/`sbom`, but `build` writes via esbuild and can't
+  // stream; without this it would silently create a directory literally named `-`.
+  if (values.output === '-') usage('Error: stasis build cannot stream to stdout; --output must be a .js/.cjs/.mjs file or a directory')
+  // --define=KEY=VALUE -> esbuild's define map. The value is forwarded to esbuild verbatim,
+  // so it must be valid JS the same way esbuild's CLI requires (a JSON literal, an
+  // identifier, ...): e.g. --define=process.env.NODE_ENV='"production"' or --define=DEBUG=false.
+  const define = {}
+  for (const entry of values.define ?? []) {
+    const eq = entry.indexOf('=')
+    if (eq <= 0) usage(`Error: --define must be KEY=VALUE (got '${entry}')`)
+    define[entry.slice(0, eq)] = entry.slice(eq + 1)
+  }
+  // --loader=.ext:NAME -> esbuild loader override for that extension, e.g.
+  // --loader=.js:jsx so a .js file carrying JSX (the React Native convention) parses.
+  const loader = {}
+  for (const entry of values.loader ?? []) {
+    const colon = entry.indexOf(':')
+    if (colon <= 0 || !entry.startsWith('.')) usage(`Error: --loader must be .EXT:LOADER (got '${entry}')`)
+    loader[entry.slice(0, colon)] = entry.slice(colon + 1)
+  }
+  const { buildCommand } = await import('../src/cmd/build.js')
+  await buildCommand({
+    cwd: process.cwd(),
+    artifact: argv[0],
+    entry: argv[1],
+    output: values.output,
+    format: values.format,
+    platform: values.platform,
+    minify: values.minify,
+    sourcemap: values.sourcemap,
+    define,
+    external: values.external ?? [],
+    loader,
   })
 } else if (command === 'extract') {
   const flags = []

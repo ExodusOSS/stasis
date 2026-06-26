@@ -12,6 +12,7 @@
     "./mock": "./src/mock.js",
     "./bundle": "./src/bundle.js",
     "./cmd/bundle": "./src/cmd/bundle.js",
+    "./cmd/build": "./src/cmd/build.js",
     "./diff": "./src/diff.js",
     "./lockfile": "./src/lockfile.js",
     "./prune": "./src/prune.js",
@@ -25,7 +26,9 @@
     "src/apis/npm/semver.cjs",
     "src/audit.js",
     "src/bundle.js",
+    "src/bundle-from-lockfile.js",
     "src/cmd/bundle.js",
+    "src/cmd/build.js",
     "src/cmd/diff.js",
     "src/cmd/extract.js",
     "src/cmd/sbom.js",
@@ -67,5 +70,13 @@
   "dependencies": {
     "@exodus/stasis-core": "1.0.0-alpha.3",
     "oxc-parser": "^0.94.0"
+  },
+  "peerDependencies": {
+    "esbuild": "*"
+  },
+  "peerDependenciesMeta": {
+    "esbuild": {
+      "optional": true
+    }
   }
 }

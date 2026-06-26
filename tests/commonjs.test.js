@@ -373,6 +373,37 @@ test('run --bundle=load resolves a cache-shared #imports subpath within the impo
   t.assert.equal(load.stdout, 'AIMPL|BIMPL\n') // each #impl resolves within its own package
 }))
 
+// A workspace `#imports` subpath that is cache-shared at capture: main.cjs requires
+// #local first (loading impl.cjs), so y.cjs's require('#local') hits Node's module cache.
+// The Module._load capture shim still records y.cjs's edge, so at load -- where main.cjs
+// (no WARM) reaches y.cjs first -- y.cjs's #local resolves via its OWN recorded edge.
+test('run --bundle=load resolves a cache-shared workspace #imports subpath from the bundle', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ws-imp', version: '1.0.0', private: true, imports: { '#local': './impl.cjs' } }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.mjs'), "import m from './main.cjs'\nconsole.log(m)\n")
+  writeFileSync(join(tmp, 'main.cjs'), "module.exports = (process.env.WARM ? require('#local') : '') + require('./y.cjs')\n")
+  writeFileSync(join(tmp, 'y.cjs'), "module.exports = require('#local')\n")
+  writeFileSync(join(tmp, 'impl.cjs'), "module.exports = 'LOCAL'\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'],
+    { cwd: tmp, env: { ...cleanEnv, WARM: '1' } }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  // Remove the target from disk so the bundle is the only source: at load, y.cjs's
+  // recorded #local edge resolves to impl.cjs, served from the bundle (not disk).
+  rmSync(join(tmp, 'impl.cjs'))
+
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.mjs'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'LOCAL\n')
+}))
+
 // require.resolve() resolves through native Module._resolveFilename and, on Node
 // versions where that bypasses the resolve hook (e.g. 24.x), addImport never sees
 // it -- so the edge wasn't recorded and require.resolve() failed at load even when

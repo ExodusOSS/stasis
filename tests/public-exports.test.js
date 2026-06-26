@@ -2,6 +2,7 @@ import { test } from 'node:test'
 
 import { Bundle } from '@exodus/stasis/bundle'
 import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
+import { buildCommand, bundleFromLockfile } from '@exodus/stasis/cmd/build'
 import { diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact } from '@exodus/stasis/diff'
 import { Lockfile } from '@exodus/stasis/lockfile'
 import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
@@ -38,6 +39,11 @@ test('@exodus/stasis/metro-transformer re-exports the stasis-core worker transfo
 test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API', (t) => {
   t.assert.equal(typeof buildBundle, 'function')
   t.assert.equal(typeof bundleCommand, 'function')
+})
+
+test('@exodus/stasis/cmd/build exports the build command and the lockfile-to-bundle helper', (t) => {
+  t.assert.equal(typeof buildCommand, 'function')
+  t.assert.equal(typeof bundleFromLockfile, 'function')
 })
 
 test('@exodus/stasis/lockfile exports Lockfile class', (t) => {
