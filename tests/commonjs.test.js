@@ -228,6 +228,35 @@ test('run --bundle=load resolves an under-recorded (module-cached) require from 
   t.assert.equal(load.stdout, 'Sb\n')
 }))
 
+// Capture side of the under-recording: Node's Module._load fast path
+// (relativeResolveCache, keyed by the parent DIRECTORY + request) returns an
+// already-loaded module WITHOUT calling _resolveFilename, so a SECOND sibling
+// importer's require() of the same target was never observed and its edge went
+// unrecorded. index.js requires ./a then ./b; a.js loads ./shared (caching it), so
+// b.js's require('./shared') hits the cache. The _load observe-shim records the true
+// per-importer edge at capture, so BOTH a.js's and b.js's `./shared` edges land.
+test('run --bundle=add records a sibling importer\'s require() edge (no under-recording)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'sib', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.mjs'), "import 'pkg'\n")
+  const pkg = join(tmp, 'node_modules', 'pkg')
+  mkdirSync(pkg, { recursive: true })
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'pkg', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(pkg, 'index.js'), "require('./a'); require('./b')\n") // a runs first -> caches shared
+  writeFileSync(join(pkg, 'a.js'), "module.exports = require('./shared')\n")
+  writeFileSync(join(pkg, 'b.js'), "module.exports = require('./shared')\n") // sibling: hits relativeResolveCache
+  writeFileSync(join(pkg, 'shared.js'), "module.exports = 'S'\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const bundle = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  const hasEdge = (parent) => Object.values(bundle.imports).some((byParent) => byParent[parent]?.['./shared'] !== undefined)
+  t.assert.ok(hasEdge('node_modules/pkg/a.js'), 'pkg/a.js -> ./shared recorded')
+  t.assert.ok(hasEdge('node_modules/pkg/b.js'), 'pkg/b.js -> ./shared recorded (the previously under-recorded sibling edge)')
+}))
+
 // Review finding: an under-recorded relative require of a directory whose
 // package.json `main` != index.js must resolve to `main`, not index.js. The bundle
 // carries no package.json, so structural resolution alone picks the wrong file;
