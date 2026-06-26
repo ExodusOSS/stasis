@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
+ stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)
@@ -38,7 +38,7 @@ if (command === '-v' || command === '--version') {
   process.exit(0)
 } else if (command === 'run') {
   const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file', '--lock', '--resources'])
+  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -47,6 +47,7 @@ if (command === '-v' || command === '--version') {
     lock: { type: 'string', default: 'none' },
     bundle: { type: 'string', default: 'none' },
     'bundle-file': { type: 'string' },
+    'resources-bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
     'child-process': { type: 'boolean' },
@@ -66,9 +67,14 @@ if (command === '-v' || command === '--version') {
   const scope = values.dependencies ? 'node_modules' : 'full'
   const bundle = values.bundle
   const bundleFile = values['bundle-file'] ? resolve(values['bundle-file']) : ''
+  const resourcesBundleFile = values['resources-bundle-file'] ? resolve(values['resources-bundle-file']) : ''
   const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
+  // Unlike --bundle-file (which is inert-but-harmless under --bundle=ignore, so Config allows
+  // it), --resources-bundle-file needs an active bundle: Config rejects bundle=none AND ignore
+  // (resourcesBundleFile requires an active bundle mode). Front-run that with a clean usage error.
+  if (resourcesBundleFile && (bundle === 'none' || bundle === 'ignore')) usage('Error: --resources-bundle-file requires --bundle=(add|replace|load|frozen)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
   if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
   // --fs monkey-patches the fs readers (readFileSync/readdirSync + lstatSync/statSync)
@@ -84,12 +90,13 @@ if (command === '-v' || command === '--version') {
   // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
   // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
   const childProcess = values['child-process'] ? '1' : ''
-  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
+  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
+  setEnv('EXODUS_STASIS_RESOURCES_BUNDLE_FILE', resourcesBundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)

@@ -391,14 +391,30 @@ export class State {
     for (const rootDir of potentialRoots) {
       const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8')
       const lockProbe = explicitLockPath ? null : readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
-      const sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
-      const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+      // Probe for a bundle at the construction-time bundleFile (a --bundle-file flag or
+      // EXODUS_STASIS_BUNDLE_FILE) or, absent that, the default <rootDir>/stasis.code.br.
+      // This is only a root-detection signal -- the authoritative path can still change when
+      // loadConfig() applies a `bundleFile` from stasis.config.json, so it's re-read below.
+      let sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
+      let sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
       if (config !== null || lockProbe !== null || sources !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
         loaded = true
         this.root = rootDir
 
-        if (config) this.config.loadConfig(config)
+        if (config) {
+          this.config.loadConfig(config)
+          // stasis.config.json may set `bundleFile`, which the probe above (using the
+          // construction-time value) could not see. Re-resolve against the now-authoritative
+          // config and re-read, so a config-only bundleFile is honored for load/frozen -- the
+          // write side (state.write) already resolves bundleFile after loadConfig. This mirrors
+          // the resourcesBundleFile read below, which is naturally post-loadConfig.
+          const configuredPath = this.config.bundleFile || join(rootDir, FILE_CODE)
+          if (configuredPath !== sourcesPath) {
+            sourcesPath = configuredPath
+            sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+          }
+        }
 
         // Resolve the effective lockfile content + path for this run. With an explicit
         // `config.lockFile`, the lockfile is at that exact path (loaded once, not at a

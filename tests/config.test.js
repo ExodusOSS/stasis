@@ -151,6 +151,52 @@ test('loadConfig bundle=add -> writeBundle, bundle truthy, not replace', (t) => 
   t.assert.equal(c.ignoreBundle, false)
 })
 
+test('loadConfig with resourcesBundleFile (split-resources layout)', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ bundle: 'add', resourcesBundleFile: 'resources.br' }))
+  t.assert.equal(c.resourcesBundleFile, 'resources.br')
+})
+
+test('loadConfig resourcesBundleFile without a bundle mode is rejected', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ lock: 'add', resourcesBundleFile: 'resources.br' })),
+    /requires an active bundle mode/)
+})
+
+test('loadConfig resourcesBundleFile conflicting with EXODUS_STASIS_RESOURCES_BUNDLE_FILE is rejected', withEnv(
+  { EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_RESOURCES_BUNDLE_FILE: '/abs/res.br' },
+  (t) => {
+    const c = new Config()
+    t.assert.equal(c.resourcesBundleFile, '/abs/res.br') // env is picked up at construction
+    t.assert.throws(() => c.loadConfig(json({ bundle: 'add', resourcesBundleFile: '/abs/other.br' })),
+      /can not override stasis\.config\.json/)
+  }
+))
+
+test('loadConfig with bundleFile (set via stasis.config.json)', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ bundle: 'add', bundleFile: 'bundle.br' }))
+  t.assert.equal(c.bundleFile, 'bundle.br')
+})
+
+// Unlike resourcesBundleFile, bundleFile carries no "requires an active bundle mode"
+// constraint -- a lock-only config may still name a bundleFile.
+test('loadConfig accepts bundleFile without a bundle mode', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ lock: 'add', bundleFile: 'bundle.br' }))
+  t.assert.equal(c.bundleFile, 'bundle.br')
+})
+
+test('loadConfig bundleFile conflicting with EXODUS_STASIS_BUNDLE_FILE is rejected', withEnv(
+  { EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_BUNDLE_FILE: '/abs/bundle.br' },
+  (t) => {
+    const c = new Config()
+    t.assert.equal(c.bundleFile, '/abs/bundle.br') // env is picked up at construction
+    t.assert.throws(() => c.loadConfig(json({ bundle: 'add', bundleFile: '/abs/other.br' })),
+      /can not override stasis\.config\.json/)
+  }
+))
+
 test('loadConfig bundle=replace -> writeBundle and replaceBundle', (t) => {
   const c = new Config()
   c.loadConfig(json({ bundle: 'replace' }))

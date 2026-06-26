@@ -20,6 +20,7 @@ const {
   EXODUS_STASIS_SCOPE: _s,
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
+  EXODUS_STASIS_RESOURCES_BUNDLE_FILE: _rbf,
   EXODUS_STASIS_DEBUG: _d,
   EXODUS_STASIS_FS: _fs,
   ...cleanEnv
@@ -105,6 +106,40 @@ test('run --fs --bundle=load serves the reads from the bundle with the files gon
 
   const load = run(
     ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, EXPECTED_STDOUT)
+}))
+
+test('run --fs --resources-bundle-file splits resources into a separate bundle (and load round-trips)', withTmp((t, tmp) => {
+  const codePath = join(tmp, 'code.br')
+  const resPath = join(tmp, 'resources.br')
+  const save = run(
+    ['run', '--lock=add', '--bundle=add', `--bundle-file=${codePath}`, `--resources-bundle-file=${resPath}`, '--fs=sync', 'src/entry.js'],
+    { cwd: tmp }
+  )
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, EXPECTED_STDOUT)
+  t.assert.ok(existsSync(codePath) && existsSync(resPath), 'both bundle halves written')
+
+  const code = decode(codePath)
+  const res = decode(resPath)
+  // Code half: the entry + the .json (code-by-extension). Resources half: the txt/bin/dir captures.
+  t.assert.deepEqual(Object.keys(code.sources['.'].files).toSorted(), ['src/assets/data.json', 'src/entry.js'])
+  t.assert.deepEqual(Object.keys(res.sources['.'].files).toSorted(), ['src/assets', 'src/assets/blob.bin', 'src/assets/message.txt'])
+  // Formats are partitioned to their own half.
+  t.assert.equal(code.formats['src/assets/data.json'], 'json')
+  t.assert.equal(code.formats['src/assets/message.txt'], undefined, 'resource formats absent from the code half')
+  t.assert.equal(res.formats['src/assets/message.txt'], 'resource')
+  t.assert.equal(res.formats['src/assets/blob.bin'], 'resource:base64')
+  t.assert.equal(res.formats['src/assets'], 'directory')
+  t.assert.equal((res.entries ?? []).length, 0, 'resources half carries no entries')
+
+  // bundle=load reassembles BOTH halves and serves them with the sources gone from disk.
+  rmSync(join(tmp, 'src'), { recursive: true })
+  const load = run(
+    ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${codePath}`, `--resources-bundle-file=${resPath}`, '--fs=sync', 'src/entry.js'],
     { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)

@@ -91,6 +91,22 @@ test('run rejects --bundle-file without a non-none --bundle', (t) => {
   t.assert.match(r.stderr, /--bundle-file requires --bundle/)
 })
 
+test('run rejects --resources-bundle-file without a non-none --bundle', (t) => {
+  const r = run(['run', '--lock=add', '--resources-bundle-file=/tmp/r.br', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--resources-bundle-file requires --bundle/)
+})
+
+test('run rejects --resources-bundle-file with --bundle=ignore (it needs an active bundle)', (t) => {
+  // Config rejects resourcesBundleFile under bundle=ignore; the bin must front-run that with a
+  // clean usage error. Regression: the guard previously only caught `none` (letting `ignore`
+  // through to an ugly child RangeError) and the message wrongly advertised `ignore` as valid.
+  // The `frozen)` anchor below would not match the old `frozen|ignore)` message.
+  const r = run(['run', '--lock=add', '--bundle=ignore', '--resources-bundle-file=/tmp/r.br', 'a.js'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /Error: --resources-bundle-file requires --bundle=\(add\|replace\|load\|frozen\)/)
+})
+
 test('run rejects --bundle=load with --lock=add', (t) => {
   const r = run(['run', '--lock=add', '--bundle=load', '--bundle-file=/tmp/x.br', 'a.js'])
   t.assert.equal(r.status, 1)
@@ -193,6 +209,32 @@ test('run --lock=frozen --bundle=load detects a tampered source in the bundle', 
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
   t.assert.doesNotMatch(r.stdout, /pwned/, 'tampered payload must not be executed')
+}))
+
+test('run honors a bundleFile set only in stasis.config.json (capture + load round-trip)', withTmp((t, tmp) => {
+  // Regression: state.js root-discovery resolved the bundle path from config.bundleFile BEFORE
+  // loadConfig() applied stasis.config.json, so a config-only bundleFile (no --bundle-file flag,
+  // no env) was ignored on load -- the bundle silently failed to load (or, with a stale default
+  // stasis.code.br present, loaded the wrong file). The write side already ran post-loadConfig.
+  cpSync(runFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json')) // lock=none must not meet an existing lockfile
+  const configPath = join(tmp, 'stasis.config.json')
+  const writeConfig = (bundle) =>
+    writeFileSync(configPath, JSON.stringify({ scope: 'full', lock: 'none', bundle, bundleFile: 'custom.code.br' }))
+
+  // capture: bundleFile comes ONLY from stasis.config.json
+  writeConfig('add')
+  const save = run(['run', '--lock=none', '--bundle=add', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.ok(existsSync(join(tmp, 'custom.code.br')), 'bundle written to the config-specified path')
+  t.assert.ok(!existsSync(join(tmp, 'stasis.code.br')), 'nothing written to the default path')
+
+  // load: remove on-disk sources so the bundle is the ONLY source of code
+  writeConfig('load')
+  rmSync(join(tmp, 'src'), { recursive: true })
+  const r = run(['run', '--lock=none', '--bundle=load', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `load stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /hello, world/, 'code must have been served from the config-specified bundle')
 }))
 
 test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp((t, tmp) => {

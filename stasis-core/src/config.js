@@ -241,6 +241,8 @@ export class Config {
       scope = this.#scope,
       lock = this.#lock,
       bundle = this.#bundle,
+      bundleFile = this.#bundleFile,
+      resourcesBundleFile = this.#resourcesBundleFile,
       debug = this.#debug,
       childProcess = this.#childProcess,
       fs = this.#fs,
@@ -251,6 +253,11 @@ export class Config {
     this.#scope = scope
     this.#lock = lock
     this.#bundle = bundle
+    // Coerce '' -> undefined to match the constructor: an empty-string path is "unset"
+    // everywhere downstream (State consumes bundleFile truthily), but #checkInvariants would
+    // otherwise resolve('') -> cwd and claim it as a write target.
+    this.#bundleFile = bundleFile || undefined
+    this.#resourcesBundleFile = resourcesBundleFile || undefined
     this.#debug = debug
     this.#childProcess = childProcess
     this.#fs = fs
@@ -261,6 +268,8 @@ export class Config {
       if (this.#env.scope !== undefined) assert.equal(this.#scope, this.#env.scope)
       if (this.#env.lock !== undefined) assert.equal(this.#lock, this.#env.lock)
       if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
+      if (this.#env.bundleFile !== undefined) assert.equal(this.#bundleFile, this.#env.bundleFile)
+      if (this.#env.resourcesBundleFile !== undefined) assert.equal(this.#resourcesBundleFile, this.#env.resourcesBundleFile)
       if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool(this.#env.debug))
       if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool(this.#env.childProcess))
       if (this.#env.fs !== undefined) assert.equal(this.#fs, this.#env.fs)
@@ -274,6 +283,8 @@ export class Config {
       if (this.#explicit.scope !== undefined) assert.equal(this.#scope, this.#explicit.scope)
       if (this.#explicit.lock !== undefined) assert.equal(this.#lock, this.#explicit.lock)
       if (this.#explicit.bundle !== undefined) assert.equal(this.#bundle, this.#explicit.bundle)
+      if (this.#explicit.bundleFile !== undefined) assert.equal(this.#bundleFile, this.#explicit.bundleFile)
+      if (this.#explicit.resourcesBundleFile !== undefined) assert.equal(this.#resourcesBundleFile, this.#explicit.resourcesBundleFile)
       if (this.#explicit.debug !== undefined) assert.equal(this.#debug, this.#explicit.debug)
       if (this.#explicit.childProcess !== undefined) assert.equal(this.#childProcess, this.#explicit.childProcess)
       if (this.#explicit.fs !== undefined) assert.equal(this.#fs, this.#explicit.fs)

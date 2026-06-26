@@ -15,6 +15,7 @@ const {
   EXODUS_STASIS_SCOPE: _s,
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
+  EXODUS_STASIS_RESOURCES_BUNDLE_FILE: _rbf,
   EXODUS_STASIS_DEBUG: _d,
   ...cleanEnv
 } = process.env
@@ -132,6 +133,19 @@ test('run --mock refuses a --bundle-file whose ancestors do not exist', (t) => {
   ])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /no existing parent directory for --bundle-file/)
+})
+
+test('run --mock refuses a --resources-bundle-file whose ancestors do not exist', (t) => {
+  // The dual-target write-grant loop must walk the *resources* target too (not just
+  // --bundle-file) and name the offending flag correctly in the refusal. --bundle-file
+  // here has an existing parent (/tmp) so the loop reaches and rejects the resources arg.
+  const r = run([
+    'run', '--lock=frozen', '--bundle=add',
+    '--bundle-file=/tmp/stasis-mock-code.br',
+    '--resources-bundle-file=/zzz-no-such-toplevel-9998/res.br', '--mock', 'a.js',
+  ])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /no existing parent directory for --resources-bundle-file/)
 })
 
 test('run --mock writes a --bundle-file under a not-yet-existing directory outside cwd', withTmp(async (t, tmp) => {

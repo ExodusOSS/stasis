@@ -19,7 +19,7 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -51,7 +51,7 @@ if (command === '-v' || command === '--version') {
   process.exit(0)
 } else if (command === 'run') {
   const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file', '--lock', '--resources'])
+  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -60,6 +60,7 @@ if (command === '-v' || command === '--version') {
     lock: { type: 'string', default: 'none' },
     bundle: { type: 'string', default: 'none' },
     'bundle-file': { type: 'string' },
+    'resources-bundle-file': { type: 'string' },
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
     'child-process': { type: 'boolean' },
@@ -80,9 +81,14 @@ if (command === '-v' || command === '--version') {
   const scope = values.dependencies ? 'node_modules' : 'full'
   const bundle = values.bundle
   const bundleFile = values['bundle-file'] ? resolve(values['bundle-file']) : ''
+  const resourcesBundleFile = values['resources-bundle-file'] ? resolve(values['resources-bundle-file']) : ''
   const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
+  // Unlike --bundle-file (which is inert-but-harmless under --bundle=ignore, so Config allows
+  // it), --resources-bundle-file needs an active bundle: Config rejects bundle=none AND ignore
+  // (resourcesBundleFile requires an active bundle mode). Front-run that with a clean usage error.
+  if (resourcesBundleFile && (bundle === 'none' || bundle === 'ignore')) usage('Error: --resources-bundle-file requires --bundle=(add|replace|load|frozen)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
   if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
   if (values.mock && bundle === 'load') usage('Error: --mock is for capturing imports while building a bundle; not compatible with --bundle=load')
@@ -100,12 +106,13 @@ if (command === '-v' || command === '--version') {
   // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
   // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
   const childProcess = values['child-process'] ? '1' : ''
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(childProcess && { childProcess: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
   setEnv('EXODUS_STASIS_BUNDLE', bundle)
   setEnv('EXODUS_STASIS_BUNDLE_FILE', bundleFile)
+  setEnv('EXODUS_STASIS_RESOURCES_BUNDLE_FILE', resourcesBundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
@@ -128,24 +135,24 @@ if (command === '-v' || command === '--version') {
   const nodeArgs = []
   if (values.mock) {
     const writeAllow = [process.cwd()]
-    if (bundleFile && !bundleFile.startsWith(`${process.cwd()}/`)) {
-      // --allow-fs-write paths must already exist on disk; granting the bundle
-      // file's own path is not enough when state.write()'s mkdirSync has to
-      // create the parent chain. Walk up to the nearest existing ancestor and
-      // grant write there -- broader than ideal, but the user explicitly chose
-      // this location for their bundle.
-      // (Note: the cwd check above uses '/' as a separator and is therefore
-      //  unix-only; that matches the rest of the project's path handling.)
-      let p = dirname(bundleFile)
+    // --allow-fs-write paths must already exist on disk; granting a bundle file's own path is not
+    // enough when state.write()'s mkdirSync has to create the parent chain. For each out-of-cwd
+    // bundle target (code and/or split resources), walk up to the nearest existing ancestor and
+    // grant write there -- broader than ideal, but the user explicitly chose these locations.
+    // (Note: the cwd check uses '/' as a separator and is therefore unix-only; that matches the
+    //  rest of the project's path handling.)
+    for (const [flag, file] of [['--bundle-file', bundleFile], ['--resources-bundle-file', resourcesBundleFile]]) {
+      if (!file || file.startsWith(`${process.cwd()}/`)) continue
+      let p = dirname(file)
       while (!existsSync(p) && dirname(p) !== p) p = dirname(p)
-      // Refuse to grant write access to the filesystem root: it would
-      // effectively disable the --permission layer everywhere, and reaching
-      // it means none of the bundle path's ancestors exist -- the user
-      // almost certainly didn't intend this. Ask them to create a parent.
+      // Refuse to grant write access to the filesystem root: it would effectively disable the
+      // --permission layer everywhere, and reaching it means none of the path's ancestors exist --
+      // the user almost certainly didn't intend this. Ask them to create a parent.
       if (p === dirname(p)) {
-        usage(`Error: no existing parent directory for --bundle-file=${bundleFile}; create one first or choose a path under an existing directory`)
+        usage(`Error: no existing parent directory for ${flag}=${file}; create one first or choose a path under an existing directory`)
       }
-      writeAllow.push(p)
+      if (!writeAllow.includes(p)) writeAllow.push(p) // both targets often share a parent dir
+
     }
     nodeArgs.push('--permission', '--allow-fs-read=*')
     for (const p of writeAllow) nodeArgs.push(`--allow-fs-write=${p}`)
