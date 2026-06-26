@@ -185,7 +185,11 @@ function resolutionsOf(imports) {
         const key = JSON.stringify([parent, specifier])
         let entry = byPair.get(key)
         if (!entry) byPair.set(key, (entry = { parent, specifier, targets: new Set() }))
-        entry.targets.add(target)
+        // A `--metro` edge target may be a { platform: file } map; fold each
+        // platform's file into the target set, so a redirect is compared at the
+        // "what files does this resolve to" level regardless of platform keying.
+        if (target instanceof Map) for (const f of target.values()) entry.targets.add(f)
+        else entry.targets.add(target)
       }
     }
   }

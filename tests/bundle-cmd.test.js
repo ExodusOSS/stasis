@@ -8,6 +8,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
 import {
   buildBashBundle,
   buildBundle,
@@ -17,6 +18,7 @@ import {
   bundleCommand,
   outermostDir,
 } from '../stasis/src/cmd/bundle.js'
+import { diffCommand } from '../stasis/src/cmd/diff.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
@@ -1095,14 +1097,18 @@ test('CLI: bundle --conditions --lockfile attests the conditions-selected resolu
   t.assert.equal(lock.imports['*']['src/entry.js'].rnpkg, 'node_modules/rnpkg/rn.js')
 }))
 
-// --- Legacy-field resolution (`--mainFields`) ---
+// --- Legacy-field / Metro resolution (`--mainFields`, `--metro --platforms`) ---
 //
 // These drive the legacy-field resolver (tests/resolve-fields.test.js covers it in
 // isolation). The relevant fixtures live under tests/fixtures/resolve-fields:
 // `entryfields` (mainFields entry), `redir` (browser object map incl. false->empty),
-// and `exportswins` (exports beats a browser main field). Edges are always flat
-// (a single target per specifier).
-const importTarget = (bundle, parent, spec) => bundle.imports.get('*').get(parent).get(spec)
+// `exportswins` (exports beats a browser main field), and platform-suffixed Button.*.
+// A `--mainFields` edge is always flat; a `--metro` edge unflattens to a
+// `{ platform: target }` map where the requested platforms diverge.
+const importTarget = (bundle, parent, spec) => {
+  const t = bundle.imports.get('*').get(parent).get(spec)
+  return t instanceof Map ? Object.fromEntries(t) : t
+}
 
 test('buildBundle --mainFields resolves entry fields, browser redirects, and empty stubs (flat edges)', async (t) => {
   const bundle = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], mainFields: ['react-native', 'browser', 'main'] })
@@ -1119,6 +1125,145 @@ test('buildBundle --mainFields resolves entry fields, browser redirects, and emp
   t.assert.equal(bundle.sources.get('.stasis/empty-module.js'), '')
   t.assert.equal(bundle.formats.get('.stasis/empty-module.js'), 'commonjs')
 })
+
+test('buildBundle --metro bundles every platform at once: union files, divergent edges unflatten', async (t) => {
+  const bundle = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], metro: true, platforms: ['ios', 'android'] })
+  const files = new Set(bundle.sources.keys())
+  // Both platform variants are carried (the file set is the union across platforms).
+  t.assert.ok(files.has('src/Button.ios.js') && files.has('src/Button.android.js'))
+  // The divergent edge unflattens to a { platform: file } map keyed by the supplied platforms.
+  t.assert.deepEqual(importTarget(bundle, 'src/entry.js', './Button'), {
+    android: 'src/Button.android.js',
+    ios: 'src/Button.ios.js',
+  })
+  // An edge every platform agrees on stays flat. (--metro asserts react-native, so exports wins -> rn.js.)
+  t.assert.equal(importTarget(bundle, 'src/entry.js', 'exportswins'), 'node_modules/exportswins/rn.js')
+})
+
+test('buildBundle --metro with a single platform never unflattens (stays flat)', async (t) => {
+  const bundle = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], metro: true, platforms: ['ios'] })
+  t.assert.equal(importTarget(bundle, 'src/entry.js', './Button'), 'src/Button.ios.js')
+})
+
+test('buildBundle --metro: a base .js can appear when one platform resolves to it', async (t) => {
+  // ios resolves Button.ios.js; web has no Button.web.js and excludes .native, so it
+  // resolves the base Button.js -- the edge unflattens and the base file is carried.
+  const bundle = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], metro: true, platforms: ['ios', 'web'] })
+  t.assert.deepEqual(importTarget(bundle, 'src/entry.js', './Button'), {
+    ios: 'src/Button.ios.js',
+    web: 'src/Button.js',
+  })
+  t.assert.ok([...bundle.sources.keys()].includes('src/Button.js'))
+})
+
+test('CLI: bundle --metro --platforms writes a bundle + lockfile that round-trip with the platform map', withTmp((t, tmp) => {
+  const out = join(tmp, 'metro.br')
+  const lock = join(tmp, 'metro.lock.json')
+  const r = runCli(
+    ['bundle', '--metro', '--platforms=ios,android', `--lockfile=${lock}`, `--output=${out}`, 'src/entry.js'],
+    { cwd: fieldsFixture },
+  )
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  t.assert.deepEqual(Object.fromEntries(bundle.imports.get('*').get('src/entry.js').get('./Button')), {
+    android: 'src/Button.android.js',
+    ios: 'src/Button.ios.js',
+  })
+  // The companion lockfile attests the same per-platform edge (by integrity).
+  const lockfile = Lockfile.parse(readFileSync(lock, 'utf8'))
+  const lt = lockfile.imports.get('*').get('src/entry.js').get('./Button')
+  t.assert.ok(lt instanceof Map)
+  t.assert.deepEqual(Object.fromEntries(lt), { android: 'src/Button.android.js', ios: 'src/Button.ios.js' })
+}))
+
+test('CLI: --platforms accepts repeats and comma lists, unioned', withTmp((t, tmp) => {
+  const out = join(tmp, 'metro.br')
+  const r = runCli(
+    ['bundle', '--metro', '--platforms=ios', '--platforms=ios,android', `--output=${out}`, 'src/entry.js'],
+    { cwd: fieldsFixture },
+  )
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  // Both platforms took effect (the edge unflattened across ios+android).
+  t.assert.deepEqual(Object.keys(Object.fromEntries(bundle.imports.get('*').get('src/entry.js').get('./Button'))), ['android', 'ios'])
+}))
+
+test('CLI: a --metro multi-platform bundle fails closed under plain --bundle=load', withTmp((t, tmp) => {
+  const out = join(tmp, 'metro.br')
+  t.assert.equal(runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${out}`, 'src/entry.js'], { cwd: fieldsFixture }).status, 0)
+  // Plain node has no platform context to pick a per-platform edge -> clear error, not a crash.
+  const load = runCli(['run', '--lock=none', '--bundle=load', `--bundle-file=${out}`, 'src/entry.js'], { cwd: fieldsFixture })
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /platform-specific|ERR_STASIS_PLATFORM_SPECIFIC/)
+}))
+
+test('CLI: a --metro bundle verifies clean against its own companion lockfile at load (no ERR_ASSERTION)', withTmp((t, tmp) => {
+  cpSync(fieldsFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'stasis.code.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  t.assert.equal(runCli(['bundle', '--metro', '--platforms=ios,android', `--lockfile=${lockPath}`, `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp }).status, 0)
+  // `--lock=frozen` loads the bundle AND verifies it against the companion lockfile, so
+  // the constructor cross-checks every edge; a per-platform edge is a Map on BOTH sides
+  // and must compare STRUCTURALLY -- not throw ERR_ASSERTION on identical-but-distinct
+  // Maps. The verification passes clean, then it fails closed at getImport (no platform
+  // context) with the clean platform-specific error -- never an assertion mismatch.
+  const load = runCli(['run', '--bundle=load', '--lock=frozen', `--bundle-file=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.notEqual(load.status, 0)
+  t.assert.match(load.stderr, /platform-specific|ERR_STASIS_PLATFORM_SPECIFIC/)
+  t.assert.doesNotMatch(load.stderr, /ERR_ASSERTION|mismatches the lockfile/)
+}))
+
+test('CLI: --metro requires --platforms; --platforms requires --metro; --metro forbids --conditions/--mainFields', (t) => {
+  t.assert.match(runCli(['bundle', '--metro', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /--metro requires --platforms/)
+  t.assert.match(runCli(['bundle', '--platforms=ios', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /--platforms is only valid with --metro/)
+  t.assert.match(runCli(['bundle', '--metro', '--platforms=ios', '--conditions=x', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /--conditions can't be combined with --metro/)
+  t.assert.match(runCli(['bundle', '--metro', '--platforms=ios', '--mainFields=browser', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /--mainFields can't be combined with --metro/)
+  t.assert.match(runCli(['bundle', '--metro', '--platforms=ios', 'a.sol']).stderr, /--metro is only valid for JS bundles/)
+})
+
+test('--platforms rejects a name containing / or * (the parsers would refuse the edge key)', async (t) => {
+  // A platform name becomes an edge key; Bundle/Lockfile parse reject '/', and '*' is the
+  // reserved placeholder. The writer must reject both rather than emit an unreadable bundle.
+  t.assert.match(runCli(['bundle', '--metro', '--platforms=ios,x/y', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /invalid --platforms value 'x\/y'/)
+  t.assert.match(runCli(['bundle', '--metro', '--platforms=*', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /invalid --platforms value '\*'/)
+  await t.assert.rejects(
+    () => buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], metro: true, platforms: ['ios', 'x/y'] }),
+    /invalid platform 'x\/y'/,
+  )
+})
+
+test('CLI: diff folds per-platform edges to the resolved-file set (detects a divergent target)', withTmp((t, tmp) => {
+  const iosAndroid = join(tmp, 'ios-android.br')
+  const iosWeb = join(tmp, 'ios-web.br')
+  t.assert.equal(runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${iosAndroid}`, 'src/entry.js'], { cwd: fieldsFixture }).status, 0)
+  t.assert.equal(runCli(['bundle', '--metro', '--platforms=ios,web', `--output=${iosWeb}`, 'src/entry.js'], { cwd: fieldsFixture }).status, 0)
+  // ./Button is a per-platform Map on BOTH sides (ios+android vs ios+web); the FOLD is
+  // what surfaces the divergence -- folded target sets {Button.ios.js, Button.android.js}
+  // vs {Button.ios.js, Button.js} differ. Without the fold both Maps contribute nothing
+  // and the edge would read unchanged, so assert it IS reported as a changed import.
+  const stub = { write() {} }
+  const { diff } = diffCommand({ left: iosAndroid, right: iosWeb, stat: true, imports: true, out: stub })
+  const buttonChange = diff.imports.changed.find((c) => c.parent === 'src/entry.js' && c.specifier === './Button')
+  t.assert.ok(buttonChange, './Button must be reported as a changed import')
+  // The FOLD reduces each side's per-platform Map to its resolved-file SET; assert those
+  // exact sets, so the test fails if the fold is removed (the targets would be raw Maps).
+  t.assert.deepEqual(new Set(buttonChange.from), new Set(['src/Button.android.js', 'src/Button.ios.js']))
+  t.assert.deepEqual(new Set(buttonChange.to), new Set(['src/Button.ios.js', 'src/Button.js']))
+  // A --metro bundle still diffs clean against an identical copy (no false positives).
+  const copy = join(tmp, 'copy.br')
+  t.assert.equal(runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${copy}`, 'src/entry.js'], { cwd: fieldsFixture }).status, 0)
+  t.assert.equal(diffCommand({ left: iosAndroid, right: copy, stat: true, imports: true, out: stub }).differences, false)
+}))
+
+test('CLI: extract unpacks a --metro multi-platform bundle (both variants + a platform-keyed lockfile)', withTmp((t, tmp) => {
+  const out = join(tmp, 'metro.br')
+  t.assert.equal(runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${out}`, 'src/entry.js'], { cwd: fieldsFixture }).status, 0)
+  const dir = join(tmp, 'ex')
+  t.assert.equal(runCli(['extract', `--output=${dir}`, out]).status, 0)
+  t.assert.ok(existsSync(join(dir, 'src', 'Button.ios.js')) && existsSync(join(dir, 'src', 'Button.android.js')))
+  const lock = JSON.parse(readFileSync(join(dir, 'stasis.lock.json'), 'utf8'))
+  t.assert.deepEqual(lock.imports['*']['src/entry.js']['./Button'], { android: 'src/Button.android.js', ios: 'src/Button.ios.js' })
+}))
 
 test('CLI: bundle --mainFields rejects a non-JS bundle and an empty value', (t) => {
   t.assert.match(runCli(['bundle', '--mainFields=browser', 'a.sol']).stderr, /--mainFields is only valid for JS bundles/)

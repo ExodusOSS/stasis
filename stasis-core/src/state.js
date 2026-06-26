@@ -730,7 +730,14 @@ export class State {
       assert.ok(targets.size === 1, `${what} resolution ${edge} is attested inconsistently across condition sets in the ${source}`)
       ;[attested] = targets
     }
-    assert.equal(file, attested, `${what} resolution ${edge} mismatches the ${source}`)
+    // A per-platform edge is a Map<platform, target>; compare it structurally -- a plain
+    // assert.equal is reference equality, so two identical Maps (the bundle's edge and the
+    // lockfile's) would never match. A flat string edge stays a plain ===; a Map-vs-string
+    // (e.g. a per-platform attestation vs a single observed runtime target) is a mismatch.
+    const matches = file instanceof Map && attested instanceof Map
+      ? file.size === attested.size && [...file].every(([platform, target]) => attested.get(platform) === target)
+      : file === attested
+    assert.ok(matches, `${what} resolution ${edge} mismatches the ${source}`)
   }
 
   // Verify one file's loader format against an attestation map (`source`: a
@@ -1541,6 +1548,15 @@ export class State {
       // those guards.
       const err = new Error(`Cannot find module '${specifier}' imported from ${parent}`)
       err.code = 'ERR_MODULE_NOT_FOUND'
+      throw err
+    }
+    // A `stasis bundle --metro` artifact records a { platform: file } Map for an
+    // edge that resolves differently per platform. Plain `stasis run --bundle=load`
+    // has no platform context to pick one, so it can't serve such an edge -- fail
+    // closed with a clear error rather than feeding a Map where a path is expected.
+    if (typeof file !== 'string') {
+      const err = new Error(`Resolution of '${specifier}' from ${parent} is platform-specific (a --metro multi-platform bundle); it can't be loaded by plain node, build a single-platform bundle to load`)
+      err.code = 'ERR_STASIS_PLATFORM_SPECIFIC'
       throw err
     }
     const url = pathToFileURL(resolve(this.root, file)).toString()

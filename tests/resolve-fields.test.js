@@ -17,16 +17,35 @@ const rel = (r) => {
   return relative(fx, fileURLToPath(r.url)).split(/[\\/]/u).join('/')
 }
 
-// Build a resolver, varying the bits a caller tweaks (the legacy fields it honours
-// and any extra `exports` conditions).
-const mk = ({ mainFields = ['react-native', 'browser', 'main'], extras = [] } = {}) =>
+// Build a resolver, varying the bits a caller tweaks (the legacy fields it honours,
+// the target `platform` and native-suffix preference, and any extra `exports`
+// conditions). `platform: null` (the default, the `--mainFields` case) disables
+// platform-suffix probing; for a real platform, web alone excludes `.native`.
+const mk = ({ mainFields = ['react-native', 'browser', 'main'], extras = [], platform = null, preferNative = platform !== null && platform !== 'web' } = {}) =>
   createFieldResolver({
     conditions: resolveConditions('module', extras),
     mainFields,
+    platform,
+    preferNative,
   })
 
 test('a relative import resolves with extension probing', (t) => {
   t.assert.equal(rel(mk()(entry, './Button')), 'src/Button.js')
+})
+
+test('platform suffixes: name.<platform>.ext beats name.native.ext beats name.ext', (t) => {
+  t.assert.equal(rel(mk({ platform: 'ios' })(entry, './Button')), 'src/Button.ios.js')
+  t.assert.equal(rel(mk({ platform: 'android' })(entry, './Button')), 'src/Button.android.js')
+})
+
+test('web excludes the .native variant (preferNative is false for web)', (t) => {
+  // Button.native.js exists, but web must not pick it -- it falls through to the base.
+  t.assert.equal(rel(mk({ platform: 'web', extras: ['browser'] })(entry, './Button')), 'src/Button.js')
+})
+
+test('a native platform with no platform-specific file falls back to .native', (t) => {
+  // No Button.windows.js exists; windows is a native platform, so .native wins over base.
+  t.assert.equal(rel(mk({ platform: 'windows' })(entry, './Button')), 'src/Button.native.js')
 })
 
 test('a relative directory import honours package.json main even when exports is present', (t) => {

@@ -82,10 +82,25 @@ export class Lockfile {
           assert(!posixPathEscapes(parent))
           assert(isPlainObject(specifiers))
           const specs = new Map()
-          for (const [specifier, file] of Object.entries(specifiers)) {
-            assert(typeof file === 'string')
-            assert(!posixPathEscapes(file))
-            specs.set(specifier, file)
+          for (const [specifier, target] of Object.entries(specifiers)) {
+            // A file string (the common case) or, for a `--metro` multi-platform
+            // lockfile, a { platform: file } map for an edge that resolves
+            // differently per platform. Reject any other shape (fail closed).
+            if (typeof target === 'string') {
+              assert(!posixPathEscapes(target))
+              specs.set(specifier, target)
+            } else {
+              assert(isPlainObject(target) && Object.keys(target).length > 0,
+                'import target must be a file or a non-empty {platform: file} map')
+              const byPlatform = new Map()
+              for (const [platform, file] of Object.entries(target)) {
+                assert(typeof platform === 'string' && platform.length > 0 && !platform.includes('/'), `invalid platform key '${platform}'`)
+                assert(typeof file === 'string')
+                assert(!posixPathEscapes(file))
+                byPlatform.set(platform, file)
+              }
+              specs.set(specifier, byPlatform)
+            }
           }
           parents.set(parent, specs)
         }

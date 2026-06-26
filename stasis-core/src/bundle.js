@@ -179,15 +179,28 @@ export class Bundle {
     // root (including a mid-path `a/../../x`) must be rejected here rather than
     // pulling an out-of-tree file in at load time.
     const imports = objectToMaps(json.imports)
+    // An edge target is normally a file string. A `stasis bundle --metro` edge that
+    // resolves differently per platform is instead a { platform: file } map (which
+    // objectToMaps has turned into a Map). Validate both shapes; reject anything else
+    // (e.g. a deeper nesting) so a tampered artifact fails closed at the schema edge.
+    const assertTarget = (target) => {
+      if (typeof target === 'string') {
+        assert(!posixPathEscapes(target))
+        return
+      }
+      assert(target instanceof Map && target.size > 0, 'import target must be a file or a non-empty {platform: file} map')
+      for (const [platform, file] of target) {
+        assert(typeof platform === 'string' && platform.length > 0 && !platform.includes('/'), `invalid platform key '${platform}'`)
+        assert(typeof file === 'string')
+        assert(!posixPathEscapes(file))
+      }
+    }
     for (const [, byParent] of imports) {
       assert(byParent instanceof Map)
       for (const [parent, specifiers] of byParent) {
         assert(!posixPathEscapes(parent))
         assert(specifiers instanceof Map)
-        for (const [, file] of specifiers) {
-          assert(typeof file === 'string')
-          assert(!posixPathEscapes(file))
-        }
+        for (const [, target] of specifiers) assertTarget(target)
       }
     }
 

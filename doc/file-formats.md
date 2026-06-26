@@ -118,6 +118,19 @@ flags, not attested).
   `scope = node_modules`, where the workspace is deliberately unattested.
   Lockfiles written before this field existed omit it; such lockfiles attest
   resolutions only as far as they were recorded (frozen runs warn about this).
+- Per-platform edges (`stasis bundle --metro --platforms=…`): a resolution
+  target is normally a project-relative file string. When `--metro` resolves the
+  same `(parent, specifier)` edge to **different** files across the requested
+  platforms (e.g. `./Button` → `Button.ios.js` on `ios` but the base `Button.js` on
+  `web` -- which has no `.web` variant and, being web, opts out of `.native`), the
+  target is instead a `{ "<platform>": "<file>" }` object whose
+  keys are exactly the requested platforms (no `"*"`). Edges every platform
+  agrees on stay a flat string, and a single requested platform never produces a
+  map. The file set is the union across platforms, so a base `.js` and its
+  `.ios.js`/`.android.js` variants can all appear. Both the bundle and its
+  companion lockfile use this shape. Such a multi-platform artifact is for
+  analysis/attestation: plain `stasis run --bundle=load` has no platform context
+  and fails closed on a per-platform edge (`ERR_STASIS_PLATFORM_SPECIFIC`).
 - `formats` records each file's format in the same shape as the bundle's
   `formats` map. Code files use a Node loader format (`module`, `commonjs`,
   `json`, `module-typescript`, `commonjs-typescript`) or a source-language tag

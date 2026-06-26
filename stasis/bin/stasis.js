@@ -23,6 +23,7 @@ function usage(prefix = '') {
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout)
@@ -163,7 +164,7 @@ if (command === '-v' || command === '--version') {
   process.exitCode = code
 } else if (command === 'bundle') {
   const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '-o'])
+  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '-o'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -174,6 +175,8 @@ if (command === '-v' || command === '--version') {
     lockfile: { type: 'string' },
     conditions: { type: 'string' },
     mainFields: { type: 'string' },
+    metro: { type: 'boolean' },
+    platforms: { type: 'string', multiple: true },
   }
   let values
   try {
@@ -196,10 +199,10 @@ if (command === '-v' || command === '--version') {
     usage('Error: --scope must be node_modules or full')
   }
   if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
-  // --scope selects a bundle subset; the field resolver (--mainFields) always emits
-  // a full-scope bundle, so the two together would silently ignore --scope.
-  if (values.scope !== undefined && values.mainFields !== undefined) {
-    usage('Error: --scope is not supported with --mainFields')
+  // --scope selects a bundle subset; the field resolver (--mainFields/--metro) always
+  // emits a full-scope bundle, so the two together would silently ignore --scope.
+  if (values.scope !== undefined && (values.mainFields !== undefined || values.metro)) {
+    usage('Error: --scope is not supported with --mainFields or --metro')
   }
   // --conditions: comma-separated extra `exports`/`imports` resolution conditions
   // (e.g. react-native,browser) merged on top of the conditions Node always asserts.
@@ -223,6 +226,26 @@ if (command === '-v' || command === '--version') {
   if (values.mainFields !== undefined && mainFields.length === 0) {
     usage('Error: --mainFields must list at least one field (e.g. --mainFields=react-native,browser,main)')
   }
+  // --metro: resolve like Metro/React Native -- it sets its own conditions
+  // (react-native, +browser for web) and mainFields, and resolves platform suffixes
+  // (.ios/.android/.native) for each --platforms target, bundling all of them at once.
+  // --platforms is repeatable and/or comma-separated; the values union.
+  const metro = Boolean(values.metro)
+  const platforms = [...new Set((values.platforms ?? []).flatMap((p) => p.split(',')).map((s) => s.trim()).filter(Boolean))]
+  // A platform name becomes a bundle/lockfile edge key, which the parsers reject if it
+  // contains '/'; '*' is the reserved private placeholder. Reject both here so we never
+  // emit a bundle the readers can't parse (the divergent-edge case is data-dependent).
+  for (const p of platforms) {
+    if (p === '*' || p.includes('/')) usage(`Error: invalid --platforms value '${p}' (a platform name can't contain '/' or be '*')`)
+  }
+  if ((metro || platforms.length > 0) && !allJs) usage('Error: --metro is only valid for JS bundles')
+  if (metro) {
+    if (conditions.length > 0) usage("Error: --conditions can't be combined with --metro (it sets its own conditions)")
+    if (mainFields !== undefined) usage("Error: --mainFields can't be combined with --metro (it sets its own mainFields)")
+    if (platforms.length === 0) usage('Error: --metro requires --platforms (e.g. --platforms=ios,android)')
+  } else if (platforms.length > 0) {
+    usage('Error: --platforms is only valid with --metro')
+  }
   const { bundleCommand } = await import('../src/cmd/bundle.js')
   await bundleCommand({
     cwd: process.cwd(),
@@ -233,6 +256,8 @@ if (command === '-v' || command === '--version') {
     lockfile: values.lockfile,
     conditions,
     mainFields,
+    metro,
+    platforms,
   })
 } else if (command === 'extract') {
   const flags = []

@@ -3,17 +3,21 @@ import { createRequire, isBuiltin } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-// Static module resolver for legacy package fields. `scan` (src/scan.js) resolves
-// through Node's own resolver, which only understands `main` + `exports`/conditions.
-// Older packages (and the React Native ecosystem) also rely on legacy `mainFields`
-// that Node has no equivalent for, and this module reproduces them so a static
-// `stasis bundle --mainFields` picks the same files those tools would:
+// Static module resolver for legacy package fields + platform suffixes. `scan`
+// (src/scan.js) resolves through Node's own resolver, which only understands `main` +
+// `exports`/conditions. Older packages (and the React Native ecosystem) rely on two
+// mechanisms Node has no equivalent for, and this module reproduces them so a static
+// `stasis bundle --mainFields`/`--metro` picks the same files Metro/React Native would:
 //
-//   * Legacy package `mainFields` (`react-native`/`browser`/`main`): the entry field
-//     consulted in order (first non-empty string wins; default `index`), PLUS the
-//     browser-field-spec object form -- a `{ "./a.js": "./b.js", "mod": false }` map
-//     that redirects specific subpaths/bare modules to another file or to an empty
-//     module (`false`). See https://github.com/defunctzombie/package-browser-field-spec.
+//   1. Legacy package `mainFields` (`react-native`/`browser`/`main`): the entry field
+//      consulted in order (first non-empty string wins; default `index`), PLUS the
+//      browser-field-spec object form -- a `{ "./a.js": "./b.js", "mod": false }` map
+//      that redirects specific subpaths/bare modules to another file or to an empty
+//      module (`false`). See https://github.com/defunctzombie/package-browser-field-spec.
+//   2. Platform suffixes (`.ios`/`.android`/`.native`): for a target platform P and
+//      source extension E, try `name.P.E`, then `name.native.E` (native platforms only
+//      -- web opts out), then `name.E`; the bare name (no added ext) is tried first.
+//      Driven by `--metro`; `--mainFields` alone passes no platform (suffixes disabled).
 //
 // `exports` still wins over `mainFields` when a package declares it, and Node resolves
 // `exports`/conditions correctly, so packages with an `exports` field are delegated to
@@ -168,14 +172,28 @@ function matchBareRedirect(map, spec) {
   return map.size === 0 ? undefined : map.get(spec)
 }
 
-// Probe `base` (an absolute path without a guaranteed extension) for a source file:
-// the bare path first (handles imports that already include the extension), then
-// `base.<ext>` for each source extension in order.
-function resolveSourceFile(base, { sourceExts }) {
-  if (isFile(base)) return base
+// Probe `base` (an absolute path without a guaranteed extension) for a source file, in
+// platform-aware order: the bare name first (handles imports that already include the
+// extension), then for each source ext `base.<platform>.<ext>`, `base.native.<ext>`
+// (native platforms only), `base.<ext>`. `platform: null` disables suffix probing.
+function resolveSourceFile(base, { platform, preferNative, sourceExts }) {
+  const tryExt = (sourceExt) => {
+    if (platform) {
+      const p = `${base}.${platform}${sourceExt}`
+      if (isFile(p)) return p
+    }
+    if (preferNative && sourceExt !== '') {
+      const n = `${base}.native${sourceExt}`
+      if (isFile(n)) return n
+    }
+    const b = `${base}${sourceExt}`
+    return isFile(b) ? b : null
+  }
+  const bare = tryExt('')
+  if (bare) return bare
   for (const ext of sourceExts) {
-    const cand = `${base}.${ext}`
-    if (isFile(cand)) return cand
+    const hit = tryExt(`.${ext}`)
+    if (hit) return hit
   }
   return null
 }
@@ -210,14 +228,17 @@ function resolveFileOrDir(base, opts) {
 
 // Build a resolver bound to a set of options. `conditions` is the full condition set
 // used for `exports`-bearing packages (delegated to Node); `mainFields` drives the
-// legacy-field path; `sourceExts` are the extensions probed when an entry/redirect
-// target names no extension.
+// legacy-field path; `platform`/`preferNative` drive platform-suffix probing
+// (`platform: null` disables it -- the `--mainFields` case); `sourceExts` are the
+// extensions probed when an entry/redirect target names no extension.
 export function createFieldResolver({
   conditions = [],
   mainFields = ['main'],
+  platform = null,
+  preferNative = false,
   sourceExts = ['js', 'json', 'ts'],
 } = {}) {
-  const opts = { sourceExts, mainFields }
+  const opts = { platform, preferNative, sourceExts, mainFields }
   // `callConditions` (when scan passes it) is the parent file's format-driven
   // condition set (ESM -> import, CJS -> require, + the configured extras), so
   // `exports` delegation matches how Node would resolve from THAT file. Falls back to

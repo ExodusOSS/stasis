@@ -268,8 +268,9 @@ function makeRustClassifier(baseDir) {
 // `format` tags every file uniformly (the single-language non-JS callers); pass
 // `formats` (a Map<path, format>) instead to tag per file, as the JS resolver path
 // does (a graph mixes module / commonjs / *-typescript / json). `resolutions`
-// values are target strings (one flat edge per specifier) that round-trip through
-// the bundle's recursive serializer untouched.
+// values may be a target string (a flat edge) or a Map<platform, target> (a `--metro`
+// edge that resolves differently per platform) -- both round-trip through the bundle's
+// recursive serializer untouched.
 function assembleCodeBundle({
   baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep,
 }) {
@@ -713,20 +714,30 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
 // Source extensions probed when a resolved entry/redirect target names no extension.
 // Limited to what a source bundle can actually carry (scan's RESOLVABLE_EXTS), so the
 // resolver never resolves a file the bundle would then reject. `--mainFields` lets a
-// caller pick its own fields, and `--conditions` its own extra exports conditions.
+// caller pick its own fields, `--metro` presets the React Native fields, and
+// `--conditions` adds its own extra exports conditions.
 const SOURCE_EXTS = ['js', 'json', 'ts']
+// React Native preset mainFields asserted by `--metro` (which sets these plus the
+// react-native/browser conditions and platform suffixes, so the user supplies neither
+// --mainFields nor --conditions alongside it).
+const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
 // Synthetic, project-relative path for the empty module a browser/react-native
 // `false` redirect resolves to. Carried in the bundle as a real (empty) CJS file
 // so the edge points at attestable bytes rather than a sentinel.
 const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 
 // Build a JS/TS Bundle (and companion Lockfile) through the legacy-field resolver
-// (src/resolve-fields.js) rather than Node's resolver -- the `--mainFields` path.
-// The graph is scanned once and every `(parent, specifier)` edge is recorded flat
-// (a single target). A browser/react-native `false` redirect resolves to a
-// synthetic empty module carried in the bundle. Returns { bundle, lockfile } (the
-// lockfile attests the same files + edges, by integrity).
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, conditions = [] }) {
+// (src/resolve-fields.js) rather than Node's resolver -- the `--mainFields` and
+// `--metro` paths. The graph is scanned once PER platform (just `[null]` in
+// `--mainFields` mode, where there are no platform suffixes); the file set is the union
+// across platforms, and each `(parent, specifier)` edge is recorded FLAT (a single
+// target) when every platform that has it agrees, and UNFLATTENED to a
+// `{ platform: target }` map only where platforms genuinely diverge. A single platform
+// therefore never unflattens; platform keys are exactly the supplied platforms (no
+// wildcard). A browser/react-native `false` redirect resolves to a synthetic empty
+// module carried in the bundle. Returns { bundle, lockfile } (the lockfile attests the
+// same files + the same -- possibly per-platform -- edges, by integrity).
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -742,37 +753,52 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // Normalize conditions like buildJsBundle does, so a sloppy programmatic caller
   // (stray '' / whitespace) can't push a bogus token into the resolver.
   const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
-  const resolver = createFieldResolver({
-    mainFields,
-    sourceExts: SOURCE_EXTS,
-    conditions: resolveConditions('commonjs', scanConditions),
-  })
-  const scanner = scan(absEntries, { conditions: scanConditions, resolve: resolver })
-  reportScanIssues(analyzeScanner(scanner))
 
   const formatsByRel = new Map()
-  const reached = new Set() // absolute paths of every real file reached
-  const resolutions = new Map() // parentRel -> specifier -> targetRel
+  // parentRel -> specifier -> Map<platformKey, targetRel>. Collapsed into flat /
+  // platform-map edges after every platform has been scanned.
+  const edges = new Map()
+  const reached = new Set() // absolute paths of every real file reached on any platform
   let usesEmpty = false
-  for (const [url, info] of scanner.files) {
-    const rel = toRel(fileURLToPath(url))
-    reached.add(fileURLToPath(url))
-    formatsByRel.set(rel, info.format)
-    for (const e of info.edges) {
-      if (e.builtin || e.dynamic) continue
-      let target
-      if (e.empty) { usesEmpty = true; target = EMPTY_MODULE_PATH }
-      else if (e.child) target = toRel(fileURLToPath(e.child))
-      else continue // unresolved (already warned/thrown by reportScanIssues)
-      if (!resolutions.has(rel)) resolutions.set(rel, new Map())
-      resolutions.get(rel).set(e.spec, target)
+
+  for (const platform of platforms) {
+    // `--metro` asserts the React Native preset's conditions (react-native, plus
+    // browser for the web platform); `--mainFields` (platform === null) carries the
+    // user's own `--conditions`. scan layers these on the format-derived base.
+    const extras = metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : scanConditions
+    const resolver = createFieldResolver({
+      mainFields,
+      platform,
+      preferNative: platform !== null && platform !== 'web',
+      sourceExts: SOURCE_EXTS,
+      conditions: resolveConditions('commonjs', extras),
+    })
+    const scanner = scan(absEntries, { conditions: extras, resolve: resolver })
+    reportScanIssues(analyzeScanner(scanner), { label: platform ?? 'mainFields' })
+
+    const platformKey = platform ?? '*' // '*' is a private placeholder for the single mainFields pass; it never unflattens
+    for (const [url, info] of scanner.files) {
+      const rel = toRel(fileURLToPath(url))
+      reached.add(fileURLToPath(url))
+      formatsByRel.set(rel, info.format)
+      for (const e of info.edges) {
+        if (e.builtin || e.dynamic) continue
+        let target
+        if (e.empty) { usesEmpty = true; target = EMPTY_MODULE_PATH }
+        else if (e.child) target = toRel(fileURLToPath(e.child))
+        else continue // unresolved (already warned/thrown by reportScanIssues)
+        if (!edges.has(rel)) edges.set(rel, new Map())
+        const bySpec = edges.get(rel)
+        if (!bySpec.has(e.spec)) bySpec.set(e.spec, new Map())
+        bySpec.get(e.spec).set(platformKey, target)
+      }
     }
   }
 
-  // Read every reached file's bytes once: content for the bundle, integrity for
-  // the lockfile (hash the raw bytes so it matches `stasis run --lock=frozen`).
-  // The stored source is UTF-8 text, so the bytes must BE valid UTF-8 -- otherwise
-  // toString('utf8') would lossily diverge from the hashed bytes.
+  // Read every reached file's bytes once: content for the bundle, integrity for the
+  // lockfile (hash the raw bytes so it matches `stasis run --lock=frozen`). The stored
+  // source is UTF-8 text, so the bytes must BE valid UTF-8 -- otherwise toString('utf8')
+  // would lossily diverge from the hashed bytes.
   const sources = new Map()
   const integrities = new Map()
   const realBase = realpathSync(baseDir)
@@ -797,6 +823,22 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     sources.set(EMPTY_MODULE_PATH, '')
     formatsByRel.set(EMPTY_MODULE_PATH, 'commonjs')
     integrities.set(EMPTY_MODULE_PATH, sha512integrity(Buffer.alloc(0)))
+  }
+
+  // Collapse each edge: one distinct target across the platforms that have it -> flat
+  // string; otherwise a Map<platform, target> (platform keys only, sorted).
+  const resolutions = new Map()
+  for (const [parent, bySpec] of edges) {
+    const specMap = new Map()
+    for (const [spec, byPlatform] of bySpec) {
+      const distinct = new Set(byPlatform.values())
+      if (distinct.size === 1) {
+        specMap.set(spec, [...distinct][0])
+      } else {
+        specMap.set(spec, new Map([...byPlatform].toSorted((a, b) => (a[0] < b[0] ? -1 : 1))))
+      }
+    }
+    resolutions.set(parent, specMap)
   }
 
   const rootPkg = readJson(join(baseDir, 'package.json')) ?? {}
@@ -834,7 +876,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 // Classify entries into the single bundle language they all share and check
 // option applicability. Shared by buildBundle and bundleCommand; `name`
 // prefixes error messages with the caller.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -862,15 +904,41 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (Array.isArray(conditions) && conditions.length > 0 && kind !== 'js') {
     throw new Error(`${name}: --conditions is only valid for JS bundles`)
   }
-  // --mainFields honours legacy package entry fields (plus the browser-field object
-  // redirection) for non-`exports` packages; JS-only too.
+  // --mainFields and --metro/--platforms are legacy-/platform-resolution knobs; JS-only.
   if (mainFields !== undefined && kind !== 'js') {
     throw new Error(`${name}: --mainFields is only valid for JS bundles`)
   }
-  // The field resolver always emits a full-scope bundle (it has no node_modules-only
-  // mode), so --scope alongside --mainFields would be silently ignored -- reject it.
-  if (scope !== undefined && mainFields !== undefined) {
-    throw new Error(`${name}: --scope is not supported with --mainFields`)
+  if ((metro || (Array.isArray(platforms) && platforms.length > 0)) && kind !== 'js') {
+    throw new Error(`${name}: --metro is only valid for JS bundles`)
+  }
+  // `--metro` is a preset for conditions + mainFields + platform suffixes, so it can't
+  // be combined with explicit --conditions/--mainFields (they'd conflict), and it needs
+  // --platforms to know which suffixes to resolve. `--platforms` is meaningless without it.
+  if (metro) {
+    if (Array.isArray(conditions) && conditions.length > 0) {
+      throw new Error(`${name}: --conditions can't be combined with --metro (it sets its own conditions)`)
+    }
+    if (mainFields !== undefined) {
+      throw new Error(`${name}: --mainFields can't be combined with --metro (it sets its own mainFields)`)
+    }
+    if (!Array.isArray(platforms) || platforms.length === 0) {
+      throw new Error(`${name}: --metro requires --platforms (e.g. --platforms=ios,android)`)
+    }
+    // A platform name becomes a bundle/lockfile edge key (Bundle/Lockfile parse reject
+    // a '/'); '*' is the reserved private placeholder. Reject both so the writer can
+    // never emit an edge map the readers refuse -- a divergent-edge, data-dependent break.
+    for (const p of platforms) {
+      if (typeof p !== 'string' || p.length === 0 || p === '*' || p.includes('/')) {
+        throw new Error(`${name}: invalid platform '${p}' (a platform name can't be empty, contain '/', or be '*')`)
+      }
+    }
+  } else if (Array.isArray(platforms) && platforms.length > 0) {
+    throw new Error(`${name}: --platforms is only valid with --metro`)
+  }
+  // The field resolver always emits a full-scope bundle (no node_modules-only mode), so
+  // --scope alongside --mainFields/--metro would be silently ignored -- reject it.
+  if (scope !== undefined && (mainFields !== undefined || metro)) {
+    throw new Error(`${name}: --scope is not supported with --mainFields or --metro`)
   }
   return kind
 }
@@ -891,15 +959,25 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // `mainFields` (an array of legacy package fields, e.g. `['react-native','browser','main']`)
 // selects the legacy-field resolver -- see buildResolvedJsBundle. It resolves
 // non-`exports` packages via those fields, including the browser-field object
-// redirection, and composes with `conditions`. JS/TS-only.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields })
+// redirection, and composes with `conditions`. `metro: true` is instead a preset that
+// sets its OWN React Native fields + conditions + platform suffixes (so it is not
+// combined with `mainFields`/`conditions`) and requires `platforms` (e.g.
+// `['ios','android']`); the edge graph is then per-platform. JS/TS-only.
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
   if (kind === 'rust') return buildRustBundle({ cwd, entries })
-  if (mainFields !== undefined) {
-    const { bundle } = await buildResolvedJsBundle({ cwd, entries, mainFields, conditions })
+  if (metro || mainFields !== undefined) {
+    const { bundle } = await buildResolvedJsBundle({
+      cwd,
+      entries,
+      mainFields: metro ? METRO_MAIN_FIELDS : mainFields,
+      platforms: metro ? platforms : [null],
+      conditions,
+      metro: Boolean(metro),
+    })
     return bundle
   }
   const state = await buildJsBundle({ cwd, entries, scope, conditions })
@@ -942,16 +1020,24 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // so it resolves different files on disk and fails closed (correctly -- the lockfile
 // genuinely attests a different graph). Pair such a lockfile with `--bundle=load`, or
 // replay the same `--conditions` at run time, so the attested and observed graphs agree.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
 
   let bundle
   let lockData
-  if (kind === 'js' && mainFields !== undefined) {
+  if (kind === 'js' && (metro || mainFields !== undefined)) {
     // The legacy-field resolver path builds the Bundle (and the matching Lockfile)
-    // directly -- it carries a synthetic empty module (for a browser/react-native
-    // `false` redirect) that State's disk-reading addFile can't represent.
-    const built = await buildResolvedJsBundle({ cwd, entries, mainFields, conditions })
+    // directly -- it carries per-platform edges and a synthetic empty module (for a
+    // browser/react-native `false` redirect) that State's disk-reading addFile can't
+    // represent.
+    const built = await buildResolvedJsBundle({
+      cwd,
+      entries,
+      mainFields: metro ? METRO_MAIN_FIELDS : mainFields,
+      platforms: metro ? platforms : [null],
+      conditions,
+      metro: Boolean(metro),
+    })
     bundle = built.bundle
     if (lockfile) lockData = built.lockfile.serialize()
   } else if (kind === 'js' && lockfile) {

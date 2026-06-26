@@ -55,6 +55,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis bundle --conditions=react-native,browser app.js` | statically bundle, asserting extra `exports`/`imports` resolution conditions |
 | `stasis bundle --mainFields=react-native,browser,main app.js` | statically bundle, honoring legacy package `mainFields` (incl. browser-field object redirection) |
+| `stasis bundle --metro --platforms=ios,android app.js` | statically bundle the way Metro resolves: RN conditions + mainFields + `.ios`/`.android`/`.native` suffixes, all platforms at once |
 | `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |
 | `stasis diff --stat a.lock.json b.stasis.code.br` | summarize module/file differences between two lockfiles/bundles |
 | `stasis prune` | trim `node_modules` to the lockfile, verifying the rest |
