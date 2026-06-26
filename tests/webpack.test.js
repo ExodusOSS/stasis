@@ -838,3 +838,294 @@ test('sidecar bundle (rule 6) is emitted by the plugin alongside preload bundle'
   t.assert.ok(existsSync(sidecarBundle), 'sidecar bundle written by plugin done hook')
   t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')))
 }))
+
+// ----- package.json "imports" subpaths rewritten by babel-plugin-module-resolver ---------
+//
+// Regression: webpack 4's enhanced-resolve has no imports-field support, so a
+// `require('#app/abc.js')` (a package.json "imports" subpath) only builds because a babel
+// loader -- babel-plugin-module-resolver -- rewrites the specifier IN SOURCE to an
+// importer-relative path (`../abc.js`) before webpack's parser sees it. Pre-fix, the plugin
+// keyed the import edge on webpack's post-loader `rawRequest` (`../abc.js`), so the portable
+// original `#app/abc.js` was lost and the load-mode `#`-resolution machinery in state.js was
+// dead. The fix monkey-patches module-resolver's rewrite chokepoint to recover the original
+// and records THAT as the key. These tests stand up a faithful fake of module-resolver (its
+// chokepoint moved from `lib/utils.js` `mapPathString` in v3 to `lib/mapPath.js` default in
+// v4/v5 -- both covered) plus a loader that routes the rewrite through it, exactly as
+// babel-loader would, so the plugin's patch observes the rewrite.
+
+// Faithful fake of babel-plugin-module-resolver: a CJS package whose rewrite chokepoint reads
+// the original specifier off the node, resolves a `#app/<x>` subpath to an importer-relative
+// path, and replaceWith()s it -- the exact contract StasisWebpack#patchModuleResolver wraps.
+// `shape` picks the version layout: 'v3' exposes `lib/utils.js` `mapPathString`; 'v4v5' exposes
+// `lib/mapPath.js` default (which reads `customResolvePath`). Mirrors the real published tarballs.
+// Stands in for module-resolver's alias resolution: an alias prefix configured by the project
+// ('#app/' is a package.json "imports" subpath; '~lib/' is a plain alias used by the gate test)
+// maps into <root>/src and is returned as a path relative to the importer's dir (posix,
+// './'-prefixed) -- the observable input->output the plugin's patch reads. NB: '#' is only an
+// alias-config convention here; module-resolver has no built-in '#'-awareness (it resolves via
+// the user's `alias`/`root` config), so the patch keys off the AUTHORED prefix, not the resolver.
+const RESOLVE_PATH_JS = `'use strict'
+Object.defineProperty(exports, '__esModule', { value: true })
+const path = require('path')
+exports.default = function resolvePath(sourcePath, currentFile, opts) {
+  if (typeof sourcePath !== 'string') return null
+  // '#app/' and '#alt/' are two subpath aliases that BOTH map into <root>/src, so e.g.
+  // '#app/abc.js' and '#alt/abc.js' resolve to the same file and rewrite to the same relative
+  // request -- the collision the recorder must keep both originals for. '~lib/' is the non-'#'
+  // alias used by the gate test.
+  const prefix = ['#app/', '#alt/', '~lib/'].find((p) => sourcePath.startsWith(p))
+  if (!prefix) return null
+  const target = path.resolve(opts.root, 'src', sourcePath.slice(prefix.length))
+  let rel = path.relative(path.dirname(currentFile), target)
+  if (!rel.startsWith('.')) rel = './' + rel
+  return rel.split(path.sep).join('/')
+}
+`
+// Mirrors the real chokepoint's body, including the leading isStringLiteral guard and the
+// pathResolved tagging that makes a re-visit a no-op (so the patch observes each rewrite once).
+const chokepointBody = (resolverExpr) => `function rewrite(nodePath, state) {
+  if (!state.types.isStringLiteral(nodePath)) return
+  if (nodePath.node.pathResolved) return
+  const sourcePath = nodePath.node.value
+  const currentFile = state.file.opts.filename
+  const modulePath = ${resolverExpr}(sourcePath, currentFile, state.opts)
+  if (modulePath) {
+    nodePath.replaceWith(state.types.stringLiteral(modulePath))
+    nodePath.node.pathResolved = true
+  }
+}`
+
+function writeFakeModuleResolver(pkgDir, shape) {
+  const lib = join(pkgDir, 'lib')
+  mkdirSync(join(lib, 'transformers'), { recursive: true })
+  writeFileSync(join(pkgDir, 'package.json'),
+    JSON.stringify({ name: 'babel-plugin-module-resolver', version: shape === 'v3' ? '3.2.0' : '5.0.3', main: 'lib/index.js' }))
+  writeFileSync(join(lib, 'index.js'),
+    `'use strict'\nObject.defineProperty(exports, '__esModule', { value: true })\n` +
+    `exports.resolvePath = require('./resolvePath').default\n` +
+    `exports.default = function moduleResolver() { return { name: 'module-resolver', visitor: {} } }\n`)
+  writeFileSync(join(lib, 'resolvePath.js'), RESOLVE_PATH_JS)
+  if (shape === 'v3') {
+    // v3 chokepoint: lib/utils.js named export mapPathString, reads normalizedOpts.resolvePath.
+    writeFileSync(join(lib, 'utils.js'),
+      `'use strict'\nObject.defineProperty(exports, '__esModule', { value: true })\n` +
+      `${chokepointBody('state.normalizedOpts.resolvePath')}\nexports.mapPathString = rewrite\n`)
+  } else {
+    // v4/v5 chokepoint: lib/mapPath.js default export, reads normalizedOpts.customResolvePath.
+    writeFileSync(join(lib, 'mapPath.js'),
+      `'use strict'\nObject.defineProperty(exports, '__esModule', { value: true })\n` +
+      `${chokepointBody('state.normalizedOpts.customResolvePath')}\nexports.default = rewrite\n`)
+  }
+}
+
+// A loader that stands in for babel-loader: it rewrites every alias specifier ('#app/...' or
+// '~lib/...') in source to an importer-relative path by routing through module-resolver's OWN
+// chokepoint (the function the plugin patches), so the rewrite is observed. Mirrors the v3-vs-v4/v5
+// patch try-order. The fake `state.types.isStringLiteral` matches the real plugin's leading guard.
+const MODULE_RESOLVER_LOADER = `'use strict'
+let chokepoint, resolveOpt
+try { chokepoint = require('babel-plugin-module-resolver/lib/mapPath').default; resolveOpt = 'customResolvePath' }
+catch { chokepoint = require('babel-plugin-module-resolver/lib/utils').mapPathString; resolveOpt = 'resolvePath' }
+const resolvePath = require('babel-plugin-module-resolver/lib/resolvePath').default
+module.exports = function (source) {
+  const filename = this.resourcePath
+  const root = this.rootContext
+  return source.replace(/(['"])((?:#app|#alt|~lib)\\/[^'"]+)\\1/g, (m, q, spec) => {
+    const np = { node: { value: spec }, replaceWith(n) { this.node = n } }
+    const state = {
+      file: { opts: { filename } },
+      types: { stringLiteral: (value) => ({ value }), isStringLiteral: (n) => typeof n?.node?.value === 'string' },
+      normalizedOpts: { [resolveOpt]: resolvePath },
+      opts: { root },
+    }
+    chokepoint(np, state)
+    return q + np.node.value + q
+  })
+}
+`
+
+// Build the project + fake module-resolver + loader under `tmp`. The importer sits one dir deep
+// (src/nested/entry.js) so its rewritten relative request (`../abc.js`) is visibly DIFFERENT from
+// the original specifier(s) -- the whole point of the assertions. `specs` is what the entry imports
+// (string or array; default the '#app/abc.js' subpath). Returns the loader's path.
+function writeSubpathProject(tmp, shape, specs = '#app/abc.js') {
+  const list = Array.isArray(specs) ? specs : [specs]
+  writeFileSync(join(tmp, 'package.json'),
+    JSON.stringify({ name: 'subpath-app', version: '0.0.0', private: true, imports: { '#app/*': './src/*', '#alt/*': './src/*' } }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  mkdirSync(join(tmp, 'src', 'nested'), { recursive: true })
+  writeFileSync(join(tmp, 'src', 'abc.js'), 'module.exports = 42\n')
+  const requires = list.map((s, i) => `const v${i} = require('${s}')`).join('\n')
+  writeFileSync(join(tmp, 'src', 'nested', 'entry.js'),
+    `${requires}\nconsole.log(${list.map((_, i) => `v${i}`).join(', ')})\n`)
+  writeFakeModuleResolver(join(tmp, 'node_modules', 'babel-plugin-module-resolver'), shape)
+  const loaderPath = join(tmp, 'module-resolver-loader.cjs')
+  writeFileSync(loaderPath, MODULE_RESOLVER_LOADER)
+  return loaderPath
+}
+
+for (const shape of ['v3', 'v4v5']) {
+  test(`module-resolver (${shape}) rewrite of a '#'-subpath is captured under the ORIGINAL key`, withTmp((t, tmp) => {
+    const loaderPath = writeSubpathProject(tmp, shape)
+    const rules = JSON.stringify([{ test: '\\.js$', use: loaderPath }])
+
+    const r = run('src/nested/entry.js', {
+      cwd: tmp,
+      env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_WEBPACK_RULES: rules },
+    })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+    const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+    const edges = lock.imports?.['*']?.['src/nested/entry.js'] ?? {}
+    // The edge is keyed by the ORIGINAL subpath specifier, mapping to the resolved file...
+    t.assert.equal(edges['#app/abc.js'], 'src/abc.js',
+      `expected '#app/abc.js' edge; got ${JSON.stringify(edges)}`)
+    // ...and NOT by the babel-rewritten importer-relative path (pre-fix this was the only key).
+    t.assert.equal(edges['../abc.js'], undefined,
+      'resolved relative path must not be recorded as the key')
+  }))
+}
+
+// Real-package smoke test: exercise the ACTUAL babel-plugin-module-resolver (a top-level test
+// devDep), not the fake. A custom loader runs real @babel/core + the real plugin to rewrite
+// '#app/abc.js' in source; the plugin's monkey-patch must wrap the REAL chokepoint (v3
+// lib/utils.js `mapPathString`) and recover the original key. node_modules is symlinked to the
+// workspace so the loader's requires AND #patchModuleResolver's require.resolve (anchored on
+// state.root) find the SAME installed copy -> the patch wraps the chokepoint babel actually runs.
+// Pins the patch against the real package's export shape; the fakes above cover the v3/v4v5 shapes
+// and the edge cases (collapse, gate) the controllable fake makes cheap.
+test("REAL babel-plugin-module-resolver rewrite of a '#'-subpath is captured under the ORIGINAL key", withTmp((t, tmp) => {
+  const workspaceNodeModules = join(here, '..', 'node_modules')
+  writeFileSync(join(tmp, 'package.json'),
+    JSON.stringify({ name: 'subpath-app-real', version: '0.0.0', private: true, imports: { '#app/*': './src/*' } }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  mkdirSync(join(tmp, 'src', 'nested'), { recursive: true })
+  writeFileSync(join(tmp, 'src', 'abc.js'), 'module.exports = 42\n')
+  writeFileSync(join(tmp, 'src', 'nested', 'entry.js'),
+    "const abc = require('#app/abc.js')\nconsole.log(abc)\n")
+  symlinkSync(workspaceNodeModules, join(tmp, 'node_modules'), 'dir')
+  const loaderPath = join(tmp, 'babel-real-loader.cjs')
+  writeFileSync(loaderPath, `'use strict'
+const babel = require('@babel/core')
+const mrPath = require.resolve('babel-plugin-module-resolver')
+module.exports = function (source) {
+  const out = babel.transformSync(source, {
+    babelrc: false, configFile: false, filename: this.resourcePath,
+    plugins: [[mrPath, { cwd: this.rootContext, alias: { '^#app/(.+)': './src/\\\\1' } }]],
+  })
+  return out.code
+}
+`)
+  const rules = JSON.stringify([{ test: '\\.js$', use: loaderPath }])
+
+  const r = run('src/nested/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_WEBPACK_RULES: rules },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const edges = lock.imports?.['*']?.['src/nested/entry.js'] ?? {}
+  t.assert.equal(edges['#app/abc.js'], 'src/abc.js',
+    `expected '#app/abc.js' edge from the real plugin; got ${JSON.stringify(edges)}`)
+  t.assert.equal(edges['../abc.js'], undefined, 'resolved relative path must not be recorded as the key')
+}))
+
+// Gate: the recovery is scoped to package.json "imports" subpaths ('#'-prefixed). A NON-'#'
+// module-resolver alias ('~lib/abc.js') is rewritten by the same chokepoint, but the plugin must
+// leave its edge keyed on webpack's resolved rawRequest -- recovering it would over-capture an
+// alias that isn't a portable subpath import. Guards `before.startsWith('#')` in #patchModuleResolver.
+test("module-resolver rewrite of a NON-'#' alias keeps webpack's resolved key", withTmp((t, tmp) => {
+  const loaderPath = writeSubpathProject(tmp, 'v3', '~lib/abc.js')
+  const rules = JSON.stringify([{ test: '\\.js$', use: loaderPath }])
+
+  const r = run('src/nested/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_WEBPACK_RULES: rules },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const edges = lock.imports?.['*']?.['src/nested/entry.js'] ?? {}
+  // The non-'#' alias resolves to the same file, but the edge stays keyed by the rewritten
+  // relative path (rawRequest) -- the '#'-gate must not recover a plain alias.
+  t.assert.equal(edges['../abc.js'], 'src/abc.js',
+    `expected the resolved relative key; got ${JSON.stringify(edges)}`)
+  t.assert.equal(edges['~lib/abc.js'], undefined, 'a non-# alias must not be recovered as the key')
+}))
+
+// Collision: two distinct subpath aliases ('#app/abc.js' and '#alt/abc.js') that resolve to the
+// SAME file from one importer both rewrite to the identical relative request ('../abc.js'), so the
+// recorder keys them under one slot. Both originals must survive (recorded as separate edges) --
+// a single-value recorder would drop one, and at clean-dir load the dropped subpath would miss.
+test("two '#'-subpaths collapsing to one relative request both keep their original keys", withTmp((t, tmp) => {
+  const loaderPath = writeSubpathProject(tmp, 'v3', ['#app/abc.js', '#alt/abc.js'])
+  const rules = JSON.stringify([{ test: '\\.js$', use: loaderPath }])
+
+  const r = run('src/nested/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_WEBPACK_RULES: rules },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const edges = lock.imports?.['*']?.['src/nested/entry.js'] ?? {}
+  t.assert.equal(edges['#app/abc.js'], 'src/abc.js', `expected '#app/abc.js' edge; got ${JSON.stringify(edges)}`)
+  t.assert.equal(edges['#alt/abc.js'], 'src/abc.js', `expected '#alt/abc.js' edge (not dropped); got ${JSON.stringify(edges)}`)
+  t.assert.equal(edges['../abc.js'], undefined, 'resolved relative path must not be recorded as the key')
+}))
+
+// End-to-end: the recovered '#'-key makes a clean-dir bundle=load build resolve the subpath itself.
+// At load the source is served from the bundle with the ORIGINAL '#app/abc.js' intact (capture
+// records pre-loader source); with no rewriting loader present (the realistic clean-dir case, where
+// module-resolver can't re-resolve the subpath), beforeResolve looks the edge up by '#app/abc.js'
+// and redirects it -- which only works because the fix recorded that key. Pre-fix the bundle held
+// only a '../abc.js' edge, so this lookup would miss and the build would fail.
+test("bundle=load resolves a '#'-subpath via the recovered key in a clean dir", withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  mkdirSync(capDir)
+  const loaderPath = writeSubpathProject(capDir, 'v3')
+  const capBundle = join(capDir, 'snapshot.br')
+
+  const capture = run('src/nested/entry.js', {
+    cwd: capDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'add',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add',
+      EXODUS_STASIS_BUNDLE_FILE: capBundle,
+      STASIS_TEST_WEBPACK_RULES: JSON.stringify([{ test: '\\.js$', use: loaderPath }]),
+      STASIS_TEST_WEBPACK_OUTDIR: join(tmp, 'out-capture'),
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+
+  // Clean load dir: only the bundle + a minimal package.json. No src, no module-resolver, no loader
+  // -- so webpack sees the bundle-served `require('#app/abc.js')` verbatim and must rely on the
+  // recorded edge to resolve it.
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true }')
+
+  const replay = run('src/nested/entry.js', {
+    cwd: loadDir,
+    env: {
+      EXODUS_STASIS_LOCK: 'none',
+      EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load',
+      EXODUS_STASIS_BUNDLE_FILE: join(loadDir, 'snapshot.br'),
+      STASIS_TEST_WEBPACK_OUTDIR: join(tmp, 'out-load'),
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  // status 0 already proves the subpath resolved (webpack 4 can't resolve '#app/...' natively, so a
+  // miss would fail the build). Additionally assert the RIGHT target's bytes round-tripped: the
+  // bundle-served src/abc.js payload must be inlined into the load output -- not merely that some
+  // file was emitted. (Full byte-equality with capture would be brittle: mode:'none' embeds the
+  // request string in module comments, which legitimately differs -- '#app/abc.js' vs '../abc.js'.)
+  const replayOutput = readFileSync(join(tmp, 'out-load', 'bundle.js'), 'utf-8')
+  t.assert.match(replayOutput, /module\.exports = 42/, 'src/abc.js bytes must be served from the bundle into the output')
+}))

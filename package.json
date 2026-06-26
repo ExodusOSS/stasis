@@ -19,9 +19,11 @@
   "author": "Exodus Movement, Inc.",
   "license": "MIT",
   "devDependencies": {
+    "@babel/core": "^7.29.7",
     "@exodus/bytes": "^1.15.0",
     "@exodus/stasis": "workspace:*",
     "@exodus/stasis-core": "workspace:*",
+    "babel-plugin-module-resolver": "^3.2.0",
     "esbuild": "^0.27.3",
     "file-loader": "^6.2.0",
     "oxlint": "^1.52.0",

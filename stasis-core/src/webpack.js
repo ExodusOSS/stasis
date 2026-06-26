@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
 import { existsSync } from 'node:fs'
-import { isBuiltin } from 'node:module'
+import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -9,6 +9,35 @@ import { resolvePluginState } from './plugins.js'
 import { State } from './state.js'
 import { realReadFileSync } from './state-util.js'
 import { classifyExtension } from './util.js'
+
+// A CJS require anchored at this ESM module, used only to optionally locate the
+// PROJECT's babel-plugin-module-resolver for the capture-time monkey-patch below.
+// stasis-core stays zero-dependency: the package is never imported statically, and
+// a project without it just skips the patch.
+const require = createRequire(import.meta.url)
+
+// Original package.json "imports" subpath specifiers ('#app/abc.js') recovered by the
+// babel-plugin-module-resolver monkey-patch (see StasisWebpack#patchModuleResolver),
+// keyed by `${importerAbsolute}\0${rewrittenRequest}` -> the original '#'-specifier(s).
+// The value is an ARRAY: usually one, but more than one when several subpath aliases map to the
+// SAME file from the same importer (they all rewrite to the identical relative request, colliding
+// on one key). afterResolve records an edge for EACH, so no subpath import is silently dropped.
+// Module-level (not per-instance) so the single patch -- installed by whichever plugin
+// instance applies first -- and every instance's afterResolve lookup share one map; the
+// patch wrapper and the lookup both live in THIS module, so the closure reference agrees.
+// Intentionally never cleared: keys are deterministic (absolute importer + rewritten request)
+// and values are deduped, so a watch rebuild RE-RECORDS the same entries idempotently rather
+// than accumulating -- bounded by the project's '#'-edge count. Not scoped per build because a
+// parallel MultiCompiler would race a per-`done` clear,
+// and entries are tiny (~a path + a short specifier). The only unbounded case is a long-lived
+// process building MANY DISTINCT graphs (e.g. a build server with per-run temp dirs); that's
+// outside stasis's per-`stasis run`-process model, so the simplicity wins.
+const subpathOriginals = new Map()
+const edgeKey = (importerAbsolute, request) => `${importerAbsolute}\u0000${request}`
+
+// Marks an already-wrapped chokepoint so watch rebuilds / multiple plugin instances
+// don't double-wrap babel-plugin-module-resolver.
+const PATCHED = Symbol('stasis.modresolver.patched')
 
 // Synthetic stat for files served from the bundle in load mode. Webpack's resolver
 // + module factory call inputFileSystem.stat() to check existence and read size;
@@ -254,7 +283,84 @@ export class StasisWebpack {
     })
   }
 
+  // babel-plugin-module-resolver is the babel plugin webpack-4 builds use to make
+  // package.json "imports" subpaths resolvable: webpack 4's enhanced-resolve has no
+  // imports-field support, so a '#app/abc.js' specifier MUST be rewritten in source
+  // (to an importer-relative '../../abc.js') before webpack's parser sees it. That
+  // rewrite happens in a LOADER, before the parser builds the dependency, so by
+  // afterResolve webpack's rawRequest is the resolved relative path and the original
+  // '#'-specifier is gone from every field. To record the ORIGINAL specifier as the
+  // import key -- it's portable (resolves within the importer's OWN package regardless
+  // of layout) and is what every other capture backend records (the Node loader's
+  // resolve hook and Metro both key edges by the as-written specifier) -- hook the
+  // rewrite at its source. The plugin has a single rewrite chokepoint that reads the
+  // original `nodePath.node.value`, resolves it, then replaceWith()s the result;
+  // across majors it is `lib/mapPath.js`'s default export (v5) or `lib/utils.js`'s
+  // `mapPathString` (v3/v4). Wrap whichever the PROJECT'S copy exposes and record
+  // (importer, rewritten) -> original for each '#'-rewrite; afterResolve then keys the
+  // edge by the original instead of the resolved relative rawRequest.
+  //
+  // Best-effort and side-effect-only: a project without babel-plugin-module-resolver
+  // (no '#'-rewriting in play) skips the patch entirely and capture is unchanged. The
+  // wrapper is a transparent passthrough -- it never alters the rewrite, only observes
+  // it -- so leaving it installed across watch rebuilds is harmless; PATCHED guards
+  // against re-wrapping. stasis-core takes no dependency on the package: it is located
+  // via the project's own node_modules (createRequire) and absent-package errors are
+  // swallowed.
+  #patchModuleResolver() {
+    const paths = [this.#state.root, process.cwd()]
+    // No `"exports"` map in any major, so deep `/lib/...` requires resolve fine. Try the
+    // v5 chokepoint first, then the v3/v4 one; wrap every shape the copy actually exposes
+    // (a stale-but-uninvoked export is never called, so a double-wrap can't double-record).
+    const candidates = [
+      { sub: 'babel-plugin-module-resolver/lib/mapPath', prop: 'default' },
+      { sub: 'babel-plugin-module-resolver/lib/utils', prop: 'mapPathString' },
+    ]
+    for (const { sub, prop } of candidates) {
+      let mod
+      try {
+        mod = require(require.resolve(sub, { paths }))
+      } catch {
+        continue  // package absent, or this major lacks this submodule
+      }
+      const original = mod?.[prop]
+      if (typeof original !== 'function' || original[PATCHED]) continue
+      const wrapped = function stasisModuleResolverHook(nodePath, state) {
+        const before = nodePath?.node?.value
+        const result = original.apply(this, arguments)
+        try {
+          const after = nodePath?.node?.value
+          // Only package.json "imports" subpaths ('#'-prefixed) are recovered; any other
+          // module-resolver alias keeps webpack's rawRequest. A node that didn't actually
+          // change (after === before) records nothing.
+          if (typeof before === 'string' && before.startsWith('#') &&
+              typeof after === 'string' && after !== before) {
+            const importer = state?.file?.opts?.filename
+            if (typeof importer === 'string') {
+              // Append, don't overwrite: two distinct subpath aliases that resolve to the same
+              // file from this importer rewrite to the identical `after`, so they share one key.
+              // Keeping both (deduped) lets afterResolve record an edge for each.
+              const key = edgeKey(path.resolve(importer), after)
+              const originals = subpathOriginals.get(key)
+              if (originals === undefined) subpathOriginals.set(key, [before])
+              else if (!originals.includes(before)) originals.push(before)
+            }
+          }
+        } catch {
+          // A recorder fault must never break the build -- the rewrite already ran above.
+        }
+        return result
+      }
+      wrapped[PATCHED] = true
+      mod[prop] = wrapped
+    }
+  }
+
   #applyCaptureMode(compiler) {
+    // Install the babel-plugin-module-resolver hook before the build runs (apply() is
+    // called synchronously at webpack() construction, before compiler.run()), so the
+    // recorder is populated by the loader pass before afterResolve looks an edge up.
+    this.#patchModuleResolver()
     compiler.hooks.normalModuleFactory.tap('Stasis', (nmf) => {
       // webpack 4's resolver reuses `resourceResolveData.context.issuer` across
       // factory invocations -- by the time `afterResolve` fires for a given
@@ -327,8 +433,20 @@ export class StasisWebpack {
         const rawRequest = cd.rawRequest ?? data.rawRequest
 
         if (kind === 'code' && !isEntry) {
-          const parentURL = pathToFileURL(path.resolve(issuer)).toString()
-          this.#state.addImport(parentURL, rawRequest, url)
+          const issuerAbsolute = path.resolve(issuer)
+          const parentURL = pathToFileURL(issuerAbsolute).toString()
+          // When babel-plugin-module-resolver rewrote one or more package.json "imports"
+          // subpaths ('#app/abc.js') into this resolved-relative rawRequest, the monkey-patch
+          // (#patchModuleResolver) recorded the original specifier(s) for this exact
+          // (importer, rewritten-request) edge. Key the edge by each ORIGINAL instead of the
+          // position-coupled relative path: it round-trips at load (where the same subpath
+          // reaches beforeResolve) and activates state.js's resolveBundled '#'-handling. Several
+          // aliases can collapse onto one rawRequest, so record an edge per original. No rewrite
+          // seen -> fall back to webpack's rawRequest unchanged.
+          const originals = subpathOriginals.get(edgeKey(issuerAbsolute, rawRequest))
+          for (const specifier of originals ?? [rawRequest]) {
+            this.#state.addImport(parentURL, specifier, url)
+          }
         }
 
         if (!this.#seen.has(filePath)) {
