@@ -78,6 +78,20 @@ export class StasisWebpack {
   #state
   #resources
 
+  // Number of compilers this (capture-mode) instance is applied to. webpack constructs every
+  // compiler -- and runs every plugin's apply() -- before any build starts, so by the first
+  // `done` this is final: 1 for a lone compiler, N when one shared instance drives a
+  // MultiCompiler's N child compilers. Only the latter accumulates files into one State across
+  // N `done`s, which is the case worth deferring (see the done hook).
+  #captureApplyCount = 0
+
+  // Deferred-write bookkeeping for the MULTI-compiler one-shot case, see #deferWrite. #armed:
+  // whether the single beforeExit/exit flush pair has been registered (idempotent across the
+  // N child-compiler `done`s a MultiCompiler fires). #dirty: a clean build completed since the
+  // last flush, so there is something to write.
+  #deferredWriteArmed = false
+  #deferredWriteDirty = false
+
   constructor(options = {}) {
     const { state } = resolvePluginState('StasisWebpack', options, process.cwd())
     this.#state = state  // null when plugin should be inert
@@ -357,6 +371,8 @@ export class StasisWebpack {
   }
 
   #applyCaptureMode(compiler) {
+    // Count compilers this instance drives (final by the first `done`; see the field comment).
+    this.#captureApplyCount += 1
     // Install the babel-plugin-module-resolver hook before the build runs (apply() is
     // called synchronously at webpack() construction, before compiler.run()), so the
     // recorder is populated by the loader pass before afterResolve looks an edge up.
@@ -473,10 +489,59 @@ export class StasisWebpack {
     // compiler finishes -- but only on a clean build. A failed compilation has incomplete
     // state, and lock=replace would otherwise overwrite a good lockfile with a partial one.
     if (this.#state !== State.preload) {
+      // Watch-mode detection. compiler.hooks.watchRun fires ONLY under compiler.watch() (both
+      // webpack 4 and 5) and always before that build's `done`, so the flag is set in time.
+      // The flag is per-compiler (this closure), which is what we want: each compiler reports
+      // its own run kind even when one shared plugin instance drives several.
+      let watching = false
+      compiler.hooks.watchRun.tap('Stasis', () => { watching = true })
       compiler.hooks.done.tap('Stasis', (stats) => {
         if (stats.hasErrors()) return
-        this.#state.write()
+        // Write immediately when the bundle cannot grow across `done`s:
+        //   - watch mode: a watcher keeps the event loop alive, so a deferred flush would never
+        //     fire; per-rebuild freshness is the point, and State.write's compare-and-skip keeps
+        //     an unchanged rebuild a ~no-op; and
+        //   - a single compiler: only one `done`, so there is no N-write amplification and no
+        //     reason to give up the old write-by-`done` durability (the bundle is on disk by the
+        //     time compiler.run()'s callback resolves).
+        // Defer ONLY the multi-compiler one-shot case. compiler.hooks.done fires once PER CHILD
+        // COMPILER, so a MultiCompiler with N targets sharing this one State's growing bundle
+        // would otherwise pay N brotli + writeFileSync passes over an ever-larger payload (the
+        // dominant, super-linear cost). Deferral collapses those into ONE write of the final
+        // bundle at process exit -- mirroring how the preload writes (hooks.js). esbuild / metro
+        // are deliberately NOT changed: their write hook fires once per build (no per-child
+        // amplification), and stasis build reads esbuild output in-process, so their synchronous
+        // write is load-bearing in a way webpack's per-child `done` write is not.
+        if (watching || this.#captureApplyCount === 1) this.#state.write()
+        else this.#deferWrite()
       })
     }
+  }
+
+  // Mark the State dirty and ensure a single end-of-process flush is registered, so a
+  // MultiCompiler's per-child-compiler `done` events coalesce into one write of the final
+  // bundle rather than re-serializing + brotli-compressing (quality 11, super-linear in size)
+  // an ever-growing bundle on every target's completion.
+  //
+  // KNOWN LIMITATION: the flush runs at process exit, so a multi-compiler one-shot build inside
+  // a process that never exits normally -- one that stays alive after building and is then
+  // killed by a signal (SIGINT/SIGTERM/SIGKILL), which bypass both beforeExit and exit -- would
+  // not flush. That is the same capture-then-exit assumption the preload already relies on
+  // (hooks.js) and metro documents; the common build-and-exit and watch (`--watch`, dev-server)
+  // flows are unaffected, and a single-compiler build never reaches here (it writes on `done`).
+  #deferWrite() {
+    this.#deferredWriteDirty = true
+    if (this.#deferredWriteArmed) return
+    this.#deferredWriteArmed = true
+    const flush = () => {
+      if (!this.#deferredWriteDirty) return  // already flushed; the exit backstop is then a no-op
+      this.#state.write()                    // synchronous; if it throws, dirty stays set so the
+      this.#deferredWriteDirty = false       // exit backstop retries -- clear ONLY after success
+    }
+    // beforeExit handles the natural event-loop drain; exit is the synchronous backstop for an
+    // explicit process.exit(). state.write() is fully synchronous (writeFileSync/brotliCompressSync),
+    // so it is safe in the exit handler, and the dirty guard makes the second of the two a no-op.
+    process.on('beforeExit', flush)
+    process.on('exit', flush)
   }
 }
