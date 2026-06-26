@@ -91,12 +91,11 @@ export class StasisEsbuild {
         try {
           ;({ url } = this.#state.getImport(parentURL, specifier, { importAttributes: attrs }))
         } catch (err) {
-          // No attested edge. getImport already tried the recorded edges AND the
-          // under-recorded bundle-file-set fallback (resolveBundled), so a miss
-          // means the request names nothing the bundle carries -- at a successful
-          // capture it was an EXTERNAL (a user `external` entry; built-ins are
-          // handled above). Externals are never recorded as edges, so return
-          // undefined to hand it back to esbuild, which externalizes it as it would
+          // No attested edge. getImport tried the recorded edge under every conditions
+          // bucket (resolveBundled), so a miss means the request names nothing the
+          // bundle carries -- at a successful capture it was an EXTERNAL (a user
+          // `external` entry; built-ins are handled above). Externals are never recorded
+          // as edges, so return undefined to hand it back to esbuild, which externalizes it as it would
           // without this plugin. This relaxes only the resolve-time edge lookup:
           // a genuinely missing in-scope FILE still fails closed at onLoad
           // (state.getFile serves in-scope bytes from the bundle or throws), so no

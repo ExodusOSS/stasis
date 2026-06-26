@@ -189,16 +189,15 @@ test('run --bundle=load serves an ESM->CJS->CJS node_modules graph with node_mod
   t.assert.equal(load.stdout, 'a:b\n')
 }))
 
-// Regression for the fs-extra `Cannot find module '../mkdirs'` report. Node's
-// module cache makes the resolve hook miss a require() whose target another module
-// already loaded, so the edge is recorded under only ONE importer. When a
-// different importer is the first to need it at load time, the per-parent edge is
-// absent -- resolveBundled must recover the target from the bundle's own file set
-// (here a relative require, resolved by path + index). Capture warms a.js first
-// (recording ./shared under a.js); at load a.js is skipped, so b.js is the first
-// to require ./shared, where the edge was never recorded. Fails without the
-// file-set fallback (bare `Cannot find module './shared'`).
-test('run --bundle=load resolves an under-recorded (module-cached) require from the bundle', withTmp((t, tmp) => {
+// Regression for the fs-extra `Cannot find module '../mkdirs'` report. Node's module
+// cache makes a sibling's require() of an already-loaded target skip resolution
+// (Module._load's relativeResolveCache), which once left the edge recorded under only
+// ONE importer. The Module._load capture shim now records the per-importer edge anyway,
+// so at load b.js -- the first to require ./shared (a.js is skipped without WARM) --
+// resolves via its OWN recorded edge. Without that capture shim the edge would be
+// unrecorded and the load would fail (`Cannot find module './shared'`): there is no
+// load-time fallback.
+test('run --bundle=load resolves a cache-shared sibling require from the bundle', withTmp((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'cache-graph', version: '1.0.0', private: true }))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
   writeFileSync(join(tmp, 'index.mjs'), "import m from 'multi'\nconsole.log(m)\n")
@@ -228,14 +227,42 @@ test('run --bundle=load resolves an under-recorded (module-cached) require from 
   t.assert.equal(load.stdout, 'Sb\n')
 }))
 
-// Review finding: an under-recorded relative require of a directory whose
-// package.json `main` != index.js must resolve to `main`, not index.js. The bundle
-// carries no package.json, so structural resolution alone picks the wrong file;
-// resolveBundled reuses the attested target a sibling importer recorded for the
-// same location. Warm-up records ./sub -> sub/real.js (main) under a.js AND pulls
-// sub/index.js into the bundle; at load b.js's under-recorded ./sub must still hit
-// real.js. Without the attested-target reuse this silently runs sub/index.js.
-test('run --bundle=load honors package.json main for an under-recorded directory require', withTmp((t, tmp) => {
+// Capture side of the under-recording: Node's Module._load fast path
+// (relativeResolveCache, keyed by the parent DIRECTORY + request) returns an
+// already-loaded module WITHOUT calling _resolveFilename, so a SECOND sibling
+// importer's require() of the same target was never observed and its edge went
+// unrecorded. index.js requires ./a then ./b; a.js loads ./shared (caching it), so
+// b.js's require('./shared') hits the cache. The _load observe-shim records the true
+// per-importer edge at capture, so BOTH a.js's and b.js's `./shared` edges land.
+test('run --bundle=add records a sibling importer\'s require() edge (no under-recording)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'sib', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.mjs'), "import 'pkg'\n")
+  const pkg = join(tmp, 'node_modules', 'pkg')
+  mkdirSync(pkg, { recursive: true })
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'pkg', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(pkg, 'index.js'), "require('./a'); require('./b')\n") // a runs first -> caches shared
+  writeFileSync(join(pkg, 'a.js'), "module.exports = require('./shared')\n")
+  writeFileSync(join(pkg, 'b.js'), "module.exports = require('./shared')\n") // sibling: hits relativeResolveCache
+  writeFileSync(join(pkg, 'shared.js'), "module.exports = 'S'\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+
+  const bundle = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  const hasEdge = (parent) => Object.values(bundle.imports).some((byParent) => byParent[parent]?.['./shared'] !== undefined)
+  t.assert.ok(hasEdge('node_modules/pkg/a.js'), 'pkg/a.js -> ./shared recorded')
+  t.assert.ok(hasEdge('node_modules/pkg/b.js'), 'pkg/b.js -> ./shared recorded (the previously under-recorded sibling edge)')
+}))
+
+// A cache-shared relative require of a directory whose package.json `main` != index.js
+// must resolve to `main`, not index.js. The bundle carries no package.json, so the
+// resolved target has to be the attested one. The Module._load capture shim records
+// ./sub -> sub/real.js (main) under BOTH a.js and b.js (b.js's require hits the module
+// cache), so at load b.js resolves to real.js via its recorded edge -- the captured
+// resolution already baked in package.json `main`, so index.js is never guessed.
+test('run --bundle=load honors package.json main for a cache-shared directory require', withTmp((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'main-dir', version: '1.0.0', private: true }))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
   writeFileSync(join(tmp, 'index.mjs'), "import m from 'pkg'\nconsole.log(m)\n")
@@ -266,12 +293,13 @@ test('run --bundle=load honors package.json main for an under-recorded directory
   t.assert.equal(load.stdout, 'REAL\n') // the package's main, NOT sub/index.js
 }))
 
-// Review finding: an under-recorded BARE require of a multi-version dependency
-// must resolve to the NEAREST node_modules copy. With several versions bundled the
-// cross-parent reuse can't pick by uniqueness, so resolveBundled walks node_modules
-// from the importer. pkgA/a.js records 'dep' -> pkgA's nested dep; pkgA/b.js is
-// under-recorded; pkgB records 'dep' -> the top-level dep.
-test('run --bundle=load resolves an under-recorded bare require to the nearest node_modules copy', withTmp((t, tmp) => {
+// A cache-shared BARE require of a multi-version dependency must resolve to the copy
+// Node picked at capture (the NEAREST node_modules). pkgA/a.js and pkgA/b.js both
+// require 'dep'; a.js loads pkgA's nested dep and b.js's require hits the cache. The
+// Module._load capture shim records 'dep' -> pkgA's nested dep under BOTH, and pkgB
+// records 'dep' -> the top-level dep -- so at load each resolves to its captured copy
+// via its own recorded edge (no node_modules walk: the right copy is already attested).
+test('run --bundle=load resolves a cache-shared multi-version bare require to its recorded copy', withTmp((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'multi-ver', version: '1.0.0', private: true }))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
   writeFileSync(join(tmp, 'index.mjs'), "import a from 'pkgA'\nimport b from 'pkgB'\nconsole.log(a + '|' + b)\n")
@@ -309,12 +337,13 @@ test('run --bundle=load resolves an under-recorded bare require to the nearest n
   t.assert.equal(load.stdout, 'NESTED|TOP\n') // pkgA/b.js -> nested copy, pkgB -> top copy
 }))
 
-// Review finding: a subpath import ('#name', a package's "imports" field) is
-// bare-looking but resolves within the importer's OWN package, not via a
-// node_modules walk. When two packages share a '#' specifier and both edges are
-// under-recorded, the bare walk would look for a package literally named '#name'
-// and crash; resolveBundled scopes '#' specifiers to the importer's package.
-test('run --bundle=load scopes an under-recorded #imports subpath to the importing package', withTmp((t, tmp) => {
+// A subpath import ('#name', a package's "imports" field) resolves within the
+// importer's OWN package. Two packages share the '#impl' specifier mapping to their
+// own impl.js; each package's y.js requires '#impl' after index.js already loaded it
+// (cache-shared). The Module._load capture shim records '#impl' under each y.js to its
+// own package's impl.js, so at load each resolves within its package via the recorded
+// edge -- the captured resolution is inherently package-scoped, no '#name' walk needed.
+test('run --bundle=load resolves a cache-shared #imports subpath within the importing package', withTmp((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'imp', version: '1.0.0', private: true }))
   writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
   writeFileSync(join(tmp, 'index.mjs'), "import a from 'pkgA'\nimport b from 'pkgB'\nconsole.log(a + '|' + b)\n")

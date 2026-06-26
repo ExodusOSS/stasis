@@ -638,4 +638,23 @@ function patchCjsResolution() {
     }
     return resolved
   }
+
+  // Capture: Module._load's fast path (relativeResolveCache, keyed by the parent
+  // DIRECTORY + request) returns an already-loaded module WITHOUT calling
+  // _resolveFilename -- so a SECOND sibling importer's require() of a target the first
+  // sibling already loaded never reaches the observe shim above, and the edge is
+  // recorded only under the first importer (under-recording). _load runs for EVERY
+  // require() including cache hits, so force the resolution here to observe the true
+  // per-importer edge; _resolveFilename is itself cached, so this is cheap, and a
+  // resolution error is left for the original _load to raise (behavior unchanged).
+  // We call the PROPERTY `Module._resolveFilename` (our shim above), not a captured
+  // reference, so the call routes through observeResolution.
+  const originalLoad = Module._load
+  Module._load = function (request, parent, ...rest) {
+    if (state && !state.config.loadBundle && typeof request === 'string'
+        && !isBuiltin(request) && typeof parent?.filename === 'string') {
+      try { Module._resolveFilename(request, parent, ...rest) } catch { /* original _load raises the real error */ }
+    }
+    return originalLoad.call(this, request, parent, ...rest)
+  }
 }

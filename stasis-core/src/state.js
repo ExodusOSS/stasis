@@ -26,10 +26,6 @@ const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
 
-// Extensions Node's CommonJS loader tries for an extensionless require() (and for
-// a directory's index.*). Used by the bundle file-set fallback in resolveBundled.
-const CJS_EXTENSIONS = ['.js', '.json', '.node']
-
 function readPackageJSON(pkgAbsolute) {
   const buf = readFileSync(pkgAbsolute)
   assert.ok(isUtf8(buf))
@@ -144,18 +140,12 @@ export class State {
   #bundleImports = null
   #bundleFormats = null
 
-  // Lazily-built reverse index over the bundle's recorded resolutions, memoizing
-  // the under-recorded fallbacks in resolveBundled (see #bundleIndex). Only ever
-  // built/used in load mode, where this.imports / this.sources are immutable after
-  // construction, so a single build is safe.
-  #bundleResolveIndex = null
-
   // Lazily-built set of directory paths IMPLIED by the bundle's recorded entries
   // (files, resources, directory listings): a recorded `node_modules/dep/index.js`
   // proves `node_modules` and `node_modules/dep` exist as directories even though
   // neither was readdir'd. getFsStat consults it so
-  // `fs.statSync('node_modules').isDirectory()` succeeds at bundle=load. Same load-mode
-  // immutability assumption as #bundleResolveIndex, so a single build is safe.
+  // `fs.statSync('node_modules').isDirectory()` succeeds at bundle=load. Built once
+  // in load mode, where this.imports / this.sources are immutable after construction.
   #impliedDirIndex = null
 
   // Capture-time native resolutions (parent URL -> specifier -> resolved URL)
@@ -1532,12 +1522,10 @@ export class State {
       file = this.imports.get('*')?.get(parent)?.get(specifier)
     }
     if (file === undefined) {
-      // Under-recorded edge: Node's module cache hid this require() from the
-      // resolve hook at capture (another module loaded the target first), so no
-      // edge was recorded under this importer. Newer Node routes a bundle-served
-      // CJS require() through the resolve hook (this path) rather than through
-      // Module._resolveFilename (where the CJS-loader shim recovers it) -- the
-      // routing changed within 26.x -- so recover it from the bundle here too.
+      // The (key, parent, spec) and '*' lookups missed, but the edge may be recorded
+      // under a DIFFERENT conditions bucket -- e.g. the esbuild plugin asks with
+      // conditions='*' while a Node-loader-captured bundle keyed the edge under
+      // 'require, node, ...'. resolveBundled scans every bucket for the recorded edge.
       if (this.config.loadBundle) {
         const abs = this.resolveBundled(parentURL, specifier)
         if (abs !== undefined) {
@@ -1564,144 +1552,30 @@ export class State {
   // path the loader should use (load() then serves its bytes from the bundle), or
   // undefined to defer to Node's native resolution.
   //
-  // Node's CommonJS loader resolves require() through Module._resolveFilename,
-  // which registerHooks does NOT intercept. When the ESM->CJS translator runs a
-  // CJS module we served from the bundle (`import chalk from 'chalk'`, chalk
-  // being CJS), that module's nested require()s take this native path and Node
-  // resolves them against disk -- so a bundle is not self-contained for a CJS
-  // dependency graph once node_modules is pruned/absent. The CJS-loader shim in
-  // hooks.js consults this to serve them from the bundle instead.
+  // Node's CommonJS loader resolves require() through Module._resolveFilename, which
+  // registerHooks does NOT intercept. When the ESM->CJS translator runs a CJS module we
+  // served from the bundle (`import chalk from 'chalk'`, chalk being CJS), that module's
+  // nested require()s take this native path and Node resolves them against disk -- so a
+  // bundle is not self-contained for a CJS dependency graph once node_modules is
+  // pruned/absent. The CJS-loader shim in hooks.js consults this to serve them from the
+  // bundle instead.
   //
-  // Resolution order:
-  //   1. The recorded edge for this exact (parent, specifier), under any
-  //      conditions bucket (the native require gives us no conditions to key on);
-  //      this is the attested resolution. Divergent targets across buckets are
-  //      ambiguous -> skip.
-  //   2. Fallback against the bundle's own file set. The resolve hook never
-  //      observes a require() satisfied from Node's module cache, so an edge can
-  //      be absent under the importer that needs it at load time (another module
-  //      resolved the same target first -- e.g. fs-extra's copy-sync.js
-  //      require('../mkdirs') when copy.js already cached it). A relative/absolute
-  //      specifier resolves by path (deterministic -- a fixed path can't be
-  //      redirected); a bare specifier reuses a recorded target for the same
-  //      specifier (it names the same package from any importer in the tree).
-  //   Both fallbacks return only files the bundle actually carries, and load()
-  //   still hash-verifies the bytes, so the trust boundary is unchanged.
+  // Returns the recorded edge for this (parent, specifier) under ANY conditions bucket --
+  // a native require gives no conditions to key on, and divergent targets across buckets
+  // are ambiguous, so we defer. EVERY require() edge is recorded at capture, including the
+  // sibling requires Node's module cache used to hide from the resolve hook (the
+  // Module._load shim in hooks.js observes them) -- so a miss here means the bundle simply
+  // doesn't carry the target (an external), and we defer to Node rather than guess.
   resolveBundled(parentURL, specifier) {
     let parent
     try { parent = this.#canonicalFile(parentURL) } catch { return undefined }
     const spec = this.#canonicalSpecifier(parentURL, specifier)
-
-    // 1. The recorded edge for this exact (parent, specifier), under any
-    //    conditions bucket -- the attested resolution. Ambiguous across buckets -> skip.
-    const exact = new Set()
+    const matches = new Set()
     for (const [, byParent] of this.imports) {
       const file = byParent.get(parent)?.get(spec)
-      if (file !== undefined) exact.add(file)
+      if (file !== undefined) matches.add(file)
     }
-    if (exact.size === 1) return resolve(this.root, [...exact][0])
-
-    // 2. Under-recorded fallback (see the note above), reusing only already-attested
-    //    targets from the bundle (load() still hash-verifies the bytes).
-    const index = this.#bundleIndex()
-    if (spec.startsWith('.') || isAbsolute(spec)) {
-      // Relative/absolute: a fixed resolved location. Reuse the target another
-      // importer attested for that SAME location -- this honors a directory's
-      // package.json `main` (which the bundle can't carry, so structural index
-      // resolution would otherwise run the wrong file). Fall back to structural
-      // extension/index resolution only when nothing attested it.
-      const absCandidate = resolve(isAbsolute(spec) ? this.root : dirname(resolve(this.root, parent)), spec)
-      const attested = index.byLocation.get(absCandidate) // null == ambiguous across importers
-      if (typeof attested === 'string') return resolve(this.root, attested)
-      const file = this.#resolveFileInBundle(absCandidate)
-      if (file !== undefined) return resolve(this.root, file)
-    } else {
-      const file = this.#resolveBareInBundle(index, resolve(this.root, parent), spec)
-      if (file !== undefined) return resolve(this.root, file)
-    }
-    return undefined
-  }
-
-  // Reverse index over the bundle's recorded resolutions, for resolveBundled's
-  // under-recorded fallbacks. Built once and cached: load mode never mutates
-  // this.imports / this.sources after construction, so per-miss rescans (which are
-  // O(edges)) become O(1)/O(node_modules-depth) lookups.
-  //   byLocation: a relative/absolute specifier's resolved ABSOLUTE location ->
-  //     the attested target, or null when importers disagree (ambiguous).
-  //   byBareSpec: a bare specifier -> { package dir -> attested target } -- the
-  //     candidate copies for node_modules-nesting-aware resolution.
-  // Both include only targets the bundle actually serves (this.sources).
-  #bundleIndex() {
-    if (this.#bundleResolveIndex) return this.#bundleResolveIndex
-    const byLocation = new Map()
-    const byBareSpec = new Map()
-    for (const [, byParent] of this.imports) {
-      for (const [p, specs] of byParent) {
-        const pdir = dirname(resolve(this.root, p))
-        for (const [s, file] of specs) {
-          if (!this.sources.has(file)) continue
-          if (s.startsWith('.') || isAbsolute(s)) {
-            const loc = resolve(isAbsolute(s) ? this.root : pdir, s)
-            byLocation.set(loc, byLocation.has(loc) && byLocation.get(loc) !== file ? null : file)
-          } else {
-            const nm = splitNodeModulesPath(file)
-            if (!nm) continue
-            let copies = byBareSpec.get(s)
-            if (copies === undefined) byBareSpec.set(s, (copies = new Map()))
-            copies.set(nm.dir, file)
-          }
-        }
-      }
-    }
-    this.#bundleResolveIndex = { byLocation, byBareSpec }
-    return this.#bundleResolveIndex
-  }
-
-  // CommonJS file/extension/index resolution against the bundle's code files, for
-  // an absolute candidate path. Returns the project-relative bundled file, or
-  // undefined. Bounded to this.sources (the code the bundle carries), so it can
-  // never reach outside the bundle or onto disk. package.json `main` isn't
-  // consulted (the bundle doesn't carry package.json) -- directory targets fall
-  // back to index.*, which covers the common case; anything else defers to Node.
-  #resolveFileInBundle(absCandidate) {
-    let base
-    try { base = this.relative(absCandidate) } catch { return undefined } // escapes root
-    if (this.sources.has(base)) return base
-    for (const ext of CJS_EXTENSIONS) if (this.sources.has(base + ext)) return base + ext
-    for (const ext of CJS_EXTENSIONS) {
-      const index = base === '' ? `index${ext}` : `${base}/index${ext}`
-      if (this.sources.has(index)) return index
-    }
-    return undefined
-  }
-
-  // node_modules-nesting-aware resolution of an under-recorded bare specifier
-  // against the bundle's recorded targets (index.byBareSpec). Among the candidate
-  // copies, pick the one Node would: the nearest node_modules/<pkg> enclosing the
-  // importer, so the correct copy wins when several versions are bundled. A single
-  // recorded copy is used directly.
-  #resolveBareInBundle(index, parentAbs, spec) {
-    const byPkgDir = index.byBareSpec.get(spec)
-    if (byPkgDir === undefined) return undefined
-    // A subpath import ('#name', a package's "imports" field) is bare-looking but
-    // resolves within the importer's OWN package -- NOT via a node_modules walk for
-    // a package literally named '#name'. Scope it to the importer's package dir.
-    if (spec.startsWith('#')) {
-      const nm = splitNodeModulesPath(relative(this.root, parentAbs))
-      return nm ? byPkgDir.get(nm.dir) : undefined
-    }
-    if (byPkgDir.size === 1) return [...byPkgDir.values()][0]
-    // Several versions bundled: nearest enclosing node_modules/<pkg> wins.
-    const parts = spec.split('/')
-    const pkg = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
-    let dir = dirname(parentAbs)
-    while (true) {
-      const candidate = relative(this.root, join(dir, 'node_modules', pkg))
-      if (!candidate.startsWith('..') && byPkgDir.has(candidate)) return byPkgDir.get(candidate)
-      const up = dirname(dir)
-      if (up === dir) return undefined
-      dir = up
-    }
+    return matches.size === 1 ? resolve(this.root, [...matches][0]) : undefined
   }
 
   // Union of the lockfile-attested resolutions and the live map (observed at

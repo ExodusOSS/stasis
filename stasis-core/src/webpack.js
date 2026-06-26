@@ -259,11 +259,11 @@ export class StasisWebpack {
         try {
           resolved = state.getImport(parentURL, data.request)
         } catch (err) {
-          // No attested edge. getImport already tried the recorded edges AND the
-          // under-recorded bundle-file-set fallback (resolveBundled), so a miss
-          // means the request names nothing the bundle carries. At a SUCCESSFUL
-          // capture that is an EXTERNAL -- a module webpack externalized instead of
-          // bundling: `electron` under an electron target, anything the target's
+          // No attested edge. getImport tried the recorded edge under every conditions
+          // bucket (resolveBundled), so a miss means the request names nothing the
+          // bundle carries. At a SUCCESSFUL capture that is an EXTERNAL -- a module
+          // webpack externalized instead of bundling: `electron` under an electron
+          // target, anything the target's
           // externals preset covers, or a user `externals` entry. Externals are
           // never recorded as edges (afterResolve only records resolutions with an
           // on-disk path; see #applyCaptureMode), exactly like built-ins -- so defer
