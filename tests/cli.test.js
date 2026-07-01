@@ -266,6 +266,50 @@ test('run honors a config-only bundleFile in a nested-package (monorepo) layout'
   t.assert.doesNotMatch(r.stderr, /Stasis config already loaded/, 'outer root must not re-detect the bundle')
 }))
 
+test('run --bundle=load with an explicit --bundle-file resolves the root consistently in a monorepo', withTmp((t, tmp) => {
+  // Regression: an explicit --bundle-file (or EXODUS_STASIS_BUNDLE_FILE) is a rootDir-INDEPENDENT
+  // path -- it reads the same file at every candidate root. As a root-detection signal it therefore
+  // matched the INNERMOST package.json (packages/app) and committed that as the root at load time,
+  // even though capture -- run before the bundle existed, so with no such signal -- committed the
+  // OUTER repo root. Bundle keys are stored relative to the capture root, so a dependency hoisted to
+  // <repo>/node_modules then landed OUTSIDE the (leaf) load root: the load hook could not serve it,
+  // and Node's ESM->CJS translator re-resolved it through Module._load(absPath, /* no parent */),
+  // which fell through hooks.js's `typeof parent?.filename === 'string'` guard to native disk
+  // resolution -- `Cannot find module '<abs>/node_modules/dep/index.js'` once node_modules was
+  // pruned/not shipped. Choosing the root without the explicit bundleFile biasing it keeps capture
+  // and load agreed, so the hoisted dep stays in-root and is served from the bundle.
+  //
+  // Layout yields potentialRoots = [packages/app, <tmp>] (the .git at <tmp> stops the upward walk).
+  mkdirSync(join(tmp, '.git'))
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'root', version: '1.0.0', private: true }))
+  // A CJS dependency hoisted to the repo-root node_modules (the npm/pnpm dedup shape).
+  const dep = join(tmp, 'node_modules', 'dep')
+  mkdirSync(dep, { recursive: true })
+  writeFileSync(join(dep, 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(dep, 'index.js'), "module.exports = 'DEP-FROM-BUNDLE'\n")
+  // Leaf package with NO stasis.config.json; its ESM entry imports the hoisted CJS dep (an
+  // ESM->CJS edge, so Node's translator drives the resolution that tripped the guard).
+  const app = join(tmp, 'packages', 'app')
+  mkdirSync(app, { recursive: true })
+  writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0', private: true }))
+  writeFileSync(join(app, 'index.mjs'), "import dep from 'dep'\nconsole.log(dep)\n")
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const save = run(['run', '--lock=none', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'], { cwd: app })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.match(save.stdout, /DEP-FROM-BUNDLE/)
+
+  // Tamper the dep's on-disk bytes: the node_modules layout stays on disk (node_modules scope
+  // resolves the bare specifier through it), but the CONTENT must come from the bundle. Pre-fix,
+  // the leaf-root misclassification served (or failed to find) the on-disk copy instead.
+  writeFileSync(join(dep, 'index.js'), "module.exports = 'DEP-FROM-DISK-TAMPERED'\n")
+
+  const load = run(['run', '--lock=none', '--dependencies', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.mjs'], { cwd: app })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.doesNotMatch(load.stdout, /TAMPERED/, 'the hoisted dep must be served from the bundle, not the on-disk copy')
+  t.assert.match(load.stdout, /DEP-FROM-BUNDLE/, 'bundle bytes win for a dependency resolved above the leaf package')
+}))
+
 test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')

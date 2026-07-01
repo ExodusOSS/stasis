@@ -388,16 +388,36 @@ export class State {
     // the explicit one), then substitute the explicit content once root-detection has
     // committed to a rootDir below.
     const explicitLockPath = this.config.lockFile
+    // A construction-time `bundleFile` (a --bundle-file flag or EXODUS_STASIS_BUNDLE_FILE) is
+    // rootDir-INDEPENDENT: reading it yields the same file at every candidate root. So, exactly
+    // like explicitLockPath, it must NOT act as a per-rootDir root-detection signal -- if it did,
+    // the innermost package.json dir would always match first and win, diverging load's root from
+    // the (outer) root the bundle was captured with. Because every bundle key is stored relative
+    // to the capture root, that divergence makes every bundled dependency unreachable at load: the
+    // load hook throws "outside project root" / "not attested", and Node's ESM->CJS translator --
+    // which re-resolves a required dependency through Module._load(absPath, /* no parent */) -- hits
+    // native disk resolution for a file the bundle carries but disk (post-prune / never-shipped)
+    // does not, i.e. `Cannot find module '<abs node_modules path>'`. Root is instead chosen from
+    // rootDir-DEPENDENT signals (stasis.config.json, the default lockfile/bundle at the dir), then
+    // the explicit bundle is loaded at the committed root -- or, when nothing else committed, at the
+    // outermost root post-loop (mirroring explicitLockPath). A `bundleFile` that comes only from
+    // stasis.config.json is NOT suppressed: it lives at a dir already carrying the config signal, so
+    // it selects that dir consistently at capture and load alike.
+    const explicitBundlePath = this.config.bundleFile
     for (const rootDir of potentialRoots) {
       const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8')
       const lockProbe = explicitLockPath ? null : readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
-      // Probe for a bundle at the construction-time bundleFile (a --bundle-file flag or
-      // EXODUS_STASIS_BUNDLE_FILE) or, absent that, the default <rootDir>/stasis.code.br.
-      // This is only a root-detection signal -- the authoritative path can still change when
+      // Read the bundle at the construction-time bundleFile (a --bundle-file flag or
+      // EXODUS_STASIS_BUNDLE_FILE) or, absent that, the default <rootDir>/stasis.code.br -- used
+      // to LOAD the bundle once a root is committed. The authoritative path can still change when
       // loadConfig() applies a `bundleFile` from stasis.config.json, so it's re-read below.
       let sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
       let sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
-      if (config !== null || lockProbe !== null || sources !== null) {
+      // Root-SELECTION signal: only the DEFAULT <rootDir>/stasis.code.br counts. An explicit
+      // (rootDir-independent) bundleFile is suppressed here (see explicitBundlePath above) so it
+      // can't bias selection to the innermost dir; it is still loaded via `sources` once committed.
+      const bundleProbe = explicitBundlePath ? null : sources
+      if (config !== null || lockProbe !== null || bundleProbe !== null) {
         if (loaded) throw new Error('Stasis config already loaded')
         loaded = true
         this.root = rootDir
@@ -473,40 +493,7 @@ export class State {
         }
 
         if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-          // One unified bundle carries both code and resources. Split the flat file
-          // view into this.sources (code) and this.resources (resource payloads --
-          // raw UTF-8 for 'resource', base64 for 'resource:base64') by format.
-          const bundle = Bundle.parse(brotliDecompressSync(sources).toString('utf-8'))
-          // `Bundle.parse` accepts v0 for offline tooling (`stasis extract`, `diff`,
-          // `audit`, `sbom`) -- it has the metadata those commands need. The runtime
-          // path is stricter: a v0 bundle has no per-file `formats` attestation
-          // (resources can't be distinguished from code, the loader can't pick
-          // module-vs-commonjs) and no import map (resolution edges go unchecked),
-          // so serving / verifying one under `stasis run` would silently widen the
-          // trust boundary. Refuse it explicitly and point at the upgrade path.
-          assert.equal(bundle.version, Bundle.VERSION,
-            `stasis run requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
-            `Re-bundle with the current stasis (\`stasis bundle\`) or \`stasis run --bundle=replace\` ` +
-            `against a v0-free starting point to upgrade.`)
-          assert.equal(bundle.config.scope, this.config.scope)
-          this.#mergeBundleMetadata(bundle, { lockfileLoaded })
-          for (const [file, content] of bundle.sources) {
-            if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
-            else this.sources.set(file, content)
-          }
-          this.formats = bundle.formats
-          this.imports = bundle.imports
-          if (this.config.frozenBundle) {
-            // Snapshot the attested sets before addFile/addImport mutate the live maps.
-            // imports is deep-cloned (this.imports shares bundle.imports's nested Maps,
-            // which addImport extends); formats is a flat file->string map, so a shallow
-            // copy suffices. Code and resource file sets are tracked separately to match
-            // addFile's per-kind frozen-bundle membership check.
-            this.#bundleSources = new Set(this.sources.keys())
-            this.#bundleResources = new Set(this.resources.keys())
-            this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
-            this.#bundleFormats = new Map(bundle.formats)
-          }
+          this.#absorbCodeBundle(sources, sourcesPath, lockfileLoaded)
         }
 
         // Split-bundle layout: when `resourcesBundleFile` is configured, resources
@@ -569,6 +556,35 @@ export class State {
       }
     }
 
+    // Explicit (flag/env) bundleFile with no rootDir-dependent indicator at any rootDir: like the
+    // explicit lockfile above, it was suppressed as a root-detection signal so it couldn't pull the
+    // root down to the innermost package, so the loop never loaded it. Load it here against
+    // `this.root` (the outermost package.json) -- the same root capture commits to when no signal
+    // exists -- so its capture-root-relative keys line up with how they're looked up. Inlines the
+    // same gates as the in-loop bundle branch.
+    if (!loaded && explicitBundlePath) {
+      const sourcesPath = this.config.bundleFile
+      const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+      if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
+        throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
+      }
+      if (sources && !lockfileLoaded && this.config.useLockfile && !this.config.replaceLockfile && !this.config.frozenBundle) {
+        throw new Error('stasis.lock.json missing, can not use sources')
+      }
+      if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
+        this.#absorbCodeBundle(sources, sourcesPath, lockfileLoaded)
+      }
+      // Split-bundle resources: same post-loop treatment (resourcesBundleFile is likewise an
+      // explicit, rootDir-independent path). Mirrors the in-loop resources branch.
+      if (this.config.resourcesBundleFile) {
+        const resourcesPath = this.config.resourcesBundleFile
+        const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
+        if (resourcesData && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
+          this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
+        }
+      }
+    }
+
     // Frozen modes must have actually loaded their attestation. Asserting here --
     // after the discovery loop -- rather than only inside it closes a fail-open: with
     // no stasis files on disk at all the loop body never runs, so a per-rootDir guard
@@ -606,6 +622,46 @@ export class State {
     }
 
     liveStates().add(this)
+  }
+
+  // Absorb a unified code+resource bundle's metadata and payloads into this State. Shared by the
+  // discovery loop (a committed rootDir carrying a stasis signal) and the post-loop fallback that
+  // loads an explicit (rootDir-independent) bundleFile against the outermost root.
+  #absorbCodeBundle(sources, sourcesPath, lockfileLoaded) {
+    // One unified bundle carries both code and resources. Split the flat file
+    // view into this.sources (code) and this.resources (resource payloads --
+    // raw UTF-8 for 'resource', base64 for 'resource:base64') by format.
+    const bundle = Bundle.parse(brotliDecompressSync(sources).toString('utf-8'))
+    // `Bundle.parse` accepts v0 for offline tooling (`stasis extract`, `diff`,
+    // `audit`, `sbom`) -- it has the metadata those commands need. The runtime
+    // path is stricter: a v0 bundle has no per-file `formats` attestation
+    // (resources can't be distinguished from code, the loader can't pick
+    // module-vs-commonjs) and no import map (resolution edges go unchecked),
+    // so serving / verifying one under `stasis run` would silently widen the
+    // trust boundary. Refuse it explicitly and point at the upgrade path.
+    assert.equal(bundle.version, Bundle.VERSION,
+      `stasis run requires a v1 bundle; ${sourcesPath} is v${bundle.version}. ` +
+      `Re-bundle with the current stasis (\`stasis bundle\`) or \`stasis run --bundle=replace\` ` +
+      `against a v0-free starting point to upgrade.`)
+    assert.equal(bundle.config.scope, this.config.scope)
+    this.#mergeBundleMetadata(bundle, { lockfileLoaded })
+    for (const [file, content] of bundle.sources) {
+      if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
+      else this.sources.set(file, content)
+    }
+    this.formats = bundle.formats
+    this.imports = bundle.imports
+    if (this.config.frozenBundle) {
+      // Snapshot the attested sets before addFile/addImport mutate the live maps.
+      // imports is deep-cloned (this.imports shares bundle.imports's nested Maps,
+      // which addImport extends); formats is a flat file->string map, so a shallow
+      // copy suffices. Code and resource file sets are tracked separately to match
+      // addFile's per-kind frozen-bundle membership check.
+      this.#bundleSources = new Set(this.sources.keys())
+      this.#bundleResources = new Set(this.resources.keys())
+      this.#bundleImports = objectToMaps(fileMapToObject(bundle.imports))
+      this.#bundleFormats = new Map(bundle.formats)
+    }
   }
 
   // Cross-check bundle metadata (entries/modules) with what the lockfile already
