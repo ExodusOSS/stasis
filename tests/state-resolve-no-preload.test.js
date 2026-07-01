@@ -7,7 +7,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { resolvePluginState } from '@exodus/stasis-plugins/plugins'
+// resolvePluginState is internal plugin<->preload coordination, not a public export;
+// import the source directly (same pattern as fs.js in the fs tests).
+import { resolvePluginState } from '../stasis-plugins/src/plugins.js'
 import { State } from '@exodus/stasis-core/state'
 
 const fixture = () => {

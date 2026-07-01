@@ -318,7 +318,7 @@ export class StasisWebpack {
   // (no '#'-rewriting in play) skips the patch entirely and capture is unchanged. The
   // wrapper is a transparent passthrough -- it never alters the rewrite, only observes
   // it -- so leaving it installed across watch rebuilds is harmless; PATCHED guards
-  // against re-wrapping. stasis-core takes no dependency on the package: it is located
+  // against re-wrapping. stasis-plugins takes no dependency on it: it is located
   // via the project's own node_modules (createRequire) and absent-package errors are
   // swallowed.
   #patchModuleResolver() {
