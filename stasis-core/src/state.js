@@ -1548,6 +1548,21 @@ export class State {
     return this.formats.get(this.#canonicalFile(url))
   }
 
+  // True when this State carries content for `url` -- i.e. getFile(url) would serve it
+  // (code or resource). Tolerant like inNodeModules: a URL that can't be canonicalized
+  // (non-file, outside the project root) is simply not carried. The CJS-resolution shim
+  // (hooks.js patchCjsResolution) consults this to decide whether a PARENTLESS
+  // absolute-path resolution names a bundled file it should resolve as the identity.
+  hasFile(url) {
+    let file
+    try {
+      file = this.#canonicalFile(url)
+    } catch {
+      return false
+    }
+    return this.sources.has(file) || this.resources.has(file)
+  }
+
   // Different conditions / import attributes can yield different URLs/formats for the same parent+specifier
   #conditionsKey(conditions, importAttributes) {
     const cond = conditions === '*' ? '*' : conditions.join(', ')

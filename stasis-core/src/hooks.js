@@ -1,5 +1,5 @@
 import Module, { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
-import { basename, dirname, extname, join, resolve as resolvePath } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 import * as fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto'
@@ -726,16 +726,36 @@ function patchCjsResolution() {
   const original = Module._resolveFilename
   Module._resolveFilename = function (request, parent, ...rest) {
     const loadMode = state?.config.loadBundle
-    if (loadMode && typeof request === 'string'
-        && !isBuiltin(request) && typeof parent?.filename === 'string') {
-      const parentURL = pathToFileURL(parent.filename).toString()
-      // Same scope gate the resolve hook applies (see above): node_modules scope
-      // only serves dependency parents from the bundle; workspace/app code is left
-      // to Node's native resolution (read from disk). Without this the shim would
-      // silently take over CJS resolution for app files too.
-      if (state.config.full || state.inNodeModules(parentURL)) {
-        const resolved = state.resolveBundled(parentURL, request)
-        if (resolved !== undefined) return resolved
+    if (loadMode && typeof request === 'string' && !isBuiltin(request)) {
+      if (typeof parent?.filename === 'string') {
+        const parentURL = pathToFileURL(parent.filename).toString()
+        // Same scope gate the resolve hook applies (see above): node_modules scope
+        // only serves dependency parents from the bundle; workspace/app code is left
+        // to Node's native resolution (read from disk). Without this the shim would
+        // silently take over CJS resolution for app files too.
+        if (state.config.full || state.inNodeModules(parentURL)) {
+          const resolved = state.resolveBundled(parentURL, request)
+          if (resolved !== undefined) return resolved
+        }
+      } else if (isAbsolute(request)) {
+        // NO parent, request already an absolute path: Node's ESM<->CJS interop re-enters
+        // the monkey-patchable CJS loader with the RESOLVED filename, no parent module, and
+        // the registerHooks hooks SKIPPED -- translators.js evaluates an import-linked CJS
+        // module via wrapModuleLoad(filename, undefined|null, isMain, kShouldSkipModuleHooks)
+        // (the 'commonjs-sync' translator, reached whenever a require() pulls in an ESM graph
+        // that imports a CJS dep; also createCJSNoSourceModuleWrap). resolveForCJSWithHooks
+        // then bypasses the resolve hook entirely, so this shim is the ONLY interception
+        // point. An absolute path can only arrive here from a prior successful resolution
+        // (ours, from the bundle -- or Node's own), so when the bundle attests that exact
+        // file under the same scope gate, the resolution is the identity. Falling through to
+        // native would stat a file the bundle carries but disk (pruned / never-shipped
+        // node_modules) may not -- MODULE_NOT_FOUND on a path that is perfectly servable.
+        // Node >=24.18 forwards pre-resolved context for hook-resolved modules, masking the
+        // common case; on 24.14-24.17 (our supported floor) every commonjs-sync evaluation
+        // re-resolves through here, and the no-parent shape survives on >=24.18 too (the
+        // deferred-resolution branch and createCJSNoSourceModuleWrap still take it).
+        const url = pathToFileURL(request).toString()
+        if ((state.config.full || state.inNodeModules(url)) && state.hasFile(url)) return request
       }
     }
     const resolved = original.call(this, request, parent, ...rest)

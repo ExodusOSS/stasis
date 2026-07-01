@@ -310,6 +310,76 @@ test('run --bundle=load with an explicit --bundle-file resolves the root consist
   t.assert.match(load.stdout, /DEP-FROM-BUNDLE/, 'bundle bytes win for a dependency resolved above the leaf package')
 }))
 
+// Shared fixture for the two tests below: the graph shape whose CJS leaf Node links via the
+// 'commonjs-sync' translator. entry (ESM) --createRequire--> bridge-cjs (natively-executed
+// CJS) --require(esm)--> esm-pkg (ESM) --import--> cjs-dep (CJS). At evaluation, translators.js
+// re-enters the monkey-patchable CJS loader for cjs-dep as
+//   Module._load('<abs>/node_modules/cjs-dep/index.js', /* parent */ undefined, isMain,
+//                kShouldSkipModuleHooks)
+// -- an ALREADY-RESOLVED absolute path, NO parent module, and the registerHooks hooks SKIPPED,
+// so the resolve hook never sees the call and Module._resolveFilename is the only interception
+// point. Pre-fix the request fell through the shim's `typeof parent?.filename === 'string'`
+// guard to native disk resolution: `Cannot find module '<abs>/node_modules/cjs-dep/index.js'`
+// for a file only the bundle carries (thrown from hooks.js's original.call). This is the
+// cosmiconfig/import-fresh config-loading shape (a required config pulling in an ESM graph
+// with CJS deps). Node >=24.18 forwards pre-resolved context for hook-resolved modules and
+// masks the common case; on 24.14-24.17 every commonjs-sync evaluation re-resolves this way.
+const writeRequireEsmCjsFixture = (tmp) => {
+  const write = (rel, content) => {
+    mkdirSync(join(tmp, dirname(rel)), { recursive: true })
+    writeFileSync(join(tmp, rel), content)
+  }
+  write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', private: true }))
+  write('entry.mjs', [
+    "import { createRequire } from 'node:module'",
+    'const require = createRequire(import.meta.url)',
+    "console.log(require('bridge-cjs').bridged)",
+    '',
+  ].join('\n'))
+  write('node_modules/bridge-cjs/package.json', JSON.stringify({ name: 'bridge-cjs', version: '1.0.0', main: 'index.js' }))
+  write('node_modules/bridge-cjs/index.js', "module.exports = { bridged: require('esm-pkg').ok }\n")
+  write('node_modules/esm-pkg/package.json', JSON.stringify({ name: 'esm-pkg', version: '1.0.0', type: 'module', main: 'index.js' }))
+  write('node_modules/esm-pkg/index.js', "import tag from 'cjs-dep'\nexport const ok = tag('LOADED')\n")
+  write('node_modules/cjs-dep/package.json', JSON.stringify({ name: 'cjs-dep', version: '1.0.0', main: 'index.js' }))
+  write('node_modules/cjs-dep/index.js', 'module.exports = (v) => `CJS-DEP-${v}`\n')
+}
+
+test('run --bundle=load serves a require(esm)-linked CJS dep with node_modules removed', withTmp((t, tmp) => {
+  writeRequireEsmCjsFixture(tmp)
+
+  const save = run(['run', '--lock=add', '--bundle=add', 'entry.mjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.match(save.stdout, /CJS-DEP-LOADED/)
+
+  // A full-scope bundle is self-contained: ship it without node_modules entirely. The
+  // commonjs-sync re-load of cjs-dep must then resolve from the bundle (the shim's
+  // parentless identity resolution), never from disk.
+  rmSync(join(tmp, 'node_modules'), { recursive: true, force: true })
+
+  const load = run(['run', '--lock=frozen', '--bundle=load', 'entry.mjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.match(load.stdout, /CJS-DEP-LOADED/, 'the require(esm)-linked CJS dep must be served from the bundle')
+}))
+
+test('run --dependencies --bundle=load serves a require(esm)-linked CJS dep absent from disk', withTmp((t, tmp) => {
+  // Same graph under node_modules scope: bridge-cjs stays on disk (the workspace entry's
+  // bare specifier resolves through the on-disk layout by design), but esm-pkg and cjs-dep
+  // are resolved from the bundle's import map (node_modules parents), so their trees can be
+  // absent -- including cjs-dep's, whose commonjs-sync re-load takes the parentless path.
+  writeRequireEsmCjsFixture(tmp)
+
+  const save = run(['run', '--lock=add', '--dependencies', '--bundle=add', 'entry.mjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.match(save.stdout, /CJS-DEP-LOADED/)
+
+  rmSync(join(tmp, 'node_modules', 'esm-pkg'), { recursive: true, force: true })
+  rmSync(join(tmp, 'node_modules', 'cjs-dep'), { recursive: true, force: true })
+
+  const load = run(['run', '--lock=frozen', '--dependencies', '--bundle=load', 'entry.mjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.match(load.stdout, /CJS-DEP-LOADED/, 'node_modules-scope deps resolved via the bundle map must survive a pruned tree')
+}))
+
 test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
