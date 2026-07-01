@@ -736,6 +736,24 @@ function patchCjsResolution() {
         if (state.config.full || state.inNodeModules(parentURL)) {
           const resolved = state.resolveBundled(parentURL, request)
           if (resolved !== undefined) return resolved
+          // Recorded-edge miss: let Node try disk first (a resolution native CAN produce
+          // is never overridden), and only when that fails on a specifier the bundle can
+          // still place, fall back to the bundle's own node_modules layout. This is the
+          // lazy-require shape -- an edge capture never executed, e.g. Babel lazy interop
+          // (@react-native-community/cli-tools' logger requires chalk on first use), so
+          // the bundle carries the package but not THIS (parent, specifier) edge -- and
+          // the static-bundle shape, whose dynamic edges are unrecordable by design.
+          // resolveBundledLayout is fail-closed (bare specifiers, nearest bundled package
+          // dir on the parent's lookup path, unique require-kind recorded target), so an
+          // unresolvable specifier still surfaces Node's original MODULE_NOT_FOUND.
+          try {
+            return original.call(this, request, parent, ...rest)
+          } catch (err) {
+            if (err?.code !== 'MODULE_NOT_FOUND') throw err
+            const fallback = state.resolveBundledLayout(parentURL, request, { kind: 'require' })
+            if (fallback !== undefined) return fallback
+            throw err
+          }
         }
       } else if (isAbsolute(request)) {
         // NO parent, request already an absolute path: Node's ESM<->CJS interop re-enters
@@ -747,15 +765,23 @@ function patchCjsResolution() {
         // then bypasses the resolve hook entirely, so this shim is the ONLY interception
         // point. An absolute path can only arrive here from a prior successful resolution
         // (ours, from the bundle -- or Node's own), so when the bundle attests that exact
-        // file under the same scope gate, the resolution is the identity. Falling through to
-        // native would stat a file the bundle carries but disk (pruned / never-shipped
-        // node_modules) may not -- MODULE_NOT_FOUND on a path that is perfectly servable.
+        // FILE under the same scope gate, the resolution is the identity (returned in
+        // path.resolve()d form, matching native's normalized cache-key contract). Falling
+        // through to native would stat a file the bundle carries but disk (pruned /
+        // never-shipped node_modules) may not -- MODULE_NOT_FOUND on a servable path.
+        // getFsStat === 'file' (not mere presence) keeps a --fs-captured directory
+        // LISTING from hijacking native directory->main/index resolution. This widens
+        // parentless reachability to any attested in-scope file when disk lacks the path;
+        // that is bounded by attestation and the load hook's gates (getFile +
+        // NODEJS_FORMATS), which remain the load-bearing checks.
         // Node >=24.18 forwards pre-resolved context for hook-resolved modules, masking the
         // common case; on 24.14-24.17 (our supported floor) every commonjs-sync evaluation
         // re-resolves through here, and the no-parent shape survives on >=24.18 too (the
         // deferred-resolution branch and createCJSNoSourceModuleWrap still take it).
         const url = pathToFileURL(request).toString()
-        if ((state.config.full || state.inNodeModules(url)) && state.hasFile(url)) return request
+        if ((state.config.full || state.inNodeModules(url)) && state.getFsStat(url) === 'file') {
+          return resolvePath(request)
+        }
       }
     }
     const resolved = original.call(this, request, parent, ...rest)

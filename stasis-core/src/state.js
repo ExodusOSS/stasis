@@ -1548,21 +1548,6 @@ export class State {
     return this.formats.get(this.#canonicalFile(url))
   }
 
-  // True when this State carries content for `url` -- i.e. getFile(url) would serve it
-  // (code or resource). Tolerant like inNodeModules: a URL that can't be canonicalized
-  // (non-file, outside the project root) is simply not carried. The CJS-resolution shim
-  // (hooks.js patchCjsResolution) consults this to decide whether a PARENTLESS
-  // absolute-path resolution names a bundled file it should resolve as the identity.
-  hasFile(url) {
-    let file
-    try {
-      file = this.#canonicalFile(url)
-    } catch {
-      return false
-    }
-    return this.sources.has(file) || this.resources.has(file)
-  }
-
   // Different conditions / import attributes can yield different URLs/formats for the same parent+specifier
   #conditionsKey(conditions, importAttributes) {
     const cond = conditions === '*' ? '*' : conditions.join(', ')
@@ -1671,7 +1656,22 @@ export class State {
       // conditions='*' while a Node-loader-captured bundle keyed the edge under
       // 'require, node, ...'. resolveBundled scans every bucket for the recorded edge.
       if (this.config.loadBundle) {
-        const abs = this.resolveBundled(parentURL, specifier)
+        let abs = this.resolveBundled(parentURL, specifier)
+        if (abs === undefined) {
+          // Unrecorded edge entirely: the lazy-require shape (see resolveBundledLayout).
+          // Which Node code path such a require takes is patch-version dependent -- Node
+          // 24.14-24.17 runs imported CJS under the translator's re-invented require
+          // (resolution via the Module._resolveFilename shim), >=24.18 under the native
+          // CJS loader (resolution via THIS hook) -- so the same layout fallback backs
+          // both. The kind keeps require()s off a dual-entry package's import target and
+          // vice versa; unknowable kinds ('*' callers, e.g. the esbuild plugin) match
+          // only '*'-keyed (statically-resolved) buckets. Unlike the shim there is no
+          // native resolution to defer to on this path -- a miss here always threw.
+          const kind = Array.isArray(conditions)
+            ? (conditions.includes('require') ? 'require' : 'import')
+            : undefined
+          abs = this.resolveBundledLayout(parentURL, specifier, { kind })
+        }
         if (abs !== undefined) {
           const f = relative(this.root, abs)
           return { url: pathToFileURL(abs).toString(), format: this.formats.get(f) }
@@ -1727,6 +1727,63 @@ export class State {
     for (const [, byParent] of this.imports) {
       const file = byParent.get(parent)?.get(spec)
       if (file !== undefined) matches.add(file)
+    }
+    return matches.size === 1 ? resolve(this.root, [...matches][0]) : undefined
+  }
+
+  // Fallback resolution for a BARE specifier the bundle carries but whose (parent,
+  // specifier) edge was never recorded: a require() behind a branch capture never
+  // executed -- Babel's lazy interop is the field case (@react-native-community/
+  // cli-tools' logger defers require('chalk') to the first log call, so a silent
+  // capture bundles chalk via other importers but records no logger->chalk edge) --
+  // or a dynamic edge a statically-built bundle cannot record at all. Emulates Node's
+  // node_modules directory precedence over the BUNDLE's layout: walk the parent's
+  // ancestor dirs for the nearest node_modules/<pkg> the bundle carries (state.modules
+  // keys every bundled package dir), then serve the unique target that recorded edges
+  // of a compatible condition KIND resolve the SAME specifier to within that package
+  // dir. The kind filter ('require' from the CJS shim, 'import' for ESM-context misses;
+  // '*' buckets -- static bundles -- always qualify, and an undefined kind matches ONLY
+  // those) keeps a dual-entry package's import-only target from being handed to a
+  // require() and vice versa. Anything less certain -- no bundled package dir on the
+  // lookup path, no recorded target inside it, or several disagreeing ones -- returns
+  // undefined and the caller stays fail-closed. Consulted only where the alternative
+  // was a guaranteed failure: after native resolution failed with MODULE_NOT_FOUND (the
+  // shim) or where a miss always threw (getImport), so a resolution disk can produce is
+  // never overridden.
+  resolveBundledLayout(parentURL, specifier, { kind } = {}) {
+    if (typeof specifier !== 'string' || specifier === '') return undefined
+    // Bare specifiers only: relative/absolute requests are parent-anchored (recorded
+    // under a canonical parent-relative key, handled by resolveBundled), and URL-ish
+    // ones ('file:', 'data:') are not node_modules lookups.
+    if (specifier.startsWith('.') || isAbsolute(specifier) || specifier.includes(':')) return undefined
+    const parts = specifier.split('/')
+    const pkgName = specifier.startsWith('@') ? (parts.length >= 2 ? `${parts[0]}/${parts[1]}` : undefined) : parts[0]
+    if (!pkgName) return undefined
+    let parent
+    try { parent = this.#canonicalFile(parentURL) } catch { return undefined }
+    // Nearest bundled package dir on the parent's node_modules lookup path, mirroring
+    // require()'s walk-up precedence (a nested copy shadows a hoisted one).
+    let pkgDir
+    for (let dir = dirname(parent); ; dir = dirname(dir)) {
+      const candidate = join(dir, 'node_modules', pkgName)
+      if (this.modules.has(candidate)) {
+        pkgDir = candidate
+        break
+      }
+      if (dir === '.') break
+    }
+    if (pkgDir === undefined) return undefined
+    // Targets recorded for this exact specifier under a kind-compatible conditions
+    // bucket, restricted to files inside the package dir the walk selected.
+    const prefix = `${pkgDir}/`
+    const matches = new Set()
+    for (const [key, byParent] of this.imports) {
+      if (key !== '*' && !key.split(' (with:')[0].split(', ').includes(kind)) continue
+      for (const specifiers of byParent.values()) {
+        const file = specifiers.get(specifier)
+        // typeof guard: a --metro multi-platform edge is a { platform: file } Map, not servable here
+        if (typeof file === 'string' && file.startsWith(prefix)) matches.add(file)
+      }
     }
     return matches.size === 1 ? resolve(this.root, [...matches][0]) : undefined
   }

@@ -380,6 +380,50 @@ test('run --dependencies --bundle=load serves a require(esm)-linked CJS dep abse
   t.assert.match(load.stdout, /CJS-DEP-LOADED/, 'node_modules-scope deps resolved via the bundle map must survive a pruned tree')
 }))
 
+test('run --bundle=load resolves a require() edge capture never observed via the bundle layout', withTmp((t, tmp) => {
+  // Regression for the lazy-require shape: Babel lazy interop (e.g. @react-native-community/
+  // cli-tools' logger) defers require('chalk') to the first log call, so a capture that never
+  // takes that branch bundles chalk (via other importers' edges) but records no logger->chalk
+  // edge. At load, resolveBundled misses and native resolution walks a node_modules that is
+  // not there: `Cannot find module 'chalk'` (with require stack) out of the shim's
+  // original.call. The shim now retries a natively-failed bare specifier against the bundle's
+  // own layout (state.resolveBundledLayout): nearest bundled package dir on the parent's
+  // lookup path, unique require-kind recorded target. Modeled here with an env-gated require
+  // the capture run leaves unexecuted.
+  const write = (rel, content) => {
+    mkdirSync(join(tmp, dirname(rel)), { recursive: true })
+    writeFileSync(join(tmp, rel), content)
+  }
+  write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', private: true }))
+  // eager-cjs records the require-conditions edge that puts lazy-target in the bundle;
+  // lazy-cjs only require()s it behind an env flag the CAPTURE run leaves unset.
+  write('entry.mjs', [
+    "import eager from 'eager-cjs'",
+    "import lazy from 'lazy-cjs'",
+    'console.log(eager, lazy.val())',
+    '',
+  ].join('\n'))
+  write('node_modules/eager-cjs/package.json', JSON.stringify({ name: 'eager-cjs', version: '1.0.0', main: 'index.js' }))
+  write('node_modules/eager-cjs/index.js', "module.exports = require('lazy-target').tag\n")
+  write('node_modules/lazy-cjs/package.json', JSON.stringify({ name: 'lazy-cjs', version: '1.0.0', main: 'index.js' }))
+  write('node_modules/lazy-cjs/index.js',
+    "exports.val = () => (process.env.STASIS_TEST_LAZY ? require('lazy-target').tag : 'lazy-skipped')\n")
+  write('node_modules/lazy-target/package.json', JSON.stringify({ name: 'lazy-target', version: '1.0.0', main: 'index.js' }))
+  write('node_modules/lazy-target/index.js', "exports.tag = 'LAZY-TARGET-OK'\n")
+
+  const save = run(['run', '--lock=add', '--bundle=add', 'entry.mjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.match(save.stdout, /LAZY-TARGET-OK lazy-skipped/)
+
+  // Ship the bundle without node_modules; the load run takes the lazy branch capture never saw.
+  rmSync(join(tmp, 'node_modules'), { recursive: true, force: true })
+
+  const load = run(['run', '--lock=frozen', '--bundle=load', 'entry.mjs'],
+    { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_LAZY: '1' } })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.match(load.stdout, /LAZY-TARGET-OK LAZY-TARGET-OK/, 'the unrecorded lazy edge must resolve via the bundle layout')
+}))
+
 test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp((t, tmp) => {
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
