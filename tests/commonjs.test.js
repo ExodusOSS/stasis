@@ -546,3 +546,233 @@ test('run --lock=add keys require.resolve() edges under require conditions, not 
     t.assert.ok(cond.split(', ').includes('require'), `expected require conditions, got '${cond}'`)
   }
 }))
+
+// node:59666. When a load hook supplies `source` for a CommonJS module, Node's
+// ESM->CJS translator (loadCJSModule) hands it a *re-invented* require() that sets
+// only `.resolve`/`.main` -- `.cache` and `.extensions` are undefined, unlike the
+// require a disk-loaded CJS module gets. bundle=load is the only mode that serves CJS
+// via a source override, so the deficiency only shows there. The loader repairs the
+// two properties from node:module before user code runs. This is the direct guard:
+// a bundle-served (off-disk) entry must see require.cache/require.extensions that ARE
+// the real Module._cache/_extensions.
+test('run --bundle=load gives a bundle-served CJS module a require() with .cache and .extensions (node:59666)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'req-shape', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.cjs'),
+    "const m = require('node:module')\n" +
+    'console.log(JSON.stringify([typeof require.cache, typeof require.extensions, ' +
+    'require.cache === m.Module._cache, require.extensions === m.Module._extensions]))\n')
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, `${JSON.stringify(['object', 'object', true, true])}\n`)
+
+  // Serve the entry entirely from the bundle: this is the path that gets the
+  // re-invented require. Before the repair, `typeof require.cache` was 'undefined'.
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, `${JSON.stringify(['object', 'object', true, true])}\n`)
+}))
+
+// The import-fresh@3.3.1 interaction, in its mechanism: a module-invalidation
+// helper does `delete require.cache[require.resolve(id)]; require(id)`. Under
+// bundle=load this threw `Cannot read properties of undefined (reading '<path>')`
+// at `require.cache[...]` before the node:59666 repair, because the entry's
+// re-invented require() had no `.cache`. This is the regression guard: the pattern
+// must complete (no crash), and the two plain require()s must agree.
+//
+// counter.cjs is kept ON DISK so require.resolve() is version-independent; only the
+// ENTRY is served from the bundle (removed from disk), and the entry is the module
+// that receives the re-invented require under test. We deliberately do NOT assert a
+// fresh re-evaluation ([1,1,2,3]): a bundle-served module lives in the ESM loader's
+// own CJS cache, not Module._cache, so this inline form returns the cached instance
+// ([1,1,1,1]) even though the published import-fresh -- via resolve-from +
+// parent.require -- does force a fresh eval. Asserting only the stable contract
+// keeps the test independent of that Node-internal detail.
+test('run --bundle=load survives import-fresh-style require.cache busting (node:59666)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'fresh', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'counter.cjs'),
+    'globalThis.__n = (globalThis.__n || 0) + 1\nmodule.exports = globalThis.__n\n')
+  writeFileSync(join(tmp, 'index.cjs'),
+    "const fresh = (id) => { delete require.cache[require.resolve(id)]; return require(id) }\n" +
+    "const a = require('./counter.cjs')\n" +
+    "const b = require('./counter.cjs')\n" +
+    "const c = fresh('./counter.cjs')\n" +
+    "const d = fresh('./counter.cjs')\n" +
+    'console.log(JSON.stringify([a, b, c, d]))\n')
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, '[1,1,2,3]\n') // on disk: ordinary Node require, genuine fresh re-eval
+
+  // Serve the entry from the bundle (counter.cjs stays on disk so require.resolve is
+  // version-independent). Before the repair this crashed at `require.cache[...]`.
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  const parsed = JSON.parse(load.stdout)
+  t.assert.equal(parsed.length, 4)
+  t.assert.ok(parsed.every((n) => typeof n === 'number'), `expected 4 numbers, got ${load.stdout}`)
+  t.assert.equal(parsed[0], parsed[1], 'the two plain require()s return a consistent value')
+}))
+
+// Regression for the node:59666 repair's directive handling: the require-repair
+// prelude must be inserted AFTER the module's full Directive Prologue (shebang,
+// comments, and string-literal directives), never before or fused onto it. Two
+// realistic shapes broke a naive "match a bare leading 'use strict'" approach:
+//   (a) a license/banner comment BEFORE `'use strict'` -> prelude inserted at
+//       offset 0 -> the directive is demoted to an expression -> the module
+//       silently runs in SLOPPY mode under bundle=load but strict on disk; and
+//   (b) `'use strict'` followed by a comment with no semicolon -> the prelude's
+//       `try{` fuses onto the directive -> SyntaxError, failing the load.
+// The module below is strict on disk (a `with` statement would be a SyntaxError);
+// its `f()` assigns to an undeclared name, which throws only in strict mode. We
+// assert the served module still throws -> strict mode preserved, no demotion.
+test('run --bundle=load preserves a strict-mode directive behind a leading comment (node:59666)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'banner', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.cjs'),
+    '/*! license banner (c) */\n' +
+    "'use strict'\n" +
+    'module.exports = (() => { try { undeclaredStrictProbe = 1; return "sloppy" } catch { return "strict" } })()\n' +
+    'console.log(module.exports)\n')
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'strict\n') // strict on disk
+
+  // Served from the bundle, the directive must still take effect (not be demoted).
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'strict\n', 'strict-mode directive must survive bundle=load (no demotion)')
+}))
+
+test('run --bundle=load handles a "use strict" directive trailed by a comment without crashing (node:59666)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'trail', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  // 'use strict' followed by a line comment, NO semicolon -> naive splicing produced
+  // `'use strict'try{...` -> SyntaxError. The prologue-aware insertion avoids it.
+  writeFileSync(join(tmp, 'index.cjs'),
+    "'use strict'// directive comment, no semicolon\nconsole.log('ok')\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'ok\n')
+
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'ok\n')
+}))
+
+// Regression for over-skip in the node:59666 repair: a module whose FIRST statement
+// is an EXPRESSION beginning with a string literal (`'x'.toUpperCase()`, `'a' + b`,
+// `'a', b`) must not be mistaken for a `'use strict'`-style directive. Mis-skipping
+// the leading string splices the prelude mid-expression, which either fails to parse
+// or -- worse -- silently changes the value. The repair only skips a string when a
+// statement boundary follows it. This module opens with a string method call and a
+// string-concatenation expression; both must survive bundle=load intact.
+test('run --bundle=load leaves a leading string EXPRESSION intact (node:59666 over-skip)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'overskip', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.cjs'),
+    "'HELLO'.toLowerCase()\n" +                    // string-method expression statement (not a directive)
+    "module.exports = 'a' + 'b'\n" +               // string-concat: must stay 'ab', not be split
+    "console.log(module.exports)\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'ab\n')
+
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'ab\n', 'a leading string expression must not be split by the repair')
+}))
+
+// Regression for a subtler over-skip in the node:59666 repair: a module whose first
+// statement is a MULTI-LINE expression beginning with a string -- e.g. `'a,b'` on one
+// line, `.split(',')` on the next. JS ASI does NOT insert a semicolon before a leading
+// `.` (or `[`, `+`, ...) on the following line, so this is a single expression, not a
+// directive. A naive "string followed by a line break = directive" check splices the
+// prelude between the string and the `.`, crashing the load. The repair peeks past the
+// line break and treats it as a directive only when the next token can't continue the
+// expression.
+test('run --bundle=load leaves a multi-line leading string expression intact (node:59666 over-skip)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'nlcont', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  // The module's FIRST statement is a bare string whose expression continues on the next
+  // line via `.split` -- not a directive, so the string must not be skipped/split.
+  writeFileSync(join(tmp, 'index.cjs'),
+    "'a,b'\n" +
+    "  .split(',')\n" +
+    "  .forEach((w) => console.log(w))\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'a\nb\n')
+
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'a\nb\n', 'a multi-line leading string expression must not be split by the repair')
+}))
+
+// The keyword-operator tail of the same over-skip class: a leading string whose
+// expression continues via the `in` / `instanceof` operator on the next line
+// (`'k'\nin obj`). ASI does not break before those keywords, so the string is not a
+// directive. The repair peeks past the line break for both punctuator and keyword
+// continuations, so the module is left intact rather than split at `in`.
+test('run --bundle=load leaves a leading string continued by `in`/`instanceof` intact (node:59666 over-skip)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'kwcont', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  writeFileSync(join(tmp, 'index.cjs'),
+    "'length'\n" +
+    'in globalThis\n' +
+    "console.log('ok')\n")
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'ok\n')
+
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'ok\n', 'a string continued by `in` must not be split by the repair')
+}))
+
+// A `'use strict'` directive trailed by a NEWLINE-SPANNING block comment (a multi-line
+// banner) before the next statement. Per spec a block comment containing a line terminator
+// acts as a line terminator for ASI, so `'use strict'` is a real directive here and the
+// module is strict on disk. The repair must treat that comment as a line boundary (not skip
+// past it and land on the next statement, which demoted the directive to sloppy mode).
+test('run --bundle=load keeps strict mode across a multi-line block comment after the directive (node:59666)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'mlbanner', version: '1.0.0', private: true }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), 'packages: []\n')
+  // The block comment's own line terminator is the only break; module.exports follows `*/`
+  // on the same physical line -- so the trailer must not skip past the comment onto it.
+  writeFileSync(join(tmp, 'index.cjs'),
+    "'use strict' /* banner\n spanning lines */ module.exports = " +
+    "(() => { try { undeclaredStrictProbe = 1; return 'sloppy' } catch { return 'strict' } })()\n" +
+    'console.log(module.exports)\n')
+
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=none', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'strict\n')
+
+  rmSync(join(tmp, 'index.cjs'))
+  const load = run(['run', '--lock=none', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.cjs'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'strict\n', 'a directive before a multi-line block comment must stay strict under bundle=load')
+}))
