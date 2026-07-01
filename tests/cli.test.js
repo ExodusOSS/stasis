@@ -22,6 +22,9 @@ const {
   EXODUS_STASIS_SCOPE: _s,
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
+  EXODUS_STASIS_RESOURCES_BUNDLE_FILE: _rbf,
+  EXODUS_STASIS_RESOURCES: _r,
+  EXODUS_STASIS_FS: _fs,
   EXODUS_STASIS_DEBUG: _d,
   EXODUS_STASIS_PID: _pid,
   EXODUS_STASIS_CHILD_PROCESS: _cp,
@@ -276,7 +279,10 @@ test('run --bundle=load with an explicit --bundle-file resolves the root consist
   // and Node's ESM->CJS translator re-resolved it through Module._load(absPath, /* no parent */),
   // which fell through hooks.js's `typeof parent?.filename === 'string'` guard to native disk
   // resolution -- `Cannot find module '<abs>/node_modules/dep/index.js'` once node_modules was
-  // pruned/not shipped. Choosing the root without the explicit bundleFile biasing it keeps capture
+  // pruned/not shipped, or (on Node versions whose translator takes the served-source path) a
+  // SILENT read of the on-disk copy instead of a crash. The load assertions below cover both
+  // symptoms: `status === 0` catches the crash, `doesNotMatch(/TAMPERED/)` the silent disk read.
+  // Choosing the root without the explicit bundleFile biasing it keeps capture
   // and load agreed, so the hoisted dep stays in-root and is served from the bundle.
   //
   // Layout yields potentialRoots = [packages/app, <tmp>] (the .git at <tmp> stops the upward walk).
@@ -298,6 +304,14 @@ test('run --bundle=load with an explicit --bundle-file resolves the root consist
   const save = run(['run', '--lock=none', '--dependencies', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'], { cwd: app })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
   t.assert.match(save.stdout, /DEP-FROM-BUNDLE/)
+  // Pin the capture side too: stdout alone would pass even if the dep never landed in the
+  // bundle (disk still holds the original bytes here), and the load step would then fail with
+  // an opaque "not attested" instead of pointing at the capture. The key must be relative to
+  // the OUTER (monorepo) root -- that is the very thing the root fix pins down.
+  t.assert.ok(existsSync(bundlePath), 'bundle written at the explicit path')
+  const bundled = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(bundled.modules['node_modules/dep']?.files['index.js'], "module.exports = 'DEP-FROM-BUNDLE'\n",
+    'hoisted dep captured under its monorepo-root-relative key')
 
   // Tamper the dep's on-disk bytes: the node_modules layout stays on disk (node_modules scope
   // resolves the bare specifier through it), but the CONTENT must come from the bundle. Pre-fix,
