@@ -444,71 +444,8 @@ export class State {
           : lockProbe
         const lockPath = explicitLockPath || join(rootDir, FILE_LOCK)
 
-        if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
-          throw new Error(`Unexpected ${lockPath} with config.lock = 'none'`)
-        }
-        if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
-          throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
-        }
-
-        // A frozen bundle is self-attesting -- it verifies disk against the bundle's
-        // own bytes, so (unlike load/add) it needs no sibling lockfile and is exempt
-        // from this "a lockfile is required before a bundle's sources can be trusted"
-        // guard. This is what lets bundle=frozen compose with lock=add (bootstrapping a
-        // fresh lockfile from the verified run) without a pre-existing lockfile.
-        if (sources && !lock && this.config.useLockfile && !this.config.replaceLockfile && !this.config.frozenBundle) {
-          throw new Error('stasis.lock.json missing, can not use sources')
-        }
-
-        if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
-          const lockfile = Lockfile.parse(lock)
-          if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
-
-          const includeSources = lockfile.config.scope === 'full' && this.config.full
-          for (const [dir, info] of lockfile.modules) {
-            if (!dir.includes('node_modules') && !includeSources) continue
-            this.modules.set(dir, info)
-          }
-          if (includeSources) this.entries = lockfile.entries
-
-          for (const [dir, { files }] of this.modules) {
-            for (const [name, hash] of Object.entries(files)) {
-              noupsert(this.hashes, join(dir, name), hash)
-            }
-          }
-          this.#lockImports = lockfile.imports
-          this.#lockFormats = lockfile.formats
-          // Frozen promises verification, but a lockfile predating resolution
-          // or format attestation can only vouch for bytes -- those metadata
-          // (from a bundle OR observed on disk) go unchecked until it's
-          // regenerated.
-          if (this.config.frozen && this.#lockImports === null) {
-            console.warn('[stasis] Warning: lockfile does not attest resolutions; they are trusted as-is. Regenerate the lockfile to enable this check.')
-          }
-          if (this.config.frozen && this.#lockFormats === null) {
-            console.warn('[stasis] Warning: lockfile does not attest formats; they are trusted as-is. Regenerate the lockfile to enable this check.')
-          }
-          lockfileLoaded = true
-          this.#lockfileLoaded = true
-        }
-
-        if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-          this.#absorbCodeBundle(sources, sourcesPath, lockfileLoaded)
-        }
-
-        // Split-bundle layout: when `resourcesBundleFile` is configured, resources
-        // live in a separate file. Load it as a standalone Bundle (entries empty,
-        // imports empty, formats restricted to resource tags) and union into the
-        // state already absorbed from `bundleFile`. The strict-shape asserts catch
-        // a writer that accidentally leaked code into the resources file or a
-        // tampered file claiming entries/imports it shouldn't have.
-        if (this.config.resourcesBundleFile) {
-          const resourcesPath = this.config.resourcesBundleFile
-          const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
-          if (resourcesData && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-            this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
-          }
-        }
+        lockfileLoaded = this.#absorbLockfile(lock, lockPath)
+        this.#loadBundleArtifacts(sources, sourcesPath, lockfileLoaded)
 
         // The innermost matching rootDir is authoritative (per-dir opt-in, see above), so stop
         // scanning once committed. An explicit/config `bundleFile` is rootDir-independent: without
@@ -522,67 +459,33 @@ export class State {
     // Explicit lockfile path with no other discovery indicator at any rootDir: the
     // discovery loop never set `loaded`, so the lockfile branch above never ran. Process
     // the explicit lockfile here against the already-resolved `this.root` (outermost
-    // package.json) so the run still has its attestation. Inlines the same gates as the
-    // in-loop branch -- a future refactor could merge the two by extracting a helper.
+    // package.json) so the run still has its attestation.
     if (!loaded && explicitLockPath) {
       const lock = readFileSyncMaybe(dirname(explicitLockPath), basename(explicitLockPath), 'utf-8')
-      if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
-        throw new Error(`Unexpected ${explicitLockPath} with config.lock = 'none'`)
-      }
-      if (lock && this.config.useLockfile && !this.config.replaceLockfile) {
-        const lockfile = Lockfile.parse(lock)
-        if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
-        const includeSources = lockfile.config.scope === 'full' && this.config.full
-        for (const [dir, info] of lockfile.modules) {
-          if (!dir.includes('node_modules') && !includeSources) continue
-          this.modules.set(dir, info)
-        }
-        if (includeSources) this.entries = lockfile.entries
-        for (const [dir, { files }] of this.modules) {
-          for (const [name, hash] of Object.entries(files)) {
-            noupsert(this.hashes, join(dir, name), hash)
-          }
-        }
-        this.#lockImports = lockfile.imports
-        this.#lockFormats = lockfile.formats
-        if (this.config.frozen && this.#lockImports === null) {
-          console.warn('[stasis] Warning: lockfile does not attest resolutions; they are trusted as-is. Regenerate the lockfile to enable this check.')
-        }
-        if (this.config.frozen && this.#lockFormats === null) {
-          console.warn('[stasis] Warning: lockfile does not attest formats; they are trusted as-is. Regenerate the lockfile to enable this check.')
-        }
-        lockfileLoaded = true
-        this.#lockfileLoaded = true
-      }
+      lockfileLoaded = this.#absorbLockfile(lock, explicitLockPath)
     }
 
-    // Explicit (flag/env) bundleFile with no rootDir-dependent indicator at any rootDir: like the
-    // explicit lockfile above, it was suppressed as a root-detection signal so it couldn't pull the
-    // root down to the innermost package, so the loop never loaded it. Load it here against
-    // `this.root` (the outermost package.json) -- the same root capture commits to when no signal
-    // exists -- so its capture-root-relative keys line up with how they're looked up. Inlines the
-    // same gates as the in-loop bundle branch.
-    if (!loaded && explicitBundlePath) {
-      const sourcesPath = this.config.bundleFile
-      const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
-      if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
-        throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
-      }
-      if (sources && !lockfileLoaded && this.config.useLockfile && !this.config.replaceLockfile && !this.config.frozenBundle) {
-        throw new Error('stasis.lock.json missing, can not use sources')
-      }
-      if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-        this.#absorbCodeBundle(sources, sourcesPath, lockfileLoaded)
-      }
-      // Split-bundle resources: same post-loop treatment (resourcesBundleFile is likewise an
-      // explicit, rootDir-independent path). Mirrors the in-loop resources branch.
-      if (this.config.resourcesBundleFile) {
-        const resourcesPath = this.config.resourcesBundleFile
-        const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
-        if (resourcesData && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
-          this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
-        }
-      }
+    // Explicit (flag/env) bundleFile and/or resourcesBundleFile with no rootDir-dependent
+    // indicator at any rootDir: like the explicit lockfile above, an explicit bundleFile was
+    // suppressed as a root-detection signal so it couldn't pull the root down to the innermost
+    // package, so the loop never loaded it. Load it here against `this.root` (the outermost
+    // package.json) -- the same root capture commits to when no signal exists -- so its
+    // capture-root-relative keys line up with how they're looked up. `resourcesBundleFile` is in
+    // the gate for the resources-only split shape (#absorbResourcesBundle documents it as legal):
+    // with no code bundle on disk there is no other reason to reach the loader here, yet the
+    // explicit resources half must still be absorbed. Post-loop, both paths are necessarily
+    // flag/env: a stasis.config.json could only have set them by also committing the loop.
+    //
+    // NB: the outermost root depends on where the upward walk stopped (PROJECT_CWD, .git,
+    // pnpm-workspace.yaml -- see potentialRoots above). Capture and load must agree on that
+    // boundary for the keys to line up: e.g. a capture under yarn (PROJECT_CWD set to an inner
+    // workspace dir) and a bare load of the same bundle (walks up to the repo's .git) commit
+    // different roots and fail with "outside the project root" / "not attested".
+    if (!loaded && (explicitBundlePath || this.config.resourcesBundleFile)) {
+      const sources = explicitBundlePath
+        ? readFileSyncMaybe(dirname(explicitBundlePath), basename(explicitBundlePath))
+        : null
+      this.#loadBundleArtifacts(sources, explicitBundlePath, lockfileLoaded)
     }
 
     // Frozen modes must have actually loaded their attestation. Asserting here --
@@ -622,6 +525,87 @@ export class State {
     }
 
     liveStates().add(this)
+  }
+
+  // Absorb a lockfile's attestation into this State: the run-scope module/hash maps, the
+  // imports/formats attestation, and the frozen-mode warnings for lockfiles predating those
+  // attestations. Shared by the discovery loop (a committed rootDir) and the post-loop fallback
+  // for an explicit `config.lockFile` -- a rootDir-independent path, so it is suppressed as a
+  // root-detection signal and loaded at the outermost root instead. Returns whether the lockfile
+  // was actually absorbed (the caller's `lockfileLoaded`).
+  #absorbLockfile(lock, lockPath) {
+    if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
+      throw new Error(`Unexpected ${lockPath} with config.lock = 'none'`)
+    }
+    if (!lock || !this.config.useLockfile || this.config.replaceLockfile) return false
+    const lockfile = Lockfile.parse(lock)
+    if (this.config.frozen) assert.equal(lockfile.config.scope, this.config.scope)
+
+    const includeSources = lockfile.config.scope === 'full' && this.config.full
+    for (const [dir, info] of lockfile.modules) {
+      if (!dir.includes('node_modules') && !includeSources) continue
+      this.modules.set(dir, info)
+    }
+    if (includeSources) this.entries = lockfile.entries
+
+    for (const [dir, { files }] of this.modules) {
+      for (const [name, hash] of Object.entries(files)) {
+        noupsert(this.hashes, join(dir, name), hash)
+      }
+    }
+    this.#lockImports = lockfile.imports
+    this.#lockFormats = lockfile.formats
+    // Frozen promises verification, but a lockfile predating resolution
+    // or format attestation can only vouch for bytes -- those metadata
+    // (from a bundle OR observed on disk) go unchecked until it's
+    // regenerated.
+    if (this.config.frozen && this.#lockImports === null) {
+      console.warn('[stasis] Warning: lockfile does not attest resolutions; they are trusted as-is. Regenerate the lockfile to enable this check.')
+    }
+    if (this.config.frozen && this.#lockFormats === null) {
+      console.warn('[stasis] Warning: lockfile does not attest formats; they are trusted as-is. Regenerate the lockfile to enable this check.')
+    }
+    this.#lockfileLoaded = true
+    return true
+  }
+
+  // Gate and load the bundle artifacts for an already-committed root: the unified
+  // code[+resource] bundle read from `sourcesPath`, plus the split `resourcesBundleFile` when
+  // one is configured. Shared by the discovery loop and the post-loop explicit-path fallback so
+  // the mode guards cannot drift between the two. `sources` may be null -- no bundle on disk, or
+  // a resources-only deployment -- in which case only the resources half applies.
+  //
+  // The missing-lockfile guard tests `lockfileLoaded` where the pre-extraction in-loop code
+  // tested raw lockfile presence; equivalent at this call point, since whenever the guard can
+  // fire (useLockfile && !replaceLockfile) #absorbLockfile absorbed the lockfile iff it existed.
+  #loadBundleArtifacts(sources, sourcesPath, lockfileLoaded) {
+    if (sources && !this.config.writeBundle && !this.config.loadBundle && !this.config.ignoreBundle && !this.config.frozenBundle) {
+      throw new Error(`Unexpected ${sourcesPath} with config.bundle = 'none'`)
+    }
+    // A frozen bundle is self-attesting -- it verifies disk against the bundle's
+    // own bytes, so (unlike load/add) it needs no sibling lockfile and is exempt
+    // from this "a lockfile is required before a bundle's sources can be trusted"
+    // guard. This is what lets bundle=frozen compose with lock=add (bootstrapping a
+    // fresh lockfile from the verified run) without a pre-existing lockfile.
+    if (sources && !lockfileLoaded && this.config.useLockfile && !this.config.replaceLockfile && !this.config.frozenBundle) {
+      throw new Error('stasis.lock.json missing, can not use sources')
+    }
+    if (sources && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
+      this.#absorbCodeBundle(sources, sourcesPath, lockfileLoaded)
+    }
+    // Split-bundle layout: when `resourcesBundleFile` is configured, resources
+    // live in a separate file. Load it as a standalone Bundle (entries empty,
+    // imports empty, formats restricted to resource tags) and union into the
+    // state already absorbed from `bundleFile`. The strict-shape asserts catch
+    // a writer that accidentally leaked code into the resources file or a
+    // tampered file claiming entries/imports it shouldn't have.
+    if (this.config.resourcesBundleFile) {
+      const resourcesPath = this.config.resourcesBundleFile
+      const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
+      if (resourcesData && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
+        this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
+      }
+    }
   }
 
   // Absorb a unified code+resource bundle's metadata and payloads into this State. Shared by the
