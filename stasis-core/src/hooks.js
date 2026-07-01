@@ -33,6 +33,9 @@ const NODEJS_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript
 // the allowlist stays the single trust gate and the message is just UX.
 const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'bash', 'rust'])
 const RESOURCE_FORMATS = new Set(['resource', 'resource:base64'])
+// The executable CommonJS formats (plain CJS + TS-CJS). Named like the sets above so
+// "which formats are CJS" lives in one place; the require-repair below keys off it.
+const CJS_FORMATS = new Set(['commonjs', 'commonjs-typescript'])
 
 function refuseNonNodeFormat(format, url) {
   if (NON_NODE_SOURCE_LANGUAGES.has(format)) {
@@ -59,6 +62,100 @@ function refuseNonNodeFormat(format, url) {
     `format. The bundle may be tampered, produced by a newer stasis, or built for a ` +
     `non-Node consumer.`
   )
+}
+
+// node:59666 workaround (see the load hook). A single-line prelude, injected
+// into served CommonJS source, that restores the `require.cache` and
+// `require.extensions` the ESM->CJS translator's re-invented require omits.
+// `require` here is the module wrapper's own parameter; node:module's CJS
+// loader owns the real `Module._cache` / `Module._extensions`, so pointing the
+// two properties at those makes a bundle-served module's require match a
+// disk-loaded one's shape. Guarded (typeof/try) so a require without the usual
+// shape, or a frozen builtins object, degrades to a no-op rather than throwing.
+const CJS_REQUIRE_REPAIR =
+  "try{if(typeof require==='function'&&!require.cache){" +
+  "const __stasis_m=require('node:module');" +
+  'if(__stasis_m&&__stasis_m.Module){' +
+  'require.cache=__stasis_m.Module._cache;' +
+  'if(!require.extensions)require.extensions=__stasis_m.Module._extensions;}}}catch{}'
+
+// Sticky scanners for the pieces of a Directive Prologue: a run of whitespace and
+// line/block comments, a single string literal, and the run of horizontal space and
+// SAME-LINE block comments that may trail a directive before its terminator. Sticky (`y`)
+// + lastIndex so the prologue is walked in place, never by re-slicing the source each step.
+const WS_COMMENTS = /(?:\s|\/\/[^\n]*|\/\*[\s\S]*?\*\/)*/uy
+const STRING_LITERAL = /(['"])(?:[^\\]|\\.)*?\1/uy
+// A block comment that CONTAINS a line terminator counts as a line terminator for ASI, so
+// the trailing run stops at one (it's handled as a line boundary below); this matches only
+// single-line block comments (comment body has no line terminators).
+const TRAILING_SAME_LINE = /(?:[ \t]|\/\*(?:[^*\n\r\u2028\u2029]|\*(?!\/))*\*\/)*/uy
+// Tokens that CONTINUE an expression across a line break. If the first token after the
+// break following a candidate directive string is one of these, the string heads a
+// multi-line expression (`'a,b'\n.split(...)`, `'x'\ninstanceof Y`), not a directive
+// (ASI does not insert a semicolon before them), so it must NOT be skipped. Punctuators
+// are matched by first char; the two keyword operators need a `\b` so `in`/`instanceof`
+// don't swallow identifiers like `index`/`instances`.
+const EXPR_CONTINUATION = new Set(['.', '[', '(', '`', '+', '-', '*', '/', '%', ',', '?', ':', '=', '<', '>', '&', '|', '^'])
+const KEYWORD_CONTINUATION = /(?:instanceof|in)\b/uy
+function skipSticky(re, source, i) {
+  re.lastIndex = i
+  re.exec(source)
+  return re.lastIndex
+}
+// At a line boundary at `pos` (a line terminator or a newline-spanning block comment), does
+// the next significant token begin a NEW statement -- so the preceding string is a complete
+// directive -- rather than continue the expression?
+function newStatementAfterBreak(source, pos) {
+  const afterBreak = skipSticky(WS_COMMENTS, source, pos)
+  if (afterBreak >= source.length) return true
+  if (EXPR_CONTINUATION.has(source[afterBreak])) return false
+  KEYWORD_CONTINUATION.lastIndex = afterBreak
+  return !KEYWORD_CONTINUATION.test(source)
+}
+
+// Prepend CJS_REQUIRE_REPAIR to a served CommonJS module's source WITHOUT shifting line
+// numbers (the prelude adds no line break) and WITHOUT perturbing the module's Directive
+// Prologue -- so a `'use strict'` directive keeps strict mode. The prelude is a `try{...}`
+// statement: inserting it ahead of a directive would demote that directive to a plain
+// expression (dropping the module to sloppy mode), so we insert AFTER the prologue --
+// shebang, then whitespace, comments, and string-literal directive STATEMENTS. A leading
+// ';' makes the insertion self-terminating so it can never fuse `'use strict'try{` into a
+// SyntaxError.
+//
+// A leading string counts as a directive only when a real statement boundary follows it:
+// `;`, `}`, a line comment, EOF, or a LINE boundary -- a line terminator OR a block comment
+// containing one -- whose next token does not continue the expression. So a module that
+// opens with a string EXPRESSION (`'x'.toUpperCase()`, `'a' + b`, `'a,b'` newline-then-
+// `.split()`, `'x'` newline-then-`instanceof Y`) is left intact instead of being split
+// mid-expression (a SyntaxError, or silently wrong bytes), while a real directive followed
+// by a multi-line banner comment still keeps strict mode. Distinguishing the two is the ASI
+// problem, so this is a small scan rather than one regex.
+function repairCjsRequire(source) {
+  if (typeof source !== 'string') return source
+  let i = 0
+  if (source.startsWith('#!')) {
+    const nl = source.indexOf('\n')
+    i = nl === -1 ? source.length : nl + 1
+  }
+  for (;;) {
+    const afterWs = skipSticky(WS_COMMENTS, source, i)
+    STRING_LITERAL.lastIndex = afterWs
+    if (STRING_LITERAL.exec(source) === null) break // next token isn't a string: end of prologue
+    const afterStr = STRING_LITERAL.lastIndex
+    const afterTrail = skipSticky(TRAILING_SAME_LINE, source, afterStr)
+    const c = source[afterTrail]
+    let isDirective
+    if (c === undefined || c === ';' || c === '}') isDirective = true
+    else if (c === '/' && source[afterTrail + 1] === '/') isDirective = true // trailing line comment
+    // A `/*` here is a newline-spanning block comment (single-line ones were consumed
+    // above); like a bare line break it terminates the directive when a new statement follows.
+    else if (c === '/' && source[afterTrail + 1] === '*') isDirective = newStatementAfterBreak(source, afterTrail)
+    else if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') isDirective = newStatementAfterBreak(source, afterTrail)
+    else isDirective = false // same-line continuation (`.`, `+`, `,`, ...): a string expression
+    if (!isDirective) break
+    i = afterStr // past the directive; loop for stacked directives
+  }
+  return `${source.slice(0, i)};${CJS_REQUIRE_REPAIR}${source.slice(i)}`
 }
 
 let state
@@ -429,6 +526,20 @@ function load(url, context, nextLoad) {
     // *-typescript formats are in the allowlist: Node's own translators strip
     // the types after this hook returns.
     if (!NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
+    // node:59666 workaround. When a load hook supplies `source` for a CommonJS
+    // module, Node's ESM->CJS translator (loadCJSModule) hands the module a
+    // *re-invented* require() that sets only `.resolve`/`.main` and omits
+    // `.cache` and `.extensions` -- unlike the require a disk-loaded CJS module
+    // gets (makeRequireFunction, which sets all four). Packages that read those
+    // (import-fresh, and anything walking require.cache / require.extensions)
+    // then throw `Cannot read properties of undefined` or misbehave -- but only
+    // under bundle=load, because that's the only mode that serves CJS via a
+    // source override. Repair the two missing properties from node:module
+    // before user code runs. Confined to executable CJS formats; ESM has no
+    // require and resources are not executed.
+    if (CJS_FORMATS.has(format)) {
+      return { source: repairCjsRequire(source), format, shortCircuit: true }
+    }
     return { source, format, shortCircuit: true }
   }
 
