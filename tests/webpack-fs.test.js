@@ -25,6 +25,10 @@ import { installFsHooks } from '../stasis-core/src/fs.js'
 // Minimal tapable-Hook shim: the plugin only calls `.tap(name, fn)`; `.call(arg)` fires the
 // collected fns, exactly as webpack would when the hook runs.
 const mkHook = () => { const fns = []; return { tap: (_n, fn) => fns.push(fn), call: (arg) => { for (const fn of fns) fn(arg) } } }
+// The compiler hooks the capture-mode plugin taps: normalModuleFactory (resolve capture),
+// watchRun (one-shot vs watch write timing), and done (the write itself). Real webpack exposes
+// all three on both v4 and v5; the stub must too, or apply() throws on the missing hook.
+const compilerHooks = () => ({ normalModuleFactory: mkHook(), watchRun: mkHook(), done: mkHook() })
 
 test('--fs does not record the StasisWebpack graph into main; the sidecar carries it', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-webpack-fs-'))
@@ -56,7 +60,7 @@ test('--fs does not record the StasisWebpack graph into main; the sidecar carrie
     // Drive the plugin's capture hooks as webpack would, without real webpack. inputFileSystem is a
     // stub: the plugin Proxy-wraps it at apply() time, but this test feeds afterResolve directly and
     // never reads through it.
-    const compiler = { inputFileSystem: { readFile() {}, stat() {} }, hooks: { normalModuleFactory: mkHook(), done: mkHook() } }
+    const compiler = { inputFileSystem: { readFile() {}, stat() {} }, hooks: compilerHooks() }
     const nmf = { hooks: { beforeResolve: mkHook(), afterResolve: mkHook() } }
     webpack.apply(compiler)
     compiler.hooks.normalModuleFactory.call(nmf) // wires the plugin's beforeResolve/afterResolve taps
