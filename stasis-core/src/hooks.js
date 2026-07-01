@@ -168,7 +168,16 @@ let state
 let createdShardDir
 let createdShardPub
 let createdShardPubId
+// True once the ROOT has written its artifacts at least once (save() is re-entrant across
+// beforeExit/exit firings and re-flushes late-observed resolution edges; see its comment).
+// Consulted by the load hook's fail-loud assert: a module whose BYTES first load after a
+// write may miss the final artifact entirely, so it must crash the capture rather than
+// silently ship unattested. Late resolution EDGES of already-loaded modules, by contrast,
+// are what the re-flush exists to pick up.
 let saved = false
+// Serialized shard text a child last wrote, so the exit firing skips an identical
+// re-write instead of dropping a second (equal) shard file for the root to merge.
+let lastShardWritten
 // Set when stasis's own capture/verification rejects something (see the hooks around
 // addFile/addImport below). Distinct from "the run exited non-zero": a clean capture is
 // allowed to exit non-zero for its own reasons and still be persisted.
@@ -283,14 +292,19 @@ function writeChildShard() {
     // its own build; the pid + random suffix keep workers from colliding even if the OS recycles an
     // exited worker's pid within one build. Write to a dot-prefixed temp then rename: the merge
     // filter ignores the temp, so the root never reads a half-written shard.
+    const shard = state.shardSnapshot() // serialized lockfile string
+    // save() re-fires on exit after the beforeExit flush (late-observed resolution edges;
+    // see save's comment). An unchanged snapshot means nothing new to forward -- skip the
+    // duplicate shard file rather than make the root merge the same content twice.
+    if (shard === lastShardWritten) return
     const privateKey = createPrivateKey({ key: Buffer.from(keyB64, 'base64'), format: 'der', type: 'pkcs8' })
     const pubId = createPublicKey(privateKey).export({ format: 'jwk' }).x
-    const shard = state.shardSnapshot() // serialized lockfile string
     const signature = sign(null, Buffer.from(shard), privateKey).toString('base64url')
     const unique = `${OWN_PID}-${randomBytes(6).toString('hex')}` // pid + random: no collision even on pid reuse
     const tmpPath = join(dir, `.${pubId}-${unique}.tmp`)
     writeFileSync(tmpPath, JSON.stringify({ shard, signature }))
     renameSync(tmpPath, join(dir, `${pubId}-${unique}.json`))
+    lastShardWritten = shard
   } catch {
     // A child that can't snapshot/sign/write just doesn't contribute; the root still persists
     // its own capture, and a later frozen run fails closed on anything genuinely missing.
@@ -448,9 +462,20 @@ function initState(root) {
   // safe: those recorded hashes are accurate (nothing drifted is baked in), and a later
   // lock=frozen run fails closed on anything missing. Unhandled signals (SIGINT/SIGTERM
   // with no handler) bypass exit hooks entirely; servers own that behavior, we don't touch it.
+  //
+  // save() runs on EVERY beforeExit/exit firing rather than latching after the first.
+  // These handlers were registered at initState -- before any user code ran -- so they fire
+  // FIRST on each event, and a require() issued by a LATER handler on the same event
+  // resolves AFTER our write. CLIs commonly log a summary at exit through a lazy require
+  // (Babel lazy interop: @react-native-community/cli-tools' logger require()s chalk on
+  // its first call): the target's bytes are usually attested via other importers, so a
+  // one-shot save silently dropped only that resolution EDGE, surfacing at bundle=load
+  // as MODULE_NOT_FOUND for a package the bundle carries. Re-running is cheap -- write()
+  // compares each artifact's serialized text and skips unchanged outputs, and the child
+  // shard path keeps its own last-written compare -- so the exit firing re-flushes
+  // whatever the beforeExit firing missed. Requires issued by a user 'exit' handler
+  // AFTER ours are the residual gap: 'exit' is the last stop, nothing later can flush.
   const save = () => {
-    if (saved) return
-    saved = true
     // A child process (pid mismatch) must never write the real artifact -- fork OR a non-fork
     // child that inherited our loader: the root owns the lockfile/bundle, and a second writer
     // would race it. Instead it forwards what it captured via a shard the root merges below.
@@ -471,9 +496,11 @@ function initState(root) {
       if (aborted) return
       // Root: fold in every forked child's shard before writing, so files/edges only a child
       // observed (e.g. a Metro worker's babel.config.js + preset/plugins) are attested too. Only
-      // when we minted a shard dir (opt-in + capturing); merges from that dir alone.
+      // when we minted a shard dir (opt-in + capturing); merges from that dir alone. On a
+      // re-flush after the dir was already removed below, the merge no-ops (opendir fails).
       if (createdShardDir) mergeChildShards(createdShardDir)
       state.write()
+      saved = true
     } finally {
       // Always remove the shard dir we minted -- clean exit, abort, or a throwing write. This is
       // the single owner of that cleanup (mergeChildShards no longer self-removes). A SIGKILL
@@ -736,24 +763,6 @@ function patchCjsResolution() {
         if (state.config.full || state.inNodeModules(parentURL)) {
           const resolved = state.resolveBundled(parentURL, request)
           if (resolved !== undefined) return resolved
-          // Recorded-edge miss: let Node try disk first (a resolution native CAN produce
-          // is never overridden), and only when that fails on a specifier the bundle can
-          // still place, fall back to the bundle's own node_modules layout. This is the
-          // lazy-require shape -- an edge capture never executed, e.g. Babel lazy interop
-          // (@react-native-community/cli-tools' logger requires chalk on first use), so
-          // the bundle carries the package but not THIS (parent, specifier) edge -- and
-          // the static-bundle shape, whose dynamic edges are unrecordable by design.
-          // resolveBundledLayout is fail-closed (bare specifiers, nearest bundled package
-          // dir on the parent's lookup path, unique require-kind recorded target), so an
-          // unresolvable specifier still surfaces Node's original MODULE_NOT_FOUND.
-          try {
-            return original.call(this, request, parent, ...rest)
-          } catch (err) {
-            if (err?.code !== 'MODULE_NOT_FOUND') throw err
-            const fallback = state.resolveBundledLayout(parentURL, request, { kind: 'require' })
-            if (fallback !== undefined) return fallback
-            throw err
-          }
         }
       } else if (isAbsolute(request)) {
         // NO parent, request already an absolute path: Node's ESM<->CJS interop re-enters

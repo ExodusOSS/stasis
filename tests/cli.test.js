@@ -380,48 +380,55 @@ test('run --dependencies --bundle=load serves a require(esm)-linked CJS dep abse
   t.assert.match(load.stdout, /CJS-DEP-LOADED/, 'node_modules-scope deps resolved via the bundle map must survive a pruned tree')
 }))
 
-test('run --bundle=load resolves a require() edge capture never observed via the bundle layout', withTmp((t, tmp) => {
-  // Regression for the lazy-require shape: Babel lazy interop (e.g. @react-native-community/
-  // cli-tools' logger) defers require('chalk') to the first log call, so a capture that never
-  // takes that branch bundles chalk (via other importers' edges) but records no logger->chalk
-  // edge. At load, resolveBundled misses and native resolution walks a node_modules that is
-  // not there: `Cannot find module 'chalk'` (with require stack) out of the shim's
-  // original.call. The shim now retries a natively-failed bare specifier against the bundle's
-  // own layout (state.resolveBundledLayout): nearest bundled package dir on the parent's
-  // lookup path, unique require-kind recorded target. Modeled here with an env-gated require
-  // the capture run leaves unexecuted.
+test('run --bundle=add records a resolution edge first observed during exit handlers', withTmp((t, tmp) => {
+  // Regression for the lazy-require-at-exit shape: Babel lazy interop (e.g.
+  // @react-native-community/cli-tools' logger) defers require('chalk') to the first log
+  // call, and CLIs commonly first log in an exit-time summary. stasis's save() handlers
+  // were registered at initState -- before user code -- so they fire FIRST on
+  // beforeExit/exit, and a one-shot save wrote the artifacts BEFORE a later handler's
+  // require resolved: the edge (its target already bundled via other importers, so only
+  // the EDGE was missing) silently never landed, and `--bundle=load` then died with
+  // `Cannot find module 'chalk'` out of the CJS shim's native fall-through. save() now
+  // re-flushes on every beforeExit/exit firing (unchanged artifacts are compare-skipped),
+  // so the exit firing persists what handlers after the beforeExit firing resolved.
   const write = (rel, content) => {
     mkdirSync(join(tmp, dirname(rel)), { recursive: true })
     writeFileSync(join(tmp, rel), content)
   }
   write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', private: true }))
-  // eager-cjs records the require-conditions edge that puts lazy-target in the bundle;
-  // lazy-cjs only require()s it behind an env flag the CAPTURE run leaves unset.
+  // The entry loads dep itself (bundling its bytes) and registers an exit-time logger
+  // call; toolpkg's OWN require('dep') therefore resolves only inside the beforeExit
+  // handler, after stasis's first write of the run.
   write('entry.mjs', [
-    "import eager from 'eager-cjs'",
-    "import lazy from 'lazy-cjs'",
-    'console.log(eager, lazy.val())',
+    "import { createRequire } from 'node:module'",
+    'const require = createRequire(import.meta.url)',
+    "require('dep')",
+    "const tool = require('toolpkg')",
+    "process.on('beforeExit', () => { console.log('late log:', tool.log()) })",
     '',
   ].join('\n'))
-  write('node_modules/eager-cjs/package.json', JSON.stringify({ name: 'eager-cjs', version: '1.0.0', main: 'index.js' }))
-  write('node_modules/eager-cjs/index.js', "module.exports = require('lazy-target').tag\n")
-  write('node_modules/lazy-cjs/package.json', JSON.stringify({ name: 'lazy-cjs', version: '1.0.0', main: 'index.js' }))
-  write('node_modules/lazy-cjs/index.js',
-    "exports.val = () => (process.env.STASIS_TEST_LAZY ? require('lazy-target').tag : 'lazy-skipped')\n")
-  write('node_modules/lazy-target/package.json', JSON.stringify({ name: 'lazy-target', version: '1.0.0', main: 'index.js' }))
-  write('node_modules/lazy-target/index.js', "exports.tag = 'LAZY-TARGET-OK'\n")
+  write('node_modules/toolpkg/package.json', JSON.stringify({ name: 'toolpkg', version: '1.0.0', main: 'index.js' }))
+  write('node_modules/toolpkg/index.js', "exports.log = () => require('dep').tag\n")
+  write('node_modules/dep/package.json', JSON.stringify({ name: 'dep', version: '1.0.0', main: 'index.js' }))
+  write('node_modules/dep/index.js', "exports.tag = 'DEP-OK'\n")
 
   const save = run(['run', '--lock=add', '--bundle=add', 'entry.mjs'], { cwd: tmp })
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
-  t.assert.match(save.stdout, /LAZY-TARGET-OK lazy-skipped/)
+  t.assert.match(save.stdout, /late log: DEP-OK/)
 
-  // Ship the bundle without node_modules; the load run takes the lazy branch capture never saw.
+  // The artifact must attest the exit-time edge itself -- not just happen to run.
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const edgeRecorded = Object.values(lock.imports ?? {}).some(
+    (parents) => Object.entries(parents).some(
+      ([parent, specs]) => parent === 'node_modules/toolpkg/index.js' && 'dep' in specs))
+  t.assert.ok(edgeRecorded, 'the beforeExit-time toolpkg->dep resolution must be recorded')
+
+  // And the bundle is then self-contained for it: same run shape with node_modules gone.
   rmSync(join(tmp, 'node_modules'), { recursive: true, force: true })
 
-  const load = run(['run', '--lock=frozen', '--bundle=load', 'entry.mjs'],
-    { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_LAZY: '1' } })
+  const load = run(['run', '--lock=frozen', '--bundle=load', 'entry.mjs'], { cwd: tmp })
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
-  t.assert.match(load.stdout, /LAZY-TARGET-OK LAZY-TARGET-OK/, 'the unrecorded lazy edge must resolve via the bundle layout')
+  t.assert.match(load.stdout, /late log: DEP-OK/, 'the exit-time edge must be served from the bundle')
 }))
 
 test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp((t, tmp) => {
