@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { State } from '@exodus/stasis-core/state'
-import { resolvePluginState } from '@exodus/stasis-core/plugins'
+import { resolvePluginState } from '@exodus/stasis-plugins/plugins'
 
 const dir = mkdtempSync(join(tmpdir(), 'stasis-nb-preload-'))
 writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fx', version: '0.0.0' }))

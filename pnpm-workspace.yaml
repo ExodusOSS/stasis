@@ -2,6 +2,7 @@
 packages:
   - stasis
   - stasis-core
+  - stasis-plugins
 
 allowBuilds:
   esbuild: false

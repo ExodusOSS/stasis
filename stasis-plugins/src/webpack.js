@@ -6,13 +6,13 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { resolvePluginState } from './plugins.js'
-import { State } from './state.js'
-import { realReadFileSync } from './state-util.js'
-import { classifyExtension } from './util.js'
+import { State } from '@exodus/stasis-core/state'
+import { realReadFileSync } from '@exodus/stasis-core/state-util'
+import { classifyExtension } from '@exodus/stasis-core/util'
 
 // A CJS require anchored at this ESM module, used only to optionally locate the
 // PROJECT's babel-plugin-module-resolver for the capture-time monkey-patch below.
-// stasis-core stays zero-dependency: the package is never imported statically, and
+// stasis-plugins takes no dependency on it: the package is never imported statically, and
 // a project without it just skips the patch.
 const require = createRequire(import.meta.url)
 

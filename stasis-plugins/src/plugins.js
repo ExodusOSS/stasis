@@ -7,10 +7,10 @@
 
 import assert from 'node:assert/strict'
 
-import { DEFAULT_LOCK, assertOptionsMatchConfig, validatePluginOptions } from './config.js'
-import { ensureStateForLoader, isLoaderInstalled } from './hooks.js'
-import { State } from './state.js'
-import { extSetsEqual, parseResourcesOption } from './util.js'
+import { DEFAULT_LOCK, assertOptionsMatchConfig, validatePluginOptions } from '@exodus/stasis-core/config'
+import { ensureStateForLoader, isLoaderInstalled } from '@exodus/stasis-core/hooks'
+import { State } from '@exodus/stasis-core/state'
+import { extSetsEqual, parseResourcesOption } from '@exodus/stasis-core/util'
 
 // Decides which State a bundler plugin (StasisWebpack / StasisEsbuild) should run against,
 // given its constructor options and the ambient preload (or lack thereof). Returns either

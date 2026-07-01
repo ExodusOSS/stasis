@@ -1,6 +1,6 @@
 // Regression: when app code imports the SAME stasis-core that the preload
 // loaded -- e.g. a build script that uses `State` directly, or a bundler
-// plugin that pulls in `@exodus/stasis-core/plugins` -- the resolve hook
+// plugin that pulls in `@exodus/stasis-plugins/plugins` -- the resolve hook
 // fires for the import edge but Node's module cache short-circuits the
 // load hook (the URL was loaded by Node BEFORE install() registered our
 // hooks). Pre-fix: addFile never ran for those URLs, so the bundle's

@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { State } from './state.js'
+import { State } from '@exodus/stasis-core/state'
 
 // Companion to the StasisMetro serializer plugin: the LOAD half of stasis for Metro.
 //

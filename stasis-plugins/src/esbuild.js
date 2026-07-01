@@ -4,16 +4,16 @@ import { extname, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 
-import { Bundle } from './bundle.js'
+import { Bundle } from '@exodus/stasis-core/bundle'
 import { resolvePluginState } from './plugins.js'
-import { State } from './state.js'
+import { State } from '@exodus/stasis-core/state'
 // Pre-patch snapshot, NOT `import { readFile } from 'node:fs/promises'`: under
 // `stasis run --fs=async` that builtin is monkey-patched, and this plugin loads after
 // the patch, so a direct import would route esbuild's own source reads through the
 // --fs capture hook. The snapshot in state-util (taken during the --import preload) is
 // the genuine reader.
-import { realReadFile } from './state-util.js'
-import { classifyExtension } from './util.js'
+import { realReadFile } from '@exodus/stasis-core/state-util'
+import { classifyExtension } from '@exodus/stasis-core/util'
 
 export class StasisEsbuild {
   #seen = new Set()

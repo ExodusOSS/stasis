@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { resolvePluginState } from '@exodus/stasis-core/plugins'
+import { resolvePluginState } from '@exodus/stasis-plugins/plugins'
 import { State } from '@exodus/stasis-core/state'
 
 const fixture = () => {

@@ -6,9 +6,9 @@ import { isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { resolvePluginState } from './plugins.js'
-import { State } from './state.js'
-import { realReadFileSync } from './state-util.js'
-import { classifyExtension } from './util.js'
+import { State } from '@exodus/stasis-core/state'
+import { realReadFileSync } from '@exodus/stasis-core/state-util'
+import { classifyExtension } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 

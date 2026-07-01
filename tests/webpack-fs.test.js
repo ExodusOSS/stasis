@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { State } from '@exodus/stasis-core/state'
-import { StasisWebpack } from '@exodus/stasis-core/webpack'
+import { StasisWebpack } from '@exodus/stasis-plugins/webpack'
 
 import { installFsHooks } from '../stasis-core/src/fs.js'
 
