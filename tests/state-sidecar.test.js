@@ -6,7 +6,9 @@ import { pathToFileURL } from 'node:url'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
-import { resolvePluginState } from '@exodus/stasis-core/plugins'
+// resolvePluginState is internal plugin<->preload coordination, not a public export;
+// import the source directly (same pattern as fs.js in the fs tests).
+import { resolvePluginState } from '../stasis-plugins/src/plugins.js'
 
 // Shared preload for all tests in this file. The preload registry is process-wide and
 // can't be reset, so we build a single parent up front and exercise sidecar/resolver

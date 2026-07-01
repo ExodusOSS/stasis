@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { brotliDecompressSync } from 'node:zlib'
 
-import { StasisWebpack } from '@exodus/stasis-core/webpack'
+import { StasisWebpack } from '@exodus/stasis-plugins/webpack'
 import { State } from '@exodus/stasis-core/state'
 
 // StasisWebpack writes a sidecar/standalone bundle on compiler.hooks.done. webpack fires that

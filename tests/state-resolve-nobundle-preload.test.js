@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { State } from '@exodus/stasis-core/state'
-import { resolvePluginState } from '@exodus/stasis-core/plugins'
+// resolvePluginState is internal plugin<->preload coordination, not a public export;
+// import the source directly (same pattern as fs.js in the fs tests).
+import { resolvePluginState } from '../stasis-plugins/src/plugins.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'stasis-nb-preload-'))
 writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fx', version: '0.0.0' }))

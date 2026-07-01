@@ -20,6 +20,9 @@ importers:
       '@exodus/stasis-core':
         specifier: workspace:*
         version: link:stasis-core
+      '@exodus/stasis-plugins':
+        specifier: workspace:*
+        version: link:stasis-plugins
       babel-plugin-module-resolver:
         specifier: ^3.2.0
         version: 3.2.0
@@ -47,6 +50,9 @@ importers:
       '@exodus/stasis-core':
         specifier: 1.0.0-alpha.3
         version: link:../stasis-core
+      '@exodus/stasis-plugins':
+        specifier: 1.0.0-alpha.3
+        version: link:../stasis-plugins
       esbuild:
         specifier: '*'
         version: 0.27.3
@@ -55,6 +61,12 @@ importers:
         version: 0.94.0(@emnapi/core@1.11.0)(@emnapi/runtime@1.11.0)
 
   stasis-core: {}
+
+  stasis-plugins:
+    dependencies:
+      '@exodus/stasis-core':
+        specifier: 1.0.0-alpha.3
+        version: link:../stasis-core
 
 packages:
 

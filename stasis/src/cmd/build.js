@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { State } from '@exodus/stasis-core/state'
-import { StasisEsbuild } from '@exodus/stasis-core/esbuild'
+import { StasisEsbuild } from '@exodus/stasis-plugins/esbuild'
 import { bundleFromLockfile } from '../bundle-from-lockfile.js'
 import { parseFileWithKind } from '../parse.js'
 

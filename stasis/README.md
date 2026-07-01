@@ -68,7 +68,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 
 ## Runtime
 
-The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run` and `prune` commands and bundler plugins only.
+The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run` and `prune` commands only; the bundler plugins live in [`@exodus/stasis-plugins`](../stasis-plugins).
 
 ## License
 

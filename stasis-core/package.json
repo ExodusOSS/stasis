@@ -13,32 +13,22 @@
     "./util": "./src/util.js",
     "./brotli": "./src/brotli.js",
     "./state-util": "./src/state-util.js",
-    "./prune": "./src/prune.js",
-    "./esbuild": "./src/esbuild.js",
-    "./webpack": "./src/webpack.js",
-    "./metro": "./src/metro.js",
-    "./metro-transformer": "./src/metro-transformer.js",
-    "./plugins": "./src/plugins.js"
+    "./prune": "./src/prune.js"
   },
   "files": [
     "bin/stasis-core.js",
     "src/brotli.js",
     "src/bundle.js",
     "src/config.js",
-    "src/esbuild.js",
     "src/fs.js",
     "src/hooks.js",
     "src/loader.js",
     "src/lockfile.js",
-    "src/metro.js",
-    "src/metro-transformer.js",
     "src/package.cjs",
-    "src/plugins.js",
     "src/prune.js",
     "src/state.js",
     "src/state-util.js",
-    "src/util.js",
-    "src/webpack.js"
+    "src/util.js"
   ],
   "engines": {
     "node": ">=24.14.0"

@@ -1,7 +1,7 @@
 {
   "name": "@exodus/stasis-workspace",
   "version": "0.0.0",
-  "description": "Workspace root for @exodus/stasis and @exodus/stasis-core",
+  "description": "Workspace root for @exodus/stasis, @exodus/stasis-core, and @exodus/stasis-plugins",
   "private": true,
   "type": "module",
   "engines": {
@@ -23,6 +23,7 @@
     "@exodus/bytes": "^1.15.0",
     "@exodus/stasis": "workspace:*",
     "@exodus/stasis-core": "workspace:*",
+    "@exodus/stasis-plugins": "workspace:*",
     "babel-plugin-module-resolver": "^3.2.0",
     "esbuild": "^0.27.3",
     "file-loader": "^6.2.0",

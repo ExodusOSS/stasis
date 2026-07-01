@@ -1,0 +1,36 @@
+{
+  "name": "@exodus/stasis-plugins",
+  "version": "1.0.0-alpha.3",
+  "description": "Bundler plugins (webpack, esbuild, Metro) for @exodus/stasis-core",
+  "type": "module",
+  "exports": {
+    "./webpack": "./src/webpack.js",
+    "./esbuild": "./src/esbuild.js",
+    "./metro": "./src/metro.js",
+    "./metro-transformer": "./src/metro-transformer.js"
+  },
+  "files": [
+    "src/esbuild.js",
+    "src/metro.js",
+    "src/metro-transformer.js",
+    "src/plugins.js",
+    "src/webpack.js"
+  ],
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ExodusOSS/stasis.git",
+    "directory": "stasis-plugins"
+  },
+  "author": "Exodus Movement, Inc.",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ExodusOSS/stasis/issues"
+  },
+  "homepage": "https://github.com/ExodusOSS/stasis#readme",
+  "dependencies": {
+    "@exodus/stasis-core": "1.0.0-alpha.3"
+  }
+}

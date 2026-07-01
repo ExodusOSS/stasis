@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { State } from '@exodus/stasis-core/state'
-import { StasisMetro } from '@exodus/stasis-core/metro'
+import { StasisMetro } from '@exodus/stasis-plugins/metro'
 
 import { installFsHooks } from '../stasis-core/src/fs.js'
 
