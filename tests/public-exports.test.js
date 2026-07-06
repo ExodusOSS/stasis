@@ -277,6 +277,76 @@ test('Bundle.parse rejects imports whose paths escape the project root', (t) => 
   t.assert.throws(() => Bundle.parse(arrayImports))
 })
 
+test('Bundle.parse rejects module/source dirs and file keys that escape the project root', (t) => {
+  // Same posixPathEscapes gate as Lockfile.parse (and the formats/imports checks
+  // above): a mid-path `..` that pops above the root, or an absolute path, must
+  // fail at the schema boundary -- the old '..'-prefix check let both through.
+  const base = { version: 1, config: { scope: 'node_modules' }, formats: {}, imports: {} }
+  const info = { name: 'w', version: '1.0.0', files: { 'i.js': 'x' } }
+  // a modules dir escaping mid-path (still contains 'node_modules', so only the
+  // path check can reject it)
+  t.assert.throws(() => Bundle.parse(JSON.stringify({
+    ...base,
+    modules: { 'node_modules/a/../../../evil': info },
+  })))
+  // an absolute modules dir
+  t.assert.throws(() => Bundle.parse(JSON.stringify({
+    ...base,
+    modules: { '/node_modules/pkg': info },
+  })))
+  // a per-file key escaping its bucket mid-path
+  t.assert.throws(() => Bundle.parse(JSON.stringify({
+    ...base,
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'sub/../../x': 'boom' } } },
+  })))
+  // a workspace sources dir escaping mid-path (scope=full branch)
+  t.assert.throws(() => Bundle.parse(JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['src/a.js'],
+    sources: { 'src/../../evil': { name: 'x', version: '1.0.0', files: { 'a.js': 'x' } } },
+    modules: {},
+    formats: {},
+    imports: {},
+  })))
+})
+
+test('Bundle.parse rejects a v0 flat source path that escapes the project root', (t) => {
+  const v0 = (path) => JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    formats: {},
+    imports: {},
+    sources: { [path]: 'boom' },
+  })
+  t.assert.throws(() => Bundle.parse(v0('../x')))
+  t.assert.throws(() => Bundle.parse(v0('a/../../x')))
+  t.assert.throws(() => Bundle.parse(v0('/etc/passwd')))
+})
+
+test('Bundle.parse keeps accepting a directory listing keyed at a module root (rel === \'\')', (t) => {
+  // `stasis run --fs` keys a readdir of a package root at rel '' inside its own
+  // bucket (moduleFileKey collapses that to the dir itself, see fs.test.js).
+  // posixPathEscapes('') normalizes to '.' -- inside the root -- so the stricter
+  // per-file check must keep accepting it.
+  const text = JSON.stringify({
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: {
+      'node_modules/dep': { name: 'dep', version: '1.0.0', files: { '': '["package.json"]' } },
+    },
+    formats: { 'node_modules/dep': 'directory' },
+    imports: {},
+  })
+  const parsed = Bundle.parse(text)
+  t.assert.equal(parsed.modules.get('node_modules/dep').files[''], '["package.json"]')
+  t.assert.equal(parsed.sources.get('node_modules/dep'), '["package.json"]')
+  t.assert.equal(parsed.formats.get('node_modules/dep'), 'directory')
+  // and the listing survives a serialize -> parse round-trip
+  const again = Bundle.parse(parsed.serialize())
+  t.assert.equal(again.modules.get('node_modules/dep').files[''], '["package.json"]')
+})
+
 test('Bundle.parse rejects a non-object formats (malformed shape)', (t) => {
   // formats is attested under frozen bundles, so a non-plain-object value is rejected at
   // parse time -- mirroring `imports` above and Lockfile.parse's `formats` check, rather
