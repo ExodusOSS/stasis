@@ -614,6 +614,30 @@ test('Config debug env "1" is true', withEnv(
   (t) => { t.assert.equal(new Config().debug, true) }
 ))
 
+test('Config debug env "false" is false (not truthy-parsed)', withEnv(
+  { EXODUS_STASIS_DEBUG: 'false' },
+  (t) => { t.assert.equal(new Config().debug, false) }
+))
+
+test('Config debug env "true" is true', withEnv(
+  { EXODUS_STASIS_DEBUG: 'true' },
+  (t) => { t.assert.equal(new Config().debug, true) }
+))
+
+test('Config debug env "" is unset and keeps the default', withEnv(
+  { EXODUS_STASIS_DEBUG: '' },
+  (t) => { t.assert.equal(new Config().debug, false) }
+))
+
+// An unrecognized value ('no', 'off', ...) must throw, not silently enable: the old
+// truthiness parse read EXODUS_STASIS_DEBUG=no as debug *on*.
+test('Config debug env rejects unrecognized values', withEnv(
+  { EXODUS_STASIS_DEBUG: 'no' },
+  (t) => {
+    t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_DEBUG must be/ })
+  }
+))
+
 test('Config debug=true option conflicts with env debug=0', withEnv(
   { EXODUS_STASIS_DEBUG: '0' },
   (t) => {
@@ -660,6 +684,29 @@ test('Config childProcess env "0" is falsy', withEnv(
 test('Config childProcess env "1" is true', withEnv(
   { EXODUS_STASIS_CHILD_PROCESS: '1' },
   (t) => { t.assert.equal(new Config().childProcess, true) }
+))
+
+test('Config childProcess env "false" is false (not truthy-parsed)', withEnv(
+  { EXODUS_STASIS_CHILD_PROCESS: 'false' },
+  (t) => { t.assert.equal(new Config().childProcess, false) }
+))
+
+test('Config childProcess env "true" is true', withEnv(
+  { EXODUS_STASIS_CHILD_PROCESS: 'true' },
+  (t) => { t.assert.equal(new Config().childProcess, true) }
+))
+
+test('Config childProcess env "" is unset and keeps the default', withEnv(
+  { EXODUS_STASIS_CHILD_PROCESS: '' },
+  (t) => { t.assert.equal(new Config().childProcess, false) }
+))
+
+// Mirrors the debug case: 'yes' would have silently enabled cross-process capture.
+test('Config childProcess env rejects unrecognized values', withEnv(
+  { EXODUS_STASIS_CHILD_PROCESS: 'yes' },
+  (t) => {
+    t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_CHILD_PROCESS must be/ })
+  }
 ))
 
 test('Config childProcess=true option conflicts with env childProcess=0', withEnv(
