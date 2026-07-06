@@ -219,7 +219,8 @@ test('bundle=replace re-writes a half on a later write() after an empty write() 
   const codePath = join(dir, 'code.br')
   const resPath = join(dir, 'res.br')
 
-  // One long-lived State across two write()s (a watch-mode plugin reuses its State): the
+  // One long-lived State across two write()s (a plugin State writes more than once in-process,
+  // e.g. webpack's per-child-compiler `done`s or the deferred flush's exit backstop): the
   // deletion must reset the per-artifact cache so a later non-empty write() re-emits the file.
   const st = new State(dir, { lock: 'replace', bundle: 'replace', bundleFile: codePath, resourcesBundleFile: resPath })
   st.addFile(pathToFileURL(join(dir, 'entry.js')).toString(), { format: 'module', isEntry: true })

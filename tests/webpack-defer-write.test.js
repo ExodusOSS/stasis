@@ -12,14 +12,16 @@ import { State } from '@exodus/stasis-core/state'
 // hook once PER CHILD COMPILER, so a MultiCompiler with N targets sharing one plugin instance
 // would re-serialize + brotli-compress (quality 11, super-linear in size) the whole, ever-growing
 // bundle N times. The fix defers ONLY that multi-compiler one-shot case to a single
-// beforeExit/exit flush (one write of the final bundle); a single compiler and watch mode keep the
-// immediate write-on-`done`. No real webpack here -- a fake compiler exposing the hooks the plugin
-// taps (normalModuleFactory, watchRun, done) drives the completion logic; afterResolve lets a test
-// feed the plugin a real source file so the deferred write's CONTENT can be checked.
+// beforeExit/exit flush (one write of the final bundle); a single compiler keeps the immediate
+// write-on-`done`, and watch mode is refused outright at watchRun (capture's path-keyed dedupe
+// would silently attest stale content on a rebuild). No real webpack here -- a fake compiler
+// exposing the hooks the plugin taps (normalModuleFactory, watchRun, done) drives the completion
+// logic; afterResolve lets a test feed the plugin a real source file so the deferred write's
+// CONTENT can be checked.
 //
 // Test 1 (single) and Test 2 (multi) are the regression guards: revert the fix to a direct
 // write()-in-`done` and Test 2's "deferred until flush" assertions fail. The remaining cases pin
-// the fix's other properties (exit-path durability, retry-after-throw, watch immediacy, failed
+// the fix's other properties (exit-path durability, retry-after-throw, watch refusal, failed
 // builds, byte content).
 
 // Minimal tapable-style hook: collects tapped fns, `call` invokes them in order.
@@ -168,23 +170,25 @@ test('deferred write that throws on beforeExit is retried by the exit backstop (
   t.assert.ok(existsSync(bundleFile), 'bundle written on the retry')
 })
 
-test('watch mode: writes immediately on every `done`, never deferred', (t) => {
-  const { plugin, bundleFile, writes, flushBeforeExit } = withPlugin(t)
-  // Two compilers so captureApplyCount > 1 -- proving it is watch, not the single-compiler path,
-  // that forces the immediate write.
-  const compilers = [fakeCompiler(), fakeCompiler()]
-  for (const c of compilers) c.applyTo(plugin)
-  for (const c of compilers) c.hooks.watchRun.call({}) // entering watch marks each compiler
+test('watch mode: capture refuses at watchRun, before anything is written', (t) => {
+  // Capture's dedupe is keyed by path, not content, so a watch rebuild whose bytes changed would
+  // silently keep attesting the OLD bytes. The plugin therefore throws from its watchRun tap --
+  // which webpack fires before the FIRST watch build, failing the watcher up front.
+  const { plugin, bundleFile, writes, flushBeforeExit, flushExit } = withPlugin(t)
+  const c = fakeCompiler()
+  c.applyTo(plugin)
 
-  compilers[0].hooks.done.call(CLEAN)
-  t.assert.equal(writes(), 1, 'watch rebuild writes right away (no beforeExit)')
-  t.assert.ok(existsSync(bundleFile))
+  t.assert.throws(
+    () => c.hooks.watchRun.call({}),
+    /StasisWebpack: watch mode is not supported for capture/,
+    'entering watch must fail the watcher loudly'
+  )
 
-  compilers[1].hooks.done.call(CLEAN) // another rebuild writes again (compare-and-skip keeps it cheap)
-  t.assert.equal(writes(), 2)
-
-  flushBeforeExit() // watch never armed a deferred flush
-  t.assert.equal(writes(), 2, 'no deferred flush in watch mode')
+  // Nothing was captured or scheduled: no write on any path, immediate or deferred.
+  flushBeforeExit()
+  flushExit()
+  t.assert.equal(writes(), 0, 'refused watch never writes')
+  t.assert.ok(!existsSync(bundleFile), 'no bundle on disk after the refusal')
 })
 
 test('failed build schedules no deferred write', (t) => {

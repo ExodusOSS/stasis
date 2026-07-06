@@ -7,9 +7,10 @@ import { pathToFileURL } from 'node:url'
 import { State } from '@exodus/stasis-core/state'
 
 // write() is called once per process for `stasis run` (beforeExit/exit), but the
-// webpack/esbuild plugins call it on every `compiler.hooks.done` event -- i.e. on
-// every rebuild in watch mode. Without compare-and-skip, every rebuild re-brotlis
-// (quality 11, multi-MB inputs, super-linear in size) and rewrites every output.
+// plugins can call it more than once -- webpack's `compiler.hooks.done` fires per
+// child compiler under a MultiCompiler, and the deferred flush has an exit backstop.
+// Without compare-and-skip, every repeat write() re-brotlis (quality 11, multi-MB
+// inputs, super-linear in size) and rewrites every output.
 // These tests pin that a second write() with no state change is a true no-op:
 // no brotli, no file touch.
 

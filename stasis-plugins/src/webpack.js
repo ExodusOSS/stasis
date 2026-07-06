@@ -484,35 +484,45 @@ export class StasisWebpack {
       })
     })
 
+    // Watch-mode capture is EXPLICITLY UNSUPPORTED -- refuse it loudly before anything is
+    // captured. Capture's dedupe is keyed by PATH, not content (#seen above, plus State.write's
+    // compare-and-skip caches), so on a watch rebuild where a file's bytes changed the plugin
+    // would skip re-capture: the emitted output would use the new bytes while the bundle /
+    // lockfile silently kept attesting the OLD ones. Rather than track content changes across
+    // rebuilds, refuse watch outright. compiler.hooks.watchRun fires ONLY under
+    // compiler.watch() (both webpack 4 and 5) and BEFORE the first watch build's compilation,
+    // so this rejects the whole watch session up front, not just the second build. watchRun is
+    // an AsyncSeriesHook: a sync `.tap` callback that throws propagates through the hook's call
+    // chain and fails the watcher -- exactly the loud refusal we want, so keep it a plain tap.
+    // Load mode is deliberately untouched (see #applyLoadMode): it serves immutable attested
+    // bytes back into the build, so a dev-server rebuild has no drift hazard there.
+    compiler.hooks.watchRun.tap('Stasis', () => {
+      throw new Error(
+        'StasisWebpack: watch mode is not supported for capture -- ' +
+        'run a one-shot build (watch rebuilds would silently attest stale content)'
+      )
+    })
+
     // The stasis preload owns its own write via beforeExit/exit hooks (stasis-core/hooks.js).
     // Standalone and sidecar States have no such hook, so the plugin writes them when the
     // compiler finishes -- but only on a clean build. A failed compilation has incomplete
     // state, and lock=replace would otherwise overwrite a good lockfile with a partial one.
     if (this.#state !== State.preload) {
-      // Watch-mode detection. compiler.hooks.watchRun fires ONLY under compiler.watch() (both
-      // webpack 4 and 5) and always before that build's `done`, so the flag is set in time.
-      // The flag is per-compiler (this closure), which is what we want: each compiler reports
-      // its own run kind even when one shared plugin instance drives several.
-      let watching = false
-      compiler.hooks.watchRun.tap('Stasis', () => { watching = true })
       compiler.hooks.done.tap('Stasis', (stats) => {
         if (stats.hasErrors()) return
-        // Write immediately when the bundle cannot grow across `done`s:
-        //   - watch mode: a watcher keeps the event loop alive, so a deferred flush would never
-        //     fire; per-rebuild freshness is the point, and State.write's compare-and-skip keeps
-        //     an unchanged rebuild a ~no-op; and
-        //   - a single compiler: only one `done`, so there is no N-write amplification and no
-        //     reason to give up the old write-by-`done` durability (the bundle is on disk by the
-        //     time compiler.run()'s callback resolves).
-        // Defer ONLY the multi-compiler one-shot case. compiler.hooks.done fires once PER CHILD
-        // COMPILER, so a MultiCompiler with N targets sharing this one State's growing bundle
-        // would otherwise pay N brotli + writeFileSync passes over an ever-larger payload (the
+        // Write immediately for a single compiler: only one `done`, so there is no N-write
+        // amplification and no reason to give up the old write-by-`done` durability (the
+        // bundle is on disk by the time compiler.run()'s callback resolves). Defer ONLY the
+        // multi-compiler one-shot case. compiler.hooks.done fires once PER CHILD COMPILER, so
+        // a MultiCompiler with N targets sharing this one State's growing bundle would
+        // otherwise pay N brotli + writeFileSync passes over an ever-larger payload (the
         // dominant, super-linear cost). Deferral collapses those into ONE write of the final
-        // bundle at process exit -- mirroring how the preload writes (hooks.js). esbuild / metro
+        // bundle at process exit -- mirroring how the preload writes (hooks.js). Watch mode
+        // never reaches this hook: capture refuses it at watchRun above. esbuild / metro
         // are deliberately NOT changed: their write hook fires once per build (no per-child
         // amplification), and stasis build reads esbuild output in-process, so their synchronous
         // write is load-bearing in a way webpack's per-child `done` write is not.
-        if (watching || this.#captureApplyCount === 1) this.#state.write()
+        if (this.#captureApplyCount === 1) this.#state.write()
         else this.#deferWrite()
       })
     }
@@ -527,8 +537,9 @@ export class StasisWebpack {
   // a process that never exits normally -- one that stays alive after building and is then
   // killed by a signal (SIGINT/SIGTERM/SIGKILL), which bypass both beforeExit and exit -- would
   // not flush. That is the same capture-then-exit assumption the preload already relies on
-  // (hooks.js) and metro documents; the common build-and-exit and watch (`--watch`, dev-server)
-  // flows are unaffected, and a single-compiler build never reaches here (it writes on `done`).
+  // (hooks.js) and metro documents; the common build-and-exit flow is unaffected, a
+  // single-compiler build never reaches here (it writes on `done`), and watch (`--watch`,
+  // dev-server) capture is refused outright at watchRun (see #applyCaptureMode).
   #deferWrite() {
     this.#deferredWriteDirty = true
     if (this.#deferredWriteArmed) return

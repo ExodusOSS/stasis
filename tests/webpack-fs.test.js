@@ -26,7 +26,7 @@ import { installFsHooks } from '../stasis-core/src/fs.js'
 // collected fns, exactly as webpack would when the hook runs.
 const mkHook = () => { const fns = []; return { tap: (_n, fn) => fns.push(fn), call: (arg) => { for (const fn of fns) fn(arg) } } }
 // The compiler hooks the capture-mode plugin taps: normalModuleFactory (resolve capture),
-// watchRun (one-shot vs watch write timing), and done (the write itself). Real webpack exposes
+// watchRun (refusing watch-mode capture), and done (the write itself). Real webpack exposes
 // all three on both v4 and v5; the stub must too, or apply() throws on the missing hook.
 const compilerHooks = () => ({ normalModuleFactory: mkHook(), watchRun: mkHook(), done: mkHook() })
 
