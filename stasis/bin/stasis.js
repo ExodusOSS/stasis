@@ -20,14 +20,15 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--output=(path|-)] path/to/file.rs ...
- (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout)
+ (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
+  --brotli-quality=0..11 tunes bundle compression for any entry language, default 11 = smallest/slowest)
  stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
@@ -52,7 +53,7 @@ if (command === '-v' || command === '--version') {
   process.exit(0)
 } else if (command === 'run') {
   const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources'])
+  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -68,6 +69,7 @@ if (command === '-v' || command === '--version') {
     mock: { type: 'boolean' },
     fs: { type: 'string' },
     resources: { type: 'string' },
+    'brotli-quality': { type: 'string' },
   }
 
   let values
@@ -104,10 +106,21 @@ if (command === '-v' || command === '--version') {
   // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
+  // --brotli-quality: bundle compression quality (integer 0..11; unset = brotli's default 11).
+  // Validated here for a clean usage error, normalized ('05' -> '5') so the child's Config and
+  // an already-set matching env var compare equal. Unlike the flags above it is NOT set to ''
+  // when absent: an ambient EXODUS_STASIS_BROTLI_QUALITY has always passed through to the
+  // child untouched, and an unconditional setEnv('') would reject that as a conflict.
+  let brotliQuality
+  if (values['brotli-quality'] !== undefined) {
+    const n = Number(values['brotli-quality'])
+    if (!Number.isInteger(n) || n < 0 || n > 11) usage(`Error: --brotli-quality must be an integer 0..11 (got '${values['brotli-quality']}')`)
+    brotliQuality = n
+  }
   // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
   // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
   const childProcess = values['child-process'] ? '1' : ''
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -118,6 +131,7 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
+  if (brotliQuality !== undefined) setEnv('EXODUS_STASIS_BROTLI_QUALITY', String(brotliQuality))
   // --mock: capture imports by running user code with side-effects denied,
   // fail-closed. Node's permission system blocks fs writes, child processes,
   // worker threads, native addons (no --allow-addons -- addons would bypass
@@ -173,7 +187,7 @@ if (command === '-v' || command === '--version') {
   process.exitCode = code ?? 128 + (osConstants.signals[signal] ?? 0)
 } else if (command === 'bundle') {
   const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '-o'])
+  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--brotli-quality', '-o'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -186,6 +200,7 @@ if (command === '-v' || command === '--version') {
     mainFields: { type: 'string' },
     metro: { type: 'boolean' },
     platforms: { type: 'string', multiple: true },
+    'brotli-quality': { type: 'string' },
   }
   let values
   try {
@@ -255,6 +270,14 @@ if (command === '-v' || command === '--version') {
   } else if (platforms.length > 0) {
     usage('Error: --platforms is only valid with --metro')
   }
+  // --brotli-quality: bundle compression quality (integer 0..11; unset = brotli's default 11).
+  // Language-independent (it tunes the output encoding, not the graph), so no allJs-style gate.
+  let brotliQuality
+  if (values['brotli-quality'] !== undefined) {
+    const n = Number(values['brotli-quality'])
+    if (!Number.isInteger(n) || n < 0 || n > 11) usage(`Error: --brotli-quality must be an integer 0..11 (got '${values['brotli-quality']}')`)
+    brotliQuality = n
+  }
   const { bundleCommand } = await import('../src/cmd/bundle.js')
   await bundleCommand({
     cwd: process.cwd(),
@@ -267,6 +290,7 @@ if (command === '-v' || command === '--version') {
     mainFields,
     metro,
     platforms,
+    brotliQuality,
   })
 } else if (command === 'build') {
   const flags = []

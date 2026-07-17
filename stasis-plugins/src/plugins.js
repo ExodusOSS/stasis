@@ -153,6 +153,9 @@ export function resolvePluginState(label, options, cwd) {
     }
     // Rule 6: different path -- sidecar inherits preload's modes, overrides bundleFile
     // (and resourcesBundleFile if the plugin provided one for a split layout).
+    // brotliQuality is copied along: a sidecar State skips the stasis.config.json
+    // discovery, so without this a config-file quality would silently not apply to
+    // the sidecar's bundle writes.
     const sidecar = new State(cwd, {
       parent: ambient,
       scope: pc.scope,
@@ -163,6 +166,7 @@ export function resolvePluginState(label, options, cwd) {
       debug: pc.debug,
       childProcess: pc.childProcess,
       resources: [...pc.resources],
+      brotliQuality: pc.brotliQuality,
     })
     return { state: sidecar, isNoop: false }
   }
@@ -199,6 +203,7 @@ export function resolvePluginState(label, options, cwd) {
     debug: pc.debug,
     childProcess: pc.childProcess,
     resources: [...pc.resources],
+    brotliQuality: pc.brotliQuality, // same reasoning as the Rule 6 sidecar above
   })
   return { state: sidecar, isNoop: false }
 }

@@ -190,9 +190,10 @@ export class State {
   // Per-artifact "last serialized" caches: write() compares the freshly serialized
   // JSON text against the cached one for each output (lockfile / unified bundle /
   // split code / split resources) and skips both the brotli step and the writeFileSync
-  // when they match. Brotli at quality 11 dominates write cost, and webpack/esbuild
-  // watch-mode rebuilds call write() on every rebuild whether or not the captured
-  // graph actually changed -- this cache makes those no-ops fast. Persistent across
+  // when they match. Brotli at the default quality (11, tunable via
+  // config.brotliQuality) dominates write cost, and webpack/esbuild watch-mode
+  // rebuilds call write() on every rebuild whether or not the captured graph
+  // actually changed -- this cache makes those no-ops fast. Persistent across
   // write() calls within one process; null on the first call.
   #lastLockData = null
   #lastUnifiedBundle = null
@@ -2193,7 +2194,7 @@ export class State {
     const text = serialize()
     if (text !== lastText) {
       mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, brotliCompressSync(text, brotliOptions()))
+      writeFileSync(path, brotliCompressSync(text, brotliOptions(this.config.brotliQuality)))
       return text
     }
     return lastText

@@ -1020,7 +1020,11 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // so it resolves different files on disk and fails closed (correctly -- the lockfile
 // genuinely attests a different graph). Pair such a lockfile with `--bundle=load`, or
 // replay the same `--conditions` at run time, so the attested and observed graphs agree.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro } = {}) {
+// `brotliQuality` (integer 0..11, optional) tunes the bundle's brotli compression:
+// lower is faster to write, higher compresses better. Unset uses brotli's default
+// (11, max). Forwarded to brotliOptions(), which also cross-checks it against
+// EXODUS_STASIS_BROTLI_QUALITY when both are set.
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality } = {}) {
   const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
 
   let bundle
@@ -1053,7 +1057,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   const files = [...bundle.sources.keys()]
   const modules = bundle.modules
 
-  const data = brotliCompressSync(serialized, brotliOptions())
+  const data = brotliCompressSync(serialized, brotliOptions(brotliQuality))
   // Default to writing stasis.code.br in cwd; `-` is the conventional opt-in
   // for streaming the raw brotli bytes to stdout (e.g. to pipe somewhere else).
   const target = output ?? DEFAULT_BUNDLE_FILE

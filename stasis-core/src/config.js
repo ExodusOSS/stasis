@@ -30,6 +30,17 @@ const envBool = (name, value) => {
 // validates each entry). An empty/unset env var means "no allowlist".
 const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
 
+// Strict integer env parsing for EXODUS_STASIS_BROTLI_QUALITY: the raw string must be an
+// integer in brotli's 0..11 quality range. Anything else ('max', '5.5', ...) throws -- a
+// lenient Number() coercion would silently write bundles at an unintended quality.
+const envBrotliQuality = (name, value) => {
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < 0 || n > 11) {
+    throw new RangeError(`${name} must be an integer 0..11 (got '${value}')`)
+  }
+  return n
+}
+
 const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources', 'childProcess']
 
 // Plugins accept the same options as Config but want to validate without constructing one,
@@ -87,9 +98,10 @@ export class Config {
   #debug
   #childProcess
   #fs
+  #brotliQuality
 
   // Options match the CLI flags (scope/lock/lockFile/bundle/bundleFile/resourcesBundleFile/debug/
-  // resources/childProcess/fs).
+  // resources/childProcess/fs/brotliQuality).
   // Env vars take effect at construction time; if both env and an option are set they must
   // agree. Likewise, any explicit constructor option is treated as authoritative: a later
   // `loadConfig` call (which reads stasis.config.json) must agree with it -- the alternative
@@ -97,9 +109,9 @@ export class Config {
   // was a footgun the CLI couldn't detect, since the flag was happily accepted
   // and then quietly ignored.
   constructor(options = {}) {
-    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs, brotliQuality, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
-    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs }
+    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs, brotliQuality }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
@@ -112,6 +124,7 @@ export class Config {
       resources: process.env.EXODUS_STASIS_RESOURCES || undefined,
       childProcess: process.env.EXODUS_STASIS_CHILD_PROCESS || undefined,
       fs: process.env.EXODUS_STASIS_FS || undefined,
+      brotliQuality: process.env.EXODUS_STASIS_BROTLI_QUALITY || undefined,
     }
 
     try {
@@ -134,6 +147,9 @@ export class Config {
         assert.equal(envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess), childProcess)
       }
       if (this.#env.fs !== undefined && fs !== undefined) assert.equal(this.#env.fs, fs)
+      if (this.#env.brotliQuality !== undefined && brotliQuality !== undefined) {
+        assert.equal(envBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality), brotliQuality)
+      }
       // Compare parsed sets, not the raw strings: ['png','svg'] and 'svg,png' are the
       // same allowlist. An empty/unset env var is "no env opinion" (handled by `||
       // undefined` above), so this only fires on two genuinely different non-empty lists.
@@ -157,6 +173,12 @@ export class Config {
     this.#childProcess = this.#env.childProcess !== undefined ? envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess) : (childProcess ?? false)
     // env wins over the option, like scope/lock/bundle; undefined means "fs untouched" (off).
     this.#fs = this.#env.fs || fs || undefined
+    // env wins over the option, like debug/childProcess; undefined means "brotli's own
+    // default quality" (11, max). No `||` chaining like fs/scope above: 0 is a valid
+    // (fastest) quality and falsy, so it must not fall through to the other source.
+    this.#brotliQuality = this.#env.brotliQuality !== undefined
+      ? envBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality)
+      : brotliQuality
     // env wins over the option (it's the process-wide signal); parseResourcesOption
     // normalizes both to a Set of lowercase extensions/filenames, or empty when neither set.
     this.#resources = parseResourcesOption(
@@ -175,6 +197,15 @@ export class Config {
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
     assert.equal(typeof this.#childProcess, 'boolean', 'childProcess must be a boolean')
+    // brotliQuality tunes how bundles are WRITTEN, so like bundleFile it is
+    // inert-but-harmless under read-only modes -- the same stasis.config.json serves
+    // both the capturing (bundle=add|replace) and the loading (bundle=load|frozen)
+    // runs, so no active-write-mode constraint is imposed here.
+    if (this.#brotliQuality !== undefined) {
+      if (!Number.isInteger(this.#brotliQuality) || this.#brotliQuality < 0 || this.#brotliQuality > 11) {
+        throw new RangeError(`brotliQuality must be an integer 0..11 (got ${JSON.stringify(this.#brotliQuality)})`)
+      }
+    }
     if (this.#fs !== undefined) {
       assert.ok(VALID_FS.has(this.#fs), `Invalid fs: ${this.#fs}`)
       // --fs patches the fs readers to capture into the bundle (add/replace) or serve them
@@ -253,6 +284,7 @@ export class Config {
       debug = this.#debug,
       childProcess = this.#childProcess,
       fs = this.#fs,
+      brotliQuality = this.#brotliQuality,
       resources,
       ...rest
     } = JSON.parse(json)
@@ -268,6 +300,7 @@ export class Config {
     this.#debug = debug
     this.#childProcess = childProcess
     this.#fs = fs
+    this.#brotliQuality = brotliQuality
     if (resources !== undefined) this.#resources = parseResourcesOption('stasis.config.json', resources)
     this.#checkInvariants()
 
@@ -280,6 +313,9 @@ export class Config {
       if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool('EXODUS_STASIS_DEBUG', this.#env.debug))
       if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess))
       if (this.#env.fs !== undefined) assert.equal(this.#fs, this.#env.fs)
+      if (this.#env.brotliQuality !== undefined) {
+        assert.equal(this.#brotliQuality, envBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality))
+      }
       if (this.#env.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('env', envList(this.#env.resources))),
           'resources in stasis.config.json must match EXODUS_STASIS_RESOURCES')
@@ -295,6 +331,7 @@ export class Config {
       if (this.#explicit.debug !== undefined) assert.equal(this.#debug, this.#explicit.debug)
       if (this.#explicit.childProcess !== undefined) assert.equal(this.#childProcess, this.#explicit.childProcess)
       if (this.#explicit.fs !== undefined) assert.equal(this.#fs, this.#explicit.fs)
+      if (this.#explicit.brotliQuality !== undefined) assert.equal(this.#brotliQuality, this.#explicit.brotliQuality)
       if (this.#explicit.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('options', this.#explicit.resources)),
           'resources in stasis.config.json must match the resources option')
@@ -352,6 +389,16 @@ export class Config {
   // a how-to-run flag like debug/childProcess, not an attested property of the bundle.
   get fs() {
     return this.#fs
+  }
+
+  // Brotli quality (integer 0..11) for bundle writes, or undefined for brotli's own
+  // default (11, max -- best ratio, slowest). State.write() forwards this to
+  // brotliOptions(); lower values trade compression ratio for write speed (useful in
+  // watch-mode rebuilds and tests). Set via "brotliQuality" in stasis.config.json,
+  // EXODUS_STASIS_BROTLI_QUALITY, or the Config option. Not serialized -- a how-to-write
+  // flag like debug/fs; the produced bundle's *content* is identical at any quality.
+  get brotliQuality() {
+    return this.#brotliQuality
   }
 
   get values() {

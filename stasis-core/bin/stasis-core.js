@@ -20,7 +20,7 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] path/to/file.js ...
+ stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)
@@ -39,7 +39,7 @@ if (command === '-v' || command === '--version') {
   process.exit(0)
 } else if (command === 'run') {
   const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources'])
+  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -54,6 +54,7 @@ if (command === '-v' || command === '--version') {
     'child-process': { type: 'boolean' },
     fs: { type: 'string' },
     resources: { type: 'string' },
+    'brotli-quality': { type: 'string' },
   }
 
   let values
@@ -88,10 +89,21 @@ if (command === '-v' || command === '--version') {
   // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
+  // --brotli-quality: bundle compression quality (integer 0..11; unset = brotli's default 11).
+  // Validated here for a clean usage error, normalized ('05' -> '5') so the child's Config and
+  // an already-set matching env var compare equal. Unlike the flags above it is NOT set to ''
+  // when absent: an ambient EXODUS_STASIS_BROTLI_QUALITY has always passed through to the
+  // child untouched, and an unconditional setEnv('') would reject that as a conflict.
+  let brotliQuality
+  if (values['brotli-quality'] !== undefined) {
+    const n = Number(values['brotli-quality'])
+    if (!Number.isInteger(n) || n < 0 || n > 11) usage(`Error: --brotli-quality must be an integer 0..11 (got '${values['brotli-quality']}')`)
+    brotliQuality = n
+  }
   // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
   // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
   const childProcess = values['child-process'] ? '1' : ''
-  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }) })
+  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -102,6 +114,7 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
+  if (brotliQuality !== undefined) setEnv('EXODUS_STASIS_BROTLI_QUALITY', String(brotliQuality))
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code, signal] = await once(child, 'close')
