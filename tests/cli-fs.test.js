@@ -1079,3 +1079,247 @@ test('"fs" in stasis.config.json requires an active bundle mode', withTmp((t, tm
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /fs requires bundle=\(add\|replace\|load\)/)
 }))
+
+// ----- stat-ONLY paths are RECORDED (payload-free stat records) ------------------------
+// lstatSync/statSync used to be serve-only: a path that was only stat'd -- never read,
+// readdir'd, or imported -- was not in the bundle, so on load its stat fell through to
+// the real fs and threw ENOENT once the path was gone from disk. Capture now records the
+// observed KIND as a payload-free 'stat:file'/'stat:directory' formats entry (no bytes,
+// no hash), which the load-side type-getter shim (and the existence probes) answer from.
+
+test('run --fs records a stat-only path and serves its type getters on load', withTmp((t, tmp) => {
+  // .dat is deliberately NOT in the resources allowlist: a READ of it would abort the
+  // capture (undeclared extension), but a stat is extension-agnostic -- only the kind is
+  // recorded, no bytes -- so it must capture cleanly.
+  mkdirSync(join(tmp, 'src', 'zone', 'deep'), { recursive: true })
+  writeFileSync(join(tmp, 'src', 'zone', 'deep', 'probe.dat'), 'PAYLOAD')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { lstatSync, statSync, existsSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const zone = join(import.meta.dirname, "zone")',
+    'const file = join(zone, "deep", "probe.dat")',
+    'console.log(`file:${lstatSync(file).isFile()}:${lstatSync(file).isDirectory()}`)',
+    'console.log(`dir:${statSync(zone).isDirectory()}`)',
+    'console.log(`exists:${existsSync(file)}`)', // the probe answers from the stat record on load
+    // src/zone/deep is IMPLIED by the stat record at src/zone/deep/probe.dat -- never
+    // stat'd at capture (env-gated so the recorded entry is identical), so at load this
+    // exercises the implied-ancestor path for stat records specifically.
+    'if (process.env.STASIS_TEST_IMPLIED) console.log(`implied:${statSync(join(zone, "deep")).isDirectory()}`)',
+    'try { lstatSync(join(zone, "missing.dat")) } catch (e) { console.log(`miss:${e.code}`) }',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'file:true:false\ndir:true\nexists:true\nmiss:ENOENT\n')
+
+  // The records are PAYLOAD-FREE: a formats tag only, no bytes in the bundle, no hash in
+  // the lockfile's file lists.
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/zone/deep/probe.dat'], 'stat:file')
+  t.assert.equal(bundle.formats['src/zone'], 'stat:directory')
+  t.assert.equal(bundle.sources['.'].files['src/zone/deep/probe.dat'], undefined, 'no bytes recorded for a stat-only file')
+  t.assert.equal(bundle.sources['.'].files['src/zone'], undefined)
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.equal(lock.formats['src/zone/deep/probe.dat'], 'stat:file')
+  t.assert.equal(lock.formats['src/zone'], 'stat:directory')
+  t.assert.equal(lock.sources['.'].files['src/zone/deep/probe.dat'], undefined, 'no hash for a payload-free record')
+
+  rmSync(join(tmp, 'src', 'zone'), { recursive: true }) // gone from disk; only the stat records answer
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_IMPLIED: '1' } })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'file:true:false\ndir:true\nexists:true\nimplied:true\nmiss:ENOENT\n')
+}))
+
+test('run --fs collapses a path that is both stat\'d and read into the content record (either order)', withTmp((t, tmp) => {
+  // check-then-read (x) and read-then-check (y): the weak stat record must never conflict
+  // with -- or survive next to -- the real content record for the same path.
+  writeFileSync(join(tmp, 'src', 'x.txt'), 'X')
+  writeFileSync(join(tmp, 'src', 'y.txt'), 'Y')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { lstatSync, statSync, readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const x = join(import.meta.dirname, "x.txt")',
+    'const y = join(import.meta.dirname, "y.txt")',
+    'const okX = lstatSync(x).isFile()', // stat FIRST ...
+    'const dataX = readFileSync(x, "utf8")', // ... then read
+    'const dataY = readFileSync(y, "utf8")', // read FIRST ...
+    'const okY = statSync(y).isFile()', // ... then stat
+    'console.log(`x:${okX}:${dataX} y:${okY}:${dataY}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'x:true:X y:true:Y\n')
+  t.assert.doesNotMatch(save.stderr, /capture aborted/, 'stat + read of one path must not conflict')
+
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/x.txt'], 'resource', 'the content record wins over the stat record')
+  t.assert.equal(bundle.formats['src/y.txt'], 'resource')
+  t.assert.equal(bundle.sources['.'].files['src/x.txt'], 'X')
+
+  rmSync(join(tmp, 'src', 'x.txt'))
+  rmSync(join(tmp, 'src', 'y.txt'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'x:true:X y:true:Y\n')
+}))
+
+test('run --fs lock=add re-run upgrades a stat-only record to a content record (no format-flip abort)', withTmp((t, tmp) => {
+  // Run A only stats x.txt -> lockfile+bundle attest 'stat:file'. Run B (lock=add,
+  // bundle=add against the same artifacts; identical entry, env-gated) also READS it:
+  // the weak stat baseline must upgrade to 'resource' instead of tripping the
+  // format-flip guard or the merged-formats conflict.
+  writeFileSync(join(tmp, 'src', 'x.txt'), 'X')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { lstatSync, readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const x = join(import.meta.dirname, "x.txt")',
+    'let out = `stat:${lstatSync(x).isFile()}`',
+    'if (process.env.STASIS_TEST_READ) out += `:${readFileSync(x, "utf8")}`',
+    'console.log(out)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const runA = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(runA.status, 0, `run A stderr: ${runA.stderr}`)
+  t.assert.equal(decode(bundlePath).formats['src/x.txt'], 'stat:file')
+  t.assert.equal(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).formats['src/x.txt'], 'stat:file')
+
+  const runB = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_READ: '1' } })
+  t.assert.equal(runB.status, 0, `run B stderr: ${runB.stderr}`)
+  t.assert.equal(runB.stdout, 'stat:true:X\n')
+  t.assert.doesNotMatch(runB.stderr, /format flip|capture aborted/, 'upgrading a stat-only baseline must not abort')
+  const upgraded = decode(bundlePath)
+  t.assert.equal(upgraded.formats['src/x.txt'], 'resource', 'the re-run upgraded the stat record to content')
+  t.assert.equal(upgraded.sources['.'].files['src/x.txt'], 'X')
+  t.assert.equal(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).formats['src/x.txt'], 'resource')
+
+  rmSync(join(tmp, 'src', 'x.txt'))
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_READ: '1' } })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'stat:true:X\n')
+}))
+
+test('run --fs=async records stat-only paths via callback lstat and fs.promises.stat', withTmp((t, tmp) => {
+  mkdirSync(join(tmp, 'src', 'd'))
+  writeFileSync(join(tmp, 'src', 'd', 'probe.dat'), 'P')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { lstat } from 'node:fs'",
+    "import { stat as statP } from 'node:fs/promises'",
+    "import { join } from 'node:path'",
+    'const dir = join(import.meta.dirname, "d")',
+    'const file = join(dir, "probe.dat")',
+    'const p = (fn, ...a) => new Promise((res, rej) => fn(...a, (e, v) => (e ? rej(e) : res(v))))',
+    'console.log(`cb-lstat-dir:${(await p(lstat, dir)).isDirectory()}`)',
+    'console.log(`p-stat-file:${(await statP(file)).isFile()}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/d'], 'stat:directory')
+  t.assert.equal(bundle.formats['src/d/probe.dat'], 'stat:file')
+
+  rmSync(join(tmp, 'src', 'd'), { recursive: true })
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'cb-lstat-dir:true\np-stat-file:true\n')
+}))
+
+test('run --fs does NOT attest a stat of a symlink that escapes the root, nor a symlink itself', withTmp((t, tmp) => {
+  // Security stance mirrors the byte readers: a statSync THROUGH an in-tree symlink
+  // pointing outside the root is answered from disk but never attested. An lstatSync of
+  // an in-root symlink reports a symlink -- a kind the shim doesn't model -- and records
+  // nothing either (capture stays untainted in both cases).
+  const outside = mkdtempSync(join(tmpdir(), 'stasis-fs-stat-OUTSIDE-'))
+  try {
+    symlinkSync(outside, join(tmp, 'src', 'peek'))
+    writeFileSync(join(tmp, 'src', 'real.txt'), 'R')
+    symlinkSync(join(tmp, 'src', 'real.txt'), join(tmp, 'src', 'link.txt'))
+    writeFileSync(join(tmp, 'src', 'entry.js'), [
+      "import { statSync, lstatSync } from 'node:fs'",
+      "import { join } from 'node:path'",
+      'const d = import.meta.dirname',
+      'console.log(`peek:${statSync(join(d, "peek")).isDirectory()}`)', // follows the escaping link
+      'console.log(`link:${lstatSync(join(d, "link.txt")).isSymbolicLink()}`)', // a symlink kind
+      '',
+    ].join('\n'))
+    const bundlePath = join(tmp, 'snapshot.br')
+    const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.equal(r.stdout, 'peek:true\nlink:true\n') // the program still sees the real fs
+    t.assert.doesNotMatch(r.stderr, /capture aborted/)
+    const bundle = decode(bundlePath)
+    t.assert.equal(bundle.formats['src/peek'], undefined, 'escaping-symlink stat must not be attested')
+    t.assert.equal(bundle.formats['src/link.txt'], undefined, 'a symlink kind is not modelled, so not recorded')
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+}))
+
+test('run --fs --child-process forwards a child-only stat record through the shard channel', (t) => {
+  // The forked worker (and ONLY the worker -- the root never touches the path) lstats
+  // statonly.dat, a file nothing reads. Its payload-free stat record can reach the root's
+  // artifacts only via the child's shard: shardSnapshot forwards the formats entry, and
+  // mergeShard replays it by re-deriving the kind from disk. Then a load run -- with the
+  // probed file gone -- must serve the child's lstat from the bundle.
+  const forkShardFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run-fork-shard')
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-fs-shard-'))
+  try {
+    cpSync(forkShardFixture, tmp, { recursive: true })
+    // The worker also statSync's THROUGH this in-root symlink: the record lands at the
+    // LINK's path with the TARGET's kind (the pnpm node_modules/<pkg> shape), and the
+    // root's replay must follow the link too -- with lstat it would see a symlink and
+    // silently drop the record (the Copilot-reported regression).
+    symlinkSync('statonly.dat', join(tmp, 'src', 'statlink.dat'))
+    const bundlePath = join(tmp, 'snapshot.br')
+    const env = { ...cleanEnv, STAT_PROBE: '1' }
+    const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', '--child-process', 'src/entry.js'], { cwd: tmp, env })
+    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    t.assert.match(save.stdout, /WORKER stat-only=true/, 'the forked child stat-probed the file')
+    t.assert.match(save.stdout, /WORKER stat-link=true/, 'the forked child stat-probed through the symlink')
+
+    const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+    t.assert.equal(lock.formats['src/statonly.dat'], 'stat:file', 'child-only stat record attested via the shard merge')
+    t.assert.equal(lock.formats['src/statlink.dat'], 'stat:file', 'a stat-through-symlink record survives the shard replay')
+    t.assert.equal(lock.sources['.'].files['src/statonly.dat'], undefined, 'payload-free: no hash entry')
+    t.assert.equal(decode(bundlePath).formats['src/statonly.dat'], 'stat:file')
+    t.assert.equal(decode(bundlePath).formats['src/statlink.dat'], 'stat:file')
+
+    // Both gone (the link now points at nothing before it's removed too); only the
+    // bundle's stat records can answer the child's probes.
+    rmSync(join(tmp, 'src', 'statonly.dat'))
+    rmSync(join(tmp, 'src', 'statlink.dat'))
+    const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', '--child-process', 'src/entry.js'], { cwd: tmp, env })
+    t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+    t.assert.match(load.stdout, /WORKER stat-only=true/, "the child's lstat of the absent file served from the bundle")
+    t.assert.match(load.stdout, /WORKER stat-link=true/, "the child's stat of the absent symlink served from the bundle")
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('run --fs only captures the single-argument lstatSync/statSync (options pass through)', withTmp((t, tmp) => {
+  // Same scope rule as readdirSync: an options form (bigint, throwIfNoEntry) is out of
+  // scope -- passed through untouched and NOT recorded.
+  writeFileSync(join(tmp, 'src', 'opt.dat'), 'O')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { lstatSync, statSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const p = join(import.meta.dirname, "opt.dat")',
+    'console.log(`big:${typeof lstatSync(p, { bigint: true }).size}`)',
+    'console.log(`quiet:${statSync(join(import.meta.dirname, "nope.dat"), { throwIfNoEntry: false })}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'big:bigint\nquiet:undefined\n')
+  t.assert.equal(decode(bundlePath).formats['src/opt.dat'], undefined, 'an options-form stat must not be captured')
+}))
