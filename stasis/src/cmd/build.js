@@ -21,13 +21,14 @@ export { bundleFromLockfile }
 const JS_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts', '.jsx', '.tsx'])
 
 // Allowlist (NOT a blocklist) of per-file formats `stasis build` accepts in an artifact:
-// the JS/TS/JSON code formats esbuild builds, plus the non-code payload formats
-// (resource/directory) that are inert unless the SELECTED entry imports them. An allowlist
+// the JS/TS/JSON code formats esbuild builds, plus the non-code formats -- resource/
+// directory payloads and the payload-free stat records (`--fs` lstat/stat captures) --
+// that are inert unless the SELECTED entry imports them. An allowlist
 // so a new language format added to `stasis bundle` later (e.g. a future `go`) is rejected
 // here by default, rather than slipping through to a cryptic esbuild failure in the build.
 const BUILDABLE_FORMATS = new Set([
   'module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript',
-  'resource', 'resource:base64', 'directory',
+  'resource', 'resource:base64', 'directory', 'stat:file', 'stat:directory',
 ])
 
 // esbuild is an OPTIONAL peer dependency: `stasis build` is the only command that

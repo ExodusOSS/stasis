@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, moduleFileKey, objectToMaps, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, isStatFormat, moduleFileKey, objectToMaps, sortPaths, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
@@ -20,7 +20,7 @@ import corePackage from './package.cjs'
 // module.syncBuiltinESMExports() to refresh node:fs's ESM wrapper for user code.
 // Direct ESM destructured imports are live bindings and would re-resolve to the
 // mocked names when state.write() fires on beforeExit.
-const { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } = fs
+const { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } = fs
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
@@ -1126,6 +1126,14 @@ export class State {
     if (!asResource && Bundle.isResourceFormat(format)) {
       throw new Error(`addFile: format '${format}' requires resource: true`)
     }
+    // A payload-free stat record is never a legal addFile format: addFile records
+    // CONTENT (bytes + hash), and a content record tagged 'stat:*' would desync the
+    // "stat records carry no payload" invariant every consumer relies on. The only
+    // producer is addFsStat; a caller passing it here (e.g. a forged child shard
+    // replayed by mergeShard) is refused at the recording site.
+    if (isStatFormat(format)) {
+      throw new Error(`addFile: format '${format}' is a payload-free stat record; use addFsStat`)
+    }
     // A resource can't be an entry: entries name code loaded by Node (the module
     // graph's roots), and Bundle.parse / assertEntry validate them as code-shaped
     // paths. A resource entry would land in this.entries -> codeBundle.entries
@@ -1138,6 +1146,14 @@ export class State {
     }
     // Canonicalize + bucket by the owning package (shared with addFsDir).
     const { absolute, file, dir, module, closestType } = this.#locateModule(url)
+
+    // A payload-free stat record (addFsStat: the path was lstat/stat'd before it was
+    // read or imported) is superseded by real content: drop it so the format
+    // inference/noupsert below records this file's ACTUAL format instead of
+    // conflicting with the weak 'stat:*' tag. The lockfile-baseline counterpart (a
+    // prior capture attested the path stat-only, this run reads it) lives in the
+    // flip-check relaxation below and #mergedFormats' upgrade rule.
+    if (isStatFormat(this.formats.get(file))) this.formats.delete(file)
 
     // A code file can NEVER be recorded as a resource. `resources` -- the only gate
     // that admits an asset payload -- rejects code extensions outright (see
@@ -1280,7 +1296,10 @@ export class State {
     // --lock=replace / --bundle=replace.)
     if (this.config.writeLockfile && this.#lockFormats !== null && format != null && inAttestedZone) {
       const attested = this.#lockFormats.get(file)
-      assert.ok(attested === undefined || attested === format,
+      // A payload-free 'stat:*' baseline is not a flip: the prior capture attested only
+      // the path's existence/kind, and this run observing real content UPGRADES the
+      // record (#mergedFormats overwrites the stat record with the real format).
+      assert.ok(attested === undefined || attested === format || isStatFormat(attested),
         `format flip for ${file}: lockfile attests '${attested}', observed '${format}' (bytes unchanged) -- re-run with --lock=replace to re-attest`)
     }
 
@@ -1348,6 +1367,10 @@ export class State {
     assert.ok(Array.isArray(names) && names.every((n) => typeof n === 'string'),
       'addFsDir requires an array of string names')
     const { file, dir, module } = this.#locateModule(url, { directory: true })
+    // As in addFile: a payload-free stat record (the dir was lstat/stat'd before it
+    // was readdir'd) is superseded by the real listing -- drop it before the format
+    // noupsert below records 'directory'.
+    if (isStatFormat(this.formats.get(file))) this.formats.delete(file)
     const content = JSON.stringify(names.toSorted())
     const format = 'directory'
     const integrity = sha512integrity(content)
@@ -1380,6 +1403,35 @@ export class State {
     assert.equal(module.files[rel], integrity)
     if (this.config.bundle) noupsert(this.resources, file, content)
     noupsert(this.formats, file, format)
+  }
+
+  // Record an `fs.lstatSync(path)`/`fs.statSync(path)` capture (`stasis run --fs`,
+  // capture side, single-arg form): a PAYLOAD-FREE stat record -- `formats[file] =
+  // 'stat:file' | 'stat:directory'`, no bytes, no hash, no module-files entry --
+  // attesting only that the path existed with that KIND. That is exactly what the
+  // load-side type-getter shim needs (bundleStats sources isFile()/isDirectory()
+  // from getFsStat), so a stat-ONLY path -- never read, readdir'd, or imported --
+  // still answers `lstatSync(x).isDirectory()` (and, transitively, the
+  // existsSync/accessSync/realpathSync probes, which consult getFsStatFamily) at
+  // bundle=load once it's gone from disk.
+  //
+  // Skipped when the path already has a content record (bytes or a directory
+  // listing, whether captured this run or seeded from the lockfile/bundle): that
+  // record already answers getFsStat, and a weak stat record must never sit beside
+  // it (check-then-read -- lstatSync before readFileSync -- is the common pattern).
+  // The REVERSE order (stat first, content later) is handled by addFile/addFsDir
+  // dropping the stale stat record in place and by #mergedFormats' upgrade rule. A
+  // kind flip WITHIN the surviving stat records (stat'd as a file, later stat'd as
+  // a directory) conflicts at the noupsert and taints the capture, exactly like a
+  // mid-run byte conflict.
+  addFsStat(url, kind) {
+    assert.ok(kind === 'file' || kind === 'directory', `addFsStat: unsupported kind '${kind}'`)
+    const file = this.#canonicalFile(url)
+    if (this.hashes.has(file) || this.sources.has(file) || this.resources.has(file)) return
+    noupsert(this.formats, file, `stat:${kind}`)
+    // Forwarded to the root via shardSnapshot's #observed-filtered formats, like
+    // every other capture; only a child's shardSnapshot reads it, skip otherwise.
+    if (this.config.childProcess) this.#observed.add(file)
   }
 
   // Serve an `fs.readFileSync` from the bundle (`stasis run --fs`, bundle=load).
@@ -1427,24 +1479,51 @@ export class State {
     }
     for (const key of this.sources.keys()) add(key)
     for (const key of this.resources.keys()) add(key)
+    // Payload-free stat records prove existence too: a 'stat:file' at
+    // node_modules/dep/index.js implies node_modules and node_modules/dep are
+    // directories exactly like a content record would, and a 'stat:directory'
+    // likewise implies its own ancestors (the recorded dir itself is answered
+    // directly by getFsStat's format branch, not via this index).
+    for (const [key, format] of this.formats) if (isStatFormat(format)) add(key)
     this.#impliedDirIndex = dirs
     return dirs
   }
 
   // Classify a captured path for the `fs.lstatSync(x)/statSync(x)` .isFile()/.isDirectory()
   // shim (`stasis run --fs`, bundle=load): 'directory' for a readdir capture, 'file' for
-  // a readFileSync capture, 'directory' for an ancestor directory implied by a recorded
-  // file (e.g. `node_modules` when the bundle carries `node_modules/dep/index.js`), or
-  // undefined when the path wasn't captured (the shim then falls back to a real on-disk
-  // lstatSync). A directory lives in this.resources too, so the 'directory' format is
-  // checked first; implied dirs are checked last so an explicit file/dir record wins.
+  // a readFileSync capture, the recorded kind for a payload-free stat record
+  // ('stat:file'/'stat:directory', an lstat/stat capture of a path never read),
+  // 'directory' for an ancestor directory implied by a recorded file (e.g.
+  // `node_modules` when the bundle carries `node_modules/dep/index.js`), or
+  // undefined when the path wasn't captured (the shim then falls back to a real
+  // on-disk lstatSync). A directory lives in this.resources too, so the 'directory'
+  // format is checked first; content records are checked before stat records
+  // (defensive -- addFsStat never records beside content) and implied dirs come
+  // last so an explicit record always wins. NB: 'file' here means "recorded as a
+  // file", NOT "the bundle can serve its bytes" -- callers needing the latter
+  // (resolution shims, byte-serving skips) must use hasFsFileContent.
   getFsStat(url) {
     let file
     try { file = this.#canonicalFile(url) } catch { return undefined }
-    if (this.formats.get(file) === 'directory') return 'directory'
+    const format = this.formats.get(file)
+    if (format === 'directory') return 'directory'
     if (this.sources.has(file) || this.resources.has(file)) return 'file'
+    if (format === 'stat:file') return 'file'
+    if (format === 'stat:directory') return 'directory'
     if (this.#impliedDirs().has(file)) return 'directory'
     return undefined
+  }
+
+  // True when the bundle carries actual BYTE content for `url` as a file -- code or
+  // a resource payload -- as opposed to a directory listing, a payload-free 'stat:*'
+  // existence record, or nothing. The CJS-resolution shim (hooks.js) and the
+  // sidecar capture-skip route "can the bundle serve this file's bytes?" through
+  // this instead of getFsStat, which also answers 'file' for stat-only records.
+  hasFsFileContent(url) {
+    let file
+    try { file = this.#canonicalFile(url) } catch { return false }
+    if (this.formats.get(file) === 'directory') return false
+    return this.sources.has(file) || this.resources.has(file)
   }
 
   // --fs <-> bundler-plugin coordination. A StasisWebpack/StasisEsbuild/StasisMetro SIDECAR
@@ -1468,11 +1547,11 @@ export class State {
   // on purpose: a file only this State has stays subject to --fs's own dedup / byte-conflict
   // detection (addFsFile's noupsert); the skip applies solely to a file a *sidecar* carries.
   attestedBySidecar(url) {
-    // `=== 'file'` (not merely `!== undefined`): the skip targets a FILE a sidecar carries (the
-    // graph the bundler reads through node:fs). getFsStat also returns 'directory' for an implied
-    // ancestor of a carried file; matching that would over-skip. Inert today (a readFileSync of a
-    // directory throws EISDIR before this is consulted) but `=== 'file'` states the intent exactly.
-    for (const s of this.#sidecars) if (s.getFsStat(url) === 'file') return true
+    // hasFsFileContent (not getFsStat): the skip targets a file whose BYTES a sidecar carries
+    // (the graph the bundler reads through node:fs). getFsStat would also match a 'directory'
+    // implied ancestor of a carried file, or a payload-free 'stat:*' record -- neither of which
+    // carries bytes, so matching them would over-skip and leave a genuine read unattested.
+    for (const s of this.#sidecars) if (s.hasFsFileContent(url)) return true
     return false
   }
 
@@ -1738,12 +1817,26 @@ export class State {
   // Union of lockfile-attested and observed/bundle-served formats, same
   // append-only stance as #mergedImports: conflicting formats for one file are
   // fatal (noupsert). Sidecars' formats are unioned in for the same reason.
+  // The one exception is a payload-free stat record ('stat:*', addFsStat): it is
+  // WEAK by design -- real content observed for the same file (a lock=add re-run
+  // READING a path a prior capture only stat'd, or a sidecar bundling a file this
+  // run also stat'd) UPGRADES the record instead of conflicting, and a stat record
+  // never displaces a real format. Two REAL formats -- and two divergent stat
+  // kinds (stat:file vs stat:directory) -- stay fatal.
   #mergedFormats() {
     const merged = new Map()
+    const mergeFormat = (file, format) => {
+      const existing = merged.get(file)
+      if (existing !== undefined && existing !== format) {
+        if (isStatFormat(existing) && !isStatFormat(format)) { merged.set(file, format); return }
+        if (isStatFormat(format) && !isStatFormat(existing)) return
+      }
+      noupsert(merged, file, format)
+    }
     if (this.#lockFormats) for (const [file, format] of this.#lockFormats) merged.set(file, format)
-    for (const [file, format] of this.formats) noupsert(merged, file, format)
+    for (const [file, format] of this.formats) mergeFormat(file, format)
     for (const sidecar of this.#sidecars) {
-      for (const [file, format] of sidecar.formats) noupsert(merged, file, format)
+      for (const [file, format] of sidecar.formats) mergeFormat(file, format)
     }
     return merged
   }
@@ -1830,6 +1923,28 @@ export class State {
     return consumers > 1 ? reason : undefined
   }
 
+  // The formats map a bundle artifact declares. Normally `this.formats` as-is; the
+  // one adjustment is dropping a payload-free stat record ('stat:*') that the run's
+  // UNIFIED attestation upgraded to a real format -- a write-mode sidecar bundling a
+  // file this run also stat'd (stat-before-plugin-capture ordering, so addFile's
+  // in-place drop never saw it). The lockfile then attests the REAL format
+  // (#mergedFormats' upgrade), and a bundle still declaring 'stat:*' for that file
+  // would fail its lockfile cross-check at load (#mergeBundleMetadata). Cheap in the
+  // common case: with no write-mode sidecars the live map is already consistent
+  // (addFile/addFsDir drop superseded stat records in place) and is returned as-is.
+  #formatsForBundle() {
+    if (this.#sidecars.size === 0) return this.formats
+    const merged = this.#mergedFormats()
+    let out = null // copy-on-write: clone only when an entry must be dropped
+    for (const [file, format] of this.formats) {
+      if (isStatFormat(format) && merged.get(file) !== format) {
+        if (out === null) out = new Map(this.formats)
+        out.delete(file)
+      }
+    }
+    return out ?? this.formats
+  }
+
   get sourceBundle() {
     // One bundle holds both code and resources; merge the two content maps (their key
     // sets are disjoint -- a file is either code or a resource) and let `formats` tag
@@ -1847,7 +1962,7 @@ export class State {
       config: this.config.values,
       entries: this.entries,
       modules: this.#bundleModules(contents),
-      formats: this.formats,
+      formats: this.#formatsForBundle(),
       imports: this.imports,
       reason: this.#bundleReason(contents.keys()),
     })
@@ -1868,8 +1983,11 @@ export class State {
     // Resource files don't appear in `this.sources` (addFile routes by format), so
     // restricting #bundleModules to `this.sources` automatically yields the code-only
     // view. Formats and modules are filtered to drop resource-only dirs/files.
+    // Payload-free stat records are NOT resource formats, so they ride the code half
+    // (like the other content-less metadata, entries/imports) -- the resources half's
+    // strict resource-formats-only shape check would reject them.
     const codeFormats = new Map()
-    for (const [file, format] of this.formats) {
+    for (const [file, format] of this.#formatsForBundle()) {
       if (!Bundle.isResourceFormat(format)) codeFormats.set(file, format)
     }
     return new Bundle({
@@ -2148,6 +2266,30 @@ export class State {
           // A file the child loaded but that's gone/unreadable here, or that addFile rejects
           // (e.g. an out-of-scope path under a different scope): skip it. The edge replay below
           // tolerates the resulting gap the same way.
+        }
+      }
+    }
+    // Payload-free stat records (`--fs` lstat/stat captures) live ONLY in the shard's
+    // formats map -- no module-files entry -- so the modules loop above never visits
+    // them. Replay each by re-deriving the kind from DISK (the same disk-is-truth
+    // stance as the byte/listing re-reads: a shard can't inject a forged kind), via
+    // addFsStat so a path the root already attests with content is skipped, exactly
+    // as if this process had stat'd it. Range-check the path BEFORE touching disk,
+    // like the directory branch above; a path gone from disk (or of an unmodelled
+    // kind, e.g. now a symlink) is skipped, best-effort like every other replay.
+    if (lf.formats) {
+      for (const [file, format] of lf.formats) {
+        if (!isStatFormat(format)) continue
+        const absolute = resolve(this.root, file)
+        const relFromRoot = relative(this.root, absolute)
+        if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
+        try {
+          const stats = lstatSync(absolute)
+          const kind = stats.isDirectory() ? 'directory' : stats.isFile() ? 'file' : null
+          if (kind !== null) this.addFsStat(pathToFileURL(absolute).toString(), kind)
+        } catch {
+          // Gone from disk, or rejected (kind conflict with the root's own capture):
+          // skip -- the root's capture stays intact.
         }
       }
     }

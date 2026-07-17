@@ -33,6 +33,7 @@ const NODEJS_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript
 // the allowlist stays the single trust gate and the message is just UX.
 const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'bash', 'rust'])
 const RESOURCE_FORMATS = new Set(['resource', 'resource:base64'])
+const STAT_FORMATS = new Set(['stat:file', 'stat:directory'])
 // The executable CommonJS formats (plain CJS + TS-CJS). Named like the sets above so
 // "which formats are CJS" lives in one place; the require-repair below keys off it.
 const CJS_FORMATS = new Set(['commonjs', 'commonjs-typescript'])
@@ -54,6 +55,13 @@ function refuseNonNodeFormat(format, url) {
     throw new Error(
       `[stasis] cannot import a directory listing ('directory'): a captured ` +
       `fs.readdirSync result is not executable JavaScript. Read it with fs.readdirSync instead (${url})`
+    )
+  }
+  if (STAT_FORMATS.has(format)) {
+    throw new Error(
+      `[stasis] cannot import '${url}': the bundle carries only a payload-free stat record ` +
+      `('${format}', an fs.lstatSync/statSync capture attesting existence and kind) -- ` +
+      `not the file's content. Capture a run that reads or imports it to bundle its bytes.`
     )
   }
   // Unknown format string: usually a tampered or forward-incompatible bundle.
@@ -778,8 +786,9 @@ function patchCjsResolution() {
         // path.resolve()d form, matching native's normalized cache-key contract). Falling
         // through to native would stat a file the bundle carries but disk (pruned /
         // never-shipped node_modules) may not -- MODULE_NOT_FOUND on a servable path.
-        // getFsStat === 'file' (not mere presence) keeps a --fs-captured directory
-        // LISTING from hijacking native directory->main/index resolution. This widens
+        // hasFsFileContent (byte content, not getFsStat's kind) keeps a --fs-captured
+        // directory LISTING -- and a payload-free 'stat:*' record, whose bytes the
+        // bundle can NOT serve -- from hijacking native disk resolution. This widens
         // parentless reachability to any attested in-scope file when disk lacks the path;
         // that is bounded by attestation and the load hook's gates (getFile +
         // NODEJS_FORMATS), which remain the load-bearing checks.
@@ -788,7 +797,7 @@ function patchCjsResolution() {
         // re-resolves through here, and the no-parent shape survives on >=24.18 too (the
         // deferred-resolution branch and createCJSNoSourceModuleWrap still take it).
         const url = pathToFileURL(request).toString()
-        if ((state.config.full || state.inNodeModules(url)) && state.getFsStat(url) === 'file') {
+        if ((state.config.full || state.inNodeModules(url)) && state.hasFsFileContent(url)) {
           return resolvePath(request)
         }
       }

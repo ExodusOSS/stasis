@@ -13,5 +13,16 @@ if (process.env.SPAWN_GRANDCHILD) {
   await new Promise((resolve) => gc.on('exit', resolve))
 }
 
+// Env-gated (test-only): lstat a path NOTHING in the tree ever reads -- a stat-ONLY
+// observation unique to this forked child, so its payload-free stat record can reach
+// the root's lockfile/bundle exclusively via the shard channel (mergeShard's stat
+// replay). Requires an --fs run; inert otherwise.
+if (process.env.STAT_PROBE) {
+  const { lstatSync } = await import('node:fs')
+  const { fileURLToPath } = await import('node:url')
+  const probed = lstatSync(fileURLToPath(new URL('./statonly.dat', import.meta.url)))
+  console.log(`WORKER stat-only=${probed.isFile()}`)
+}
+
 console.log(`WORKER extra=${extra}`)
 if (process.send) process.send('done')

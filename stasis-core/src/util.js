@@ -19,7 +19,11 @@ const sep = '/'
 //   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
-//     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload)
+//     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload), and the
+//     payload-free stat records stat:file / stat:directory (an `fs.lstatSync`/
+//     `fs.statSync` capture: attests only that the path existed with that KIND —
+//     no bytes, no hash, no module-files entry — so isFile()/isDirectory() answer
+//     from the bundle at load; see isStatFormat below)
 // Adding a new format is a deliberate schema change: list it here AND extend
 // hooks.js's executable allowlist if Node should serve it from a bundle.
 export const KNOWN_FORMATS = new Set([
@@ -35,6 +39,8 @@ export const KNOWN_FORMATS = new Set([
   'resource',
   'resource:base64',
   'directory',
+  'stat:file',
+  'stat:directory',
 ])
 
 // File extensions whose bytes are JS-shaped code -- Node's loader and the
@@ -49,6 +55,14 @@ export const KNOWN_FORMATS = new Set([
 // desync: `.jsx`/`.tsx` were code to the plugins but missing from the fs-capture's
 // own set, so an fs-read tagged a `.jsx` 'resource' while the import tagged it code.
 export const CODE_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json', 'mts', 'cts'])
+
+// The payload-free stat-record formats (`stasis run --fs` lstatSync/statSync captures).
+// A stat record attests a path's KIND (file vs directory) without any content, so it
+// lives ONLY in the `formats` maps — never in a module's hashed `files`, never as a
+// bundle payload. It is deliberately WEAK: real content recorded for the same path (a
+// read, a readdir listing, an import) supersedes it — see State's addFile/addFsDir
+// stale-record drop and #mergedFormats' upgrade rule.
+export const isStatFormat = (format) => format === 'stat:file' || format === 'stat:directory'
 
 // Lowercased, dot-less extension of a path, or '' if none.
 export function pathExt(filePath) {

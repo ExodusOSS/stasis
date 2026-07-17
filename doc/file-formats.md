@@ -145,7 +145,11 @@ into the lockfile/bundle `config` block (`debug`, `childProcess`, `fs` and
   what distinguishes a resource from code per file, and tells a reader how to
   decode the bundle payload. Filesystem captures (`stasis run --fs=sync`) add
   `directory` for a `fs.readdirSync` listing (the content is a sorted JSON array
-  of names); a captured `fs.readFileSync` reuses the code or resource tags above.
+  of names) and the **payload-free** stat records `stat:file` / `stat:directory`
+  for an `fs.lstatSync`/`fs.statSync` of a path that was never read, listed, or
+  imported — those attest only that the path existed with that kind, so they
+  appear *only* here in `formats`, never in a module's hashed `files`; a captured
+  `fs.readFileSync` reuses the code or resource tags above.
   The integrity of a `directory` listing is the sha512 of its JSON text, just
   like any other content. The loader picks module-vs-commonjs and (for the
   `*-typescript` formats) whether type-shaped syntax is stripped purely from
@@ -214,7 +218,10 @@ reporting failures) still persists what it cleanly captured.
   Resource files use `resource` (raw UTF-8 payload) or `resource:base64`
   (base64 payload) — the per-file tag that both marks a file as a resource
   and says how to decode its bundle bytes. A `directory` tag (a `stasis run
-  --fs` capture) marks a raw-UTF-8 JSON listing. May be missing per file for code
+  --fs` capture) marks a raw-UTF-8 JSON listing; a `stat:file`/`stat:directory`
+  tag (an `--fs` `lstatSync`/`statSync` capture) is payload-free — the tagged
+  path has no `files` entry at all, the format alone attests its existence and
+  kind. May be missing per file for code
   whose format Node infers. TypeScript sources are stored verbatim (types
   intact); Node strips the types at load time based on the format.
 - `imports`: conditions → parent file → specifier → resolved
@@ -343,12 +350,14 @@ a frozen run verifies a copied asset byte-for-byte just as it does code.
 ## Filesystem captures (`stasis run --fs=sync` / `--fs=async`)
 
 The loader hooks capture the module graph; `--fs=sync` additionally monkey-patches the
-**sync** readers `fs.readFileSync` and `fs.readdirSync`, plus the metadata/existence probes
-`fs.lstatSync`/`fs.statSync`/`fs.existsSync`/`fs.accessSync`/`fs.realpathSync` (and only
+**sync** readers `fs.readFileSync` and `fs.readdirSync`, the kind-recording stat calls
+`fs.lstatSync`/`fs.statSync`, plus the existence probes
+`fs.existsSync`/`fs.accessSync`/`fs.realpathSync` (and only
 those — no streams, `fs.opendir`, `fs.readlink` (a resolver probe that already treats a read
 error as "not a symlink", so an absent recorded file resolves correctly unserved), the
 deprecated callback `fs.exists`, …) so a program's
-explicit file reads are recorded into the bundle (`--bundle=add|replace`) and served back
+explicit file reads — and the kind (file vs directory) of each path it stats — are
+recorded into the bundle (`--bundle=add|replace`) and served back
 from it (`--bundle=load`). The same `--fs=…` flag is needed on the load run for the patch
 to serve; an un-captured read falls through to the real disk read. The mode can equivalently
 be set as `"fs": "sync" | "async"` in `stasis.config.json` (or `EXODUS_STASIS_FS`), which
@@ -381,9 +390,21 @@ Captures live in the usual `sources`/`modules` buckets, tagged in `formats`:
   is not captured and is not served from the bundle on load. A listing captured
   *at* a package bucket root sits at the bucket's own key: rel `''` inside its
   `files`, format keyed at the bucket dir — `.` for the project root itself.
-- `fs.lstatSync(path)` and `fs.statSync(path)` are not themselves recorded; on a load
-  run, for a path the bundle already carries — a recorded file, a `directory`, or an
-  ancestor directory implied by a recorded file (a bundled `node_modules/dep/index.js`
+- A single-argument `fs.lstatSync(path)`/`fs.statSync(path)` records the path's **kind**
+  — and only its kind. At capture the real call runs first (the program always gets the
+  genuine `Stats`, and genuine errors); the observed type is then stored as a
+  **payload-free** stat record, `stat:file` or `stat:directory` in `formats` — no bytes,
+  no hash, no `files` entry — so a path that is *only* stat'd (never read, listed, or
+  imported) still answers its type getters on load. Only regular files and directories
+  are modelled: a symlink (under `lstat`), socket, or FIFO records nothing, and a
+  `statSync` through an in-root symlink records the *target's* kind, keyed at the
+  requested path exactly like a byte read of it would be. A path already carried as
+  content (read/listed/imported), or whose real location
+  escapes the root, records no stat entry; reading a stat-only path later (same run or a
+  `lock=add`/`bundle=add` re-run) upgrades the weak stat record to the real content
+  record instead of conflicting. On a load
+  run, for a path the bundle carries — a recorded file, a `directory`, a stat record, or
+  an ancestor directory implied by a recorded path (a bundled `node_modules/dep/index.js`
   proves `node_modules` and `node_modules/dep` are directories) —
   `.isFile()`/`.isDirectory()` answer from the bundle so existence checks succeed even
   when the path is absent from disk. Other `Stats` fields/methods are the real stat's
@@ -392,13 +413,16 @@ Captures live in the usual `sources`/`modules` buckets, tagged in `formats`:
   `isFile()`/`isDirectory()` off the result (graceful-fs's `statFixSync` reads
   `uid`/`gid`, for example) keep working under `--bundle=load` instead of re-throwing
   `ENOENT`. Any path the bundle does not carry passes straight through to the real
-  call.
+  call. Stat calls with options (`bigint`, `throwIfNoEntry`) pass through untouched,
+  like `readdirSync` with options.
 - `fs.existsSync(path)`, `fs.accessSync(path)` and `fs.realpathSync(path)` (plus the async
   `fs.access`/`fs.realpath` and `fs.promises.*` forms) are **existence/canonical-path
   probes**, served (load run, for a path the bundle carries) and otherwise passed through.
-  Like `lstat`/`stat` they are **serve-only — never captured**: a probe records nothing, so a
-  file that is *only* existence-probed (never read or imported) is not in the bundle and its
-  probe falls through to disk on load. They matter because build tools check a file *before*
+  Unlike `lstat`/`stat` they are **serve-only — never captured**: a probe records nothing, so a
+  file that is *only* existence-probed (never read, stat'd, or imported) is not in the bundle
+  and its probe falls through to disk on load — though a path the program *does* `lstat`/`stat`
+  gains a stat record, from which these probes then answer too (they consult the same
+  kind lookup). They matter because build tools check a file *before*
   reading it on a channel that never touches its bytes: `@babel/core`, for one, guards config
   loading with `fs.existsSync(babel.config.js)` and realpath-canonicalizes the path **before**
   it `require()`s the file — so without serving the probe, a bundled-but-absent `babel.config.js`
@@ -430,9 +454,11 @@ way. To capture a `.map` instead (e.g. you genuinely ship one as data), add `map
 and once a `.map` is in the bundle it is served on load by membership, even if that run
 omits `--resources=map`.
 
-The two recorded kinds are hashed like any other content (the `directory` integrity
+The two content kinds are hashed like any other content (the `directory` integrity
 is the sha512 of its JSON text), so the lockfile attests them and a frozen run
-verifies them. `--fs` (either mode) requires an active bundle mode (`add`, `replace`, or `load`).
+verifies them; a stat record has no content to hash — the `formats` entry itself is
+the attestation, cross-checked bundle-vs-lockfile like every other format. `--fs`
+(either mode) requires an active bundle mode (`add`, `replace`, or `load`).
 
 When a bundler plugin runs with its own `bundleFile` (a *sidecar*), `--fs` coordinates with
 it so the bundler's module graph isn't duplicated into the main bundle: a read the sidecar

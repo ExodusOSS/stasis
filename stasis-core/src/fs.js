@@ -2,7 +2,8 @@
 // the filesystem readers
 // fs.readFileSync, fs.readdirSync, fs.lstatSync, fs.statSync so that, alongside the
 // module graph the loader hooks already capture, a program's explicit file/directory
-// reads are recorded into the bundle (bundle=add|replace) and served back from it
+// reads -- and the KIND (file vs directory) of the paths it lstat/stats -- are
+// recorded into the bundle (bundle=add|replace) and served back from it
 // (bundle=load). Alongside the readers, the existence/canonical-path PROBES existsSync /
 // accessSync / realpathSync are served (load mode) so a tool that checks a file before
 // reading it finds a bundle-only file -- see the existsSync/accessSync/realpathSync bullet.
@@ -31,17 +32,27 @@
 //   - readFileSync: the optional second argument (an `encoding` string, or an
 //     options object with `encoding`) is honoured; the raw bytes are what we
 //     capture/serve and `encoding` is applied on the way out.
-//   - lstatSync / statSync: serve-only, bundle=load, single-argument form. For a
-//     recorded path they return a Stats-like object whose isFile()/isDirectory() come
+//   - lstatSync / statSync: single-argument form, captured AND served -- but ONLY the
+//     path's kind, i.e. the type getters isFile()/isDirectory(); full Stats fields are
+//     never attested. CAPTURE (bundle=add|replace): the real call runs first, so the
+//     caller always gets the genuine Stats (and genuine errors); the observed kind is
+//     then recorded as a PAYLOAD-FREE stat record ('stat:file'/'stat:directory' in
+//     `formats` -- no bytes, no hash), so a stat-ONLY path -- never read, readdir'd,
+//     or imported -- still answers at load. A path that is neither a regular file nor
+//     a directory (a symlink under lstat, a socket, a FIFO, ...) isn't modelled and
+//     records nothing. SERVE (bundle=load): for a recorded path they return a
+//     Stats-like object whose isFile()/isDirectory() come
 //     from the bundle (the common existence check); every other member is the real
 //     stat while the file is still on disk, and a benign synthetic default (0 / epoch
 //     / file-or-dir mode) once it's gone -- so fs wrappers that read more than
 //     isFile()/isDirectory() (graceful-fs reads stats.uid/gid) keep working under
-//     bundle=load instead of re-throwing ENOENT. Not patched in capture mode (the file
-//     is on disk there, so the real Stats is correct), except to report a skipped
-//     source-map sidecar as absent (next bullet). statSync vs lstatSync differ only in
-//     symlink following, which matters solely for that on-disk passthrough -- each falls
-//     back to its own real implementation.
+//     bundle=load instead of re-throwing ENOENT. A skipped
+//     source-map sidecar is reported absent in both modes (next bullet). statSync vs
+//     lstatSync differ only in symlink following, which matters for the real-call
+//     paths (passthrough, capture, present-on-disk serve) -- each uses its own real
+//     implementation, and a stat of an in-root symlink records the TARGET's kind
+//     under the requested path (keyed exactly like a byte read of that path would
+//     be) while an lstat of one records nothing.
 //   - existsSync / accessSync / realpathSync (+ their async/promise forms under =async):
 //     existence/canonical-path PROBES, serve-only and bundle=load only. A path the bundle
 //     records answers existent / accessible (read-only: F_OK/R_OK, while W_OK/X_OK defer) /
@@ -57,7 +68,9 @@
 //     module loader). Because these are serve-only (never captured), a file that is ONLY
 //     existence-probed -- never read or imported -- isn't recorded, so its probe falls
 //     through to disk on load; babel.config.js is fine because it is also require()d, hence
-//     recorded. realpathSync returns the real (symlink-resolved) path while the file is on
+//     recorded. (An lstatSync/statSync of a path, by contrast, DOES record its kind -- see
+//     the lstat/stat bullet above -- after which these probes answer from that stat record
+//     too, since they consult the same getFsStatFamily.) realpathSync returns the real (symlink-resolved) path while the file is on
 //     disk, and falls back to the LEXICALLY-resolved request path once it's bundle-only (a
 //     symlink in a surviving ancestor dir is not re-resolved -- moot for the absent-config
 //     case, but a canonicalize-then-compare under a symlinked ancestor could diverge between
@@ -392,11 +405,31 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     return realReaddirSync(path, options)
   }
 
+  // Capture-side stat recording, shared by the sync/async lstat/stat wrappers: record
+  // the path's KIND (file vs directory) as a payload-free stat record (state.addFsStat),
+  // so the type getters -- lstatSync(x).isFile()/.isDirectory(), the common existence-
+  // and-kind check -- of a stat-ONLY path answer from the bundle at load. Only those two
+  // kinds are modelled (the serve shim's contract); a symlink (under lstat), socket,
+  // FIFO, or device records nothing. The caller has already received (or will receive)
+  // the REAL Stats -- recording never alters what the program sees. Guards mirror the
+  // byte readers: a path whose real location escapes the root (in-tree symlink pointing
+  // out) is not attested, a file whose bytes a write-mode sidecar already carries is
+  // skipped, and a recording conflict (a kind flip mid-run) taints the capture via
+  // markAborted so nothing inconsistent is written.
+  const captureStat = (state, abs, stats) => {
+    const isDir = stats.isDirectory()
+    if (!isDir && !stats.isFile()) return
+    const url = pathToFileURL(abs).toString()
+    if (!realContained(state.root, abs) || state.attestedBySidecar(url)) return
+    try { state.addFsStat(url, isDir ? 'directory' : 'file') } catch (err) { markAborted(err) }
+  }
+
   fs.lstatSync = function lstatSync(path, options) {
     const state = getState()
-    // Serve-only, single-argument form. Capture mode is left to the real lstatSync
-    // (the file is on disk, so its Stats is correct and complete) -- the lone exception
-    // being a skipped source-map sidecar, reported absent in both modes.
+    // Single-argument form. Serve (bundle=load) the bundle-backed type getters for a
+    // recorded path; capture (bundle=add|replace) the observed kind via captureStat,
+    // handing the caller the REAL Stats (and real errors, e.g. ENOENT) untouched.
+    // A skipped source-map sidecar is reported absent in both modes.
     if (state && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
@@ -404,6 +437,13 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
         if (state.config.loadBundle) {
           const kind = state.getFsStatFamily(pathToFileURL(abs).toString())
           if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
+        } else if (state.config.writeBundle && !isLoadingModule()) {
+          // (Node's loader stats module paths through internal bindings, not this
+          // public API, but skip during a load window anyway, symmetric with
+          // readFileSync/readdirSync.)
+          const stats = realLstatSync(path)
+          captureStat(state, abs, stats)
+          return stats
         }
       }
     }
@@ -413,7 +453,10 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
   // statSync mirrors lstatSync exactly; the only difference is symlink following,
   // which is moot for a bundle-served path (there is no link to follow once the
   // bytes come from the bundle) but matters for the passthrough/present-on-disk
-  // case, so it falls back to the real statSync rather than lstatSync.
+  // case AND for capture -- a statSync of an in-root symlink records the TARGET's
+  // kind (keyed at the requested path, like a byte read of it), while an lstatSync
+  // of it records nothing (a symlink isn't modelled) -- so each uses its own real
+  // implementation.
   fs.statSync = function statSync(path, options) {
     const state = getState()
     if (state && options == null) {
@@ -423,6 +466,10 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
         if (state.config.loadBundle) {
           const kind = state.getFsStatFamily(pathToFileURL(abs).toString())
           if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
+        } else if (state.config.writeBundle && !isLoadingModule()) {
+          const stats = realStatSync(path)
+          captureStat(state, abs, stats)
+          return stats
         }
       }
     }
@@ -597,8 +644,10 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       return realReaddirP(path, options)
     }
 
-    // lstat/stat are serve-only (like their sync siblings); capture is left to the real
-    // call. bundleStats's field fallback is synchronous, so it uses the sync real stat.
+    // lstat/stat capture and serve exactly like their sync siblings: serve the
+    // bundle-backed type getters, or record the real call's observed kind via
+    // captureStat while handing the caller the real Stats. bundleStats's field
+    // fallback is synchronous, so it uses the sync real stat.
     fs.lstat = function lstat(path, options, callback) {
       const cb = typeof options === 'function' ? options : callback
       // "single-argument" form: fn(path, cb) OR fn(path, null/undefined, cb). graceful-fs
@@ -610,6 +659,13 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realLstatSync, path, kind === 'directory'))); return }
+      } else if (t?.mode === 'capture') {
+        realLstat(path, (err, stats) => {
+          if (err) return cb(err) // faithful error on the user's original path; nothing recorded
+          captureStat(t.state, t.abs, stats)
+          cb(null, stats)
+        })
+        return
       }
       return realLstat(path, options, callback)
     }
@@ -625,6 +681,13 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) { queueMicrotask(() => cb(null, bundleStats(realStatSync, path, kind === 'directory'))); return }
+      } else if (t?.mode === 'capture') {
+        realStat(path, (err, stats) => {
+          if (err) return cb(err)
+          captureStat(t.state, t.abs, stats)
+          cb(null, stats)
+        })
+        return
       }
       return realStat(path, options, callback)
     }
@@ -635,6 +698,10 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
+      } else if (t?.mode === 'capture') {
+        const stats = await realLstatP(path)
+        captureStat(t.state, t.abs, stats)
+        return stats
       }
       return realLstatP(path, options)
     }
@@ -645,6 +712,10 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       if (t?.mode === 'serve') {
         const kind = t.state.getFsStatFamily(t.url)
         if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
+      } else if (t?.mode === 'capture') {
+        const stats = await realStatP(path)
+        captureStat(t.state, t.abs, stats)
+        return stats
       }
       return realStatP(path, options)
     }
