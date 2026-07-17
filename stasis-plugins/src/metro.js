@@ -108,13 +108,19 @@ function metroDefaultSerializer() {
 //   hook) is a lower-coverage fallback -- see its note.
 //
 // KNOWN LIMITATIONS (Metro-specific coverage gaps -- documented, not silently ignored):
-//   - Child-process capture is best-effort and one-shot-build only. A worker KILLED by signal
+//   - Capture is ONE-SHOT ONLY, enforced: a dev server (`metro start`) re-invokes the serializer
+//     per rebuild, and the SECOND invocation throws (see #run) -- capture's path-keyed dedupe
+//     would otherwise keep attesting a file's first-build bytes after an edit changed them.
+//     Metro gives the serializer no watch signal on the first build, so the first rebuild is the
+//     earliest refusal point. Load mode (the companion worker transformer) is unaffected and
+//     runs fine under a dev server -- it only reads immutable attested bytes.
+//   - Child-process capture is best-effort within that one shot. A worker KILLED by signal
 //     before its exit hook (jest-worker forceExit / pool overflow) loses its shard SILENTLY at
 //     capture time -- a later frozen run still catches the gap (fail-closed), but nothing warns
-//     during capture. And it relies on the loader's exit-time write: a dev server (`metro start`,
-//     pool kept warm, killed by signal) never gets there, and standalone (no stasis loader) Metro
-//     mints no shard dir -- neither produces a toolchain-complete lockfile. Use a one-shot
-//     `metro build` under `stasis run --child-process` to capture, then verify with `--lock=frozen`.
+//     during capture. And it relies on the loader's exit-time write, which standalone (no stasis
+//     loader) Metro never reaches -- it mints no shard dir and produces no toolchain-complete
+//     lockfile. Use a one-shot `metro build` under `stasis run --child-process` to capture, then
+//     verify with `--lock=frozen`.
 //   - Scaled asset variants: `import x from './logo.png'` is ONE module in the graph, keyed
 //     by the base path; Metro discovers `logo@2x.png` / `@3x` via its AssetData (parallel
 //     scales/files arrays), NOT as separate graph modules, so only the base file is attested
@@ -129,6 +135,11 @@ export class StasisMetro {
   #seen = new Set()
   #state
   #resources
+
+  // Whether this instance already served one capture (#run). The serializer fires once per
+  // one-shot `metro build`; a dev server re-invokes it per rebuild, which capture refuses --
+  // see the guard in #run.
+  #ran = false
 
   constructor(options = {}) {
     const { state } = resolvePluginState('StasisMetro', options, process.cwd())
@@ -192,15 +203,31 @@ export class StasisMetro {
         'serializer config in load mode, or use bundle=add/replace/frozen here to capture.'
       )
     }
+    // Watch/dev-server capture is EXPLICITLY UNSUPPORTED -- refuse the second serialization
+    // loudly before it captures anything. Capture's dedupe is keyed by PATH, not content
+    // (#seen below, plus State.write's compare-and-skip caches), so on a rebuild where a
+    // file's bytes changed the plugin would skip re-capture: the emitted bundle would use the
+    // new bytes while the stasis bundle/lockfile silently kept attesting the OLD ones. The
+    // serializer fires exactly once per one-shot `metro build`; only a dev server
+    // (`metro start`) re-invokes it, and Metro hands the serializer no watch-mode signal on
+    // the FIRST build, so the first rebuild is the earliest point capture can refuse. (Load
+    // mode has no such hazard and legitimately runs under a dev server -- it lives in the
+    // companion worker transformer, rejected above, which only READS immutable attested bytes.)
+    if (this.#ran) {
+      throw new Error(
+        'StasisMetro: watch/dev-server rebuilds are not supported for capture -- use a one-shot `metro build`'
+      )
+    }
+    this.#ran = true
     this.#capture(graph, preModules)
 
     // The stasis preload owns its own write via beforeExit/exit hooks (stasis-core/hooks.js).
     // Standalone and sidecar States have no such hook, so the plugin writes them here. The
     // serializer only runs once Metro has successfully built + transformed the whole graph
     // (a failed build throws before serialization), so this is the clean-build equivalent of
-    // webpack's `stats.hasErrors()` / esbuild's `result.errors.length` gate. In watch / dev
-    // mode it fires on every rebuild; State.write's per-artifact compare-and-skip makes the
-    // unchanged-graph case a cheap no-op.
+    // webpack's `stats.hasErrors()` / esbuild's `result.errors.length` gate -- and it runs at
+    // most once per instance (the rebuild guard above), so this write is the one-shot build's
+    // single flush.
     if (this.#state !== State.preload) this.#state.write()
   }
 

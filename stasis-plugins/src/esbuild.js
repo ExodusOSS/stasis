@@ -21,6 +21,11 @@ export class StasisEsbuild {
   #resources
   #loaders
 
+  // Build starts observed by this (capture-mode) instance, across rebuilds AND across separate
+  // esbuild.build()/context() calls sharing one instance. The second start is refused -- see
+  // the onStart hook in setup().
+  #captureBuildCount = 0
+
   constructor(options = {}, { loaders } = {}) {
     // A caller that owns a State (e.g. `stasis build`) can pass it directly to drive the plugin, bypassing resolvePluginState; mode follows that State's config, and a foreign-copy State fails closed via the instanceof miss.
     const state = options instanceof State
@@ -49,8 +54,32 @@ export class StasisEsbuild {
     return 'stasis'
   }
 
-  setup = ({ onResolve, onLoad, onEnd, resolve }) => {
+  setup = ({ onResolve, onLoad, onStart, onEnd, resolve }) => {
     if (!this.#state) return  // noop plugin
+
+    // Watch/rebuild capture is EXPLICITLY UNSUPPORTED -- fail the second build loudly before it
+    // captures anything. Capture's dedupe is keyed by PATH, not content (#seen below, plus
+    // State.write's compare-and-skip caches), so on a rebuild where a file's bytes changed the
+    // plugin would skip re-capture: the emitted output would use the new bytes while the
+    // bundle/lockfile silently kept attesting the OLD ones. Rather than track content changes
+    // across rebuilds, refuse them outright. esbuild rebuilds (watch mode, context.rebuild())
+    // re-fire onStart/onEnd against the SAME setup registrations, so an instance-level counter
+    // sees every start; it also covers reusing one plugin instance across two esbuild.build()
+    // calls, which has the same staleness hazard. Returning errors from onStart is the
+    // esbuild-idiomatic hard failure (the build reports them and onEnd's clean-build gate then
+    // skips the write). Load mode registers nothing here: it serves immutable attested bytes,
+    // so rebuilds have no drift hazard.
+    if (!this.#state.config.loadBundle) {
+      onStart(() => {
+        this.#captureBuildCount += 1
+        if (this.#captureBuildCount === 1) return undefined
+        return {
+          errors: [{
+            text: 'StasisEsbuild: watch/rebuild is not supported for capture -- run a one-shot build (rebuilds would silently attest stale content)',
+          }],
+        }
+      })
+    }
 
     // The stasis preload owns its own write via beforeExit/exit hooks (stasis-core/hooks.js).
     // Standalone and sidecar States have no such hook, so the plugin writes them when the
