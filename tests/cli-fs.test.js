@@ -1273,21 +1273,33 @@ test('run --fs --child-process forwards a child-only stat record through the sha
   const tmp = mkdtempSync(join(tmpdir(), 'stasis-fs-shard-'))
   try {
     cpSync(forkShardFixture, tmp, { recursive: true })
+    // The worker also statSync's THROUGH this in-root symlink: the record lands at the
+    // LINK's path with the TARGET's kind (the pnpm node_modules/<pkg> shape), and the
+    // root's replay must follow the link too -- with lstat it would see a symlink and
+    // silently drop the record (the Copilot-reported regression).
+    symlinkSync('statonly.dat', join(tmp, 'src', 'statlink.dat'))
     const bundlePath = join(tmp, 'snapshot.br')
     const env = { ...cleanEnv, STAT_PROBE: '1' }
     const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', '--child-process', 'src/entry.js'], { cwd: tmp, env })
     t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
     t.assert.match(save.stdout, /WORKER stat-only=true/, 'the forked child stat-probed the file')
+    t.assert.match(save.stdout, /WORKER stat-link=true/, 'the forked child stat-probed through the symlink')
 
     const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
     t.assert.equal(lock.formats['src/statonly.dat'], 'stat:file', 'child-only stat record attested via the shard merge')
+    t.assert.equal(lock.formats['src/statlink.dat'], 'stat:file', 'a stat-through-symlink record survives the shard replay')
     t.assert.equal(lock.sources['.'].files['src/statonly.dat'], undefined, 'payload-free: no hash entry')
     t.assert.equal(decode(bundlePath).formats['src/statonly.dat'], 'stat:file')
+    t.assert.equal(decode(bundlePath).formats['src/statlink.dat'], 'stat:file')
 
-    rmSync(join(tmp, 'src', 'statonly.dat')) // gone; only the bundle's stat record can answer the child's lstat
+    // Both gone (the link now points at nothing before it's removed too); only the
+    // bundle's stat records can answer the child's probes.
+    rmSync(join(tmp, 'src', 'statonly.dat'))
+    rmSync(join(tmp, 'src', 'statlink.dat'))
     const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', '--child-process', 'src/entry.js'], { cwd: tmp, env })
     t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
     t.assert.match(load.stdout, /WORKER stat-only=true/, "the child's lstat of the absent file served from the bundle")
+    t.assert.match(load.stdout, /WORKER stat-link=true/, "the child's stat of the absent symlink served from the bundle")
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }

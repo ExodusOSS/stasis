@@ -20,7 +20,7 @@ import corePackage from './package.cjs'
 // module.syncBuiltinESMExports() to refresh node:fs's ESM wrapper for user code.
 // Direct ESM destructured imports are live bindings and would re-resolve to the
 // mocked names when state.write() fires on beforeExit.
-const { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } = fs
+const { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } = fs
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
@@ -2276,20 +2276,37 @@ export class State {
     // addFsStat so a path the root already attests with content is skipped, exactly
     // as if this process had stat'd it. Range-check the path BEFORE touching disk,
     // like the directory branch above; a path gone from disk (or of an unmodelled
-    // kind, e.g. now a symlink) is skipped, best-effort like every other replay.
+    // kind, e.g. a socket) is skipped, best-effort like every other replay.
     if (lf.formats) {
+      let realRoot // resolved once, on the first record: the containment anchor below
       for (const [file, format] of lf.formats) {
         if (!isStatFormat(format)) continue
         const absolute = resolve(this.root, file)
         const relFromRoot = relative(this.root, absolute)
         if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
         try {
-          const stats = lstatSync(absolute)
+          // statSync (follow symlinks), NOT lstatSync: the child's capture followed them
+          // -- a statSync of an in-root symlink records the TARGET's kind keyed at the
+          // requested path (pnpm's public node_modules/<pkg> links are exactly this
+          // shape), and an lstat of a symlink was never recorded at all -- so for every
+          // key a legitimate shard can carry, statSync reproduces the recorded kind
+          // while lstatSync would report the link itself and silently drop the record.
+          const stats = statSync(absolute)
           const kind = stats.isDirectory() ? 'directory' : stats.isFile() ? 'file' : null
-          if (kind !== null) this.addFsStat(pathToFileURL(absolute).toString(), kind)
+          if (kind === null) continue
+          // Because statSync follows links, re-assert the capture side's containment
+          // (fs.js captureStat's realContained) before attesting: the REAL location must
+          // stay inside the root's real path, so a shard entry keyed at an in-root
+          // symlink that points OUT of the tree is skipped, never recorded.
+          if (realRoot === undefined) {
+            try { realRoot = realpathSync(this.root) } catch { realRoot = this.root }
+          }
+          const relReal = relative(realRoot, realpathSync(absolute))
+          if (relReal !== '' && (relReal.startsWith('..') || isAbsolute(relReal))) continue
+          this.addFsStat(pathToFileURL(absolute).toString(), kind)
         } catch {
-          // Gone from disk, or rejected (kind conflict with the root's own capture):
-          // skip -- the root's capture stays intact.
+          // Gone from disk (or a dangling link), or rejected (kind conflict with the
+          // root's own capture): skip -- the root's capture stays intact.
         }
       }
     }
