@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +21,8 @@ const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 const captureHelper = join(here, 'metro-run.helper.js')
 const resolverHelper = join(here, 'metro-resolver-run.helper.js')
+const transformHelper = join(here, 'metro-transformer-run.helper.js')
+const mockBase = join(here, 'metro-mock-transformer.cjs')
 const fullFixture = join(here, 'fixtures', 'metro-full')
 const nmFixture = join(here, 'fixtures', 'metro-nm')
 const fieldsFixture = join(here, 'fixtures', 'resolve-fields')
@@ -218,6 +220,75 @@ test('a --metro multi-platform artifact serves per-platform edges by the platfor
   t.assert.equal(noPlatform.deferred.platform, null)
   t.assert.deepEqual(flat, { served: { type: 'sourceFile', filePath: join(tmp, 'node_modules', 'exportswins', 'rn.js') } })
   t.assert.deepEqual(empty, { served: { type: 'empty' } })
+}))
+
+test('no-source-tree flow: extract materializes the attested tree, recorded edges bridge unattested layouts, bundle bytes feed the transform', withTmp((t, tmp) => {
+  // The @babel/runtime/helpers shape: the PUBLIC specifier layout ('fakepkg/helpers/x')
+  // differs from the file resolution lands on ('build/x.js' -- a package.json redirect at
+  // capture time). Only the TARGET is ever loaded, so only it is attested.
+  const proj = join(tmp, 'proj')
+  mkdirSync(join(proj, 'src'), { recursive: true })
+  mkdirSync(join(proj, 'node_modules', 'fakepkg', 'build'), { recursive: true })
+  writeFileSync(join(proj, 'package.json'), JSON.stringify({ name: 'hermetic-fixture', version: '1.0.0' }))
+  writeFileSync(join(proj, 'src', 'entry.js'), "require('fakepkg/helpers/x')\n")
+  writeFileSync(join(proj, 'node_modules', 'fakepkg', 'package.json'), JSON.stringify({ name: 'fakepkg', version: '1.0.0' }))
+  writeFileSync(join(proj, 'node_modules', 'fakepkg', 'build', 'x.js'), 'module.exports = 1\n')
+
+  const bundle = join(tmp, 'app.br') // outside proj: it must survive the wipe below
+  const cap = capture('src/entry.js', {
+    cwd: proj,
+    graph: {
+      modules: [
+        { path: 'src/entry.js', deps: [['fakepkg/helpers/x', 'node_modules/fakepkg/build/x.js']] },
+        { path: 'node_modules/fakepkg/build/x.js', deps: [] },
+      ],
+    },
+    env: {
+      EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_BUNDLE_FILE: bundle,
+    },
+  })
+  t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+
+  // The starting state the flow must work from: nothing on disk but the artifact.
+  rmSync(proj, { recursive: true, force: true })
+
+  const work = join(tmp, 'work')
+  const x = runCli(['extract', `--output=${work}`, bundle], { cwd: tmp })
+  t.assert.equal(x.status, 0, `extract stderr: ${x.stderr}`)
+  // The attested target materialized (Metro's crawl/hash/worker-read will find it);
+  // the alias layout was never attested, so it doesn't exist -- Metro's own probing
+  // would die on it, which is exactly what the recorded edge bridges.
+  t.assert.ok(existsSync(join(work, 'node_modules', 'fakepkg', 'build', 'x.js')))
+  t.assert.ok(!existsSync(join(work, 'node_modules', 'fakepkg', 'helpers')))
+  t.assert.ok(existsSync(join(work, 'stasis.lock.json')), 'extract derives the lockfile for frozen verification')
+  // The bundle attests no root manifest (serializer captures never load it), so extract
+  // synthesizes one from the workspace bucket's identity -- without it, State's root
+  // discovery refuses the tree ('Unexpected stasis config without package.json').
+  t.assert.deepEqual(JSON.parse(readFileSync(join(work, 'package.json'), 'utf-8')), { name: 'hermetic-fixture', version: '1.0.0' })
+
+  const env = {
+    EXODUS_STASIS_BUNDLE: 'load', EXODUS_STASIS_BUNDLE_FILE: bundle,
+    EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full',
+    EXODUS_STASIS_DEBUG: '1',
+  }
+  const r = resolveAll([{ origin: 'src/entry.js', moduleName: 'fakepkg/helpers/x' }], { cwd: work, env })
+  t.assert.equal(r.status, 0, `resolver stderr: ${r.stderr}`)
+  const [out] = JSON.parse(r.stdout)
+  t.assert.deepEqual(out, { served: { type: 'sourceFile', filePath: join(work, 'node_modules', 'fakepkg', 'build', 'x.js') } })
+  // The debug channel names the mode and the served edge -- the diagnosability story.
+  t.assert.match(r.stderr, /StasisMetroResolver: load mode active/)
+  t.assert.match(r.stderr, /'fakepkg\/helpers\/x' from .* -> .*build/)
+
+  // And the bytes the transform consumes come from the bundle (hash-verified against
+  // the extracted lockfile), not from whatever the worker read off disk.
+  const tr = spawnSync(process.execPath, [transformHelper, 'node_modules/fakepkg/build/x.js'], {
+    encoding: 'utf-8',
+    cwd: work,
+    env: { ...cleanEnv, EXODUS_STASIS_METRO_BASE_TRANSFORMER: mockBase, STASIS_TEST_DISK_BYTES: 'TAMPERED', ...env },
+  })
+  t.assert.equal(tr.status, 0, `transform stderr: ${tr.stderr}`)
+  t.assert.equal(JSON.parse(tr.stdout)[0].received, 'module.exports = 1\n')
 }))
 
 test('createResolveRequest(base) defers misses to the base, not context.resolveRequest', withTmp((t, tmp) => {

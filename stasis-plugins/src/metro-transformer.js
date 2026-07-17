@@ -52,7 +52,9 @@ import { State } from '@exodus/stasis-core/state'
 //     processes (stasis --mock territory), which is larger than this seam. So today's
 //     guarantee is "build the bundle's attested bytes, fail closed on disk drift," not
 //     "build from a bundle with no source tree." This mirrors the documented
-//     node_modules-crossing gap in the webpack load path.
+//     node_modules-crossing gap in the webpack load path. To START from no source tree,
+//     materialize the attested files first (`stasis extract`) and build there -- the
+//     supported flow, spelled out in ./metro-resolver.js.
 
 const require = createRequire(import.meta.url)
 

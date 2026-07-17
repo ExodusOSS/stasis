@@ -42,6 +42,34 @@ import { EMPTY_MODULE_PATH } from '@exodus/stasis-core/util'
 //   // An app with its own resolveRequest composes via createResolveRequest(theirs):
 //   // stasis serves recorded edges first and defers misses to theirs.
 //
+//   NB -- WIRING CHANGES NEED A FRESH CAPTURE. Because a load run executes the ATTESTED
+//   metro.config.js (served from the bundle, not read from disk), adding this resolver to
+//   the on-disk config does NOTHING for an existing artifact: the old attested config --
+//   without the resolver -- is what runs, and the resolver's own module files aren't in
+//   the bundle to be loaded anyway. Re-capture with the resolver wired, then load. Run
+//   with EXODUS_STASIS_DEBUG=1 to see whether the resolver is live and what it serves.
+//
+// NO-SOURCE-TREE BUILDS -- MATERIALIZE WITH `stasis extract` FIRST:
+//   Metro cannot build from a bundle alone, resolver or not: metro-file-map enumerates
+//   files by crawling the watch folders with watchman or native `find` (child processes
+//   -- no fs seam to serve), the transform cache demands a file-map SHA-1 for every
+//   resolved file, and each worker pre-reads its file from disk BEFORE the stasis
+//   transformer swaps in attested bytes. None of that is interceptable through Metro
+//   config. The supported no-disk flow therefore starts from the artifact and
+//   materializes the attested tree:
+//     stasis extract --output=work app.stasis.code.br   # attested files + stasis.lock.json
+//     cd work && stasis run --lock=frozen --bundle=load --bundle-file=../app.stasis.code.br \
+//       -- <metro build cmd>   # invoke metro by real path; node_modules/.bin symlinks aren't bundle content
+//   The materialized tree carries EXACTLY the attested files -- which is where this
+//   resolver earns its keep: layouts that exist upstream but were never loaded (the
+//   `@babel/runtime/helpers/*` alias files behind a package.json redirect, manifests
+//   never read) are NOT in that tree, so Metro's own probing dies on them, while the
+//   recorded edges resolve straight to the attested targets. The materialized files
+//   exist to satisfy Metro's crawl, cache hashing, and worker pre-reads; the BYTES that
+//   get transformed still come from the bundle, hash-verified, via the transformer.
+//   (Capture with `--fs=async --child-process` so the manifests/configs Metro reads
+//   through fs -- package.json, babel.config.js -- are attested and materialize too.)
+//
 // WHAT THIS DOES AND DOESN'T GUARANTEE:
 //   - A recorded edge is served AS RECORDED: Metro's probing (platform suffixes,
 //     package.json fields, Haste) is short-circuited for it, so resolution can't drift
@@ -81,6 +109,16 @@ function getLoadState() {
     stateInited = true
     const state = State.preload ?? new State(process.cwd())
     loadState = state.config.loadBundle ? state : null
+    // A misconfigured resolver fails SILENT (every request defers to Metro, which then
+    // probes disk and produces its own UnableToResolveError) -- announce the resolved
+    // mode once under EXODUS_STASIS_DEBUG so "wired but inert" is diagnosable: a stale
+    // capture (the attested config predates the wiring), a root/cwd mismatch, or a
+    // non-load mode all show up right here.
+    if (state.config.debug) {
+      console.warn(loadState
+        ? `[stasis] StasisMetroResolver: load mode active -- root=${loadState.root}, bundleFile=${loadState.config.bundleFile ?? '<default>'}, scope=${loadState.config.full ? 'full' : 'node_modules'}`
+        : '[stasis] StasisMetroResolver: not in load mode -- passing every request through')
+    }
   }
   return loadState
 }
@@ -130,8 +168,18 @@ export function createResolveRequest(base = undefined) {
           // `stasis bundle --metro/--mainFields` artifact) maps to Metro's own notion
           // of an empty resolution -- Metro then never tries to read the synthetic
           // path from disk, which only the bundle carries.
-          if (state.relative(target) === EMPTY_MODULE_PATH) return { type: 'empty' }
-          return { type: 'sourceFile', filePath: target }
+          const empty = state.relative(target) === EMPTY_MODULE_PATH
+          if (state.config.debug) {
+            console.warn(`[stasis] StasisMetroResolver: '${moduleName}' from ${origin} -> ${empty ? '<empty>' : target}`)
+          }
+          return empty ? { type: 'empty' } : { type: 'sourceFile', filePath: target }
+        }
+        // An in-scope origin with no recorded edge: the request Metro is about to
+        // re-derive from disk. Under debug, name it -- when the disk probe then fails
+        // (UnableToResolveError), this line is the difference between "the bundle
+        // never recorded the edge" (stale/static capture) and "the resolver never ran".
+        if (state.config.debug) {
+          console.warn(`[stasis] StasisMetroResolver: no recorded edge for '${moduleName}' from ${origin}${typeof platform === 'string' ? ` (platform=${platform})` : ''} -- deferring to Metro`)
         }
       }
     }
