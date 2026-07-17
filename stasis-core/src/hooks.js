@@ -1,5 +1,5 @@
 import Module, { registerHooks, findPackageJSON, isBuiltin } from 'node:module'
-import { basename, dirname, extname, join, resolve as resolvePath } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 import * as fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto'
@@ -168,7 +168,16 @@ let state
 let createdShardDir
 let createdShardPub
 let createdShardPubId
+// True once the ROOT has written its artifacts at least once (save() is re-entrant across
+// beforeExit/exit firings and re-flushes late-observed resolution edges; see its comment).
+// Consulted by the load hook's fail-loud assert: a module whose BYTES first load after a
+// write may miss the final artifact entirely, so it must crash the capture rather than
+// silently ship unattested. Late resolution EDGES of already-loaded modules, by contrast,
+// are what the re-flush exists to pick up.
 let saved = false
+// Serialized shard text a child last wrote, so the exit firing skips an identical
+// re-write instead of dropping a second (equal) shard file for the root to merge.
+let lastShardWritten
 // Set when stasis's own capture/verification rejects something (see the hooks around
 // addFile/addImport below). Distinct from "the run exited non-zero": a clean capture is
 // allowed to exit non-zero for its own reasons and still be persisted.
@@ -283,14 +292,19 @@ function writeChildShard() {
     // its own build; the pid + random suffix keep workers from colliding even if the OS recycles an
     // exited worker's pid within one build. Write to a dot-prefixed temp then rename: the merge
     // filter ignores the temp, so the root never reads a half-written shard.
+    const shard = state.shardSnapshot() // serialized lockfile string
+    // save() re-fires on exit after the beforeExit flush (late-observed resolution edges;
+    // see save's comment). An unchanged snapshot means nothing new to forward -- skip the
+    // duplicate shard file rather than make the root merge the same content twice.
+    if (shard === lastShardWritten) return
     const privateKey = createPrivateKey({ key: Buffer.from(keyB64, 'base64'), format: 'der', type: 'pkcs8' })
     const pubId = createPublicKey(privateKey).export({ format: 'jwk' }).x
-    const shard = state.shardSnapshot() // serialized lockfile string
     const signature = sign(null, Buffer.from(shard), privateKey).toString('base64url')
     const unique = `${OWN_PID}-${randomBytes(6).toString('hex')}` // pid + random: no collision even on pid reuse
     const tmpPath = join(dir, `.${pubId}-${unique}.tmp`)
     writeFileSync(tmpPath, JSON.stringify({ shard, signature }))
     renameSync(tmpPath, join(dir, `${pubId}-${unique}.json`))
+    lastShardWritten = shard
   } catch {
     // A child that can't snapshot/sign/write just doesn't contribute; the root still persists
     // its own capture, and a later frozen run fails closed on anything genuinely missing.
@@ -448,9 +462,20 @@ function initState(root) {
   // safe: those recorded hashes are accurate (nothing drifted is baked in), and a later
   // lock=frozen run fails closed on anything missing. Unhandled signals (SIGINT/SIGTERM
   // with no handler) bypass exit hooks entirely; servers own that behavior, we don't touch it.
+  //
+  // save() runs on EVERY beforeExit/exit firing rather than latching after the first.
+  // These handlers were registered at initState -- before any user code ran -- so they fire
+  // FIRST on each event, and a require() issued by a LATER handler on the same event
+  // resolves AFTER our write. CLIs commonly log a summary at exit through a lazy require
+  // (Babel lazy interop: @react-native-community/cli-tools' logger require()s chalk on
+  // its first call): the target's bytes are usually attested via other importers, so a
+  // one-shot save silently dropped only that resolution EDGE, surfacing at bundle=load
+  // as MODULE_NOT_FOUND for a package the bundle carries. Re-running is cheap -- write()
+  // compares each artifact's serialized text and skips unchanged outputs, and the child
+  // shard path keeps its own last-written compare -- so the exit firing re-flushes
+  // whatever the beforeExit firing missed. Requires issued by a user 'exit' handler
+  // AFTER ours are the residual gap: 'exit' is the last stop, nothing later can flush.
   const save = () => {
-    if (saved) return
-    saved = true
     // A child process (pid mismatch) must never write the real artifact -- fork OR a non-fork
     // child that inherited our loader: the root owns the lockfile/bundle, and a second writer
     // would race it. Instead it forwards what it captured via a shard the root merges below.
@@ -471,9 +496,11 @@ function initState(root) {
       if (aborted) return
       // Root: fold in every forked child's shard before writing, so files/edges only a child
       // observed (e.g. a Metro worker's babel.config.js + preset/plugins) are attested too. Only
-      // when we minted a shard dir (opt-in + capturing); merges from that dir alone.
+      // when we minted a shard dir (opt-in + capturing); merges from that dir alone. On a
+      // re-flush after the dir was already removed below, the merge no-ops (opendir fails).
       if (createdShardDir) mergeChildShards(createdShardDir)
       state.write()
+      saved = true
     } finally {
       // Always remove the shard dir we minted -- clean exit, abort, or a throwing write. This is
       // the single owner of that cleanup (mergeChildShards no longer self-removes). A SIGKILL
@@ -726,16 +753,44 @@ function patchCjsResolution() {
   const original = Module._resolveFilename
   Module._resolveFilename = function (request, parent, ...rest) {
     const loadMode = state?.config.loadBundle
-    if (loadMode && typeof request === 'string'
-        && !isBuiltin(request) && typeof parent?.filename === 'string') {
-      const parentURL = pathToFileURL(parent.filename).toString()
-      // Same scope gate the resolve hook applies (see above): node_modules scope
-      // only serves dependency parents from the bundle; workspace/app code is left
-      // to Node's native resolution (read from disk). Without this the shim would
-      // silently take over CJS resolution for app files too.
-      if (state.config.full || state.inNodeModules(parentURL)) {
-        const resolved = state.resolveBundled(parentURL, request)
-        if (resolved !== undefined) return resolved
+    if (loadMode && typeof request === 'string' && !isBuiltin(request)) {
+      if (typeof parent?.filename === 'string') {
+        const parentURL = pathToFileURL(parent.filename).toString()
+        // Same scope gate the resolve hook applies (see above): node_modules scope
+        // only serves dependency parents from the bundle; workspace/app code is left
+        // to Node's native resolution (read from disk). Without this the shim would
+        // silently take over CJS resolution for app files too.
+        if (state.config.full || state.inNodeModules(parentURL)) {
+          const resolved = state.resolveBundled(parentURL, request)
+          if (resolved !== undefined) return resolved
+        }
+      } else if (isAbsolute(request)) {
+        // NO parent, request already an absolute path: Node's ESM<->CJS interop re-enters
+        // the monkey-patchable CJS loader with the RESOLVED filename, no parent module, and
+        // the registerHooks hooks SKIPPED -- translators.js evaluates an import-linked CJS
+        // module via wrapModuleLoad(filename, undefined|null, isMain, kShouldSkipModuleHooks)
+        // (the 'commonjs-sync' translator, reached whenever a require() pulls in an ESM graph
+        // that imports a CJS dep; also createCJSNoSourceModuleWrap). resolveForCJSWithHooks
+        // then bypasses the resolve hook entirely, so this shim is the ONLY interception
+        // point. An absolute path can only arrive here from a prior successful resolution
+        // (ours, from the bundle -- or Node's own), so when the bundle attests that exact
+        // FILE under the same scope gate, the resolution is the identity (returned in
+        // path.resolve()d form, matching native's normalized cache-key contract). Falling
+        // through to native would stat a file the bundle carries but disk (pruned /
+        // never-shipped node_modules) may not -- MODULE_NOT_FOUND on a servable path.
+        // getFsStat === 'file' (not mere presence) keeps a --fs-captured directory
+        // LISTING from hijacking native directory->main/index resolution. This widens
+        // parentless reachability to any attested in-scope file when disk lacks the path;
+        // that is bounded by attestation and the load hook's gates (getFile +
+        // NODEJS_FORMATS), which remain the load-bearing checks.
+        // Node >=24.18 forwards pre-resolved context for hook-resolved modules, masking the
+        // common case; on 24.14-24.17 (our supported floor) every commonjs-sync evaluation
+        // re-resolves through here, and the no-parent shape survives on >=24.18 too (the
+        // deferred-resolution branch and createCJSNoSourceModuleWrap still take it).
+        const url = pathToFileURL(request).toString()
+        if ((state.config.full || state.inNodeModules(url)) && state.getFsStat(url) === 'file') {
+          return resolvePath(request)
+        }
       }
     }
     const resolved = original.call(this, request, parent, ...rest)
