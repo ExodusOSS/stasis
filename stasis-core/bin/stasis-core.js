@@ -89,16 +89,12 @@ if (command === '-v' || command === '--version') {
   // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
-  // --brotli-quality: bundle compression quality (integer 0..11; unset = brotli's default 11).
-  // Validated here for a clean usage error, normalized ('05' -> '5') so the child's Config and
-  // an already-set matching env var compare equal. Unlike the flags above it is NOT set to ''
-  // when absent: an ambient EXODUS_STASIS_BROTLI_QUALITY has always passed through to the
-  // child untouched, and an unconditional setEnv('') would reject that as a conflict.
+  // --brotli-quality: bundle compression quality (0..11; unset = brotli's default 11).
+  // `${n}` must round-trip so coercible forms ('5.0', '05', whitespace -> 0) are rejected.
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
-    // Digits-only before coercion: Number() alone would accept '5.0' / ' 5 ' / whitespace ( -> 0).
-    const n = /^\d+$/u.test(values['brotli-quality']) ? Number(values['brotli-quality']) : Number.NaN
-    if (!Number.isInteger(n) || n < 0 || n > 11) usage(`Error: --brotli-quality must be an integer 0..11 (got '${values['brotli-quality']}')`)
+    const n = Number(values['brotli-quality'])
+    if (`${n}` !== values['brotli-quality'] || !Number.isInteger(n) || n < 0 || n > 11) usage(`Error: --brotli-quality must be an integer 0..11 (got '${values['brotli-quality']}')`)
     brotliQuality = n
   }
   // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
@@ -115,6 +111,8 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
+  // Only set when given, so an ambient EXODUS_STASIS_BROTLI_QUALITY still passes through
+  // to the child (an unconditional setEnv('') would reject it as a conflict).
   if (brotliQuality !== undefined) setEnv('EXODUS_STASIS_BROTLI_QUALITY', String(brotliQuality))
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })

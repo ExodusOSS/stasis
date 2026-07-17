@@ -30,13 +30,12 @@ const envBool = (name, value) => {
 // validates each entry). An empty/unset env var means "no allowlist".
 const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
 
-// Strict integer env parsing for EXODUS_STASIS_BROTLI_QUALITY: digits only, in brotli's
-// 0..11 quality range. Anything else ('max', '5.5', '5.0', ' 5 ', whitespace, ...) throws --
-// a bare Number() coercion would accept those (Number('   ') is 0!) and silently write
-// bundles at an unintended quality.
+// Strict integer env parsing for EXODUS_STASIS_BROTLI_QUALITY: `${n}` must round-trip
+// back to the input, so Number()-coercible forms ('5.0', '05', whitespace -> 0, ...)
+// throw instead of silently picking an unintended quality.
 const envBrotliQuality = (name, value) => {
-  const n = /^\d+$/u.test(value) ? Number(value) : Number.NaN
-  if (!Number.isInteger(n) || n < 0 || n > 11) {
+  const n = Number(value)
+  if (`${n}` !== value || !Number.isInteger(n) || n < 0 || n > 11) {
     throw new RangeError(`${name} must be an integer 0..11 (got '${value}')`)
   }
   return n
@@ -174,9 +173,7 @@ export class Config {
     this.#childProcess = this.#env.childProcess !== undefined ? envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess) : (childProcess ?? false)
     // env wins over the option, like scope/lock/bundle; undefined means "fs untouched" (off).
     this.#fs = this.#env.fs || fs || undefined
-    // env wins over the option, like debug/childProcess; undefined means "brotli's own
-    // default quality" (11, max). No `||` chaining like fs/scope above: 0 is a valid
-    // (fastest) quality and falsy, so it must not fall through to the other source.
+    // env wins over the option; no `||` chaining -- 0 is a valid quality and falsy.
     this.#brotliQuality = this.#env.brotliQuality !== undefined
       ? envBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality)
       : brotliQuality
@@ -198,10 +195,8 @@ export class Config {
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
     assert.equal(typeof this.#childProcess, 'boolean', 'childProcess must be a boolean')
-    // brotliQuality tunes how bundles are WRITTEN, so like bundleFile it is
-    // inert-but-harmless under read-only modes -- the same stasis.config.json serves
-    // both the capturing (bundle=add|replace) and the loading (bundle=load|frozen)
-    // runs, so no active-write-mode constraint is imposed here.
+    // A write-side knob; like bundleFile, inert-but-harmless under read-only modes
+    // (the same stasis.config.json serves capture and load runs).
     if (this.#brotliQuality !== undefined) {
       if (!Number.isInteger(this.#brotliQuality) || this.#brotliQuality < 0 || this.#brotliQuality > 11) {
         throw new RangeError(`brotliQuality must be an integer 0..11 (got ${JSON.stringify(this.#brotliQuality)})`)
@@ -392,12 +387,9 @@ export class Config {
     return this.#fs
   }
 
-  // Brotli quality (integer 0..11) for bundle writes, or undefined for brotli's own
-  // default (11, max -- best ratio, slowest). State.write() forwards this to
-  // brotliOptions(); lower values trade compression ratio for write speed (useful in
-  // watch-mode rebuilds and tests). Set via "brotliQuality" in stasis.config.json,
-  // EXODUS_STASIS_BROTLI_QUALITY, or the Config option. Not serialized -- a how-to-write
-  // flag like debug/fs; the produced bundle's *content* is identical at any quality.
+  // Brotli quality (integer 0..11) for bundle writes; undefined -> brotli's default (11,
+  // max). State.write() forwards this to brotliOptions(). Not serialized -- a how-to-write
+  // flag like debug/fs; the bundle's decompressed content is identical at any quality.
   get brotliQuality() {
     return this.#brotliQuality
   }

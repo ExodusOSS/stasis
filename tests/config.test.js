@@ -830,10 +830,9 @@ test('validatePluginOptions rejects fs (not a plugin option; --fs is a loader/CL
   t.assert.throws(() => validatePluginOptions('Plug', { fs: 42 }), /Unknown Plug options: fs/)
 })
 
-// brotliQuality: an integer 0..11 tuning bundle-write compression, read from the option /
-// EXODUS_STASIS_BROTLI_QUALITY / "brotliQuality" in stasis.config.json. Like debug/fs it is a
-// how-to-write flag: NOT serialized, no mode constraint (inert-but-harmless under read-only
-// modes, since the same stasis.config.json serves capture and load runs alike).
+// brotliQuality: integer 0..11 tuning bundle-write compression, read from the option /
+// EXODUS_STASIS_BROTLI_QUALITY / "brotliQuality" in stasis.config.json. A how-to-write
+// flag like debug/fs: not serialized, no bundle-mode constraint.
 test('Config defaults brotliQuality to undefined (brotli default)', (t) => {
   t.assert.equal(new Config().brotliQuality, undefined)
 })
@@ -891,11 +890,10 @@ test('Config brotliQuality env rejects out-of-range values', withEnv(
   }
 ))
 
-// Digits-only parsing: Number()-coercible non-integer strings must throw, not be silently
-// accepted -- Number('   ') is 0, so a whitespace-only env var would otherwise flip the
-// bundle to the fastest/worst quality without anyone asking for it.
-for (const bad of ['5.0', '   ', ' 5 ', '0x5', '5e0', '+5']) {
-  test(`Config brotliQuality env rejects Number()-coercible non-digits ('${bad}')`, withEnv(
+// Non-canonical Number()-coercible strings must throw (Number('   ') is 0!), not silently
+// select a quality: `${Number(value)}` has to round-trip back to the input.
+for (const bad of ['5.0', '05', '   ', ' 5 ', '0x5', '5e0', '+5']) {
+  test(`Config brotliQuality env rejects non-canonical value ('${bad}')`, withEnv(
     { EXODUS_STASIS_BROTLI_QUALITY: bad },
     (t) => {
       t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_BROTLI_QUALITY must be an integer 0\.\.11/ })
@@ -951,8 +949,6 @@ test('loadConfig brotliQuality conflicting with the constructor option throws', 
 })
 
 test('validatePluginOptions rejects brotliQuality (not a plugin option; set it process-wide)', (t) => {
-  // Like lockFile/fs: the write quality is a process-wide Config/env/stasis.config.json concern
-  // (sidecars inherit the preload's value), so a per-plugin knob is an unknown option.
   t.assert.throws(() => validatePluginOptions('Plug', { brotliQuality: 5 }), /Unknown Plug options: brotliQuality/)
 })
 

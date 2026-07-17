@@ -4,17 +4,9 @@ import { assert } from './util.js'
 
 // Brotli's default quality is 11 (max) and the encoder is superlinear in input
 // size, so on a multi-MB source bundle it dominates write time. The quality is
-// tunable via the `brotliQuality` config option (Config option / stasis.config.json
-// key, passed in here by the writer) or the env var; the output is still a valid
-// .br at any quality. Tests that bundle real-world dependency trees override it
-// to keep runs fast. Production code pays the default cost in exchange for the
-// best ratio.
-//
-// `quality` is an explicit integer 0..11 (typically config.brotliQuality), or
-// undefined for "no opinion". The env var must agree with an explicit quality
-// when both are set -- same fail-loud stance as Config's env-vs-option checks.
-// Callers going through Config never trip that assert (Config already enforces
-// agreement); it exists for direct callers like `stasis bundle --brotli-quality`.
+// tunable via `quality` (an integer 0..11, typically config.brotliQuality) or the
+// env var -- which must agree when both are set; the output is still a valid .br
+// at any quality. Production code pays the default cost for the best ratio.
 //
 // Kept out of `util.js` so that importing the generic helpers there (`sortPaths`,
 // `assertRealPathWithinBase`, …) doesn't transitively load `node:zlib`. Only the
@@ -26,11 +18,10 @@ export function brotliOptions(quality) {
   }
   const raw = process.env.EXODUS_STASIS_BROTLI_QUALITY
   if (raw) {
-    // Digits-only before coercion, matching config.js's envBrotliQuality: a bare Number()
-    // would accept '5.0' / ' 5 ' / even whitespace-only (Number('   ') is 0) and silently
-    // pick an unintended quality. '' still means "unset" via the truthiness gate above.
-    const n = /^\d+$/u.test(raw) ? Number(raw) : Number.NaN
-    assert(Number.isInteger(n) && n >= 0 && n <= 11, `EXODUS_STASIS_BROTLI_QUALITY must be an integer 0..11, got ${raw}`)
+    // `${n}` must round-trip back to raw, rejecting coercible forms like '5.0' / '05' /
+    // whitespace (Number('   ') is 0). '' still means "unset" via the truthiness gate.
+    const n = Number(raw)
+    assert(`${n}` === raw && Number.isInteger(n) && n >= 0 && n <= 11, `EXODUS_STASIS_BROTLI_QUALITY must be an integer 0..11, got ${raw}`)
     assert(quality === undefined || quality === n,
       `brotli quality ${quality} conflicts with EXODUS_STASIS_BROTLI_QUALITY=${raw}`)
     quality = n
