@@ -125,7 +125,7 @@ export class Bundle {
         assert(typeof json.modules === 'object' && json.modules !== null)
         for (const [dir, info] of Object.entries(json.modules)) {
           assert(dir.includes('node_modules'))
-          assert(!dir.startsWith('..'))
+          assert(!posixPathEscapes(dir))
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
@@ -134,7 +134,7 @@ export class Bundle {
         assert(json.sources && typeof json.sources === 'object')
         for (const [dir, info] of Object.entries(json.sources)) {
           assert(!dir.includes('node_modules'))
-          assert(!dir.startsWith('..'))
+          assert(!posixPathEscapes(dir))
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
@@ -166,15 +166,18 @@ export class Bundle {
         assert(json.sources === undefined)
       }
       for (const [, { files }] of modules) {
-        for (const rel of Object.keys(files)) assert(!rel.startsWith('..'))
+        // posixPathEscapes (not a '..' prefix check) so a mid-path escape or an
+        // absolute path fails too, matching Lockfile.parse. rel === '' (a
+        // `directory` capture keyed at a module root) normalizes to '.' and passes.
+        for (const rel of Object.keys(files)) assert(!posixPathEscapes(rel))
       }
     } else {
       // v0 legacy: flat sources at top level, regrouped by inferred module dir.
       assert(json.sources)
       for (const [path, content] of Object.entries(json.sources)) {
-        assert(!path.startsWith('..'))
+        assert(!posixPathEscapes(path))
         const { dir, rel, name } = inferModuleDir(path)
-        assert(!dir.startsWith('..') && !rel.startsWith('..'))
+        assert(!posixPathEscapes(dir) && !posixPathEscapes(rel))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         modules.get(dir).files[rel] = content
       }

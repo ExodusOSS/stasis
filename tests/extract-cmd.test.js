@@ -178,8 +178,10 @@ test('extractCommand throws when the bundle file does not exist', withTmp((t, tm
 
 test('extractCommand refuses a bundle whose path escapes the output dir', withTmp((t, tmp) => {
   // Hand-craft a v1 code bundle whose source bucket dir climbs out of the
-  // output dir via mid-path "..". Bundle.parse only rejects paths that
-  // *start* with "..", so this passes parsing; extract must catch it.
+  // output dir via mid-path "..". Bundle.parse rejects root-escaping paths at
+  // the schema boundary (posixPathEscapes) since it validates dirs like
+  // Lockfile.parse, so extract's wrapped parse error fires first; extract's own
+  // containment check stays behind it as defense-in-depth.
   const evil = {
     version: 1,
     config: { scope: 'full' },
@@ -199,16 +201,16 @@ test('extractCommand refuses a bundle whose path escapes the output dir', withTm
   writeRawBundle(bundlePath, evil)
   t.assert.throws(
     () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
-    /escapes output dir/,
+    /not a valid stasis bundle/,
   )
   t.assert.ok(!existsSync('/tmp-stasis-escape/pwned.js'), 'must not write outside the output dir')
 }))
 
 test('extractCommand rejects a sibling dir that merely shares the output dir name as a prefix', withTmp((t, tmp) => {
   // Resolves to `<tmp>/out-evil/pwned.js`, a sibling of the `<tmp>/out` output
-  // dir. A naive `startsWith(outDir)` (no separator) would wrongly accept it;
-  // the containment check requires the trailing separator (and a non-'..'
-  // relative path) to reject it.
+  // dir. The mid-path `..` needed to reach a sibling escapes the project root,
+  // so Bundle.parse rejects it at the schema boundary; extract's own
+  // trailing-separator containment check stays behind it as defense-in-depth.
   const evil = {
     version: 1,
     config: { scope: 'full' },
@@ -224,7 +226,7 @@ test('extractCommand rejects a sibling dir that merely shares the output dir nam
   writeRawBundle(bundlePath, evil)
   t.assert.throws(
     () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
-    /escapes output dir/,
+    /not a valid stasis bundle/,
   )
   t.assert.ok(!existsSync(join(tmp, 'out-evil', 'pwned.js')), 'must not write into a sibling dir')
 }))
