@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -115,6 +115,15 @@ test('run: a forked child is enforced from the bundle but does not write (via th
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stdout, /^WORKER hello, child lock=frozen bundle=load$/m)
   t.assert.deepEqual(readFileSync(join(tmp, 'stasis.lock.json')), lockBaseline, 'child must not rewrite the lockfile')
+}))
+
+test('run reports 128+signo when the child dies from a signal', withTmp((t, tmp) => {
+  // A signal-killed child (SIGSEGV, SIGKILL, OOM-kill) closes with code=null; the launcher
+  // must not turn that into an implicit exit 0. 137 = 128 + SIGKILL(9), the shell convention.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'sigkill-fixture', version: '0.0.0', private: true, type: 'module' }))
+  writeFileSync(join(tmp, 'entry.js'), "process.kill(process.pid, 'SIGKILL')\n")
+  const r = run(['run', '--lock=ignore', 'entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 137, `stderr: ${r.stderr}`)
 }))
 
 test('prune validates and removes against the lockfile', withTmp((t, tmp) => {

@@ -6,6 +6,7 @@ import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { basename, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
+import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
 import pkg from '../package.json' with { type: 'json' }
 
@@ -103,8 +104,9 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_RESOURCES', resources)
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
-  const [code] = await once(child, 'close')
-  process.exitCode = code
+  const [code, signal] = await once(child, 'close')
+  // code is null when the child died from a signal; report 128+signo (shell convention) instead of the implicit 0
+  process.exitCode = code ?? 128 + (osConstants.signals[signal] ?? 0)
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')
   const root = argv[0] ? resolve(argv[0]) : process.cwd()
