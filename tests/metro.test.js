@@ -195,19 +195,58 @@ test('bundle=add writes a bundle whose sources match disk', withTmp((t, tmp) => 
   t.assert.equal(decoded.formats['src/entry.js'], 'module')
 }))
 
-test('bundle=load on the serializer is rejected and points at the worker transformer', withTmp((t, tmp) => {
-  // Load can't be served from the serializer (Metro transforms in workers before
-  // serialization); it's handled per-worker by the companion transformer. The plugin
-  // must fail loudly and point there, not silently no-op.
+test('bundle=load: the serializer is a transparent pass-through (load lives in the worker transformer)', withTmp((t, tmp) => {
+  // Load is served by the companion worker transformer, so the serializer must pass
+  // through, not throw -- metro.config.js is itself attested at capture, so a load run
+  // executes the same config, plugin included.
+  cpSync(fullFixture, tmp, { recursive: true })
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  // Capture real artifacts for the load run to absorb.
+  const cap = run('src/entry.js', {
+    cwd: tmp,
+    env: {
+      EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+    },
+  })
+  t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+  const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+  const bundleBefore = readFileSync(bundlePath)
+
+  // Tamper a source AFTER capture: a serializer that still captured would trip frozen's hash assert.
+  writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = () => `tampered`\n')
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: {
+      EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'load', EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+      STASIS_TEST_METRO_MODE: 'customSerializer', STASIS_TEST_METRO_SERIALIZE_TWICE: '1',
+    },
+  })
+  t.assert.equal(r.status, 0, `load-mode serialization must pass through; stderr: ${r.stderr}`)
+  // Both invocations delegated to the base serializer (dev-server rebuild shape).
+  t.assert.equal(r.stdout.match(/stasis base: 2 modules/gu)?.length, 2, `stdout: ${r.stdout}`)
+  // Nothing captured, nothing written.
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore, 'load must not touch the lockfile')
+  t.assert.deepEqual(readFileSync(bundlePath), bundleBefore, 'load must not touch the bundle')
+}))
+
+test('capture refuses a second serialization (watch/dev-server rebuild)', withTmp((t, tmp) => {
+  // Capture's path-keyed dedupe would silently keep attesting first-build bytes on a
+  // rebuild, so the second invocation must throw. (Load mode is exempt; see above.)
   cpSync(fullFixture, tmp, { recursive: true })
 
   const r = run('src/entry.js', {
     cwd: tmp,
-    env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full', EXODUS_STASIS_BUNDLE: 'load' },
+    env: {
+      EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full',
+      STASIS_TEST_METRO_MODE: 'customSerializer', STASIS_TEST_METRO_SERIALIZE_TWICE: '1',
+    },
   })
-  t.assert.notEqual(r.status, 0)
-  t.assert.match(r.stderr, /served by the companion worker transformer/)
-  t.assert.match(r.stderr, /metro-transformer/)
+  t.assert.notEqual(r.status, 0, 'second capture serialization must fail')
+  t.assert.match(r.stderr, /watch\/dev-server rebuilds are not supported for capture/)
 }))
 
 // ----- node_modules scope -------------------------------------------------------------
@@ -652,7 +691,8 @@ test('real-Metro contract smoke test (ReadOnlyGraph / customSerializer / transfo
   // contract -- so a future Metro that changes any of those would not be caught by CI.
   //
   // To pin the contract against reality (fast-follow): add `metro` as a devDependency and,
-  // gated on it resolving, run a real `metro build` over a fixture with `withStasis(config)`
-  // wired (capture) and, separately, `transformer.transformerPath` set + EXODUS_STASIS_BUNDLE=load
-  // (load), asserting the lockfile/bundle round-trips. The mock is the verified surface today.
+  // gated on it resolving, run a real `metro build` over a fixture with BOTH halves wired
+  // permanently (`withStasis(config)` + top-level `transformerPath`) -- once to capture, then
+  // again with EXODUS_STASIS_BUNDLE=load on the same config -- asserting the lockfile/bundle
+  // round-trips. The mock is the verified surface today.
 })

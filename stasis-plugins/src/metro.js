@@ -86,14 +86,22 @@ function metroDefaultSerializer() {
 //   inputFileSystem wrapper, esbuild's onLoad). Metro reads + transforms in workers,
 //   before serialization, so the serializer can't inject bytes into the transform.
 //   Load is instead handled per-worker by the companion `./metro-transformer.js`
-//   (wired as Metro's `transformer.transformerPath`): unlike capture, load only ever
+//   (wired as Metro's top-level `transformerPath`): unlike capture, load only ever
 //   READS the immutable bundle and every worker reads the same bytes, so there is no
-//   cross-worker state to merge. This serializer therefore REJECTS bundle=load.
-//   Capture modes (lock/bundle add|replace|frozen, and lock=none/ignore) all work.
+//   cross-worker state to merge. Under bundle=load this serializer is therefore a
+//   transparent PASS-THROUGH (captures nothing, writes nothing, delegates to the
+//   base serializer), mirroring the transformer, which passes through in every
+//   non-load mode. Wire BOTH halves permanently; the mode picks the active one.
+//   That matters because metro.config.js is itself attested at capture, so a load
+//   run must execute it unedited. Capture modes (lock/bundle add|replace|frozen,
+//   and lock=none/ignore) all capture here.
 //
-// USAGE (metro.config.js) -- prefer withStasis:
+// USAGE (metro.config.js) -- prefer withStasis; wire the load half permanently alongside it:
 //   const { withStasis } = require('@exodus/stasis/metro')
-//   module.exports = withStasis(require('./metro.config.base'), { /* scope, lock, ... */ })
+//   module.exports = withStasis({
+//     ...require('./metro.config.base'),
+//     transformerPath: require.resolve('@exodus/stasis/metro-transformer'),  // the load half
+//   }, { /* scope, lock, ... */ })
 //
 //   Then CAPTURE with child-process forwarding ON -- Metro transforms in worker processes, so
 //   `--child-process` is REQUIRED on a capture run to attest the toolchain those workers load
@@ -112,8 +120,9 @@ function metroDefaultSerializer() {
 //     per rebuild, and the SECOND invocation throws (see #run) -- capture's path-keyed dedupe
 //     would otherwise keep attesting a file's first-build bytes after an edit changed them.
 //     Metro gives the serializer no watch signal on the first build, so the first rebuild is the
-//     earliest refusal point. Load mode (the companion worker transformer) is unaffected and
-//     runs fine under a dev server -- it only reads immutable attested bytes.
+//     earliest refusal point. Load mode is unaffected and runs fine under a dev server --
+//     the serializer passes through and the worker transformer only reads immutable
+//     attested bytes.
 //   - Child-process capture is best-effort within that one shot. A worker KILLED by signal
 //     before its exit hook (jest-worker forceExit / pool overflow) loses its shard SILENTLY at
 //     capture time -- a later frozen run still catches the gap (fail-closed), but nothing warns
@@ -195,14 +204,11 @@ export class StasisMetro {
 
   #run(graph, preModules) {
     if (!this.#state) return
-    if (this.#state.config.loadBundle) {
-      throw new Error(
-        'StasisMetro: bundle=load is served by the companion worker transformer ' +
-        "(transformer.transformerPath = '@exodus/stasis/metro-transformer'), not this serializer " +
-        'plugin -- Metro transforms in workers before serialization. Remove this plugin from your ' +
-        'serializer config in load mode, or use bundle=add/replace/frozen here to capture.'
-      )
-    }
+    // bundle=load: pass through -- load is served by the companion worker transformer, and
+    // metro.config.js is itself attested at capture, so the same wiring must run unedited
+    // in load mode (see the class note). Checked BEFORE the one-shot guard: load captures
+    // nothing and legitimately re-serializes per rebuild under a dev server.
+    if (this.#state.config.loadBundle) return
     // Watch/dev-server capture is EXPLICITLY UNSUPPORTED -- refuse the second serialization
     // loudly before it captures anything. Capture's dedupe is keyed by PATH, not content
     // (#seen below, plus State.write's compare-and-skip caches), so on a rebuild where a
@@ -211,8 +217,8 @@ export class StasisMetro {
     // serializer fires exactly once per one-shot `metro build`; only a dev server
     // (`metro start`) re-invokes it, and Metro hands the serializer no watch-mode signal on
     // the FIRST build, so the first rebuild is the earliest point capture can refuse. (Load
-    // mode has no such hazard and legitimately runs under a dev server -- it lives in the
-    // companion worker transformer, rejected above, which only READS immutable attested bytes.)
+    // mode has no such hazard and legitimately runs under a dev server -- it passed through
+    // above, and the companion worker transformer only READS immutable attested bytes.)
     if (this.#ran) {
       throw new Error(
         'StasisMetro: watch/dev-server rebuilds are not supported for capture -- use a one-shot `metro build`'

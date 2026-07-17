@@ -25,6 +25,8 @@
 //   dep is a [specifier, targetRelativePath] pair (target null = unresolved/virtual edge).
 //   `preModules` (optional) models Metro's prepended polyfills/runtime.
 // STASIS_TEST_METRO_MODE -- 'hook' (default) | 'customSerializer' | 'withStasis'.
+// STASIS_TEST_METRO_SERIALIZE_TWICE=1 -- serialize twice, modeling a dev-server rebuild
+//   (capture must refuse the second invocation, load must not).
 // STASIS_TEST_PLUGIN_OPTIONS (JSON)  -- routes through the plugin's options.
 // STASIS_TEST_PRELOAD_OPTIONS (JSON) -- overrides what the preload sees (sidecar/rule 6).
 // STASIS_TEST_PRELOAD=0              -- disables the preload State entirely.
@@ -107,17 +109,24 @@ const baseSerializer = (entryPoint, pre, g, _options) =>
 
 const entryAbs = abs(entries[0])
 const mode = process.env.STASIS_TEST_METRO_MODE || 'hook'
+const serializeTwice = process.env.STASIS_TEST_METRO_SERIALIZE_TWICE === '1'
 const stasis = new StasisMetro(pluginOptions)
 
+// Invoke a wired customSerializer once, or twice under the TWICE knob (dev-server rebuild).
+const serializeAndPrint = (serialize) => {
+  for (let i = 0; i < (serializeTwice ? 2 : 1); i++) {
+    const out = serialize(entryAbs, preModules, graph, {})
+    process.stdout.write(typeof out === 'string' ? out : out.code)
+  }
+}
+
 if (mode === 'customSerializer') {
-  const out = stasis.customSerializer(baseSerializer)(entryAbs, preModules, graph, {})
-  process.stdout.write(typeof out === 'string' ? out : out.code)
+  serializeAndPrint(stasis.customSerializer(baseSerializer))
 } else if (mode === 'withStasis') {
   // withStasis builds its OWN StasisMetro(pluginOptions) (which reuses the preload) and
   // wires it onto the config's customSerializer, wrapping the base we provide.
   const config = withStasis({ serializer: { customSerializer: baseSerializer } }, pluginOptions ?? {})
-  const out = config.serializer.customSerializer(entryAbs, preModules, graph, {})
-  process.stdout.write(typeof out === 'string' ? out : out.code)
+  serializeAndPrint(config.serializer.customSerializer)
 } else {
   // experimentalSerializerHook signature: (graph, delta) -- no preModules.
   stasis.serializerHook(graph, delta)
