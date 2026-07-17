@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { canonicalizePath } from './state-util.js'
-import { extSetsEqual, parseResourcesOption } from './util.js'
+import { extSetsEqual, isBrotliQuality, parseBrotliQuality, parseResourcesOption } from './util.js'
 
 const VALID_SCOPE = new Set(['node_modules', 'full'])
 const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])
@@ -29,17 +29,6 @@ const envBool = (name, value) => {
 // empties so '' and ' png , svg ' normalize predictably (parseResourcesOption then
 // validates each entry). An empty/unset env var means "no allowlist".
 const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
-
-// Strict integer env parsing for EXODUS_STASIS_BROTLI_QUALITY: `${n}` must round-trip
-// back to the input, so Number()-coercible forms ('5.0', '05', whitespace -> 0, ...)
-// throw instead of silently picking an unintended quality.
-const envBrotliQuality = (name, value) => {
-  const n = Number(value)
-  if (`${n}` !== value || !Number.isInteger(n) || n < 0 || n > 11) {
-    throw new RangeError(`${name} must be an integer 0..11 (got '${value}')`)
-  }
-  return n
-}
 
 const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources', 'childProcess']
 
@@ -148,7 +137,7 @@ export class Config {
       }
       if (this.#env.fs !== undefined && fs !== undefined) assert.equal(this.#env.fs, fs)
       if (this.#env.brotliQuality !== undefined && brotliQuality !== undefined) {
-        assert.equal(envBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality), brotliQuality)
+        assert.equal(parseBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality), brotliQuality)
       }
       // Compare parsed sets, not the raw strings: ['png','svg'] and 'svg,png' are the
       // same allowlist. An empty/unset env var is "no env opinion" (handled by `||
@@ -175,7 +164,7 @@ export class Config {
     this.#fs = this.#env.fs || fs || undefined
     // env wins over the option; no `||` chaining -- 0 is a valid quality and falsy.
     this.#brotliQuality = this.#env.brotliQuality !== undefined
-      ? envBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality)
+      ? parseBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality)
       : brotliQuality
     // env wins over the option (it's the process-wide signal); parseResourcesOption
     // normalizes both to a Set of lowercase extensions/filenames, or empty when neither set.
@@ -197,10 +186,8 @@ export class Config {
     assert.equal(typeof this.#childProcess, 'boolean', 'childProcess must be a boolean')
     // A write-side knob; like bundleFile, inert-but-harmless under read-only modes
     // (the same stasis.config.json serves capture and load runs).
-    if (this.#brotliQuality !== undefined) {
-      if (!Number.isInteger(this.#brotliQuality) || this.#brotliQuality < 0 || this.#brotliQuality > 11) {
-        throw new RangeError(`brotliQuality must be an integer 0..11 (got ${JSON.stringify(this.#brotliQuality)})`)
-      }
+    if (this.#brotliQuality !== undefined && !isBrotliQuality(this.#brotliQuality)) {
+      throw new RangeError(`brotliQuality must be an integer 0..11 (got ${JSON.stringify(this.#brotliQuality)})`)
     }
     if (this.#fs !== undefined) {
       assert.ok(VALID_FS.has(this.#fs), `Invalid fs: ${this.#fs}`)
@@ -310,7 +297,7 @@ export class Config {
       if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess))
       if (this.#env.fs !== undefined) assert.equal(this.#fs, this.#env.fs)
       if (this.#env.brotliQuality !== undefined) {
-        assert.equal(this.#brotliQuality, envBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality))
+        assert.equal(this.#brotliQuality, parseBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality))
       }
       if (this.#env.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('env', envList(this.#env.resources))),

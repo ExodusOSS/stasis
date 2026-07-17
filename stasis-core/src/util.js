@@ -87,6 +87,20 @@ export function parseResourcesOption(label, resources) {
   return out
 }
 
+export const isBrotliQuality = (n) => Number.isInteger(n) && n >= 0 && n <= 11
+
+// Parse an EXODUS_STASIS_BROTLI_QUALITY / --brotli-quality string into a brotli quality
+// (integer 0..11). `${n}` must round-trip back to the input, so Number()-coercible
+// non-canonical forms ('5.0', '05', ' 5 ', whitespace -> 0) throw instead of silently
+// selecting an unintended quality. The single parser for the env var and both CLIs.
+export function parseBrotliQuality(name, value) {
+  const n = Number(value)
+  if (`${n}` !== value || !isBrotliQuality(n)) {
+    throw new RangeError(`${name} must be an integer 0..11 (got '${value}')`)
+  }
+  return n
+}
+
 // Classifies a file against the code set + a parsed resources allowlist. Returns 'code'
 // (track with its loader format), 'resource' (track with a 'resource'/'resource:base64'
 // format -- the encoding is chosen from content), or 'unknown' (caller must reject). A

@@ -8,6 +8,7 @@ import { basename, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
+import { parseBrotliQuality } from '../src/util.js'
 import pkg from '../package.json' with { type: 'json' }
 
 const argv = [...process.argv]
@@ -90,12 +91,13 @@ if (command === '-v' || command === '--version') {
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
   // --brotli-quality: bundle compression quality (0..11; unset = brotli's default 11).
-  // `${n}` must round-trip so coercible forms ('5.0', '05', whitespace -> 0) are rejected.
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
-    const n = Number(values['brotli-quality'])
-    if (`${n}` !== values['brotli-quality'] || !Number.isInteger(n) || n < 0 || n > 11) usage(`Error: --brotli-quality must be an integer 0..11 (got '${values['brotli-quality']}')`)
-    brotliQuality = n
+    try {
+      brotliQuality = parseBrotliQuality('--brotli-quality', values['brotli-quality'])
+    } catch (cause) {
+      usage(`Error: ${cause.message}`)
+    }
   }
   // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
   // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
