@@ -119,7 +119,13 @@ export class Lockfile {
         // tampered or forward-incompatible lockfile fails closed at the schema
         // boundary, with a message that names the offending value.
         assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
-        formats.set(file, format)
+        // The project root's `directory` listing is keyed '.' -- lockfiles written
+        // before that normalization keyed it '' (see moduleFileKey), which never
+        // matches the '.' the hash absorb (join('.', '')) and lookups use. Normalize
+        // on parse; both keys appearing is a duplicate under the alias -- fail closed.
+        const key = file === '' ? '.' : file
+        assert(!formats.has(key), `duplicate format key '${key}'`)
+        formats.set(key, format)
       }
     }
 

@@ -370,8 +370,34 @@ test('run --fs captures a readdirSync of a bucket root without discarding the ru
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'root:true\n')
   t.assert.ok(existsSync(bundlePath), 'bundle must be written (not silently discarded)')
-  // The project-root listing is keyed at '' (the workspace bucket root).
-  t.assert.equal(decode(bundlePath).formats[''], 'directory')
+  // The project-root listing is keyed at '.' (the workspace bucket root) -- the same
+  // key the lockfile hash absorb derives on load, so the listing serves again.
+  t.assert.equal(decode(bundlePath).formats['.'], 'directory')
+}))
+
+test('run --fs=async round-trips a readdir of the project root through bundle=load', withTmp((t, tmp) => {
+  // Regression (the reported case): the project-root listing was captured under the
+  // key '' -- present in the lockfile, but on load the hash absorb re-keys it as
+  // join('.', '') === '.', so the 'directory' entry under '' failed its integrity
+  // lookup and the load run crashed serving the readdir. Both sides now key at '.'.
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readdir } from 'node:fs/promises'",
+    'const names = await readdir(process.cwd())',
+    'console.log(`root:${names.includes("package.json")}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'root:true\n')
+  t.assert.equal(decode(bundlePath).formats['.'], 'directory')
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.equal(lock.formats['.'], 'directory')
+  t.assert.match(lock.sources['.'].files[''], /^sha512-/) // hashed at rel '' inside the '.' bucket
+
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'root:true\n')
 }))
 
 test('run --fs handles a type-less .js that is both imported and readFileSync-read', withTmp((t, tmp) => {
