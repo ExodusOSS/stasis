@@ -1,6 +1,6 @@
 {
   "name": "@exodus/stasis-core",
-  "version": "1.0.0-alpha.3",
+  "version": "1.0.0-beta.1",
   "description": "Zero-dependency stasis runtime",
   "type": "module",
   "exports": {
