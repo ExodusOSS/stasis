@@ -80,11 +80,14 @@ export function lockfileFromBundle(bundle) {
 // disk: write every bundled source to `output` (default: cwd), preserving its
 // project-relative path, and drop a matching `stasis.lock.json` alongside them.
 // The lockfile is derived from the bundle's own contents, so the extracted tree
-// validates against it out of the box (e.g. `stasis prune`). For legacy v0
-// bundles only the sources are extracted -- see the in-body comment.
+// validates against it out of the box (e.g. `stasis prune`). When the bundle
+// attests no root package.json, a minimal one is synthesized from the workspace
+// bucket's identity so the tree is usable as a stasis root (see the in-body
+// comment). For legacy v0 bundles only the sources are extracted -- see the
+// in-body comment.
 //
 // Returns `{ dir, files }` where `files` is the number of sources written
-// (the lockfile is not counted).
+// (the lockfile and a synthesized package.json are not counted).
 export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {}) {
   if (!bundleFile) throw new Error('extract: a bundle file is required')
   const bundleAbs = resolve(cwd, bundleFile)
@@ -185,7 +188,29 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
   mkdirSync(outDir, { recursive: true }) // for an empty bundle, where no write created it
   if (withLockfile) writeFileSync(lockAbs, lockText)
 
+  // A State constructed in the extracted tree (`stasis run --bundle=load` there -- the
+  // no-source-tree Metro flow) must root itself here, and State's root discovery REFUSES
+  // a directory holding a stasis artifact (the derived stasis.lock.json just written)
+  // with no package.json. The bundle carries the root manifest only when it was attested
+  // (loaded as a module, or captured as an --fs read); when it wasn't, synthesize a
+  // MINIMAL one from the workspace bucket's attested identity -- the same basis
+  // `stasis prune` rewrites manifests from (the artifact is the attested source of
+  // package identity). Written only when absent AFTER the planned writes: an attested
+  // package.json has already landed by now, and extracting into an existing project
+  // keeps its manifest (existsSync also covers a pathological package.json directory).
+  const pkgAbs = join(outDir, 'package.json')
+  let syntheticPkg = false
+  if (withLockfile && !existsSync(pkgAbs)) {
+    const workspace = bundle.modules.get('.')
+    const identity = { name: workspace?.name ?? 'stasis-extracted', version: workspace?.version ?? '0.0.0' }
+    writeFileSync(pkgAbs, `${JSON.stringify(identity, null, 2)}\n`)
+    syntheticPkg = true
+  }
+
   console.warn(`[stasis] Extracted ${writes.length} file(s)${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
+  if (syntheticPkg) {
+    console.warn('[stasis] Bundle carries no root package.json; wrote a minimal one (identity from the workspace bucket) so the extracted tree roots correctly')
+  }
   if (!withLockfile) {
     console.warn(`[stasis] Warning: legacy v0 bundle records no package name/version, so ${FILE_LOCK} can not be restored and was not written`)
   }

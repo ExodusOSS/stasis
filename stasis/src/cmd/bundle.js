@@ -11,7 +11,7 @@ import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { assertRealPathWithinBase, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { EMPTY_MODULE_PATH, assertRealPathWithinBase, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -721,10 +721,10 @@ const SOURCE_EXTS = ['js', 'json', 'ts']
 // react-native/browser conditions and platform suffixes, so the user supplies neither
 // --mainFields nor --conditions alongside it).
 const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
-// Synthetic, project-relative path for the empty module a browser/react-native
-// `false` redirect resolves to. Carried in the bundle as a real (empty) CJS file
-// so the edge points at attestable bytes rather than a sentinel.
-const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
+// The empty module a browser/react-native `false` redirect resolves to is carried in the
+// bundle as a real (empty) CJS file at the reserved EMPTY_MODULE_PATH (imported from
+// stasis-core/util -- shared with readers that translate the convention back, e.g. the
+// Metro resolver plugin), so the edge points at attestable bytes rather than a sentinel.
 
 // Build a JS/TS Bundle (and companion Lockfile) through the legacy-field resolver
 // (src/resolve-fields.js) rather than Node's resolver -- the `--mainFields` and

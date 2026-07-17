@@ -11,6 +11,15 @@ const { realpathSync } = fs
 
 const sep = '/'
 
+// Synthetic, project-relative path for the empty module a browser/react-native `false`
+// redirect resolves to in a `stasis bundle --mainFields/--metro` artifact. The writer
+// (stasis/src/cmd/bundle.js) carries it as a real (empty) CJS file so such an edge points
+// at attestable bytes rather than a sentinel; readers that must translate the convention
+// back into their consumer's own "empty module" notion (the Metro resolver plugin's
+// `{ type: 'empty' }`) compare against this. One constant, shared, so writer and readers
+// can never drift.
+export const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
+
 // The full, finite universe of `format` strings stasis knows. Lockfile and bundle
 // parsers reject any value outside this set so a tampered or forward-incompatible
 // artifact fails closed at the schema boundary, not at a later string compare.

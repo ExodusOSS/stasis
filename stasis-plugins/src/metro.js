@@ -80,27 +80,31 @@ function metroDefaultSerializer() {
 //   can see every module and resolution edge (mirrors webpack's afterResolve and
 //   esbuild's onResolve/onLoad, which likewise run in the bundler's main process).
 //
-// THIS PLUGIN IS THE CAPTURE HALF -- LOAD LIVES IN A SEPARATE TRANSFORMER:
+// THIS PLUGIN IS THE CAPTURE HALF -- LOAD LIVES IN SEPARATE COMPANIONS:
 //   The other plugins serve bundle bytes back into the build because their bundler
 //   reads + transforms files in the same process the bundle lives in (webpack's
 //   inputFileSystem wrapper, esbuild's onLoad). Metro reads + transforms in workers,
 //   before serialization, so the serializer can't inject bytes into the transform.
-//   Load is instead handled per-worker by the companion `./metro-transformer.js`
-//   (wired as Metro's top-level `transformerPath`): unlike capture, load only ever
-//   READS the immutable bundle and every worker reads the same bytes, so there is no
-//   cross-worker state to merge. Under bundle=load this serializer is therefore a
-//   transparent PASS-THROUGH (captures nothing, writes nothing, delegates to the
-//   base serializer), mirroring the transformer, which passes through in every
-//   non-load mode. Wire BOTH halves permanently; the mode picks the active one.
-//   That matters because metro.config.js is itself attested at capture, so a load
-//   run must execute it unedited. Capture modes (lock/bundle add|replace|frozen,
-//   and lock=none/ignore) all capture here.
+//   Load is instead handled by two companions: `./metro-transformer.js` serves BYTES
+//   per-worker (wired as Metro's top-level `transformerPath`) and `./metro-resolver.js`
+//   serves RESOLUTION in the main process (wired as `resolver.resolveRequest`,
+//   replaying the edges captured here) -- unlike capture, load only ever READS the
+//   immutable bundle, so neither needs cross-worker state. Under bundle=load this
+//   serializer is therefore a transparent PASS-THROUGH (captures nothing, writes
+//   nothing, delegates to the base serializer), mirroring the companions, which pass
+//   through in every non-load mode. Wire ALL pieces permanently; the mode picks the
+//   active ones. That matters because metro.config.js is itself attested at capture,
+//   so a load run must execute it unedited. Capture modes (lock/bundle
+//   add|replace|frozen, and lock=none/ignore) all capture here.
 //
-// USAGE (metro.config.js) -- prefer withStasis; wire the load half permanently alongside it:
+// USAGE (metro.config.js) -- prefer withStasis; wire the load pieces permanently alongside it:
 //   const { withStasis } = require('@exodus/stasis/metro')
+//   const { resolveRequest } = require('@exodus/stasis/metro-resolver')
+//   const base = require('./metro.config.base')
 //   module.exports = withStasis({
-//     ...require('./metro.config.base'),
-//     transformerPath: require.resolve('@exodus/stasis/metro-transformer'),  // the load half
+//     ...base,
+//     transformerPath: require.resolve('@exodus/stasis/metro-transformer'),  // load: bytes
+//     resolver: { ...base.resolver, resolveRequest },                        // load: resolution
 //   }, { /* scope, lock, ... */ })
 //
 //   Then CAPTURE with child-process forwarding ON -- Metro transforms in worker processes, so

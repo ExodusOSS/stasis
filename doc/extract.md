@@ -28,6 +28,19 @@ lockfile out of the box — `stasis prune` works directly against the extracted
 `node_modules`; a `stasis run --lock=frozen` additionally needs the project's
 `package.json` files, which are only present if the bundle recorded them.
 
+When the bundle attests no root `package.json` (common for bundler-plugin
+captures — Metro/webpack read manifests through their own `fs`, so a manifest
+is attested only when it was `require()`d or captured as an `--fs` read), a
+minimal `{ name, version }` one is synthesized from the workspace bucket's
+attested identity — the same basis `stasis prune` rewrites manifests from.
+Without it the extracted tree could not serve as a stasis root: State's root
+discovery refuses a directory holding a stasis artifact (the derived
+`stasis.lock.json`) with no `package.json`, which would block the
+no-source-tree flow (`stasis extract` + `stasis run --bundle=load` in the
+extracted tree). A `package.json` already present — attested in the bundle,
+or pre-existing in the output directory — is never overwritten by the
+synthesized one.
+
 Legacy `version: 0` bundles record no package `name`/`version`, so no lockfile
 can be restored from them. Their sources are still extracted; the lockfile is
 skipped with a warning.

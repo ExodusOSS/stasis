@@ -7,12 +7,14 @@
     "./webpack": "./src/webpack.js",
     "./esbuild": "./src/esbuild.js",
     "./metro": "./src/metro.js",
-    "./metro-transformer": "./src/metro-transformer.js"
+    "./metro-transformer": "./src/metro-transformer.js",
+    "./metro-resolver": "./src/metro-resolver.js"
   },
   "files": [
     "src/esbuild.js",
     "src/metro.js",
     "src/metro-transformer.js",
+    "src/metro-resolver.js",
     "src/plugins.js",
     "src/webpack.js"
   ],
