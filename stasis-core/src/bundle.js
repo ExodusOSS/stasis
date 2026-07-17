@@ -113,7 +113,13 @@ export class Bundle {
     for (const [file, format] of Object.entries(json.formats)) {
       assert(!posixPathEscapes(file))
       assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
-      formats.set(file, format)
+      // The project root's `directory` listing is keyed '.' -- bundles written before
+      // that normalization keyed it '' (see moduleFileKey), which no lookup ever hits
+      // again at load. Normalize on parse so those artifacts keep serving; the alias
+      // makes '' and '.' the SAME key, so both appearing is a duplicate -- fail closed.
+      const key = file === '' ? '.' : file
+      assert(!formats.has(key), `duplicate format key '${key}'`)
+      formats.set(key, format)
     }
 
     const modules = new Map()

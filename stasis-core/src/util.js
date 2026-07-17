@@ -116,12 +116,14 @@ export function extSetsEqual(a, b) {
 // the bucketing State/Bundle apply. The `rel === ''` branch is reached only by a
 // `directory` capture whose path IS a module root (e.g. `fs.readdirSync` of a
 // package dir, or of the project root): the listing is keyed at the bucket itself,
-// so the flat key is the dir (or '' for the workspace root) — never `${dir}/`,
-// which a trailing-slash join would wrongly produce and break the round-trip. For
-// every ordinary file `rel` is a real basename, so this matches the historical
+// so the flat key is the dir — never `${dir}/`, which a trailing-slash join would
+// wrongly produce and break the round-trip. The workspace root keys at '.' (the
+// '.' bucket's own dir), NOT '': join('.', '') === '.' is what lockfile re-absorb
+// derives, so a '' key would be written but never found again on load. For every
+// ordinary file `rel` is a real basename, so this matches the historical
 // `dir === '.' ? rel : `${dir}/${rel}`` exactly.
 export function moduleFileKey(dir, rel) {
-  if (rel === '') return dir === '.' ? '' : dir
+  if (rel === '') return dir
   return dir === '.' ? rel : `${dir}/${rel}`
 }
 

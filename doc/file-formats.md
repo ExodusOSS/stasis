@@ -372,7 +372,9 @@ Captures live in the usual `sources`/`modules` buckets, tagged in `formats`:
   a `--bundle=load` run it receives the sorted listing, so code that relies on
   `readdirSync` ordering should sort explicitly. `readdirSync` calls with options
   (`encoding`, `withFileTypes`, `recursive`) pass through untouched, so such a call
-  is not captured and is not served from the bundle on load.
+  is not captured and is not served from the bundle on load. A listing captured
+  *at* a package bucket root sits at the bucket's own key: rel `''` inside its
+  `files`, format keyed at the bucket dir — `.` for the project root itself.
 - `fs.lstatSync(path)` and `fs.statSync(path)` are not themselves recorded; on a load
   run, for a path the bundle already carries — a recorded file, a `directory`, or an
   ancestor directory implied by a recorded file (a bundled `node_modules/dep/index.js`

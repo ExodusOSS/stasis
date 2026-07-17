@@ -4,10 +4,11 @@
 // into a write-mode State, persisting, and reloading a load-mode State from the
 // same files -- the same round-trip the CLI does, but granular and deterministic.
 import { test } from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
 import { moduleFileKey } from '@exodus/stasis-core/util'
@@ -38,7 +39,9 @@ test('moduleFileKey joins like before for real files, keys a module-root listing
   // rel === '' is only produced by a directory capture whose path is the bucket
   // itself -- never `${dir}/`, which would break the flat-key round-trip.
   t.assert.equal(moduleFileKey('node_modules/x', ''), 'node_modules/x')
-  t.assert.equal(moduleFileKey('.', ''), '')
+  // The workspace root keys at '.' (not ''): join('.', '') === '.' is what the
+  // lockfile hash absorb derives on load, so '' would be written but never found.
+  t.assert.equal(moduleFileKey('.', ''), '.')
 })
 
 test('addFsFile classifies by extension against the resources allowlist', withProject((t, dir) => {
@@ -176,10 +179,65 @@ test('addFsDir resolves the bucket for a directory captured AT a package/project
   // walks up to the owning package.json and moduleFileKey keys the listing at the bucket.
   const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
   t.assert.doesNotThrow(() => state.addFsDir(pathToFileURL(dir).toString(), ['package.json', 'assets']))
-  // The root directory keys its listing at '' (moduleFileKey of the '.' bucket root).
-  t.assert.equal(state.formats.get(''), 'directory')
-  t.assert.equal(state.resources.get(''), '["assets","package.json"]')
+  // The root directory keys its listing at '.' (the '.' bucket root) -- the same key
+  // the lockfile hash absorb derives on load (join('.', '') === '.'), never ''.
+  t.assert.equal(state.formats.get('.'), 'directory')
+  t.assert.equal(state.resources.get('.'), '["assets","package.json"]')
+  t.assert.match(state.hashes.get('.'), /^sha512-/)
   t.assert.deepEqual(state.getFsDir(pathToFileURL(dir).toString()), ['assets', 'package.json'])
+  t.assert.equal(state.getFsStat(pathToFileURL(dir).toString()), 'directory')
+}))
+
+test('a project-root readdir capture round-trips through a written lockfile + bundle', withProject((t, dir) => {
+  // Regression (the reported case): the root listing was recorded under ''
+  // (relative(root, root)), while a loading State re-derived its hash key from the
+  // lockfile as join('.', '') === '.'. So at load the format said 'directory' under
+  // '' but the integrity lookup found nothing, and serving the root readdir crashed.
+  // Both sides now key the project root at '.'.
+  const bundleFile = join(dir, 'snapshot.br')
+  const rootURL = pathToFileURL(dir).toString()
+  const cap = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile })
+  cap.addFsDir(rootURL, ['package.json', 'assets'])
+  cap.write()
+
+  // On disk: the format keys at '.', the hash lives at rel '' inside the '.' bucket.
+  const lock = JSON.parse(readFileSync(join(dir, 'stasis.lock.json'), 'utf8'))
+  t.assert.equal(lock.formats['.'], 'directory')
+  t.assert.match(lock.sources['.'].files[''], /^sha512-/)
+
+  // Reload frozen so getFsDir's getFile re-verifies the integrity under the SAME key.
+  const load = new State(dir, { scope: 'full', lock: 'frozen', bundle: 'load', bundleFile })
+  t.assert.equal(load.hashes.get('.'), lock.sources['.'].files[''])
+  t.assert.equal(load.formats.get('.'), 'directory')
+  t.assert.deepEqual(load.getFsDir(rootURL), ['assets', 'package.json'])
+  t.assert.equal(load.getFsStat(rootURL), 'directory')
+  t.assert.equal(load.getFsFile(rootURL), undefined, 'a readFileSync of the root must not serve the listing')
+}))
+
+test('legacy artifacts keying the root listing at \'\' are normalized to "." on load', withProject((t, dir) => {
+  // Artifacts written BEFORE the '.' normalization carry the root listing's format
+  // under '' (the files entry itself -- rel '' in the '.' bucket -- is unchanged).
+  // Lockfile.parse / Bundle.parse normalize the legacy key so those keep serving.
+  const bundleFile = join(dir, 'snapshot.br')
+  const rootURL = pathToFileURL(dir).toString()
+  const cap = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile })
+  cap.addFsDir(rootURL, ['package.json', 'assets'])
+  cap.write()
+
+  // Rewrite both artifacts to the pre-normalization shape: format keyed at ''.
+  const relabel = ({ '.': root, ...rest }) => ({ '': root, ...rest })
+  const lockPath = join(dir, 'stasis.lock.json')
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
+  lock.formats = relabel(lock.formats)
+  writeFileSync(lockPath, JSON.stringify(lock))
+  const bundle = JSON.parse(brotliDecompressSync(readFileSync(bundleFile)).toString('utf8'))
+  bundle.formats = relabel(bundle.formats)
+  writeFileSync(bundleFile, brotliCompressSync(JSON.stringify(bundle)))
+
+  const load = new State(dir, { scope: 'full', lock: 'frozen', bundle: 'load', bundleFile })
+  t.assert.equal(load.formats.get('.'), 'directory') // normalized on parse
+  t.assert.deepEqual(load.getFsDir(rootURL), ['assets', 'package.json'])
+  t.assert.equal(load.getFsStat(rootURL), 'directory')
 }))
 
 test('addFsFile records a type-less .js without a format so the loader stays authoritative', withProject((t, dir) => {

@@ -939,7 +939,12 @@ export class State {
     assert.ok(absolute)
     const file = relative(this.root, absolute)
     assert.ok(!file.startsWith('..'))
-    return file
+    // The project root itself is keyed '.' -- never '' (path.relative's raw answer).
+    // Reached only by a `--fs` directory capture/lookup of the root; '.' is what
+    // join('.', rel === '') re-derives when the lockfile is absorbed at load, so
+    // recording/looking up under '' would desync write from read (the root listing
+    // was written under '' yet hashed under '.', failing getFile's integrity check).
+    return file === '' ? '.' : file
   }
 
   // A file reached under node_modules whose REAL path lies outside any
@@ -1407,10 +1412,10 @@ export class State {
 
   // Every ancestor directory implied by the bundle's recorded file/resource/directory
   // keys. A recorded `node_modules/dep/index.js` implies `node_modules/dep` and
-  // `node_modules` (and the root, ''). Built once; load-mode immutable (see field).
+  // `node_modules` (and the root, '.'). Built once; load-mode immutable (see field).
   #impliedDirs() {
     if (this.#impliedDirIndex) return this.#impliedDirIndex
-    const dirs = new Set([''])
+    const dirs = new Set(['.'])
     const add = (key) => {
       let prefix = ''
       const parts = key.split('/')
