@@ -40,6 +40,31 @@ function readPackageJSON(pkgAbsolute) {
 // be unsound.
 const VERSION = corePackage.version
 
+// Set `format` for `file` in a formats map, applying the weak-stat-record priority
+// rule shared by the LIVE map writers (addFsStat, addImport -- addFile/addFsDir drop
+// a stale stat record in place before their own set) and the lockfile merge
+// (#mergedFormats): a payload-free 'stat:*' record (addFsStat) YIELDS to a real
+// format for the same file and never displaces one. Both directions arise
+// legitimately in one capture: an import may reveal the real format of a path that
+// was first only stat'd, and -- the reverse -- a stat may land on a path addImport
+// already format-attested at RESOLVE time with no byte record for addFsStat's
+// content skip to key off (stasis-core's own preload-cached modules are exactly
+// that shape: the resolve hook records 'module', the load hook never fires, and a
+// bundler's enhanced-resolve then stats the file). Everything else keeps noupsert's
+// conflict-is-fatal stance: two divergent REAL formats, or a stat kind flip
+// (stat:file vs stat:directory).
+function upsertFormat(map, file, format) {
+  const existing = map.get(file)
+  if (existing !== undefined && existing !== format) {
+    if (isStatFormat(existing) && !isStatFormat(format)) {
+      map.set(file, format)
+      return
+    }
+    if (isStatFormat(format) && !isStatFormat(existing)) return
+  }
+  noupsert(map, file, format)
+}
+
 // TODO: stricter format validation
 
 // Process-wide registry of every live State, kept on globalThis (not a module-local
@@ -1419,19 +1444,27 @@ export class State {
   // listing, whether captured this run or seeded from the lockfile/bundle): that
   // record already answers getFsStat, and a weak stat record must never sit beside
   // it (check-then-read -- lstatSync before readFileSync -- is the common pattern).
-  // The REVERSE order (stat first, content later) is handled by addFile/addFsDir
-  // dropping the stale stat record in place and by #mergedFormats' upgrade rule. A
-  // kind flip WITHIN the surviving stat records (stat'd as a file, later stat'd as
-  // a directory) conflicts at the noupsert and taints the capture, exactly like a
-  // mid-run byte conflict.
+  // A path with a REAL format but no content record -- addImport attests the format
+  // of a resolve-hook target whose load hook never fires (a preload-cached module) --
+  // is likewise left alone: upsertFormat drops the stat record, the real format
+  // wins (a plain noupsert here aborted real captures: enhanced-resolve stat'ing
+  // stasis-core's own src/util.js under --fs + a bundler plugin). The REVERSE order
+  // (stat first, real format later) is handled by addFile/addFsDir dropping the
+  // stale stat record in place, addImport's upsertFormat, and #mergedFormats'
+  // upgrade rule. A kind flip WITHIN the surviving stat records (stat'd as a file,
+  // later stat'd as a directory) still conflicts and taints the capture, exactly
+  // like a mid-run byte conflict.
   addFsStat(url, kind) {
     assert.ok(kind === 'file' || kind === 'directory', `addFsStat: unsupported kind '${kind}'`)
     const file = this.#canonicalFile(url)
     if (this.hashes.has(file) || this.sources.has(file) || this.resources.has(file)) return
-    noupsert(this.formats, file, `stat:${kind}`)
+    upsertFormat(this.formats, file, `stat:${kind}`)
     // Forwarded to the root via shardSnapshot's #observed-filtered formats, like
-    // every other capture; only a child's shardSnapshot reads it, skip otherwise.
-    if (this.config.childProcess) this.#observed.add(file)
+    // every other capture; only a child's shardSnapshot reads it, skip otherwise --
+    // and only when a stat record actually landed (upsertFormat yields to an
+    // existing real format, and forwarding THAT would ship an entry mergeShard's
+    // stat replay ignores).
+    if (this.config.childProcess && isStatFormat(this.formats.get(file))) this.#observed.add(file)
   }
 
   // Serve an `fs.readFileSync` from the bundle (`stasis run --fs`, bundle=load).
@@ -1697,7 +1730,11 @@ export class State {
     if (!imports.has(parent)) imports.set(parent, new Map())
     const specifiers = imports.get(parent)
     noupsert(specifiers, specifier, file)
-    if (format) noupsert(this.formats, file, format)
+    // upsertFormat (not a bare noupsert): the resolve hook may attest the format of
+    // a target the program already lstat/stat'd under --fs (a payload-free
+    // 'stat:file' record) -- the real format replaces the weak stat record instead
+    // of aborting the capture as a conflict.
+    if (format) upsertFormat(this.formats, file, format)
   }
 
   getImport(parentURL, specifier, { conditions = '*', importAttributes } = {}) {
@@ -1821,22 +1858,15 @@ export class State {
   // WEAK by design -- real content observed for the same file (a lock=add re-run
   // READING a path a prior capture only stat'd, or a sidecar bundling a file this
   // run also stat'd) UPGRADES the record instead of conflicting, and a stat record
-  // never displaces a real format. Two REAL formats -- and two divergent stat
-  // kinds (stat:file vs stat:directory) -- stay fatal.
+  // never displaces a real format (upsertFormat, the same rule the live-map
+  // writers apply). Two REAL formats -- and two divergent stat kinds (stat:file
+  // vs stat:directory) -- stay fatal.
   #mergedFormats() {
     const merged = new Map()
-    const mergeFormat = (file, format) => {
-      const existing = merged.get(file)
-      if (existing !== undefined && existing !== format) {
-        if (isStatFormat(existing) && !isStatFormat(format)) { merged.set(file, format); return }
-        if (isStatFormat(format) && !isStatFormat(existing)) return
-      }
-      noupsert(merged, file, format)
-    }
     if (this.#lockFormats) for (const [file, format] of this.#lockFormats) merged.set(file, format)
-    for (const [file, format] of this.formats) mergeFormat(file, format)
+    for (const [file, format] of this.formats) upsertFormat(merged, file, format)
     for (const sidecar of this.#sidecars) {
-      for (const [file, format] of sidecar.formats) mergeFormat(file, format)
+      for (const [file, format] of sidecar.formats) upsertFormat(merged, file, format)
     }
     return merged
   }
