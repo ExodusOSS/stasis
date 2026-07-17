@@ -1305,6 +1305,36 @@ test('run --fs --child-process forwards a child-only stat record through the sha
   }
 })
 
+test('run --fs: a module stat\'d before it is ever imported upgrades to the real format (no conflict)', withTmp((t, tmp) => {
+  // The stat lands first ('stat:file'); the dynamic import's resolve hook then attests
+  // the REAL format via addImport -- for a target whose format arrives at RESOLVE time,
+  // not through addFile. The real format must replace the weak stat record; a bare
+  // noupsert used to abort the whole capture as a Conflict (the crash seen with
+  // enhanced-resolve stat'ing stasis-core's own resolve-attested src/util.js).
+  writeFileSync(join(tmp, 'src', 'dep.js'), 'export const k = "v"\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { lstatSync } from 'node:fs'",
+    'const dep = new URL("./dep.js", import.meta.url)',
+    'console.log(`stat:${lstatSync(dep).isFile()}`)', // stat BEFORE dep.js is resolved/loaded
+    'const { k } = await import("./dep.js")', // resolve hook now records format "module"
+    'console.log(`k:${k}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'stat:true\nk:v\n')
+  t.assert.doesNotMatch(save.stderr, /capture aborted|Conflict/, 'the real format must upgrade the stat record, not conflict')
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/dep.js'], 'module', 'the import upgraded the stat record to the real format')
+  t.assert.equal(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).formats['src/dep.js'], 'module')
+
+  rmSync(join(tmp, 'src', 'dep.js')) // gone; both the stat and the import serve from the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'stat:true\nk:v\n')
+}))
+
 test('run --fs only captures the single-argument lstatSync/statSync (options pass through)', withTmp((t, tmp) => {
   // Same scope rule as readdirSync: an options form (bigint, throwIfNoEntry) is out of
   // scope -- passed through untouched and NOT recorded.

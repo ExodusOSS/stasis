@@ -109,6 +109,45 @@ test('getImport throws for unknown specifier', (t) => {
   t.assert.throws(() => state.getImport(parentURL, './does-not-exist.js'))
 })
 
+// --- payload-free stat records vs real formats (the weak-record priority rule) --------
+// addImport attests a resolve-hook target's format WITHOUT a byte record when the load
+// hook never fires for it (a preload-cached module -- stasis-core's own files, under a
+// bundler whose enhanced-resolve then stats them), so addFsStat cannot key its skip off
+// hashes/sources alone. The two must never conflict in EITHER order: the real format
+// always wins and the weak stat record always yields. Regression: a bare noupsert here
+// aborted whole captures -- `Conflict for "node_modules/@exodus/stasis-core/src/util.js"`,
+// 'module' vs 'stat:file'. Fresh State instances so the shared `state` above stays clean.
+
+test('addFsStat yields to a real format addImport recorded for a byte-less target', (t) => {
+  const s = new State(root)
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  const childURL = pathToFileURL(fileAbs).toString()
+  s.addImport(parentURL, './foo.js', childURL, { format: 'module' }) // resolve-time format, no addFile
+  t.assert.ok(!s.hashes.has('src/foo.js') && !s.sources.has('src/foo.js'), 'precondition: no byte record')
+  s.addFsStat(childURL, 'file') // must neither throw nor displace 'module'
+  t.assert.equal(s.formats.get('src/foo.js'), 'module')
+})
+
+test('addImport upgrades a stat record recorded before the target was ever resolved', (t) => {
+  const s = new State(root)
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  const childURL = pathToFileURL(fileAbs).toString()
+  s.addFsStat(childURL, 'file') // stat first (check-before-import)
+  t.assert.equal(s.formats.get('src/foo.js'), 'stat:file')
+  s.addImport(parentURL, './foo.js', childURL, { format: 'module' }) // must upgrade, not conflict
+  t.assert.equal(s.formats.get('src/foo.js'), 'module')
+})
+
+test('divergent stat kinds and divergent real formats still conflict', (t) => {
+  const s = new State(root)
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  const childURL = pathToFileURL(fileAbs).toString()
+  s.addFsStat(childURL, 'file')
+  t.assert.throws(() => s.addFsStat(childURL, 'directory'), /Conflict/) // kind flip stays fatal
+  s.addImport(parentURL, './foo.js', childURL, { format: 'module' })
+  t.assert.throws(() => s.addImport(parentURL, './foo.js', childURL, { format: 'commonjs' }), /Conflict/)
+})
+
 // CJS `require(require.resolve('./foo.js'))` (e.g. webpack's loader-runner doing
 // `require(loader.path)`) hands the resolve hook the already-resolved ABSOLUTE
 // path as the specifier. Recorded verbatim it bakes a machine-specific absolute
