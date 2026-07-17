@@ -30,11 +30,12 @@ const envBool = (name, value) => {
 // validates each entry). An empty/unset env var means "no allowlist".
 const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
 
-// Strict integer env parsing for EXODUS_STASIS_BROTLI_QUALITY: the raw string must be an
-// integer in brotli's 0..11 quality range. Anything else ('max', '5.5', ...) throws -- a
-// lenient Number() coercion would silently write bundles at an unintended quality.
+// Strict integer env parsing for EXODUS_STASIS_BROTLI_QUALITY: digits only, in brotli's
+// 0..11 quality range. Anything else ('max', '5.5', '5.0', ' 5 ', whitespace, ...) throws --
+// a bare Number() coercion would accept those (Number('   ') is 0!) and silently write
+// bundles at an unintended quality.
 const envBrotliQuality = (name, value) => {
-  const n = Number(value)
+  const n = /^\d+$/u.test(value) ? Number(value) : Number.NaN
   if (!Number.isInteger(n) || n < 0 || n > 11) {
     throw new RangeError(`${name} must be an integer 0..11 (got '${value}')`)
   }

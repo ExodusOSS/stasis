@@ -51,6 +51,15 @@ test('brotliOptions rejects an invalid env value', withEnv('max', (t) => {
   t.assert.throws(() => brotliOptions(), /EXODUS_STASIS_BROTLI_QUALITY must be an integer 0\.\.11/)
 }))
 
+// Digits-only parsing: Number()-coercible non-integer strings must throw, not be silently
+// accepted -- Number('   ') is 0, so a whitespace-only env var would otherwise flip the
+// bundle to the fastest/worst quality without anyone asking for it.
+for (const bad of ['5.0', '   ', ' 5 ', '0x5', '5e0', '+5']) {
+  test(`brotliOptions rejects Number()-coercible non-digits in env ('${bad}')`, withEnv(bad, (t) => {
+    t.assert.throws(() => brotliOptions(), /EXODUS_STASIS_BROTLI_QUALITY must be an integer 0\.\.11/)
+  }))
+}
+
 test('brotliOptions env agreeing with an explicit quality is accepted', withEnv('4', (t) => {
   t.assert.deepEqual(brotliOptions(4), { params: { [QUALITY]: 4 } })
 }))

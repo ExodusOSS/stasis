@@ -96,7 +96,8 @@ if (command === '-v' || command === '--version') {
   // child untouched, and an unconditional setEnv('') would reject that as a conflict.
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
-    const n = Number(values['brotli-quality'])
+    // Digits-only before coercion: Number() alone would accept '5.0' / ' 5 ' / whitespace ( -> 0).
+    const n = /^\d+$/u.test(values['brotli-quality']) ? Number(values['brotli-quality']) : Number.NaN
     if (!Number.isInteger(n) || n < 0 || n > 11) usage(`Error: --brotli-quality must be an integer 0..11 (got '${values['brotli-quality']}')`)
     brotliQuality = n
   }

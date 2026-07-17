@@ -891,6 +891,18 @@ test('Config brotliQuality env rejects out-of-range values', withEnv(
   }
 ))
 
+// Digits-only parsing: Number()-coercible non-integer strings must throw, not be silently
+// accepted -- Number('   ') is 0, so a whitespace-only env var would otherwise flip the
+// bundle to the fastest/worst quality without anyone asking for it.
+for (const bad of ['5.0', '   ', ' 5 ', '0x5', '5e0', '+5']) {
+  test(`Config brotliQuality env rejects Number()-coercible non-digits ('${bad}')`, withEnv(
+    { EXODUS_STASIS_BROTLI_QUALITY: bad },
+    (t) => {
+      t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_BROTLI_QUALITY must be an integer 0\.\.11/ })
+    }
+  ))
+}
+
 test('Config brotliQuality env "" is unset and keeps the default', withEnv(
   { EXODUS_STASIS_BROTLI_QUALITY: '' },
   (t) => { t.assert.equal(new Config().brotliQuality, undefined) }

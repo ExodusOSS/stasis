@@ -26,7 +26,10 @@ export function brotliOptions(quality) {
   }
   const raw = process.env.EXODUS_STASIS_BROTLI_QUALITY
   if (raw) {
-    const n = Number(raw)
+    // Digits-only before coercion, matching config.js's envBrotliQuality: a bare Number()
+    // would accept '5.0' / ' 5 ' / even whitespace-only (Number('   ') is 0) and silently
+    // pick an unintended quality. '' still means "unset" via the truthiness gate above.
+    const n = /^\d+$/u.test(raw) ? Number(raw) : Number.NaN
     assert(Number.isInteger(n) && n >= 0 && n <= 11, `EXODUS_STASIS_BROTLI_QUALITY must be an integer 0..11, got ${raw}`)
     assert(quality === undefined || quality === n,
       `brotli quality ${quality} conflicts with EXODUS_STASIS_BROTLI_QUALITY=${raw}`)
