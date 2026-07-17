@@ -19,12 +19,11 @@ import { State } from '@exodus/stasis-core/state'
 //     transformerPath: require.resolve('@exodus/stasis/metro-transformer'),  // top-level, a sibling of `transformer`
 //   }
 //   // run with EXODUS_STASIS_BUNDLE=load (+ EXODUS_STASIS_BUNDLE_FILE / LOCK / SCOPE),
-//   // OR a stasis.config.json with "bundle":"load". Outside load mode this transformer
-//   // is a transparent pass-through (see getLoadState), and under load the StasisMetro
-//   // serializer is one too -- so a single committed metro.config.js carries both
-//   // halves and the mode picks which is active. That symmetry is load-bearing:
-//   // metro.config.js is itself attested at capture, so a load/frozen run must
-//   // execute it byte-identical -- neither half can demand mode-specific edits.
+//   // OR a stasis.config.json with "bundle":"load". Outside load mode this transformer is
+//   // a transparent pass-through (see getLoadState), and under load the StasisMetro
+//   // serializer is one too -- one committed metro.config.js carries both halves, the
+//   // mode picks the active one (the config is itself attested at capture, so a load
+//   // run must execute it unedited).
 //
 //   Metro calls `transformerPath`'s `transform(config, projectRoot, filename, data,
 //   options)` in each worker with `data` = the file's on-disk bytes (a Buffer) and

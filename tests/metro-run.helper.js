@@ -25,8 +25,8 @@
 //   dep is a [specifier, targetRelativePath] pair (target null = unresolved/virtual edge).
 //   `preModules` (optional) models Metro's prepended polyfills/runtime.
 // STASIS_TEST_METRO_MODE -- 'hook' (default) | 'customSerializer' | 'withStasis'.
-// STASIS_TEST_METRO_SERIALIZE_TWICE=1 -- invoke the wired serializer a second time,
-//   modeling a dev-server (`metro start`) rebuild: capture must refuse it, load must not.
+// STASIS_TEST_METRO_SERIALIZE_TWICE=1 -- serialize twice, modeling a dev-server rebuild
+//   (capture must refuse the second invocation, load must not).
 // STASIS_TEST_PLUGIN_OPTIONS (JSON)  -- routes through the plugin's options.
 // STASIS_TEST_PRELOAD_OPTIONS (JSON) -- overrides what the preload sees (sidecar/rule 6).
 // STASIS_TEST_PRELOAD=0              -- disables the preload State entirely.
@@ -112,8 +112,7 @@ const mode = process.env.STASIS_TEST_METRO_MODE || 'hook'
 const serializeTwice = process.env.STASIS_TEST_METRO_SERIALIZE_TWICE === '1'
 const stasis = new StasisMetro(pluginOptions)
 
-// Invoke a wired customSerializer once -- or twice under the TWICE knob, modeling the
-// dev-server rebuild where Metro re-invokes the same serializer on the same instance.
+// Invoke a wired customSerializer once, or twice under the TWICE knob (dev-server rebuild).
 const serializeAndPrint = (serialize) => {
   for (let i = 0; i < (serializeTwice ? 2 : 1); i++) {
     const out = serialize(entryAbs, preModules, graph, {})

@@ -196,15 +196,13 @@ test('bundle=add writes a bundle whose sources match disk', withTmp((t, tmp) => 
 }))
 
 test('bundle=load: the serializer is a transparent pass-through (load lives in the worker transformer)', withTmp((t, tmp) => {
-  // Load is served per-worker by the companion transformer, so under bundle=load the
-  // serializer must be INERT -- not throw: metro.config.js (and the plugin it wires) is
-  // itself attested at capture, so a load run executes the exact same config unedited.
-  // Pass-through means: base output still produced, nothing captured, nothing written,
-  // and re-serialization (a dev server's per-rebuild invocation) tolerated.
+  // Load is served by the companion worker transformer, so the serializer must pass
+  // through, not throw -- metro.config.js is itself attested at capture, so a load run
+  // executes the same config, plugin included.
   cpSync(fullFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
 
-  // Capture real artifacts for the load run to absorb (add is idempotent vs the committed lockfile).
+  // Capture real artifacts for the load run to absorb.
   const cap = run('src/entry.js', {
     cwd: tmp,
     env: {
@@ -216,8 +214,7 @@ test('bundle=load: the serializer is a transparent pass-through (load lives in t
   const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
   const bundleBefore = readFileSync(bundlePath)
 
-  // Tamper a source on disk AFTER capture: a serializer that wrongly still captured under
-  // lock=frozen would trip the hash assert on it; a true pass-through never reads disk.
+  // Tamper a source AFTER capture: a serializer that still captured would trip frozen's hash assert.
   writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = () => `tampered`\n')
 
   const r = run('src/entry.js', {
@@ -229,7 +226,7 @@ test('bundle=load: the serializer is a transparent pass-through (load lives in t
     },
   })
   t.assert.equal(r.status, 0, `load-mode serialization must pass through; stderr: ${r.stderr}`)
-  // Both invocations delegated to the base serializer (dev-server rebuilds don't trip the one-shot guard).
+  // Both invocations delegated to the base serializer (dev-server rebuild shape).
   t.assert.equal(r.stdout.match(/stasis base: 2 modules/gu)?.length, 2, `stdout: ${r.stdout}`)
   // Nothing captured, nothing written.
   t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore, 'load must not touch the lockfile')
@@ -237,9 +234,8 @@ test('bundle=load: the serializer is a transparent pass-through (load lives in t
 }))
 
 test('capture refuses a second serialization (watch/dev-server rebuild)', withTmp((t, tmp) => {
-  // The one-shot guard: a dev server re-invokes the serializer per rebuild, and capture's
-  // path-keyed dedupe would silently keep attesting first-build bytes -- so the SECOND
-  // invocation must throw. (Load mode is exempt; see the pass-through test above.)
+  // Capture's path-keyed dedupe would silently keep attesting first-build bytes on a
+  // rebuild, so the second invocation must throw. (Load mode is exempt; see above.)
   cpSync(fullFixture, tmp, { recursive: true })
 
   const r = run('src/entry.js', {
