@@ -20,9 +20,10 @@ import { State } from '@exodus/stasis-core/state'
 //   }
 //   // run with EXODUS_STASIS_BUNDLE=load (+ EXODUS_STASIS_BUNDLE_FILE / LOCK / SCOPE),
 //   // OR a stasis.config.json with "bundle":"load". Outside load mode this transformer is
-//   // a transparent pass-through (see getLoadState), and under load the StasisMetro
-//   // serializer is one too -- one committed metro.config.js carries both halves, the
-//   // mode picks the active one (the config is itself attested at capture, so a load
+//   // a transparent pass-through (see getLoadState), and so are the `./metro-resolver.js`
+//   // companion (the RESOLUTION half of load -- wire it too) and, under load, the
+//   // StasisMetro serializer -- one committed metro.config.js carries every piece, the
+//   // mode picks the active ones (the config is itself attested at capture, so a load
 //   // run must execute it unedited).
 //
 //   Metro calls `transformerPath`'s `transform(config, projectRoot, filename, data,
@@ -41,13 +42,17 @@ import { State } from '@exodus/stasis-core/state'
 //     bytes through untouched (mirrors webpack/esbuild load scope handling).
 //   - KNOWN LIMITATION: this does NOT let Metro build with the sources fully absent
 //     from disk. Metro reads each file from disk in the worker (and hashes it in the
-//     main process for its transform cache) BEFORE this transformer runs, and resolves
-//     package.json via its own fs in the main process. Serving those reads from the
-//     bundle would need fs interception across the main + worker processes (stasis
-//     --mock territory), which is larger than this seam. So today's guarantee is
-//     "build the bundle's attested bytes, fail closed on disk drift," not "build from
-//     a bundle with no source tree." This mirrors the documented node_modules-crossing
-//     gap in the webpack load path.
+//     main process for its transform cache) BEFORE this transformer runs, and its file
+//     map still crawls the watched roots. RESOLUTION, though, no longer depends on
+//     Metro's disk probing for recorded edges -- the companion `./metro-resolver.js`
+//     replays the bundle's attested (parent, specifier) -> file edges, so an
+//     attested-files-only tree (which lacks the alias layouts and manifests Metro's own
+//     probing walks through) resolves exactly as captured. Serving the remaining byte
+//     reads from the bundle would need fs interception across the main + worker
+//     processes (stasis --mock territory), which is larger than this seam. So today's
+//     guarantee is "build the bundle's attested bytes, fail closed on disk drift," not
+//     "build from a bundle with no source tree." This mirrors the documented
+//     node_modules-crossing gap in the webpack load path.
 
 const require = createRequire(import.meta.url)
 

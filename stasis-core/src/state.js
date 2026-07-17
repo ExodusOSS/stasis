@@ -1840,13 +1840,23 @@ export class State {
   // sibling requires Node's module cache used to hide from the resolve hook (the
   // Module._load shim in hooks.js observes them) -- so a miss here means the bundle simply
   // doesn't carry the target (an external), and we defer to Node rather than guess.
-  resolveBundled(parentURL, specifier) {
+  //
+  // A per-platform edge (a `stasis bundle --metro` multi-platform artifact) stores a
+  // Map<platform, target> where a flat edge stores a string. Only a caller with platform
+  // context can pick a target from it, so `platform` (an option, e.g. 'ios') selects that
+  // key; the platform-less callers -- the native-require shim, getImport's bucket-scan
+  // fallback -- treat such an edge as unserved and defer, mirroring getImport's own
+  // fail-closed stance for Map targets rather than feeding a Map where a path is expected.
+  // (The Metro resolver plugin is the platform-bearing caller: Metro hands it the build's
+  // platform per resolution.) A platform the map doesn't carry likewise defers.
+  resolveBundled(parentURL, specifier, { platform } = {}) {
     let parent
     try { parent = this.#canonicalFile(parentURL) } catch { return undefined }
     const spec = this.#canonicalSpecifier(parentURL, specifier)
     const matches = new Set()
     for (const [, byParent] of this.imports) {
-      const file = byParent.get(parent)?.get(spec)
+      let file = byParent.get(parent)?.get(spec)
+      if (file instanceof Map) file = typeof platform === 'string' ? file.get(platform) : undefined
       if (file !== undefined) matches.add(file)
     }
     return matches.size === 1 ? resolve(this.root, [...matches][0]) : undefined
