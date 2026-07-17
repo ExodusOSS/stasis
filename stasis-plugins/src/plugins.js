@@ -163,6 +163,8 @@ export function resolvePluginState(label, options, cwd) {
       debug: pc.debug,
       childProcess: pc.childProcess,
       resources: [...pc.resources],
+      // carried over: sidecars skip stasis.config.json discovery, which may have set it
+      brotliQuality: pc.brotliQuality,
     })
     return { state: sidecar, isNoop: false }
   }
@@ -199,6 +201,7 @@ export function resolvePluginState(label, options, cwd) {
     debug: pc.debug,
     childProcess: pc.childProcess,
     resources: [...pc.resources],
+    brotliQuality: pc.brotliQuality, // carried over, like the Rule 6 sidecar above
   })
   return { state: sidecar, isNoop: false }
 }

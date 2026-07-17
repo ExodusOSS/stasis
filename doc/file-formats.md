@@ -29,6 +29,7 @@ directory holding the lockfile; none may start with `..`.
 | `bundle` | `"ignore"`, `"add"`, `"replace"`, `"load"`, `"frozen"` | unset | `EXODUS_STASIS_BUNDLE` |
 | `debug` | boolean | `false` | `EXODUS_STASIS_DEBUG` |
 | `fs` | `"sync"`, `"async"` | unset | `EXODUS_STASIS_FS` |
+| `brotliQuality` | integer `0`–`11` | unset (brotli default, `11`) | `EXODUS_STASIS_BROTLI_QUALITY` |
 
 `add` loads existing data and refuses to modify it; `replace` ignores it and
 rebuilds from scratch; `frozen` loads it read-only and requires every
@@ -42,10 +43,15 @@ itself the attestation, so a frozen bundle needs no sibling lockfile (it
 `lock = add | replace`; `bundle = frozen` composes with any `lock` mode; and at
 least one of `lock`/`bundle` must be set. `fs` is the filesystem-capture mode
 (equivalent to the `--fs` CLI flag; see "Filesystem captures" below) and requires a
-read/write bundle mode (`bundle = add | replace | load`). Unknown keys are rejected.
+read/write bundle mode (`bundle = add | replace | load`). `brotliQuality` tunes how
+hard brotli compresses bundle writes (equivalent to the `--brotli-quality` CLI flag):
+lower is faster, higher is smaller; unset uses brotli's default `11` (max). It only
+affects the artifact's encoding — the decompressed content, and thus every hash and
+attestation, is identical at any quality — so it is inert (and harmless) under
+read-only bundle modes. Unknown keys are rejected.
 If both the file and env var set a key, they must match. Only `scope` is persisted
-into the lockfile/bundle `config` block (`debug`, `childProcess` and `fs` are run-time
-flags, not attested).
+into the lockfile/bundle `config` block (`debug`, `childProcess`, `fs` and
+`brotliQuality` are run-time flags, not attested).
 
 ## `stasis.lock.json`
 

@@ -14,6 +14,7 @@ const ENV_KEYS = [
   'EXODUS_STASIS_DEBUG',
   'EXODUS_STASIS_CHILD_PROCESS',
   'EXODUS_STASIS_FS',
+  'EXODUS_STASIS_BROTLI_QUALITY',
 ]
 const withEnv = (vars, fn) => (t) => {
   const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
@@ -827,6 +828,128 @@ test('validatePluginOptions rejects fs (not a plugin option; --fs is a loader/CL
   // set, so fs is an unknown plugin option caught by the generic check regardless of its value.
   t.assert.throws(() => validatePluginOptions('Plug', { fs: 'sync' }), /Unknown Plug options: fs/)
   t.assert.throws(() => validatePluginOptions('Plug', { fs: 42 }), /Unknown Plug options: fs/)
+})
+
+// brotliQuality: integer 0..11 tuning bundle-write compression, read from the option /
+// EXODUS_STASIS_BROTLI_QUALITY / "brotliQuality" in stasis.config.json. A how-to-write
+// flag like debug/fs: not serialized, no bundle-mode constraint.
+test('Config defaults brotliQuality to undefined (brotli default)', (t) => {
+  t.assert.equal(new Config().brotliQuality, undefined)
+})
+
+test('Config(options) sets brotliQuality', (t) => {
+  t.assert.equal(new Config({ brotliQuality: 5 }).brotliQuality, 5)
+})
+
+test('Config(options) accepts the brotliQuality range edges 0 and 11', (t) => {
+  // 0 is valid AND falsy -- pins that no truthiness shortcut drops it.
+  t.assert.equal(new Config({ brotliQuality: 0 }).brotliQuality, 0)
+  t.assert.equal(new Config({ brotliQuality: 11 }).brotliQuality, 11)
+})
+
+test('Config(options) rejects out-of-range or non-integer brotliQuality', (t) => {
+  for (const bad of [-1, 12, 5.5, '5', true, null, Number.NaN]) {
+    t.assert.throws(() => new Config({ brotliQuality: bad }), /brotliQuality must be an integer 0\.\.11/)
+  }
+})
+
+test('loadConfig brotliQuality=7', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ brotliQuality: 7 }))
+  t.assert.equal(c.brotliQuality, 7)
+})
+
+test('loadConfig rejects out-of-range or non-integer brotliQuality', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ brotliQuality: 12 })), /brotliQuality must be an integer 0\.\.11/)
+  t.assert.throws(() => c.loadConfig(json({ brotliQuality: '5' })), /brotliQuality must be an integer 0\.\.11/)
+  t.assert.throws(() => c.loadConfig(json({ brotliQuality: 5.5 })), /brotliQuality must be an integer 0\.\.11/)
+})
+
+test('brotliQuality is not serialized into json (a how-to-write flag, like debug/fs)', (t) => {
+  const c = new Config({ brotliQuality: 5 })
+  t.assert.equal(JSON.parse(c.json).brotliQuality, undefined, 'no brotliQuality key in the serialized config')
+})
+
+test('Config reads EXODUS_STASIS_BROTLI_QUALITY at construction time', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: '4' },
+  (t) => { t.assert.equal(new Config().brotliQuality, 4) }
+))
+
+test('Config brotliQuality env rejects unrecognized values', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: 'max' },
+  (t) => {
+    t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_BROTLI_QUALITY must be an integer 0\.\.11/ })
+  }
+))
+
+test('Config brotliQuality env rejects out-of-range values', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: '12' },
+  (t) => {
+    t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_BROTLI_QUALITY must be an integer 0\.\.11/ })
+  }
+))
+
+// Non-canonical Number()-coercible strings must throw (Number('   ') is 0!), not silently
+// select a quality: `${Number(value)}` has to round-trip back to the input.
+for (const bad of ['5.0', '05', '   ', ' 5 ', '0x5', '5e0', '+5']) {
+  test(`Config brotliQuality env rejects non-canonical value ('${bad}')`, withEnv(
+    { EXODUS_STASIS_BROTLI_QUALITY: bad },
+    (t) => {
+      t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_BROTLI_QUALITY must be an integer 0\.\.11/ })
+    }
+  ))
+}
+
+test('Config brotliQuality env "" is unset and keeps the default', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: '' },
+  (t) => { t.assert.equal(new Config().brotliQuality, undefined) }
+))
+
+test('Config brotliQuality option conflicting with the env var throws', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: '4' },
+  (t) => {
+    t.assert.throws(() => new Config({ brotliQuality: 5 }), /Config options can not override stasis env/)
+  }
+))
+
+test('Config brotliQuality option agreeing with the env var is accepted', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: '4' },
+  (t) => { t.assert.equal(new Config({ brotliQuality: 4 }).brotliQuality, 4) }
+))
+
+test('Config brotliQuality: stasis.config.json conflicting with the env var throws', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: '4' },
+  (t) => {
+    const c = new Config()
+    t.assert.throws(() => c.loadConfig(json({ brotliQuality: 5 })), /can not override stasis\.config\.json/)
+  }
+))
+
+test('loadConfig keeps an env-set brotliQuality when the file omits the key', withEnv(
+  { EXODUS_STASIS_BROTLI_QUALITY: '4' },
+  (t) => {
+    const c = new Config()
+    t.assert.equal(c.brotliQuality, 4)
+    c.loadConfig(json({ scope: 'node_modules' }))
+    t.assert.equal(c.brotliQuality, 4, 'env-set brotliQuality survives a config load that omits it')
+    t.assert.equal(c.scope, 'node_modules')
+  }
+))
+
+test('loadConfig brotliQuality agreeing with the constructor option is accepted', (t) => {
+  const c = new Config({ brotliQuality: 5 })
+  c.loadConfig(json({ brotliQuality: 5 }))
+  t.assert.equal(c.brotliQuality, 5)
+})
+
+test('loadConfig brotliQuality conflicting with the constructor option throws', (t) => {
+  const c = new Config({ brotliQuality: 5 })
+  t.assert.throws(() => c.loadConfig(json({ brotliQuality: 6 })), /can not override stasis\.config\.json/)
+})
+
+test('validatePluginOptions rejects brotliQuality (not a plugin option; set it process-wide)', (t) => {
+  t.assert.throws(() => validatePluginOptions('Plug', { brotliQuality: 5 }), /Unknown Plug options: brotliQuality/)
 })
 
 // validatePluginOptions: standalone helper for plugin constructors. Mirrors Config's per-field
