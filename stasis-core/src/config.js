@@ -16,7 +16,14 @@ export const DEFAULT_LOCK = 'add'
 export const DEFAULT_BUNDLE = 'none'
 export const DEFAULT_SCOPE = 'full'
 
-const envBool = (value) => Boolean(value && value !== '0')
+// Strict boolean env parsing: ''/'0'/'false' -> false, '1'/'true' -> true. Anything else
+// ('no', 'off', ...) throws -- a truthiness parse would read those as *enabling* the
+// toggle, and a misconfigured env var should fail loudly, not silently flip a feature on.
+const envBool = (name, value) => {
+  if (value === '' || value === '0' || value === 'false') return false
+  if (value === '1' || value === 'true') return true
+  throw new RangeError(`${name} must be ''/'0'/'false' or '1'/'true' (got '${value}')`)
+}
 
 // EXODUS_STASIS_RESOURCES is a comma-separated extension list; split + trim + drop
 // empties so '' and ' png , svg ' normalize predictably (parseResourcesOption then
@@ -121,10 +128,10 @@ export class Config {
         assert.equal(this.#env.resourcesBundleFile, resourcesBundleFile)
       }
       if (this.#env.debug !== undefined && debug !== undefined) {
-        assert.equal(envBool(this.#env.debug), debug)
+        assert.equal(envBool('EXODUS_STASIS_DEBUG', this.#env.debug), debug)
       }
       if (this.#env.childProcess !== undefined && childProcess !== undefined) {
-        assert.equal(envBool(this.#env.childProcess), childProcess)
+        assert.equal(envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess), childProcess)
       }
       if (this.#env.fs !== undefined && fs !== undefined) assert.equal(this.#env.fs, fs)
       // Compare parsed sets, not the raw strings: ['png','svg'] and 'svg,png' are the
@@ -146,8 +153,8 @@ export class Config {
     this.#bundle = this.#env.bundle || bundle || DEFAULT_BUNDLE
     this.#bundleFile = this.#env.bundleFile || bundleFile || undefined
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
-    this.#debug = this.#env.debug !== undefined ? envBool(this.#env.debug) : (debug ?? false)
-    this.#childProcess = this.#env.childProcess !== undefined ? envBool(this.#env.childProcess) : (childProcess ?? false)
+    this.#debug = this.#env.debug !== undefined ? envBool('EXODUS_STASIS_DEBUG', this.#env.debug) : (debug ?? false)
+    this.#childProcess = this.#env.childProcess !== undefined ? envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess) : (childProcess ?? false)
     // env wins over the option, like scope/lock/bundle; undefined means "fs untouched" (off).
     this.#fs = this.#env.fs || fs || undefined
     // env wins over the option (it's the process-wide signal); parseResourcesOption
@@ -270,8 +277,8 @@ export class Config {
       if (this.#env.bundle !== undefined) assert.equal(this.#bundle, this.#env.bundle)
       if (this.#env.bundleFile !== undefined) assert.equal(this.#bundleFile, this.#env.bundleFile)
       if (this.#env.resourcesBundleFile !== undefined) assert.equal(this.#resourcesBundleFile, this.#env.resourcesBundleFile)
-      if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool(this.#env.debug))
-      if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool(this.#env.childProcess))
+      if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool('EXODUS_STASIS_DEBUG', this.#env.debug))
+      if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess))
       if (this.#env.fs !== undefined) assert.equal(this.#fs, this.#env.fs)
       if (this.#env.resources !== undefined) {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('env', envList(this.#env.resources))),
