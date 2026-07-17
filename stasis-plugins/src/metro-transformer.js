@@ -14,15 +14,17 @@ import { State } from '@exodus/stasis-core/state'
 //   there is nothing to synchronize between them. That makes the per-worker transformer
 //   the natural seam for load -- each worker independently serves attested bytes, no IPC.
 //
-// HOW IT WIRES IN (metro.config.js, load mode only):
+// HOW IT WIRES IN (metro.config.js) -- wire it PERMANENTLY, alongside the serializer half:
 //   module.exports = {
-//     transformer: {
-//       transformerPath: require.resolve('@exodus/stasis/metro-transformer'),
-//     },
+//     transformerPath: require.resolve('@exodus/stasis/metro-transformer'),  // top-level, a sibling of `transformer`
 //   }
 //   // run with EXODUS_STASIS_BUNDLE=load (+ EXODUS_STASIS_BUNDLE_FILE / LOCK / SCOPE),
-//   // OR a stasis.config.json with "bundle":"load". Do NOT also wire the StasisMetro
-//   // serializer plugin in load mode -- capture and load are separate wirings.
+//   // OR a stasis.config.json with "bundle":"load". Outside load mode this transformer
+//   // is a transparent pass-through (see getLoadState), and under load the StasisMetro
+//   // serializer is one too -- so a single committed metro.config.js carries both
+//   // halves and the mode picks which is active. That symmetry is load-bearing:
+//   // metro.config.js is itself attested at capture, so a load/frozen run must
+//   // execute it byte-identical -- neither half can demand mode-specific edits.
 //
 //   Metro calls `transformerPath`'s `transform(config, projectRoot, filename, data,
 //   options)` in each worker with `data` = the file's on-disk bytes (a Buffer) and
