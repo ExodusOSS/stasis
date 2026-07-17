@@ -1638,7 +1638,19 @@ export class State {
       if (format === 'resource:base64') source = Buffer.from(source, 'base64')
     } else {
       source = this.sources.get(file)
-      if (source === undefined) throw new Error(`stasis: file not attested in bundle: ${url}`)
+      if (source === undefined) {
+        // Name the stat-record case: the bundle DOES know this path, just not its bytes
+        // (an fs.lstatSync/statSync capture attests existence/kind only), so "not
+        // attested" would misdiagnose it. Loading it requires a capture that reads or
+        // imports it.
+        if (isStatFormat(format)) {
+          throw new Error(
+            `stasis: only a payload-free stat record ('${format}') is attested for ${url} -- ` +
+            `the capture stat'd this path but never read or imported it, so the bundle has no bytes to serve`
+          )
+        }
+        throw new Error(`stasis: file not attested in bundle: ${url}`)
+      }
     }
     // Without a lockfile the bundle is self-attesting: hashes would be derived
     // from the same source bytes we'd then verify, which is a tautology.
@@ -1646,8 +1658,23 @@ export class State {
     return { source, format }
   }
 
+  // The recorded LOADER format for a project-relative file, or undefined. Masks
+  // payload-free stat records: 'stat:*' attests existence/kind for the --fs stat and
+  // probe shims (getFsStat reads this.formats directly), NOT how bytes parse -- so
+  // loader-format consumers must see "no recorded format". Without the mask, a
+  // require.resolve()d target that was also stat'd (a resolve-only edge: attested
+  // path, no bytes, exactly the supported require.resolve case) came back as format
+  // 'stat:file' and the resolve hook's executable-format gate refused a perfectly
+  // valid resolution -- and Node itself would choke on the format regardless.
+  // getFile deliberately does NOT mask: it needs the stat tag to explain a byte-less
+  // load, and bytes smuggled under a 'stat:*' tag must still hit the loader's gate.
+  #loaderFormat(file) {
+    const format = this.formats.get(file)
+    return isStatFormat(format) ? undefined : format
+  }
+
   getFormat(url) {
-    return this.formats.get(this.#canonicalFile(url))
+    return this.#loaderFormat(this.#canonicalFile(url))
   }
 
   // Different conditions / import attributes can yield different URLs/formats for the same parent+specifier
@@ -1765,7 +1792,7 @@ export class State {
         const abs = this.resolveBundled(parentURL, specifier)
         if (abs !== undefined) {
           const f = relative(this.root, abs)
-          return { url: pathToFileURL(abs).toString(), format: this.formats.get(f) }
+          return { url: pathToFileURL(abs).toString(), format: this.#loaderFormat(f) }
         }
       }
       // Throw with Node's ERR_MODULE_NOT_FOUND shape rather than asserting:
@@ -1788,7 +1815,10 @@ export class State {
       throw err
     }
     const url = pathToFileURL(resolve(this.root, file)).toString()
-    const format = this.formats.get(file) // might be undefined e.g. for some bundlers
+    // #loaderFormat: might be undefined (e.g. some bundlers record no format), and a
+    // payload-free stat record is masked -- a resolve-only edge's target (recorded by
+    // require.resolve, never loaded) may carry one, and it is not a loader format.
+    const format = this.#loaderFormat(file)
     return { url, format }
   }
 

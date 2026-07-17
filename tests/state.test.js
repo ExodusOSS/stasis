@@ -138,6 +138,23 @@ test('addImport upgrades a stat record recorded before the target was ever resol
   t.assert.equal(s.formats.get('src/foo.js'), 'module')
 })
 
+test('getImport/getFormat mask a stat record out of the loader-format channel', (t) => {
+  // A resolve-only edge (require.resolve: attested path, no bytes, no format) whose
+  // target was also stat'd: the 'stat:file' record must not surface as the edge's
+  // LOADER format -- the resolve hook returns getImport's format to Node and gates it
+  // against the executable allowlist, so leaking 'stat:file' there refused a valid
+  // resolution. The stat/probe channel (getFsStat) still sees the record.
+  const s = new State(root)
+  const parentURL = pathToFileURL(fileAbs2).toString()
+  const childURL = pathToFileURL(fileAbs).toString()
+  s.addFsStat(childURL, 'file')
+  s.addImport(parentURL, './foo.js', childURL, {}) // resolve-only: no format recorded
+  t.assert.equal(s.formats.get('src/foo.js'), 'stat:file', 'the record itself stays intact')
+  t.assert.equal(s.getImport(parentURL, './foo.js').format, undefined, 'getImport masks stat:*')
+  t.assert.equal(s.getFormat(childURL), undefined, 'getFormat masks stat:*')
+  t.assert.equal(s.getFsStat(childURL), 'file', 'the stat shim channel still answers')
+})
+
 test('divergent stat kinds and divergent real formats still conflict', (t) => {
   const s = new State(root)
   const parentURL = pathToFileURL(fileAbs2).toString()

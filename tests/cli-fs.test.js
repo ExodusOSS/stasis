@@ -1335,6 +1335,42 @@ test('run --fs: a module stat\'d before it is ever imported upgrades to the real
   t.assert.equal(load.stdout, 'stat:true\nk:v\n')
 }))
 
+test('run --fs: a stat\'d, never-loaded file still resolves at bundle=load (require.resolve + import.meta.resolve)', withTmp((t, tmp) => {
+  // A resolve-only edge: require.resolve records the resolution natively at capture
+  // (no format -- the file is never loaded), and the program ALSO lstat's the target,
+  // leaving a payload-free 'stat:file' record as its only formats entry. At load the
+  // resolution must still serve: the stat record is NOT a loader format, so getImport/
+  // getFormat must mask it -- returning 'stat:file' made the resolve hook's
+  // executable-format gate refuse the edge (regression: require.resolve crashed with
+  // "cannot import ... payload-free stat record"). import.meta.resolve is env-gated to
+  // the LOAD run only: at capture it would fire the resolve hook and attest the REAL
+  // format, upgrading the stat record away and hiding the very case under test.
+  writeFileSync(join(tmp, 'src', 'dep.cjs'), 'module.exports = 1\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { lstatSync } from 'node:fs'",
+    "import { createRequire } from 'node:module'",
+    'const require = createRequire(import.meta.url)',
+    'console.log(`stat:${lstatSync(new URL("./dep.cjs", import.meta.url)).isFile()}`)',
+    'console.log(`resolved:${require.resolve("./dep.cjs").endsWith("dep.cjs")}`)',
+    'if (process.env.STASIS_TEST_META_RESOLVE) console.log(`meta:${import.meta.resolve("./dep.cjs").endsWith("dep.cjs")}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'stat:true\nresolved:true\n')
+  // The stat record and the resolve-only edge coexist: kind attested, no bytes.
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['src/dep.cjs'], 'stat:file')
+  t.assert.equal(bundle.sources['.'].files['src/dep.cjs'], undefined, 'resolve-only edge: no bytes recorded')
+
+  rmSync(join(tmp, 'src', 'dep.cjs')) // gone; the stat AND both resolutions must serve from the bundle
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
+    { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_META_RESOLVE: '1' } })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'stat:true\nresolved:true\nmeta:true\n')
+}))
+
 test('run --fs only captures the single-argument lstatSync/statSync (options pass through)', withTmp((t, tmp) => {
   // Same scope rule as readdirSync: an options form (bigint, throwIfNoEntry) is out of
   // scope -- passed through untouched and NOT recorded.
