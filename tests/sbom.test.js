@@ -11,6 +11,7 @@ import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '../stasis/src/sbom.js'
 import { sbomCommand } from '../stasis/src/cmd/sbom.js'
+import pkg from '../stasis/package.json' with { type: 'json' }
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
@@ -170,7 +171,7 @@ test('toSpdx DESCRIBES the single workspace root and the root DEPENDS_ON each de
   t.assert.equal(doc.name, 'top-pkg@1.0.0')
   t.assert.equal(doc.creationInfo.created, '2026-01-02T03:04:05Z')
   t.assert.deepEqual(doc.creationInfo.creators, [
-    'Tool: @exodus/stasis-1.0.0-alpha.3',
+    `Tool: @exodus/stasis-${pkg.version}`,
     'Organization: Exodus Movement, Inc.',
   ])
   t.assert.ok(doc.documentNamespace.includes('00000000-0000-4000-8000-000000000000'))
@@ -238,7 +239,7 @@ test('toCyclonedx sets the root as metadata.component and lists deps with a flat
   t.assert.equal(doc.version, 1)
   t.assert.equal(doc.metadata.timestamp, '2026-01-02T03:04:05Z')
   t.assert.deepEqual(doc.metadata.tools, {
-    components: [{ type: 'application', publisher: 'Exodus Movement, Inc.', name: '@exodus/stasis', version: '1.0.0-alpha.3' }],
+    components: [{ type: 'application', publisher: 'Exodus Movement, Inc.', name: '@exodus/stasis', version: pkg.version }],
   })
 
   t.assert.equal(doc.metadata.component.type, 'application')
