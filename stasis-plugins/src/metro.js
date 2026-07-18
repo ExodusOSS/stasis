@@ -175,17 +175,14 @@ export class StasisMetro {
         'is never attested. Enable it: `stasis run --child-process ...`, EXODUS_STASIS_CHILD_PROCESS=1, ' +
         'or "childProcess": true in stasis.config.json.'
       )
-      // Metro ends its transform workers BY SIGNAL when they don't drain in time: jest-worker's
-      // end() gives a worker 500ms after the END message, then forceExit()s it (SIGTERM) -- and
-      // a signal death bypasses the worker's exit hooks, silently dropping its shard: the
-      // fork-target entry (jest-worker's processChild.js, which only the worker ever loads --
-      // the parent merely require.resolve()s it) plus the per-transform babel toolchain. Opt
-      // this build's children into the loader's SIGTERM shard flush (hooks.js): the flag rides
-      // process.env, so the workers Metro forks AFTER config time inherit it. Scoped HERE, not
-      // globally -- a signal listener changes a child's default-kill disposition, which is the
-      // user's domain in arbitrary children, but Metro's transform workers are known tool
-      // processes where flush-then-redeliver is the right trade. The plugin can't do this in
-      // the workers itself (only the loader runs there), so an env opt-in is the seam.
+      // Opt this build's children into the loader's SIGTERM shard flush: jest-worker's
+      // forceExit would otherwise silently drop a non-draining worker's shard (mechanics in
+      // the KNOWN LIMITATIONS bullet above; the handler lives in hooks.js). The flag rides
+      // process.env, so the workers Metro forks AFTER config time inherit it -- the plugin
+      // can't act inside the workers (only the loader runs there), so an env opt-in is the
+      // seam. Scoped HERE, not globally: a signal listener changes a child's default-kill
+      // disposition, which is the user's domain in arbitrary children, but Metro's transform
+      // workers are known tool processes where flush-then-redeliver is the right trade.
       process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH = '1'
     }
     // resources is a Config field now (validated + coordinated against any preload in

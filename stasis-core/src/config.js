@@ -86,6 +86,7 @@ export class Config {
   #resources
   #debug
   #childProcess
+  #shardSignalFlush
   #fs
   #brotliQuality
 
@@ -112,6 +113,7 @@ export class Config {
       debug: process.env.EXODUS_STASIS_DEBUG || undefined,
       resources: process.env.EXODUS_STASIS_RESOURCES || undefined,
       childProcess: process.env.EXODUS_STASIS_CHILD_PROCESS || undefined,
+      shardSignalFlush: process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH || undefined,
       fs: process.env.EXODUS_STASIS_FS || undefined,
       brotliQuality: process.env.EXODUS_STASIS_BROTLI_QUALITY || undefined,
     }
@@ -160,6 +162,11 @@ export class Config {
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envBool('EXODUS_STASIS_DEBUG', this.#env.debug) : (debug ?? false)
     this.#childProcess = this.#env.childProcess !== undefined ? envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess) : (childProcess ?? false)
+    // Env-only (no option, no stasis.config.json key): shard-channel plumbing a parent
+    // process sets for its descendants, not a user-facing knob -- see the getter.
+    this.#shardSignalFlush = this.#env.shardSignalFlush !== undefined
+      ? envBool('EXODUS_STASIS_SHARD_SIGNAL_FLUSH', this.#env.shardSignalFlush)
+      : false
     // env wins over the option, like scope/lock/bundle; undefined means "fs untouched" (off).
     this.#fs = this.#env.fs || fs || undefined
     // env wins over the option; no `||` chaining -- 0 is a valid quality and falsy.
@@ -363,6 +370,20 @@ export class Config {
   // so it's only created when explicitly enabled. Not attested (not in `values`), like debug.
   get childProcess() {
     return this.#childProcess
+  }
+
+  // Opt-in (EXODUS_STASIS_SHARD_SIGNAL_FLUSH, env-only): a capturing CHILD flushes its
+  // shard when ended by SIGTERM, then re-delivers the signal (hooks.js). Set on
+  // process.env by StasisMetro's capture wiring so the transform workers Metro forks
+  // inherit it -- jest-worker force-kills a worker whose event loop doesn't drain within
+  // 500ms of its END message, which would otherwise silently drop the worker's shard.
+  // Deliberately NOT a global default (a signal listener changes a child's default-kill
+  // disposition -- the user's domain in arbitrary children) and NOT a user option: it is
+  // channel plumbing like EXODUS_STASIS_SHARD_DIR/_KEY, but parsed strictly through
+  // envBool like every other boolean toggle so '0'/'false' disable rather than enable.
+  // Not attested (not in `values`), like childProcess.
+  get shardSignalFlush() {
+    return this.#shardSignalFlush
   }
 
   // The --fs hook mode: 'sync' patches the sync fs readers, 'async' additionally patches
