@@ -1214,6 +1214,96 @@ test('CLI: a --metro bundle verifies clean against its own companion lockfile at
   t.assert.doesNotMatch(load.stderr, /ERR_ASSERTION|mismatches the lockfile/)
 }))
 
+// --- Native modules in a --metro bundle (ios/android sources + podspecs) ---
+//
+// A bundled React Native dependency's native build-input surface -- its podspec and
+// everything under ios/ and android/ -- is consumed by CocoaPods/Xcode and Gradle, never
+// by Metro, so no JS graph reaches it. `stasis bundle --metro` carries it for the bundled
+// node_modules packages so the artifact can drive (or attest) the native build.
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe]) // non-UTF-8
+
+// A React Native project: an app entry importing a native dependency (ios/android sources +
+// podspec, plus a code file under ios/ and a build-output dir that must NOT be captured) and a
+// JS-only dependency (no native surface). `main` fields keep Node/default resolution happy.
+const writeRnFixture = (root) => {
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'rn-app', version: '1.0.0' }))
+  mkdirSync(join(root, 'src'), { recursive: true })
+  writeFileSync(join(root, 'src', 'entry.js'), "import 'rn-native'\nimport 'js-only'\nconsole.log('ok')\n")
+
+  const dep = join(root, 'node_modules', 'rn-native')
+  mkdirSync(join(dep, 'ios'), { recursive: true })
+  mkdirSync(join(dep, 'android', 'src', 'main'), { recursive: true })
+  mkdirSync(join(dep, 'android', 'build'), { recursive: true }) // build output -> excluded
+  writeFileSync(join(dep, 'package.json'), JSON.stringify({ name: 'rn-native', version: '3.1.0', main: 'index.js' }))
+  writeFileSync(join(dep, 'index.js'), "module.exports = 'rn-native'\n") // reached by the graph
+  writeFileSync(join(dep, 'RNThing.podspec'), 'Pod::Spec.new { |s| s.name = "RNThing" }\n')
+  writeFileSync(join(dep, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
+  writeFileSync(join(dep, 'ios', 'RNThing.mm'), '@implementation RNThing @end\n')
+  writeFileSync(join(dep, 'ios', 'logo.png'), PNG_BYTES) // a binary asset under ios/
+  writeFileSync(join(dep, 'ios', 'helper.js'), 'export default 0\n') // CODE under ios/ -> skipped
+  writeFileSync(join(dep, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
+  writeFileSync(join(dep, 'android', 'src', 'main', 'AndroidManifest.xml'), '<manifest/>\n')
+  writeFileSync(join(dep, 'android', 'build', 'generated.o'), 'BUILD OUTPUT') // excluded
+
+  const js = join(root, 'node_modules', 'js-only')
+  mkdirSync(js, { recursive: true })
+  writeFileSync(join(js, 'package.json'), JSON.stringify({ name: 'js-only', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(js, 'index.js'), "module.exports = 'js-only'\n")
+}
+
+test('buildBundle --metro carries a bundled native dep\'s ios/android sources + podspec, skipping code + build output', withTmp(async (t, tmp) => {
+  writeRnFixture(tmp)
+  const bundle = await buildBundle({ cwd: tmp, entries: ['src/entry.js'], metro: true, platforms: ['ios', 'android'] })
+
+  const mod = bundle.modules.get('node_modules/rn-native')
+  t.assert.ok(mod, 'the native dep is a bundled module')
+  const files = new Set(Object.keys(mod.files))
+  // Native build inputs are carried alongside the graph-reached index.js.
+  for (const f of ['index.js', 'RNThing.podspec', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
+    t.assert.ok(files.has(f), `expected ${f} in the bundle`)
+  }
+  t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
+  t.assert.ok(!files.has('android/build/generated.o'), 'build output is excluded')
+  // Formats: text native sources are 'resource'; a binary asset is 'resource:base64'; the
+  // graph-reached JS keeps its code format.
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'resource')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.mm'), 'resource')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/logo.png'), 'resource:base64')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/index.js'), 'commonjs')
+  // The base64 payload decodes back to the exact bytes.
+  t.assert.deepEqual(Buffer.from(mod.files['ios/logo.png'], 'base64'), PNG_BYTES)
+  // A JS-only bundled dep contributes no native surface (only its reached JS).
+  t.assert.deepEqual(Object.keys(bundle.modules.get('node_modules/js-only').files), ['index.js'])
+}))
+
+test('buildBundle --mainFields (no --metro) does NOT pull native ios/android sources', withTmp(async (t, tmp) => {
+  writeRnFixture(tmp)
+  const bundle = await buildBundle({ cwd: tmp, entries: ['src/entry.js'], mainFields: ['react-native', 'browser', 'main'] })
+  const files = new Set(Object.keys(bundle.modules.get('node_modules/rn-native').files))
+  t.assert.ok(files.has('index.js'), 'the reached JS is still bundled')
+  t.assert.ok(!files.has('RNThing.podspec') && !files.has('ios/RNThing.mm'), 'native capture is --metro-only')
+}))
+
+test('CLI: a --metro bundle + companion lockfile attest the native surface (by integrity), round-tripping', withTmp((t, tmp) => {
+  writeRnFixture(tmp)
+  const bundlePath = join(tmp, 'stasis.code.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', `--lockfile=${lockPath}`, `--output=${bundlePath}`, 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
+  const bfiles = new Set(Object.keys(bundle.modules.get('node_modules/rn-native').files))
+  t.assert.ok(bfiles.has('RNThing.podspec') && bfiles.has('ios/RNThing.mm') && bfiles.has('android/build.gradle'))
+
+  // The companion lockfile attests the same native files by sha512 integrity.
+  const lockfile = Lockfile.parse(readFileSync(lockPath, 'utf8'))
+  const lfiles = lockfile.modules.get('node_modules/rn-native').files
+  t.assert.ok(lfiles['ios/RNThing.mm'].startsWith('sha512-'))
+  t.assert.ok(lfiles['RNThing.podspec'].startsWith('sha512-'))
+  t.assert.equal(lockfile.formats.get('node_modules/rn-native/ios/logo.png'), 'resource:base64')
+  t.assert.ok(!('ios/helper.js' in lfiles), 'code under ios/ is not attested as native')
+}))
+
 test('CLI: --metro requires --platforms; --platforms requires --metro; --metro forbids --conditions/--mainFields', (t) => {
   t.assert.match(runCli(['bundle', '--metro', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /--metro requires --platforms/)
   t.assert.match(runCli(['bundle', '--platforms=ios', 'src/entry.js'], { cwd: fieldsFixture }).stderr, /--platforms is only valid with --metro/)

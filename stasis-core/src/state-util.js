@@ -21,10 +21,6 @@ import { join, resolve, sep } from 'node:path'
 // covers `import { readFile } from 'node:fs/promises'`.)
 export const realReadFileSync = fs.readFileSync
 export const realReadFile = fs.promises.readFile
-// `realReaddirSync` is snapshotted for the SAME reason: `stasis run --fs` patches
-// fs.readdirSync too (to capture/serve directory listings), so a plugin that walks a
-// directory as its own bookkeeping -- StasisMetro's native-dependency capture -- must use
-// the genuine reader, or the walk would re-record every listing into the preload/main state.
 export const realReaddirSync = fs.readdirSync
 const { realpathSync } = fs
 
