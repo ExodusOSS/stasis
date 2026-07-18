@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -232,7 +232,10 @@ function metroDefaultSerializer() {
 //   isn't a `dependencies` entry (config reports only `reactNativePath`), so its own scattered
 //   podspecs -- third-party-podspecs/*, Libraries/*/*.podspec -- plus the Ruby helpers those
 //   podspecs `require` (hermes-utils.rb) and the package.json they parse, are captured separately
-//   (podspec-LOAD surface only -- not core's full native source). A
+//   (podspec-LOAD surface). Beyond that, a vetted fixed set of core dirs/files the native build
+//   compiles or reads is captured IN FULL -- RN_CORE_INCLUDE_DIRS (ReactCommon/yoga,
+//   sdks/hermes-engine, scripts) + RN_CORE_INCLUDE_FILES (sdks/.hermesversion) -- while core's
+//   remaining native source and its prebuilt binaries (sdks/hermesc) stay out. A
 //   native module that autolinking never reports but the app IMPORTS and wires up manually in the
 //   Podfile (e.g. a podspec under lib/ios) is also captured: any reached node_modules package
 //   that ships native code (a podspec / ios/ / android/) has its native surface attested.
@@ -497,9 +500,27 @@ export class StasisMetro {
     if (typeof rnPath === 'string' && isAbsolute(rnPath)) {
       try {
         this.#state.relative(rnPath)
-        this.#captureManifestTree(rnPath)
+        this.#captureManifestTree(rnPath) // podspec-load surface across all of core
+        // Plus specific core dirs/files the native build compiles/reads (Yoga, hermes-engine,
+        // the CocoaPods scripts, .hermesversion) -- captured in full, not just their manifests.
+        for (const sub of RN_CORE_INCLUDE_DIRS) this.#captureNativeTree(join(rnPath, sub))
+        for (const file of RN_CORE_INCLUDE_FILES) this.#captureNativeFile(join(rnPath, file))
       } catch { /* react-native resolved outside the project root -- unattestable */ }
     }
+  }
+
+  // Attest a single vetted file (RN_CORE_INCLUDE_FILES) as a resource; skipped when absent in this
+  // react-native version. Real reader (plugin bookkeeping, not a program fs read).
+  #captureNativeFile(full) {
+    if (this.#seen.has(full)) return
+    let source
+    try {
+      source = realReadFileSync(full)
+    } catch {
+      return // not present in this react-native version
+    }
+    this.#seen.add(full)
+    this.#state.addFile(pathToFileURL(full).toString(), { source, resource: true, reason: 'StasisMetro' })
   }
 
   // node_modules package roots the graph reached this build that ALSO ship native code (a podspec

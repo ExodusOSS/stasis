@@ -165,6 +165,24 @@ export function isNativeManifest(name) {
   return isPodspec(name) || pathExt(name) === 'rb' || name === 'package.json'
 }
 
+// React Native CORE subdirectories captured IN FULL (native source too, not just the podspec-load
+// surface) with a metro bundle: build inputs the native build compiles from react-native itself
+// that live outside the autolinked-dependency model and aren't reachable from the JS graph.
+// A stasis-vetted fixed list (like the metro plugin's AUTO_INCLUDES), project-relative to the
+// react-native package root; a dir that doesn't exist in a given react-native version is skipped.
+//   - ReactCommon/yoga: the Yoga layout engine's C++ sources + cmake/CMakeLists.txt.
+//   - sdks/hermes-engine: the hermes-engine podspec dir (podspec + its Ruby helpers + configs).
+//   - scripts: the CocoaPods integration the Podfile drives (react_native_pods.rb, cocoapods/*,
+//     the Xcode build-phase shell scripts).
+export const RN_CORE_INCLUDE_DIRS = ['ReactCommon/yoga', 'sdks/hermes-engine', 'scripts']
+
+// Individual react-native CORE files captured with a metro bundle (project-relative to the
+// react-native package root; a missing one is skipped). Named rather than folded into an include
+// DIR because their directory also holds huge prebuilt binaries we must NOT capture:
+//   - sdks/.hermesversion: the Hermes revision hermes-utils.rb reads at podspec-load time. It
+//     sits directly under sdks/, which also contains sdks/hermesc/* (prebuilt compiler binaries).
+export const RN_CORE_INCLUDE_FILES = ['sdks/.hermesversion']
+
 // Set-equality for parsed resources allowlists (lowercase extension/filename sets).
 // Coordinates a plugin's `resources` option against an active preload's, and the env
 // var against an explicit option in Config.

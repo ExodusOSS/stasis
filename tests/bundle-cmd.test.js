@@ -1236,6 +1236,10 @@ const writeRnFixture = (root) => {
   mkdirSync(join(core, 'third-party-podspecs'), { recursive: true })
   mkdirSync(join(core, 'Libraries', 'FBLazyVector'), { recursive: true })
   mkdirSync(join(core, 'sdks', 'hermes-engine'), { recursive: true })
+  mkdirSync(join(core, 'sdks', 'hermesc', 'osx-bin'), { recursive: true })
+  mkdirSync(join(core, 'ReactCommon', 'yoga', 'yoga'), { recursive: true })
+  mkdirSync(join(core, 'scripts'), { recursive: true })
+  mkdirSync(join(core, 'React'), { recursive: true })
   writeFileSync(join(core, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0', main: 'index.js' }))
   writeFileSync(join(core, 'index.js'), "module.exports = 'react-native'\n")
   writeFileSync(join(core, 'third-party-podspecs', 'DoubleConversion.podspec'), "Pod::Spec.new { |s| s.name = 'DoubleConversion' }\n")
@@ -1243,6 +1247,13 @@ const writeRnFixture = (root) => {
   // A podspec that require_relatives a sibling Ruby helper -- both must be captured.
   writeFileSync(join(core, 'sdks', 'hermes-engine', 'hermes-engine.podspec'), 'require_relative "./hermes-utils.rb"\nPod::Spec.new { |s| s.name = "hermes-engine" }\n')
   writeFileSync(join(core, 'sdks', 'hermes-engine', 'hermes-utils.rb'), 'def hermes_tag; "x"; end\n')
+  // Vetted core native dirs/files captured in full; React/*.m + hermesc must stay out.
+  writeFileSync(join(core, 'ReactCommon', 'yoga', 'yoga', 'Yoga.cpp'), '// yoga\n')
+  writeFileSync(join(core, 'ReactCommon', 'yoga', 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.13)\n')
+  writeFileSync(join(core, 'scripts', 'react_native_pods.rb'), 'def use_react_native!; end\n')
+  writeFileSync(join(core, 'sdks', '.hermesversion'), 'hermes-2024-01-01\n')
+  writeFileSync(join(core, 'React', 'RCTBridge.m'), '@implementation RCTBridge @end\n')
+  writeFileSync(join(core, 'sdks', 'hermesc', 'osx-bin', 'hermesc'), 'ELF\0\xff')
 
   const dep = join(root, 'node_modules', 'rn-native')
   mkdirSync(join(dep, 'ios', 'RNThing.xcframework', 'ios-arm64'), { recursive: true }) // prebuilt bundle -> excluded whole
@@ -1297,6 +1308,13 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.equal(bundle.formats.get('node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'), 'resource')
   t.assert.equal(bundle.formats.get('node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'), 'resource')
   t.assert.equal(bundle.formats.get('node_modules/react-native/package.json'), 'json')
+  // Vetted core dirs/files captured in full; core native source outside them + binaries stay out.
+  t.assert.ok(core.has('ReactCommon/yoga/yoga/Yoga.cpp'), 'yoga source captured')
+  t.assert.ok(core.has('ReactCommon/yoga/CMakeLists.txt'), 'yoga CMakeLists captured')
+  t.assert.ok(core.has('scripts/react_native_pods.rb'), 'CocoaPods script captured')
+  t.assert.ok(core.has('sdks/.hermesversion'), '.hermesversion captured')
+  t.assert.ok(!core.has('React/RCTBridge.m'), 'core native source outside include dirs stays out')
+  t.assert.ok(!core.has('sdks/hermesc/osx-bin/hermesc'), 'prebuilt hermesc binary stays out')
   // Formats: text native sources are 'resource'; a binary asset is 'resource:base64'; the
   // graph-reached JS keeps its code format.
   t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'resource')

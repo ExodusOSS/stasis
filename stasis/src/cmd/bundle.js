@@ -11,7 +11,7 @@ import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { assertRealPathWithinBase, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -912,7 +912,18 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       if (nm) pkgDirs.add(nm.dir)
     }
     for (const pkgDir of [...pkgDirs].toSorted()) {
-      for (const abs of nativeModuleFiles(join(baseDir, pkgDir))) {
+      const pkgAbs = join(baseDir, pkgDir)
+      const files = nativeModuleFiles(pkgAbs)
+      // React Native CORE also contributes vetted native dirs/files the build compiles or reads
+      // (Yoga, the hermes-engine podspec dir, the CocoaPods scripts, .hermesversion).
+      if (pkgDir.slice(pkgDir.lastIndexOf('node_modules/') + 'node_modules/'.length) === 'react-native') {
+        for (const sub of RN_CORE_INCLUDE_DIRS) walkNativeDir(join(pkgAbs, sub), files)
+        for (const file of RN_CORE_INCLUDE_FILES) {
+          const f = join(pkgAbs, file)
+          if (existsSync(f)) files.push(f)
+        }
+      }
+      for (const abs of files) {
         const rel = toRel(abs)
         if (sources.has(rel)) continue // already carried as a graph module
         assertRealPathWithinBase(realBase, baseDir, rel)
