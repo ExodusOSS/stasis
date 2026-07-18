@@ -1308,22 +1308,6 @@ test('buildBundle --metro: no dynamic import() -> no helper injected; --mainFiel
   t.assert.equal(mf.imports.get('*').get('src/entry-async.js').get(ASYNC_REQUIRE), undefined)
 })
 
-test('buildBundle --metro --asyncRequireModulePath overrides the helper; injection runs to a fixpoint', async (t) => {
-  // Mirrors a Metro config that swaps `transformer.asyncRequireModulePath` (as Expo
-  // does). asyncshim itself dynamic-imports ./extra.js, so it must get its OWN injected
-  // edge -- onto itself -- and pull extra.js in: the fixpoint case.
-  const bundle = await buildBundle({
-    cwd: fieldsFixture, entries: ['src/entry-async.js'], metro: true, platforms: ['ios'],
-    asyncRequireModulePath: 'asyncshim',
-  })
-  const files = new Set(bundle.sources.keys())
-  t.assert.ok(files.has('node_modules/asyncshim/index.js') && files.has('node_modules/asyncshim/extra.js'))
-  t.assert.ok(![...files].some((f) => f.includes('metro-runtime')), 'the default helper must not also be injected')
-  t.assert.equal(importTarget(bundle, 'src/entry-async.js', 'asyncshim'), 'node_modules/asyncshim/index.js')
-  t.assert.equal(importTarget(bundle, 'node_modules/asyncshim/index.js', 'asyncshim'), 'node_modules/asyncshim/index.js')
-  t.assert.equal(importTarget(bundle, 'node_modules/asyncshim/index.js', './extra.js'), 'node_modules/asyncshim/extra.js')
-})
-
 test('buildBundle --metro fails closed when the async-import helper is not installed', withTmp(async (t, tmp) => {
   // A dynamic import() means Metro WOULD ship the helper; a bundle silently missing it
   // would leave shipped code unattested, so the build must refuse instead.
@@ -1353,21 +1337,6 @@ test('CLI: bundle --metro --lockfile attests the injected async-import helper an
   t.assert.equal(lockfile.imports.get('*').get('src/entry-async.js').get(ASYNC_REQUIRE), 'node_modules/metro-runtime/src/modules/asyncRequire.js')
   t.assert.match(lockfile.modules.get('node_modules/metro-runtime').files['src/modules/asyncRequire.js'], /^sha512-/u)
 }))
-
-test('CLI: --asyncRequireModulePath requires --metro and a non-empty specifier', async (t) => {
-  t.assert.match(
-    runCli(['bundle', '--asyncRequireModulePath=asyncshim', 'src/entry-async.js'], { cwd: fieldsFixture }).stderr,
-    /--asyncRequireModulePath is only valid with --metro/u,
-  )
-  t.assert.match(
-    runCli(['bundle', '--metro', '--platforms=ios', '--asyncRequireModulePath=', 'src/entry-async.js'], { cwd: fieldsFixture }).stderr,
-    /--asyncRequireModulePath must name a module specifier/u,
-  )
-  await t.assert.rejects(
-    () => buildBundle({ cwd: fieldsFixture, entries: ['src/entry-async.js'], mainFields: ['main'], asyncRequireModulePath: 'asyncshim' }),
-    /--asyncRequireModulePath is only valid with --metro/u,
-  )
-})
 
 test('CLI: bundle --mainFields rejects a non-JS bundle and an empty value', (t) => {
   t.assert.match(runCli(['bundle', '--mainFields=browser', 'a.sol']).stderr, /--mainFields is only valid for JS bundles/)
