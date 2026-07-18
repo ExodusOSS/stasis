@@ -133,3 +133,11 @@ if (mode === 'customSerializer') {
 }
 
 if (State.preload) State.preload.write()
+
+// Test-only visibility (STASIS_TEST_REPORT_SIGNAL_FLUSH=1): report whether the plugin opted
+// this build's children into the loader's SIGTERM shard flush -- metro.js sets
+// EXODUS_STASIS_SHARD_SIGNAL_FLUSH on process.env for CAPTURING runs so the workers Metro
+// forks inherit it; non-writing runs (frozen/load/inert) must leave it unset.
+if (process.env.STASIS_TEST_REPORT_SIGNAL_FLUSH) {
+  console.log(`SIGNAL_FLUSH=${process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH ?? ''}`)
+}

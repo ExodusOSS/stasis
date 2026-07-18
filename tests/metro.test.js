@@ -57,6 +57,7 @@ const {
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
   EXODUS_STASIS_CHILD_PROCESS: _cp,
+  EXODUS_STASIS_SHARD_SIGNAL_FLUSH: _ssf,
   ...cleanEnv
 } = process.env
 
@@ -372,6 +373,29 @@ test('frozen verify is EXEMPT from the child-process assert (no shards minted in
   cpSync(fullFixture, tmp, { recursive: true })
   const r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full', EXODUS_STASIS_CHILD_PROCESS: '' } })
   t.assert.equal(r.status, 0, `frozen verify must not require --child-process; stderr: ${r.stderr}`)
+}))
+
+test('a CAPTURING plugin opts the build children into the SIGTERM shard flush (env flag set)', withTmp((t, tmp) => {
+  // Metro ends transform workers by signal when they don't drain in time (jest-worker's
+  // forceExit), which would silently drop their shards; the plugin therefore sets
+  // EXODUS_STASIS_SHARD_SIGNAL_FLUSH on process.env at construction so the workers Metro
+  // forks later inherit it and the loader flushes their shard on SIGTERM (hooks.js). The
+  // forked-worker behavior itself is pinned in cli.test.js (cli-run-fork-resolve).
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  const r = run('src/entry.js', { cwd: tmp, env: { ...withOpts({ lock: 'add' }), STASIS_TEST_REPORT_SIGNAL_FLUSH: '1' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^SIGNAL_FLUSH=1$/m, 'capturing run must set the flush opt-in for its children')
+}))
+
+test('a NON-writing plugin does not opt children into the SIGTERM shard flush', withTmp((t, tmp) => {
+  // Same gate as the child-process assert (writeLockfile || writeBundle): a frozen verify
+  // mints no shard channel, so its children have nothing to flush -- the flag must stay
+  // unset, keeping the loader's signal disposition untouched outside capturing Metro builds.
+  cpSync(fullFixture, tmp, { recursive: true })
+  const r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full', STASIS_TEST_REPORT_SIGNAL_FLUSH: '1' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.match(r.stdout, /^SIGNAL_FLUSH=$/m, 'a non-writing run must not set the flush opt-in')
 }))
 
 test('a Rule-6 sidecar inherits childProcess from the preload (env-less programmatic option)', withTmp((t, tmp) => {

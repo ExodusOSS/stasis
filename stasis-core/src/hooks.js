@@ -469,7 +469,10 @@ function initState(root) {
   // not taint, so the files captured so far ARE still written. That is intentional and
   // safe: those recorded hashes are accurate (nothing drifted is baked in), and a later
   // lock=frozen run fails closed on anything missing. Unhandled signals (SIGINT/SIGTERM
-  // with no handler) bypass exit hooks entirely; servers own that behavior, we don't touch it.
+  // with no handler) bypass exit hooks entirely; servers own that behavior, we don't touch
+  // it -- except for a capturing CHILD under the EXODUS_STASIS_SHARD_SIGNAL_FLUSH opt-in
+  // (StasisMetro sets it for its force-killed transform workers), which flushes its shard
+  // on SIGTERM and re-delivers the signal -- see the handler registered below.
   //
   // save() runs on EVERY beforeExit/exit firing rather than latching after the first.
   // These handlers were registered at initState -- before any user code ran -- so they fire
@@ -521,6 +524,43 @@ function initState(root) {
 
   process.on('beforeExit', save)
   process.on('exit', save)
+
+  // EXODUS_STASIS_SHARD_SIGNAL_FLUSH (opt-in; StasisMetro's capture wiring sets it for its
+  // build's children -- see the plugin's constructor): flush the shard when a capturing
+  // child is ended BY SIGNAL. Metro's transform workers are routinely killed that way:
+  // jest-worker's end() sends its END message, gives the worker 500ms to drain its event
+  // loop, then forceExit()s it -- SIGTERM, and SIGKILL another 500ms later -- and a worker
+  // whose loop doesn't drain in time (a watcher or ref'd timer some transformer left
+  // behind) dies by SIGTERM, which bypasses beforeExit/exit entirely. Everything ONLY that
+  // worker observed (its fork-target entry, jest-worker's processChild.js; babel.config.js
+  // + the preset/plugin graph loaded per transform) then silently vanished from the
+  // capture, surfacing only later at bundle=load as "file not attested in bundle" when the
+  // forked child's loader can't be served its own entry. The handler flushes the shard and
+  // re-delivers the signal; semantics are preserved:
+  //   - the `once` listener is already removed when the handler runs, so when no user
+  //     listener remains the OS default disposition is restored and the re-kill terminates
+  //     the process BY that signal (the parent still observes code=null, signal=SIGTERM);
+  //   - when user code registered its own handler, we only flush and do NOT re-kill -- the
+  //     user's handler owns process lifetime, and if it later exits normally the exit-hook
+  //     write dedups via lastShardWritten;
+  //   - signal listeners don't ref the event loop, so a cleanly-draining worker still
+  //     exits (and writes) exactly as before.
+  // NOT a global default: a signal listener changes a process's default-kill disposition,
+  // which in arbitrary user children is the user's domain -- the Metro plugin opts in its
+  // KNOWN tool workers, where flush-then-redeliver is the right trade. Gated additionally
+  // to a CHILD (the root's signal behavior stays untouched -- servers own it) that is
+  // actually capturing into an inherited shard channel. SIGTERM only -- it's what
+  // jest-worker's forceExit sends (Metro doesn't override killSignal); SIGKILL remains
+  // uncatchable (jest-worker's memory-limit killChild), the documented best-effort
+  // residual -- a later frozen/load run fails closed on anything genuinely missing.
+  if (isChildProcess && shardForwardingEnabled()
+      && process.env.EXODUS_STASIS_SHARD_DIR && process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH) {
+    process.once('SIGTERM', () => {
+      // Same taint gate as save(): a rejected capture forwards nothing.
+      if (!aborted) writeChildShard()
+      if (process.listenerCount('SIGTERM') === 0) process.kill(process.pid, 'SIGTERM')
+    })
+  }
 }
 
 function load(url, context, nextLoad) {

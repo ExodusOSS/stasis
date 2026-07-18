@@ -2098,7 +2098,14 @@ export class State {
   //     worker child like worker-farm's, a .node addon). The resolution is real and
   //     must be attested so the same require.resolve() returns the same path at
   //     load; the file simply has no bytes -- require.resolve returns a path, load()
-  //     never runs for it, so getFile is never asked to serve it.
+  //     never runs for it, so getFile is never asked to serve it. Bytes are attested
+  //     only by whoever actually LOADS the file: a fork/worker target (jest-worker's
+  //     processChild) is loaded in the forked CHILD as its entry, and that child's
+  //     own capture contributes them via the --child-process shard -- flushed even on
+  //     SIGTERM under the Metro plugin's opt-in (hooks.js), so a force-killed
+  //     transform worker still reports. Deliberately NOT seeded here from the parent:
+  //     attesting bytes this process never loaded would widen the trust set to
+  //     everything that merely resolves.
   // Guards:
   //   - skip out-of-scope targets (mirroring #collectMissingImportedFiles) so a
   //     node_modules-scope artifact doesn't attest workspace resolutions it isn't

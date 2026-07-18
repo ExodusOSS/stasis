@@ -123,13 +123,17 @@ function metroDefaultSerializer() {
 //     earliest refusal point. Load mode is unaffected and runs fine under a dev server --
 //     the serializer passes through and the worker transformer only reads immutable
 //     attested bytes.
-//   - Child-process capture is best-effort within that one shot. A worker KILLED by signal
-//     before its exit hook (jest-worker forceExit / pool overflow) loses its shard SILENTLY at
-//     capture time -- a later frozen run still catches the gap (fail-closed), but nothing warns
-//     during capture. And it relies on the loader's exit-time write, which standalone (no stasis
-//     loader) Metro never reaches -- it mints no shard dir and produces no toolchain-complete
-//     lockfile. Use a one-shot `metro build` under `stasis run --child-process` to capture, then
-//     verify with `--lock=frozen`.
+//   - Child-process capture is best-effort within that one shot. A writing plugin opts the
+//     build's workers into the loader's SIGTERM shard flush (EXODUS_STASIS_SHARD_SIGNAL_FLUSH,
+//     set in the constructor), so a worker force-killed by jest-worker's forceExit -- SIGTERM
+//     500ms after END, routine for a transform worker whose event loop doesn't drain -- still
+//     contributes its shard. SIGKILL remains uncatchable (jest-worker's memory-limit killChild,
+//     a killSignal:'SIGKILL' override): such a worker loses its shard SILENTLY at capture time
+//     -- a later frozen run still catches the gap (fail-closed), but nothing warns during
+//     capture. And it relies on the loader's exit/signal-time writes, which standalone (no
+//     stasis loader) Metro never reaches -- it mints no shard dir and produces no
+//     toolchain-complete lockfile. Use a one-shot `metro build` under
+//     `stasis run --child-process` to capture, then verify with `--lock=frozen`.
 //   - Scaled asset variants: `import x from './logo.png'` is ONE module in the graph, keyed
 //     by the base path; Metro discovers `logo@2x.png` / `@3x` via its AssetData (parallel
 //     scales/files arrays), NOT as separate graph modules, so only the base file is attested
@@ -171,6 +175,18 @@ export class StasisMetro {
         'is never attested. Enable it: `stasis run --child-process ...`, EXODUS_STASIS_CHILD_PROCESS=1, ' +
         'or "childProcess": true in stasis.config.json.'
       )
+      // Metro ends its transform workers BY SIGNAL when they don't drain in time: jest-worker's
+      // end() gives a worker 500ms after the END message, then forceExit()s it (SIGTERM) -- and
+      // a signal death bypasses the worker's exit hooks, silently dropping its shard: the
+      // fork-target entry (jest-worker's processChild.js, which only the worker ever loads --
+      // the parent merely require.resolve()s it) plus the per-transform babel toolchain. Opt
+      // this build's children into the loader's SIGTERM shard flush (hooks.js): the flag rides
+      // process.env, so the workers Metro forks AFTER config time inherit it. Scoped HERE, not
+      // globally -- a signal listener changes a child's default-kill disposition, which is the
+      // user's domain in arbitrary children, but Metro's transform workers are known tool
+      // processes where flush-then-redeliver is the right trade. The plugin can't do this in
+      // the workers itself (only the loader runs there), so an env opt-in is the seam.
+      process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH = '1'
     }
     // resources is a Config field now (validated + coordinated against any preload in
     // resolvePluginState); cache the resolved Set for the per-file classify hot path.
