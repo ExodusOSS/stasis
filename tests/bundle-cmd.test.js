@@ -1235,10 +1235,14 @@ const writeRnFixture = (root) => {
   const core = join(root, 'node_modules', 'react-native')
   mkdirSync(join(core, 'third-party-podspecs'), { recursive: true })
   mkdirSync(join(core, 'Libraries', 'FBLazyVector'), { recursive: true })
+  mkdirSync(join(core, 'sdks', 'hermes-engine'), { recursive: true })
   writeFileSync(join(core, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0', main: 'index.js' }))
   writeFileSync(join(core, 'index.js'), "module.exports = 'react-native'\n")
   writeFileSync(join(core, 'third-party-podspecs', 'DoubleConversion.podspec'), "Pod::Spec.new { |s| s.name = 'DoubleConversion' }\n")
   writeFileSync(join(core, 'Libraries', 'FBLazyVector', 'FBLazyVector.podspec'), "Pod::Spec.new { |s| s.name = 'FBLazyVector' }\n")
+  // A podspec that require_relatives a sibling Ruby helper -- both must be captured.
+  writeFileSync(join(core, 'sdks', 'hermes-engine', 'hermes-engine.podspec'), 'require_relative "./hermes-utils.rb"\nPod::Spec.new { |s| s.name = "hermes-engine" }\n')
+  writeFileSync(join(core, 'sdks', 'hermes-engine', 'hermes-utils.rb'), 'def hermes_tag; "x"; end\n')
 
   const dep = join(root, 'node_modules', 'rn-native')
   mkdirSync(join(dep, 'ios', 'RNThing.xcframework', 'ios-arm64'), { recursive: true }) // prebuilt bundle -> excluded whole
@@ -1283,11 +1287,16 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(!files.has('android/src/main/jniLibs/arm64-v8a/librnthing.so'), 'a jniLibs .so is excluded')
   t.assert.ok(!files.has('ios/RNThing.xcframework/ios-arm64/RNThing.a'), 'a lib inside an xcframework is excluded')
   t.assert.ok(!files.has('ios/RNThing.xcframework/Info.plist'), 'the whole *.xcframework bundle dir is skipped')
-  // React Native core's scattered podspecs are discovered recursively (config lists none).
+  // React Native core's scattered podspecs are discovered recursively (config lists none), along
+  // with the Ruby helper a podspec requires and the package.json podspecs parse.
   const core = new Set(Object.keys(bundle.modules.get('node_modules/react-native').files))
   t.assert.ok(core.has('third-party-podspecs/DoubleConversion.podspec'), 'core third-party podspec discovered')
   t.assert.ok(core.has('Libraries/FBLazyVector/FBLazyVector.podspec'), 'core Libraries podspec discovered')
+  t.assert.ok(core.has('sdks/hermes-engine/hermes-utils.rb'), 'the Ruby helper a podspec requires is discovered')
+  t.assert.ok(core.has('package.json'), 'core package.json (parsed by podspecs) is captured')
   t.assert.equal(bundle.formats.get('node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'), 'resource')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'), 'resource')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/package.json'), 'json')
   // Formats: text native sources are 'resource'; a binary asset is 'resource:base64'; the
   // graph-reached JS keeps its code format.
   t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'resource')

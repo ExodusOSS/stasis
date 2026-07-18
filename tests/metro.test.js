@@ -744,15 +744,22 @@ const writeReactNativeCli = (tmp) => {
   const dir = join(tmp, 'node_modules', 'react-native')
   mkdirSync(join(dir, 'third-party-podspecs'), { recursive: true })
   mkdirSync(join(dir, 'Libraries', 'FBLazyVector'), { recursive: true })
+  mkdirSync(join(dir, 'sdks', 'hermes-engine'), { recursive: true })
   mkdirSync(join(dir, 'sdks', 'hermesc', 'linux64-bin'), { recursive: true })
+  mkdirSync(join(dir, 'React'), { recursive: true })
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0' }))
   writeFileSync(join(dir, 'cli.js'), RN_CLI_JS)
   // react-native core's own podspecs, in the scattered subdirs config never enumerates:
   writeFileSync(join(dir, 'third-party-podspecs', 'DoubleConversion.podspec'), "Pod::Spec.new { |s| s.name = 'DoubleConversion' }\n")
   writeFileSync(join(dir, 'Libraries', 'FBLazyVector', 'FBLazyVector.podspec'), "Pod::Spec.new { |s| s.name = 'FBLazyVector' }\n")
-  // Non-podspec core files that must NOT be captured (scripts ignored for now; hermesc is a
-  // prebuilt binary; index.js is code):
+  // A podspec that `require_relative`s a sibling Ruby helper -- both must be captured:
+  writeFileSync(join(dir, 'sdks', 'hermes-engine', 'hermes-engine.podspec'), 'require_relative "./hermes-utils.rb"\nPod::Spec.new { |s| s.name = "hermes-engine" }\n')
+  writeFileSync(join(dir, 'sdks', 'hermes-engine', 'hermes-utils.rb'), 'def hermes_tag; "x"; end\n')
+  // Non-manifest core files that must NOT be captured (core is podspec-LOAD surface only, not
+  // its full native source): index.js is code, React/RCTBridge.m is native source, hermesc is a
+  // prebuilt binary.
   writeFileSync(join(dir, 'index.js'), 'module.exports = {}\n')
+  writeFileSync(join(dir, 'React', 'RCTBridge.m'), '@implementation RCTBridge @end\n')
   writeFileSync(join(dir, 'sdks', 'hermesc', 'linux64-bin', 'hermesc'), 'ELF\0\xff') // prebuilt, no ext
 }
 
@@ -853,7 +860,15 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.ok(core.files['third-party-podspecs/DoubleConversion.podspec']?.startsWith('sha512-'), 'core third-party podspec captured')
   t.assert.ok(core.files['Libraries/FBLazyVector/FBLazyVector.podspec']?.startsWith('sha512-'), 'core Libraries podspec captured')
   t.assert.equal(lock.formats['node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'], 'resource')
-  t.assert.equal(core.files['index.js'], undefined, 'core JS is not captured by the podspec pass')
+  // A podspec's required Ruby helper + the package.json podspecs parse are captured too.
+  t.assert.ok(core.files['sdks/hermes-engine/hermes-engine.podspec']?.startsWith('sha512-'), 'core hermes podspec captured')
+  t.assert.ok(core.files['sdks/hermes-engine/hermes-utils.rb']?.startsWith('sha512-'), 'the Ruby helper a podspec requires is captured')
+  t.assert.equal(lock.formats['node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'], 'resource')
+  t.assert.ok(core.files['package.json']?.startsWith('sha512-'), 'core package.json (parsed by podspecs) captured')
+  t.assert.equal(lock.formats['node_modules/react-native/package.json'], 'json')
+  // ...but NOT core's JS, native source, or prebuilt binaries (podspec-LOAD surface only).
+  t.assert.equal(core.files['index.js'], undefined, 'core JS is not captured by the manifest pass')
+  t.assert.equal(core.files['React/RCTBridge.m'], undefined, 'core native source is not captured (load surface only)')
   t.assert.equal(core.files['sdks/hermesc/linux64-bin/hermesc'], undefined, 'core prebuilt hermesc binary is not captured')
 }))
 

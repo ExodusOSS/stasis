@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { classifyExtension, isNativeArtifact, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -230,7 +230,9 @@ function metroDefaultSerializer() {
 //   react-native-skia's `libs/` of .a/.xcframework) are NOT captured -- generated output, not
 //   source, and often non-deterministic across installs (isNativeArtifact). React Native CORE
 //   isn't a `dependencies` entry (config reports only `reactNativePath`), so its own scattered
-//   podspecs -- third-party-podspecs/*, Libraries/*/*.podspec -- are captured separately. A
+//   podspecs -- third-party-podspecs/*, Libraries/*/*.podspec -- plus the Ruby helpers those
+//   podspecs `require` (hermes-utils.rb) and the package.json they parse, are captured separately
+//   (podspec-LOAD surface only -- not core's full native source). A
 //   native module that autolinking never reports but the app IMPORTS and wires up manually in the
 //   Podfile (e.g. a podspec under lib/ios) is also captured: any reached node_modules package
 //   that ships native code (a podspec / ios/ / android/) has its native surface attested.
@@ -495,7 +497,7 @@ export class StasisMetro {
     if (typeof rnPath === 'string' && isAbsolute(rnPath)) {
       try {
         this.#state.relative(rnPath)
-        this.#capturePodspecTree(rnPath)
+        this.#captureManifestTree(rnPath)
       } catch { /* react-native resolved outside the project root -- unattestable */ }
     }
   }
@@ -541,11 +543,13 @@ export class StasisMetro {
     return false
   }
 
-  // Recursively attest every podspec (*.podspec / *.podspec.json) under `dir`, pruning the same
-  // build-output/binary subtrees as #captureNativeTree. Used for react-native core, whose podspecs
-  // `react-native config` never lists (see #captureNativeModules). Podspecs are UTF-8 Ruby text,
-  // attested as resources through the same addFile path as any other capture.
-  #capturePodspecTree(dir) {
+  // Recursively attest react-native core's podspec-LOAD surface under `dir` (see
+  // #captureNativeModules): the podspecs `react-native config` never lists, the Ruby helpers they
+  // `require` (hermes-engine.podspec -> hermes-utils.rb), and the package.json they parse -- but
+  // NOT core's full native source. Prunes the same build-output/binary subtrees as
+  // #captureNativeTree. package.json rides the code path (format 'json'); podspecs + Ruby are
+  // UTF-8 text attested as resources, through the same addFile path as any other capture.
+  #captureManifestTree(dir) {
     let entries
     try {
       entries = realReaddirSync(dir, { withFileTypes: true })
@@ -556,15 +560,16 @@ export class StasisMetro {
       if (ent.isSymbolicLink()) continue
       const full = join(dir, ent.name)
       if (ent.isDirectory()) {
-        if (!NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) this.#capturePodspecTree(full)
+        if (!NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) this.#captureManifestTree(full)
         continue
       }
-      if (!ent.isFile() || !isPodspec(ent.name)) continue
+      if (!ent.isFile() || !isNativeManifest(ent.name)) continue
       if (this.#seen.has(full)) continue
       this.#seen.add(full)
       const source = realReadFileSync(full)
-      assert.ok(isUtf8(source), `StasisMetro: podspec has non-UTF-8 bytes: ${full}`)
-      this.#state.addFile(pathToFileURL(full).toString(), { source, resource: true, reason: 'StasisMetro' })
+      assert.ok(isUtf8(source), `StasisMetro: native manifest has non-UTF-8 bytes: ${full}`)
+      // package.json is code (format 'json'); podspecs + the Ruby helpers they require are resources.
+      this.#state.addFile(pathToFileURL(full).toString(), { source, resource: ent.name !== 'package.json', reason: 'StasisMetro' })
     }
   }
 

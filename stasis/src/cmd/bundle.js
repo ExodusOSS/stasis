@@ -11,7 +11,7 @@ import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { assertRealPathWithinBase, classifyExtension, isNativeArtifact, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { assertRealPathWithinBase, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -757,11 +757,12 @@ function walkNativeDir(dirAbs, out) {
   }
 }
 
-// Recursively collect podspec manifests (*.podspec / *.podspec.json) anywhere under `dirAbs`,
-// pruning the same build-output/binary subtrees as walkNativeDir. React Native's own podspecs
-// live in scattered subdirs (third-party-podspecs/, Libraries/*/) that `react-native config`
-// never enumerates -- it reports only reactNativePath -- so a root-only scan misses them.
-function collectPodspecs(dirAbs, out) {
+// Recursively collect podspec-LOAD manifests (podspecs, the Ruby helpers they `require`, and the
+// package.json they parse -- isNativeManifest) anywhere under `dirAbs`, pruning the same build-
+// output/binary subtrees as walkNativeDir. React Native's own podspecs live in scattered subdirs
+// (third-party-podspecs/, Libraries/*/, sdks/hermes-engine/) that `react-native config` never
+// enumerates -- it reports only reactNativePath -- so a root-only scan misses them.
+function collectNativeManifests(dirAbs, out) {
   let entries
   try {
     entries = readdirSync(dirAbs, { withFileTypes: true })
@@ -772,22 +773,29 @@ function collectPodspecs(dirAbs, out) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) collectPodspecs(full, out)
-    } else if (ent.isFile() && isPodspec(ent.name)) {
+      if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) collectNativeManifests(full, out)
+    } else if (ent.isFile() && isNativeManifest(ent.name)) {
       out.push(full)
     }
   }
 }
 
 // The native SOURCE files a bundled React Native dependency contributes to the app's native
-// build: its podspec(s) anywhere in the package, and the non-artifact files under ios/ and
-// android/. These are what CocoaPods/Xcode and Gradle consume; no JS module graph reaches them.
-// Prebuilt/installed binaries (.a/.so/.xcframework, installed pods) are excluded -- generated
-// output, not source. Returns deduped absolute paths (a non-native package yields none).
+// build: its podspecs (+ the Ruby helpers/package.json they load) anywhere in the package, and
+// the non-artifact files under ios/ and android/. These are what CocoaPods/Xcode and Gradle
+// consume; no JS module graph reaches them. Prebuilt/installed binaries (.a/.so/.xcframework,
+// installed pods) are excluded -- generated output, not source. The collected manifests are kept
+// ONLY when the package is actually native (ships a podspec or an ios/android dir) -- otherwise a
+// JS-only dependency's package.json would be pulled in. Returns deduped absolute paths.
 function nativeModuleFiles(pkgAbs) {
-  const out = []
-  collectPodspecs(pkgAbs, out) // podspecs anywhere (incl. react-native's scattered ones)
-  for (const dir of ['ios', 'android']) walkNativeDir(join(pkgAbs, dir), out)
+  const manifests = []
+  collectNativeManifests(pkgAbs, manifests)
+  const hasIos = existsSync(join(pkgAbs, 'ios'))
+  const hasAndroid = existsSync(join(pkgAbs, 'android'))
+  if (!hasIos && !hasAndroid && !manifests.some((f) => isPodspec(f))) return []
+  const out = [...manifests]
+  if (hasIos) walkNativeDir(join(pkgAbs, 'ios'), out)
+  if (hasAndroid) walkNativeDir(join(pkgAbs, 'android'), out)
   return [...new Set(out)]
 }
 
@@ -907,11 +915,19 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       for (const abs of nativeModuleFiles(join(baseDir, pkgDir))) {
         const rel = toRel(abs)
         if (sources.has(rel)) continue // already carried as a graph module
-        // A code file under ios/android is a JS module, not native code: the graph already
-        // carries the ones a build uses, and an unused one isn't a native input -- skip it.
-        if (classifyExtension(rel, NO_RESOURCES) === 'code') continue
         assertRealPathWithinBase(realBase, baseDir, rel)
         const buf = readFileSync(abs)
+        // A native package's package.json (podspecs parse it for the version) rides the code path
+        // as json; prune keeps a file-listed package.json in full. Any OTHER code file under
+        // ios/android is a JS module -- the graph carries the ones a build uses; skip it.
+        if (rel.endsWith('/package.json')) {
+          if (!isUtf8(buf)) throw new Error(`native package.json is not valid UTF-8: ${rel}`)
+          sources.set(rel, buf.toString('utf8'))
+          formatsByRel.set(rel, 'json')
+          integrities.set(rel, sha512integrity(buf))
+          continue
+        }
+        if (classifyExtension(rel, NO_RESOURCES) === 'code') continue
         const utf8 = isUtf8(buf)
         sources.set(rel, utf8 ? buf.toString('utf8') : buf.toString('base64'))
         formatsByRel.set(rel, utf8 ? 'resource' : 'resource:base64')

@@ -156,6 +156,15 @@ export function isPodspec(name) {
   return name.endsWith('.podspec') || name.endsWith('.podspec.json')
 }
 
+// Files `pod install` READS while LOADING podspecs, beyond the podspec itself: the Ruby helpers a
+// podspec `require`s (react-native's hermes-engine.podspec -> hermes-utils.rb; the Podfile ->
+// scripts/*.rb) and the package.json podspecs parse for the version. Captured alongside podspecs
+// so every podspec can load from the artifact -- NOT the native source those podspecs later
+// compile. `name` is a basename (package.json is matched exactly).
+export function isNativeManifest(name) {
+  return isPodspec(name) || pathExt(name) === 'rb' || name === 'package.json'
+}
+
 // Set-equality for parsed resources allowlists (lowercase extension/filename sets).
 // Coordinates a plugin's `resources` option against an active preload's, and the env
 // var against an explicit option in Config.
