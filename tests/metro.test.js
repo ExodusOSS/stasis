@@ -574,6 +574,120 @@ test('resources rejects code extensions', withTmp((t, tmp) => {
   t.assert.match(r.stderr, /resources entry 'js' is a code extension/)
 }))
 
+// ----- Auto-included files (asyncRequire.js, setup_env.sh) -----------------------------
+
+// Models the two well-known packages whose files StasisMetro auto-includes. Every OTHER
+// test in this suite runs without them, which doubles as coverage for the both-absent
+// case: an unresolvable auto-include is skipped silently (e.g. the first test's
+// `lock.modules` deepEqual {}).
+const ASYNC_REQUIRE = 'node_modules/metro-runtime/src/modules/asyncRequire.js'
+const SETUP_ENV = 'node_modules/@react-native-community/cli/setup_env.sh'
+const writeAutoIncludePackages = (tmp, { asyncRequire = true, setupEnv = true } = {}) => {
+  if (asyncRequire) {
+    const dir = join(tmp, 'node_modules', 'metro-runtime')
+    mkdirSync(join(dir, 'src', 'modules'), { recursive: true })
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'metro-runtime', version: '0.80.0' }))
+    writeFileSync(join(tmp, ASYNC_REQUIRE), 'module.exports = function asyncRequire() {}\n')
+  }
+  if (setupEnv) {
+    const dir = join(tmp, 'node_modules', '@react-native-community', 'cli')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@react-native-community/cli', version: '13.6.0' }))
+    writeFileSync(join(tmp, SETUP_ENV), '#!/bin/bash\nexport NODE_BINARY=node\n')
+  }
+}
+
+test('auto-includes: asyncRequire.js and setup_env.sh are attested at capture when present', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeAutoIncludePackages(tmp)
+  const bundlePath = join(tmp, 'snapshot.br')
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: {
+      EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full',
+      EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+    },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.modules['node_modules/metro-runtime'].files['src/modules/asyncRequire.js'].startsWith('sha512-'))
+  t.assert.ok(lock.modules['node_modules/@react-native-community/cli'].files['setup_env.sh'].startsWith('sha512-'))
+  // asyncRequire is code (commonjs -- metro-runtime declares no `type`); setup_env.sh is
+  // attested as a raw-UTF-8 resource WITHOUT 'sh' in the resources allowlist -- the
+  // auto-include list is stasis-vetted, so it bypasses classifyExtension.
+  t.assert.equal(lock.formats[ASYNC_REQUIRE], 'commonjs')
+  t.assert.equal(lock.formats[SETUP_ENV], 'resource')
+  // The app graph is still captured alongside.
+  t.assert.ok(lock.sources['.'].files['src/entry.js'].startsWith('sha512-'))
+
+  // The bundle carries both payloads, formats tagged the same way.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
+  t.assert.equal(decoded.modules['node_modules/metro-runtime'].files['src/modules/asyncRequire.js'],
+    readFileSync(join(tmp, ASYNC_REQUIRE), 'utf-8'))
+  t.assert.equal(decoded.modules['node_modules/@react-native-community/cli'].files['setup_env.sh'],
+    readFileSync(join(tmp, SETUP_ENV), 'utf-8'))
+  t.assert.equal(decoded.formats[ASYNC_REQUIRE], 'commonjs')
+  t.assert.equal(decoded.formats[SETUP_ENV], 'resource')
+}))
+
+test('auto-includes: entries are independent -- a missing one is skipped, the present one attested', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeAutoIncludePackages(tmp, { asyncRequire: false })
+
+  const r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.modules['node_modules/@react-native-community/cli'].files['setup_env.sh'].startsWith('sha512-'))
+  t.assert.equal(lock.modules['node_modules/metro-runtime'], undefined, 'unresolvable auto-include is skipped')
+}))
+
+test('auto-includes: frozen verifies them and rejects a tampered setup_env.sh', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeAutoIncludePackages(tmp)
+
+  let r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `capture stderr: ${r.stderr}`)
+
+  r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `frozen must pass on captured auto-includes; stderr: ${r.stderr}`)
+
+  // Auto-includes go through the same addFile path as graph modules, so tampering one
+  // after capture must fail a frozen run closed -- the very reason to attest them.
+  writeFileSync(join(tmp, SETUP_ENV), '#!/bin/bash\nexport NODE_BINARY=tampered\n')
+  r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.notEqual(r.status, 0, 'tampered setup_env.sh must be rejected')
+  t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
+}))
+
+test('auto-includes: an auto-include that is also a graph module is captured once, without conflict', withTmp((t, tmp) => {
+  // With dynamic import() in the app, Metro puts asyncRequire in the graph itself; the
+  // auto-include pass must dedupe against the graph capture rather than re-record it.
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeAutoIncludePackages(tmp)
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' },
+    graph: {
+      modules: [
+        { path: 'src/entry.js', deps: [['./hello.js', 'src/hello.js']] },
+        { path: 'src/hello.js', deps: [] },
+        { path: ASYNC_REQUIRE, deps: [] },
+      ],
+    },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.ok(lock.modules['node_modules/metro-runtime'].files['src/modules/asyncRequire.js'].startsWith('sha512-'))
+}))
+
 // ----- Metro-specific: serializer wiring, preModules, virtual modules -----------------
 
 const POLYFILL_GRAPH = {

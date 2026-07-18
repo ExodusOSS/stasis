@@ -26,6 +26,26 @@ function entrySet(graph) {
   return new Set()
 }
 
+// Well-known files a React Native / Metro build REQUIRES that the serializer's module
+// graph never reliably carries -- attested automatically at capture when they resolve
+// from the project, and skipped when they don't (not every Metro project ships them):
+//   - metro-runtime/src/modules/asyncRequire.js: Metro's default
+//     `transformer.asyncRequireModulePath`. The transform injects it to implement
+//     dynamic import(), so it ships in bundles without necessarily appearing as a
+//     module of the graph handed to the serializer.
+//   - @react-native-community/cli/setup_env.sh: sourced by the React Native CLI's
+//     native build phases (Xcode / Gradle) around the JS bundle step -- build-shaping
+//     toolchain that is never part of the JS module graph at all.
+// A `resource: true` entry bypasses the `resources` allowlist: this is a stasis-vetted
+// list of SPECIFIC files, not a user-widened extension class. Code entries ride the
+// normal loader-format inference. Extend the list here, not via an option -- an option
+// would make the attested set configuration-dependent, which is exactly what
+// auto-include exists to avoid.
+const AUTO_INCLUDES = [
+  { specifier: 'metro-runtime/src/modules/asyncRequire.js', resource: false },
+  { specifier: '@react-native-community/cli/setup_env.sh', resource: true },
+]
+
 // Metro has no public "default serializer" export, but its default bundle CODE is exactly
 // `bundleToString(baseJSBundle(entryPoint, preModules, graph, options)).code` (Metro's own
 // Server.js else-branch when no customSerializer is set). bundleToString returns
@@ -115,6 +135,14 @@ function metroDefaultSerializer() {
 //   `new StasisMetro(opts).customSerializer(base?)`. `serializerHook` (the experimental
 //   hook) is a lower-coverage fallback -- see its note.
 //
+// AUTO-INCLUDED FILES: capture also attests the fixed AUTO_INCLUDES list (see it above
+//   the class) -- files a React Native build requires that the serializer's graph never
+//   reliably carries (Metro's asyncRequire module, the RN CLI's setup_env.sh). Each is
+//   attested when it resolves from the project and skipped when it doesn't, through the
+//   same addFile path as graph modules, so frozen verification covers them fail-closed.
+//   NOTE: a lockfile captured before this list existed doesn't attest these files, so a
+//   frozen run against it fails once they're present -- recapture (lock=replace) once.
+//
 // KNOWN LIMITATIONS (Metro-specific coverage gaps -- documented, not silently ignored):
 //   - Capture is ONE-SHOT ONLY, enforced: a dev server (`metro start`) re-invokes the serializer
 //     per rebuild, and the SECOND invocation throws (see #run) -- capture's path-keyed dedupe
@@ -144,6 +172,13 @@ export class StasisMetro {
   #seen = new Set()
   #state
   #resources
+
+  // Base dir AUTO_INCLUDES resolution starts from: the directory Metro runs in -- the
+  // same cwd resolvePluginState anchors the State at, and an in-or-under-root path by
+  // State's own root detection (which walks UP from it), so Node's node_modules walk-up
+  // from here also covers hoisted workspace layouts. Snapshotted at construction so a
+  // later chdir can't skew what a capture attests.
+  #projectDir = process.cwd()
 
   // Whether this instance already served one capture (#run). The serializer fires once per
   // one-shot `metro build`; a dev server re-invokes it per rebuild, which capture refuses --
@@ -245,6 +280,42 @@ export class StasisMetro {
     // app module graph.
     if (preModules) this.#captureModules(preModules, entries)
     this.#captureModules(graph.dependencies.values(), entries)
+    // AFTER the graph so #seen already holds every graph module: an auto-include that
+    // did land in the graph this build (asyncRequire does when the app uses dynamic
+    // import()) is deduped instead of re-recorded.
+    this.#captureAutoIncludes()
+  }
+
+  // Attest the AUTO_INCLUDES list (see its note above). Skips, per entry: a specifier
+  // that doesn't resolve from the project (the file genuinely doesn't exist there --
+  // nothing to attest), a file already captured as a graph module this build, and a
+  // resolution landing outside the project root (unattestable -- lockfile/bundle keys
+  // are root-relative; same out-of-scope stance as the load transformer's inScope).
+  // Everything that IS attested goes through the exact addFile path graph modules use,
+  // so frozen runs verify these files fail-closed like any other capture.
+  #captureAutoIncludes() {
+    for (const { specifier, resource } of AUTO_INCLUDES) {
+      let modPath
+      try {
+        modPath = require.resolve(specifier, { paths: [this.#projectDir] })
+      } catch {
+        continue // not installed in this project -- nothing to attest
+      }
+      if (this.#seen.has(modPath)) continue
+      try {
+        this.#state.relative(modPath)
+      } catch {
+        continue // outside the project root -- unattestable
+      }
+      this.#seen.add(modPath)
+      // Real reader for the same reason as #captureModules: this is plugin bookkeeping,
+      // not a program fs read -- it must not be re-recorded by a --fs patched reader.
+      const source = realReadFileSync(modPath)
+      if (!resource) {
+        assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${modPath}`)
+      }
+      this.#state.addFile(pathToFileURL(modPath).toString(), { source, resource, reason: 'StasisMetro' })
+    }
   }
 
   #captureModules(modules, entries) {
