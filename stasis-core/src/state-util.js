@@ -21,6 +21,7 @@ import { join, resolve, sep } from 'node:path'
 // covers `import { readFile } from 'node:fs/promises'`.)
 export const realReadFileSync = fs.readFileSync
 export const realReadFile = fs.promises.readFile
+export const realReaddirSync = fs.readdirSync
 const { realpathSync } = fs
 
 assert.equal(sep, '/', 'Not tested on Windows')

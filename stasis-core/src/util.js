@@ -131,6 +131,58 @@ export function classifyExtension(filePath, resources) {
   return 'unknown'
 }
 
+// Compiled / installed / prebuilt native artifacts a package ships or generates on install
+// (e.g. react-native-skia's prebuilt Skia `libs/` -- hundreds of MiB of .a/.xcframework). These
+// are build OUTPUTS, not source, and typically non-deterministic across installs, so the native
+// capture skips them entirely -- bundling neither their bytes nor an integrity (a frozen run
+// would otherwise flake on regenerated blobs). Matched by suffix on a file OR directory name, so
+// an Apple `*.framework`/`*.xcframework` bundle (a directory of a binary + headers) is skipped
+// whole rather than descended into and captured header-by-header.
+const NATIVE_ARTIFACT_EXTS = new Set([
+  'a', 'so', 'o', 'obj', 'dylib', 'lib', 'dll', 'exe', 'pdb', // native objects / libraries
+  'aar', 'jar', 'class', 'dex', // JVM / Android build output
+  'node', // Node native addon
+  'framework', 'xcframework', 'dsym', // Apple binary bundle directories
+  'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', // opaque archives
+])
+export function isNativeArtifact(name) {
+  return NATIVE_ARTIFACT_EXTS.has(pathExt(name))
+}
+
+// A CocoaPods podspec manifest. React Native ships these in scattered subdirs
+// (third-party-podspecs/, Libraries/*/) that `react-native config` never enumerates, so the
+// native capture discovers them by name rather than by a fixed location.
+export function isPodspec(name) {
+  return name.endsWith('.podspec') || name.endsWith('.podspec.json')
+}
+
+// Files `pod install` READS while LOADING podspecs, beyond the podspec itself: the Ruby helpers a
+// podspec `require`s (react-native's hermes-engine.podspec -> hermes-utils.rb; the Podfile ->
+// scripts/*.rb) and the package.json podspecs parse for the version. Captured alongside podspecs
+// so every podspec can load from the artifact -- NOT the native source those podspecs later
+// compile. `name` is a basename (package.json is matched exactly).
+export function isNativeManifest(name) {
+  return isPodspec(name) || pathExt(name) === 'rb' || name === 'package.json'
+}
+
+// React Native CORE subdirectories captured IN FULL (native source too, not just the podspec-load
+// surface) with a metro bundle: build inputs the native build compiles from react-native itself
+// that live outside the autolinked-dependency model and aren't reachable from the JS graph.
+// A stasis-vetted fixed list (like the metro plugin's AUTO_INCLUDES), project-relative to the
+// react-native package root; a dir that doesn't exist in a given react-native version is skipped.
+//   - ReactCommon/yoga: the Yoga layout engine's C++ sources + cmake/CMakeLists.txt.
+//   - sdks/hermes-engine: the hermes-engine podspec dir (podspec + its Ruby helpers + configs).
+//   - scripts: the CocoaPods integration the Podfile drives (react_native_pods.rb, cocoapods/*,
+//     the Xcode build-phase shell scripts).
+export const RN_CORE_INCLUDE_DIRS = ['ReactCommon/yoga', 'sdks/hermes-engine', 'scripts']
+
+// Individual react-native CORE files captured with a metro bundle (project-relative to the
+// react-native package root; a missing one is skipped). Named rather than folded into an include
+// DIR because their directory also holds huge prebuilt binaries we must NOT capture:
+//   - sdks/.hermesversion: the Hermes revision hermes-utils.rb reads at podspec-load time. It
+//     sits directly under sdks/, which also contains sdks/hermesc/* (prebuilt compiler binaries).
+export const RN_CORE_INCLUDE_FILES = ['sdks/.hermesversion']
+
 // Set-equality for parsed resources allowlists (lowercase extension/filename sets).
 // Coordinates a plugin's `resources` option against an active preload's, and the env
 // var against an explicit option in Config.
