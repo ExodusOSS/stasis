@@ -396,9 +396,10 @@ export class Config {
     return this.#fs
   }
 
-  // Brotli quality (integer 0..11) for bundle writes; undefined -> brotli's default (11,
-  // max). State.write() forwards this to brotliOptions(). Not serialized -- a how-to-write
-  // flag like debug/fs; the bundle's decompressed content is identical at any quality.
+  // Brotli quality (integer 0..11) for bundle writes; undefined -> stasis's default
+  // (DEFAULT_BROTLI_QUALITY = 9, applied by brotliOptions). State.write() forwards this to
+  // brotliOptions(). Not serialized -- a how-to-write flag like debug/fs; the bundle's
+  // decompressed content is identical at any quality.
   get brotliQuality() {
     return this.#brotliQuality
   }

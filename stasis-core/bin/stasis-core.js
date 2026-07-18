@@ -90,7 +90,7 @@ if (command === '-v' || command === '--version') {
   // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
-  // --brotli-quality: bundle compression quality (0..11; unset = brotli's default 11).
+  // --brotli-quality: bundle compression quality (0..11; unset -> stasis default 9).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
     try {
