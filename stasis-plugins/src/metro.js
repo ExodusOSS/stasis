@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { classifyExtension } from '@exodus/stasis-core/util'
+import { classifyExtension, isNativeArtifact } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -222,11 +222,13 @@ function metroDefaultSerializer() {
 //   above attests them. Capture closes this by asking React Native's OWN autolinking resolver,
 //   `react-native config`, which native dependencies the build links (the same query
 //   `use_native_modules!` / the Gradle settings plugin run), then attesting each one's native
-//   build-input surface (see #captureNativeModules). This runs automatically whenever the RN
-//   CLI resolves from the project -- no option, so the attested set can't drift by config --
-//   and is skipped otherwise (a non-RN Metro build has nothing native to attest). Without it,
-//   `stasis prune` -- which keeps only lockfile-listed files -- would DELETE every native
-//   dependency's ios/android sources and break the native build.
+//   SOURCE surface (see #captureNativeModules). This runs automatically whenever the RN CLI
+//   resolves from the project -- no option, so the attested set can't drift by config -- and is
+//   skipped otherwise (a non-RN Metro build has nothing native to attest). Without it, `stasis
+//   prune` -- which keeps only lockfile-listed files -- would DELETE every native dependency's
+//   ios/android sources and break the native build. Prebuilt/installed binary artifacts (e.g.
+//   react-native-skia's `libs/` of .a/.xcframework) are NOT captured -- generated output, not
+//   source, and often non-deterministic across installs (isNativeArtifact).
 //
 // KNOWN LIMITATIONS (Metro-specific coverage gaps -- documented, not silently ignored):
 //   - Capture is ONE-SHOT ONLY, enforced: a dev server (`metro start`) re-invokes the serializer
@@ -491,10 +493,14 @@ export class StasisMetro {
       if (ent.isSymbolicLink()) continue
       const full = join(dir, ent.name)
       if (ent.isDirectory()) {
-        if (!NATIVE_WALK_SKIP_DIRS.has(ent.name)) this.#captureNativeTree(full)
+        // Skip build-output subtrees and Apple binary bundles (*.framework/*.xcframework).
+        if (!NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) this.#captureNativeTree(full)
         continue
       }
       if (!ent.isFile()) continue // sockets/FIFOs/etc. -- no attestable bytes
+      // Prebuilt/installed binary artifacts (react-native-skia's `libs/` of .a/.so/.xcframework,
+      // etc.) are build output, not source, and non-deterministic -- never captured.
+      if (isNativeArtifact(ent.name)) continue
       if (this.#seen.has(full)) continue // already captured as a graph module or auto-include
       const isPackageJson = ent.name === 'package.json'
       const kind = classifyExtension(full, this.#resources)

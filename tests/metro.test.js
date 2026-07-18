@@ -755,8 +755,12 @@ const writeNativeDep = (tmp, name) => {
   mkdirSync(join(root, 'ios'), { recursive: true })
   mkdirSync(join(root, 'android', 'src', 'main', 'java', 'com'), { recursive: true })
   mkdirSync(join(root, 'android', 'build'), { recursive: true })
+  mkdirSync(join(root, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a'), { recursive: true })
   mkdirSync(join(root, 'src'), { recursive: true })
   mkdirSync(join(root, 'example', 'ios'), { recursive: true })
+  // A skia-style prebuilt/installed `libs/`: an Apple binary bundle (dir) + a static lib.
+  mkdirSync(join(root, 'libs', 'apple', 'Skia.xcframework', 'ios-arm64'), { recursive: true })
+  mkdirSync(join(root, 'libs', 'android', 'arm64-v8a'), { recursive: true })
   writeFileSync(join(root, 'package.json'), JSON.stringify({
     name, version: '1.2.3', codegenConfig: { name: 'RNThingSpec', type: 'modules', jsSrcsDir: 'src' },
   }))
@@ -769,6 +773,11 @@ const writeNativeDep = (tmp, name) => {
   writeFileSync(join(root, 'src', 'index.js'), 'export default {}\n')                 // unused JS -> skipped
   writeFileSync(join(root, 'android', 'build', 'generated.o'), 'BUILDOUTPUT')         // build output -> excluded
   writeFileSync(join(root, 'example', 'ios', 'Example.m'), '// example app source\n') // example app -> excluded
+  // Prebuilt/installed binary artifacts -- generated output, never captured:
+  writeFileSync(join(root, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a', 'librnthing.so'), 'ELF\0\xff')
+  writeFileSync(join(root, 'libs', 'android', 'arm64-v8a', 'libskia.a'), '!<arch>\0\xff')
+  writeFileSync(join(root, 'libs', 'apple', 'Skia.xcframework', 'Info.plist'), '<plist/>\n') // text, but inside a skipped bundle dir
+  writeFileSync(join(root, 'libs', 'apple', 'Skia.xcframework', 'ios-arm64', 'Skia.a'), '!<arch>\0\xff')
   return root
 }
 
@@ -811,6 +820,13 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.equal(mod.files['src/index.js'], undefined, 'unused JS in a native dep is not attested')
   t.assert.equal(mod.files['example/ios/Example.m'], undefined, 'the example app subtree is excluded')
   t.assert.equal(mod.files['android/build/generated.o'], undefined, 'build output is excluded')
+  // Prebuilt/installed binary artifacts are never captured (react-native-skia's `libs/` case):
+  // static libs, jniLibs .so, and everything inside an Apple *.xcframework bundle (incl. its
+  // text Info.plist) -- generated output, not source.
+  t.assert.equal(mod.files['libs/android/arm64-v8a/libskia.a'], undefined, 'a prebuilt .a is excluded')
+  t.assert.equal(mod.files['android/src/main/jniLibs/arm64-v8a/librnthing.so'], undefined, 'a jniLibs .so is excluded')
+  t.assert.equal(mod.files['libs/apple/Skia.xcframework/ios-arm64/Skia.a'], undefined, 'a lib inside an xcframework is excluded')
+  t.assert.equal(mod.files['libs/apple/Skia.xcframework/Info.plist'], undefined, 'the whole *.xcframework bundle dir is skipped, not descended into')
   // Native sources are attested as resources; package.json rides the code path as json.
   t.assert.equal(lock.formats['node_modules/react-native-native-lib/react-native-native-lib.podspec'], 'resource')
   t.assert.equal(lock.formats['node_modules/react-native-native-lib/ios/RNThing.m'], 'resource')

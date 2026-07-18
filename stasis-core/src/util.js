@@ -131,6 +131,24 @@ export function classifyExtension(filePath, resources) {
   return 'unknown'
 }
 
+// Compiled / installed / prebuilt native artifacts a package ships or generates on install
+// (e.g. react-native-skia's prebuilt Skia `libs/` -- hundreds of MiB of .a/.xcframework). These
+// are build OUTPUTS, not source, and typically non-deterministic across installs, so the native
+// capture skips them entirely -- bundling neither their bytes nor an integrity (a frozen run
+// would otherwise flake on regenerated blobs). Matched by suffix on a file OR directory name, so
+// an Apple `*.framework`/`*.xcframework` bundle (a directory of a binary + headers) is skipped
+// whole rather than descended into and captured header-by-header.
+const NATIVE_ARTIFACT_EXTS = new Set([
+  'a', 'so', 'o', 'obj', 'dylib', 'lib', 'dll', 'exe', 'pdb', // native objects / libraries
+  'aar', 'jar', 'class', 'dex', // JVM / Android build output
+  'node', // Node native addon
+  'framework', 'xcframework', 'dsym', // Apple binary bundle directories
+  'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', // opaque archives
+])
+export function isNativeArtifact(name) {
+  return NATIVE_ARTIFACT_EXTS.has(pathExt(name))
+}
+
 // Set-equality for parsed resources allowlists (lowercase extension/filename sets).
 // Coordinates a plugin's `resources` option against an active preload's, and the env
 // var against an explicit option in Config.

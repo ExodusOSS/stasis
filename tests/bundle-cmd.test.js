@@ -1231,8 +1231,8 @@ const writeRnFixture = (root) => {
   writeFileSync(join(root, 'src', 'entry.js'), "import 'rn-native'\nimport 'js-only'\nconsole.log('ok')\n")
 
   const dep = join(root, 'node_modules', 'rn-native')
-  mkdirSync(join(dep, 'ios'), { recursive: true })
-  mkdirSync(join(dep, 'android', 'src', 'main'), { recursive: true })
+  mkdirSync(join(dep, 'ios', 'RNThing.xcframework', 'ios-arm64'), { recursive: true }) // prebuilt bundle -> excluded whole
+  mkdirSync(join(dep, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a'), { recursive: true })
   mkdirSync(join(dep, 'android', 'build'), { recursive: true }) // build output -> excluded
   writeFileSync(join(dep, 'package.json'), JSON.stringify({ name: 'rn-native', version: '3.1.0', main: 'index.js' }))
   writeFileSync(join(dep, 'index.js'), "module.exports = 'rn-native'\n") // reached by the graph
@@ -1244,6 +1244,10 @@ const writeRnFixture = (root) => {
   writeFileSync(join(dep, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
   writeFileSync(join(dep, 'android', 'src', 'main', 'AndroidManifest.xml'), '<manifest/>\n')
   writeFileSync(join(dep, 'android', 'build', 'generated.o'), 'BUILD OUTPUT') // excluded
+  // Prebuilt/installed binary artifacts -- generated output, never captured:
+  writeFileSync(join(dep, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a', 'librnthing.so'), 'ELF\0\xff')
+  writeFileSync(join(dep, 'ios', 'RNThing.xcframework', 'Info.plist'), '<plist/>\n') // text, but inside a skipped bundle dir
+  writeFileSync(join(dep, 'ios', 'RNThing.xcframework', 'ios-arm64', 'RNThing.a'), '!<arch>\0\xff')
 
   const js = join(root, 'node_modules', 'js-only')
   mkdirSync(js, { recursive: true })
@@ -1264,6 +1268,11 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   }
   t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
   t.assert.ok(!files.has('android/build/generated.o'), 'build output is excluded')
+  // Prebuilt/installed binary artifacts are excluded: a jniLibs .so, and everything inside an
+  // Apple *.xcframework bundle (including its text Info.plist -- the dir is skipped whole).
+  t.assert.ok(!files.has('android/src/main/jniLibs/arm64-v8a/librnthing.so'), 'a jniLibs .so is excluded')
+  t.assert.ok(!files.has('ios/RNThing.xcframework/ios-arm64/RNThing.a'), 'a lib inside an xcframework is excluded')
+  t.assert.ok(!files.has('ios/RNThing.xcframework/Info.plist'), 'the whole *.xcframework bundle dir is skipped')
   // Formats: text native sources are 'resource'; a binary asset is 'resource:base64'; the
   // graph-reached JS keeps its code format.
   t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'resource')
