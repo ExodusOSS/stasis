@@ -48,10 +48,10 @@ importers:
   stasis:
     dependencies:
       '@exodus/stasis-core':
-        specifier: 1.0.0-beta.1
+        specifier: 1.0.0-beta.2
         version: link:../stasis-core
       '@exodus/stasis-plugins':
-        specifier: 1.0.0-beta.1
+        specifier: 1.0.0-beta.2
         version: link:../stasis-plugins
       esbuild:
         specifier: '*'
@@ -65,7 +65,7 @@ importers:
   stasis-plugins:
     dependencies:
       '@exodus/stasis-core':
-        specifier: 1.0.0-beta.1
+        specifier: 1.0.0-beta.2
         version: link:../stasis-core
 
 packages:

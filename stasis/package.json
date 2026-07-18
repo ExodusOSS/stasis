@@ -1,6 +1,6 @@
 {
   "name": "@exodus/stasis",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "description": "File-level source bundles and lockfiles",
   "type": "module",
   "exports": {
@@ -68,8 +68,8 @@
   },
   "homepage": "https://github.com/ExodusOSS/stasis#readme",
   "dependencies": {
-    "@exodus/stasis-core": "1.0.0-beta.1",
-    "@exodus/stasis-plugins": "1.0.0-beta.1",
+    "@exodus/stasis-core": "1.0.0-beta.2",
+    "@exodus/stasis-plugins": "1.0.0-beta.2",
     "oxc-parser": "^0.94.0"
   },
   "peerDependencies": {
