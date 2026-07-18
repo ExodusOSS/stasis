@@ -1228,7 +1228,17 @@ const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0
 const writeRnFixture = (root) => {
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'rn-app', version: '1.0.0' }))
   mkdirSync(join(root, 'src'), { recursive: true })
-  writeFileSync(join(root, 'src', 'entry.js'), "import 'rn-native'\nimport 'js-only'\nconsole.log('ok')\n")
+  writeFileSync(join(root, 'src', 'entry.js'), "import 'rn-native'\nimport 'js-only'\nimport 'react-native'\nconsole.log('ok')\n")
+
+  // React Native core: reached via the JS graph, but its own podspecs live in scattered subdirs
+  // (third-party-podspecs/, Libraries/*/) that must be discovered recursively.
+  const core = join(root, 'node_modules', 'react-native')
+  mkdirSync(join(core, 'third-party-podspecs'), { recursive: true })
+  mkdirSync(join(core, 'Libraries', 'FBLazyVector'), { recursive: true })
+  writeFileSync(join(core, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0', main: 'index.js' }))
+  writeFileSync(join(core, 'index.js'), "module.exports = 'react-native'\n")
+  writeFileSync(join(core, 'third-party-podspecs', 'DoubleConversion.podspec'), "Pod::Spec.new { |s| s.name = 'DoubleConversion' }\n")
+  writeFileSync(join(core, 'Libraries', 'FBLazyVector', 'FBLazyVector.podspec'), "Pod::Spec.new { |s| s.name = 'FBLazyVector' }\n")
 
   const dep = join(root, 'node_modules', 'rn-native')
   mkdirSync(join(dep, 'ios', 'RNThing.xcframework', 'ios-arm64'), { recursive: true }) // prebuilt bundle -> excluded whole
@@ -1273,6 +1283,11 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(!files.has('android/src/main/jniLibs/arm64-v8a/librnthing.so'), 'a jniLibs .so is excluded')
   t.assert.ok(!files.has('ios/RNThing.xcframework/ios-arm64/RNThing.a'), 'a lib inside an xcframework is excluded')
   t.assert.ok(!files.has('ios/RNThing.xcframework/Info.plist'), 'the whole *.xcframework bundle dir is skipped')
+  // React Native core's scattered podspecs are discovered recursively (config lists none).
+  const core = new Set(Object.keys(bundle.modules.get('node_modules/react-native').files))
+  t.assert.ok(core.has('third-party-podspecs/DoubleConversion.podspec'), 'core third-party podspec discovered')
+  t.assert.ok(core.has('Libraries/FBLazyVector/FBLazyVector.podspec'), 'core Libraries podspec discovered')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'), 'resource')
   // Formats: text native sources are 'resource'; a binary asset is 'resource:base64'; the
   // graph-reached JS keeps its code format.
   t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'resource')

@@ -11,7 +11,7 @@ import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { assertRealPathWithinBase, classifyExtension, isNativeArtifact, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { assertRealPathWithinBase, classifyExtension, isNativeArtifact, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -757,24 +757,38 @@ function walkNativeDir(dirAbs, out) {
   }
 }
 
+// Recursively collect podspec manifests (*.podspec / *.podspec.json) anywhere under `dirAbs`,
+// pruning the same build-output/binary subtrees as walkNativeDir. React Native's own podspecs
+// live in scattered subdirs (third-party-podspecs/, Libraries/*/) that `react-native config`
+// never enumerates -- it reports only reactNativePath -- so a root-only scan misses them.
+function collectPodspecs(dirAbs, out) {
+  let entries
+  try {
+    entries = readdirSync(dirAbs, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const ent of entries) {
+    if (ent.isSymbolicLink()) continue
+    const full = join(dirAbs, ent.name)
+    if (ent.isDirectory()) {
+      if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) collectPodspecs(full, out)
+    } else if (ent.isFile() && isPodspec(ent.name)) {
+      out.push(full)
+    }
+  }
+}
+
 // The native SOURCE files a bundled React Native dependency contributes to the app's native
-// build: its podspec(s) at the package root, and the non-artifact files under ios/ and android/.
-// These are what CocoaPods/Xcode and Gradle consume; no JS module graph reaches them. Prebuilt/
-// installed binaries (.a/.so/.xcframework, installed pods) are excluded by walkNativeDir -- they
-// are generated output, not source. Returns absolute paths (a non-native package yields none).
+// build: its podspec(s) anywhere in the package, and the non-artifact files under ios/ and
+// android/. These are what CocoaPods/Xcode and Gradle consume; no JS module graph reaches them.
+// Prebuilt/installed binaries (.a/.so/.xcframework, installed pods) are excluded -- generated
+// output, not source. Returns deduped absolute paths (a non-native package yields none).
 function nativeModuleFiles(pkgAbs) {
   const out = []
-  let rootEntries
-  try {
-    rootEntries = readdirSync(pkgAbs, { withFileTypes: true })
-  } catch {
-    return out
-  }
-  for (const ent of rootEntries) {
-    if (ent.isFile() && /\.podspec(\.json)?$/u.test(ent.name)) out.push(join(pkgAbs, ent.name))
-  }
+  collectPodspecs(pkgAbs, out) // podspecs anywhere (incl. react-native's scattered ones)
   for (const dir of ['ios', 'android']) walkNativeDir(join(pkgAbs, dir), out)
-  return out
+  return [...new Set(out)]
 }
 
 // Build a JS/TS Bundle (and companion Lockfile) through the legacy-field resolver

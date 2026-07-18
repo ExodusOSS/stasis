@@ -149,6 +149,13 @@ export function isNativeArtifact(name) {
   return NATIVE_ARTIFACT_EXTS.has(pathExt(name))
 }
 
+// A CocoaPods podspec manifest. React Native ships these in scattered subdirs
+// (third-party-podspecs/, Libraries/*/) that `react-native config` never enumerates, so the
+// native capture discovers them by name rather than by a fixed location.
+export function isPodspec(name) {
+  return name.endsWith('.podspec') || name.endsWith('.podspec.json')
+}
+
 // Set-equality for parsed resources allowlists (lowercase extension/filename sets).
 // Coordinates a plugin's `resources` option against an active preload's, and the env
 // var against an explicit option in Config.

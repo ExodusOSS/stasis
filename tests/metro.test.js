@@ -736,14 +736,24 @@ for (const n of JSON.parse(process.env.__FAKE_NATIVE_DEPS || '[]')) {
 for (const n of JSON.parse(process.env.__FAKE_JS_DEPS || '[]')) {
   dependencies[n] = { root: nm(n), name: n, platforms: { ios: null, android: null } }
 }
-if (process.argv[2] === 'config') { process.stdout.write(JSON.stringify({ root: proj, dependencies })); process.exit(0) }
+// Real config reports react-native core only as reactNativePath -- NOT as a dependency.
+if (process.argv[2] === 'config') { process.stdout.write(JSON.stringify({ root: proj, reactNativePath: nm('react-native'), dependencies })); process.exit(0) }
 process.exit(1)
 `
 const writeReactNativeCli = (tmp) => {
   const dir = join(tmp, 'node_modules', 'react-native')
-  mkdirSync(dir, { recursive: true })
+  mkdirSync(join(dir, 'third-party-podspecs'), { recursive: true })
+  mkdirSync(join(dir, 'Libraries', 'FBLazyVector'), { recursive: true })
+  mkdirSync(join(dir, 'sdks', 'hermesc', 'linux64-bin'), { recursive: true })
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0' }))
   writeFileSync(join(dir, 'cli.js'), RN_CLI_JS)
+  // react-native core's own podspecs, in the scattered subdirs config never enumerates:
+  writeFileSync(join(dir, 'third-party-podspecs', 'DoubleConversion.podspec'), "Pod::Spec.new { |s| s.name = 'DoubleConversion' }\n")
+  writeFileSync(join(dir, 'Libraries', 'FBLazyVector', 'FBLazyVector.podspec'), "Pod::Spec.new { |s| s.name = 'FBLazyVector' }\n")
+  // Non-podspec core files that must NOT be captured (scripts ignored for now; hermesc is a
+  // prebuilt binary; index.js is code):
+  writeFileSync(join(dir, 'index.js'), 'module.exports = {}\n')
+  writeFileSync(join(dir, 'sdks', 'hermesc', 'linux64-bin', 'hermesc'), 'ELF\0\xff') // prebuilt, no ext
 }
 
 // A native dependency package: native sources across ios/ + android/ (should be attested as
@@ -837,6 +847,14 @@ test('native modules: config discovers native deps; native sources attested, unu
   // codegenConfig survives in the attested package.json bundle payload (prune keeps it in full).
   const pkg = JSON.parse(readFileSync(join(tmp, 'node_modules', 'react-native-native-lib', 'package.json'), 'utf-8'))
   t.assert.ok(pkg.codegenConfig, 'the attested package.json carries codegenConfig for the native build')
+  // React Native CORE's own podspecs (via reactNativePath, not `dependencies`) are captured from
+  // their scattered subdirs; its non-podspec files (index.js code, prebuilt hermesc) are not.
+  const core = lock.modules['node_modules/react-native']
+  t.assert.ok(core.files['third-party-podspecs/DoubleConversion.podspec']?.startsWith('sha512-'), 'core third-party podspec captured')
+  t.assert.ok(core.files['Libraries/FBLazyVector/FBLazyVector.podspec']?.startsWith('sha512-'), 'core Libraries podspec captured')
+  t.assert.equal(lock.formats['node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'], 'resource')
+  t.assert.equal(core.files['index.js'], undefined, 'core JS is not captured by the podspec pass')
+  t.assert.equal(core.files['sdks/hermesc/linux64-bin/hermesc'], undefined, 'core prebuilt hermesc binary is not captured')
 }))
 
 test('native modules: frozen verifies the native surface and rejects a tampered native source', withTmp((t, tmp) => {

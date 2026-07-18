@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { classifyExtension, isNativeArtifact } from '@exodus/stasis-core/util'
+import { classifyExtension, isNativeArtifact, isPodspec } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -228,7 +228,9 @@ function metroDefaultSerializer() {
 //   prune` -- which keeps only lockfile-listed files -- would DELETE every native dependency's
 //   ios/android sources and break the native build. Prebuilt/installed binary artifacts (e.g.
 //   react-native-skia's `libs/` of .a/.xcframework) are NOT captured -- generated output, not
-//   source, and often non-deterministic across installs (isNativeArtifact).
+//   source, and often non-deterministic across installs (isNativeArtifact). React Native CORE
+//   isn't a `dependencies` entry (config reports only `reactNativePath`), so its own scattered
+//   podspecs -- third-party-podspecs/*, Libraries/*/*.podspec -- are captured separately.
 //
 // KNOWN LIMITATIONS (Metro-specific coverage gaps -- documented, not silently ignored):
 //   - Capture is ONE-SHOT ONLY, enforced: a dev server (`metro start`) re-invokes the serializer
@@ -463,18 +465,59 @@ export class StasisMetro {
   // as graph modules, so frozen runs verify it fail-closed.
   #captureNativeModules() {
     const config = loadReactNativeConfig(this.#projectDir)
-    const deps = config?.dependencies
-    if (!deps || typeof deps !== 'object') return
-    for (const dep of Object.values(deps)) {
-      if (!isNativeDependency(dep)) continue
-      const root = dep?.root
-      if (typeof root !== 'string' || !isAbsolute(root)) continue
-      try {
-        this.#state.relative(root) // asserts the dependency lives inside the project root
-      } catch {
-        continue // outside the project root -- unattestable
+    if (!config) return
+    const deps = config.dependencies
+    if (deps && typeof deps === 'object') {
+      for (const dep of Object.values(deps)) {
+        if (!isNativeDependency(dep)) continue
+        const root = dep?.root
+        if (typeof root !== 'string' || !isAbsolute(root)) continue
+        try {
+          this.#state.relative(root) // asserts the dependency lives inside the project root
+        } catch {
+          continue // outside the project root -- unattestable
+        }
+        this.#captureNativeTree(root)
       }
-      this.#captureNativeTree(root)
+    }
+    // React Native CORE is NOT a `dependencies` entry -- `react-native config` reports only
+    // `reactNativePath` and leaves build tools to find react-native's own podspecs there. Those
+    // podspecs (third-party-podspecs/*, Libraries/*/*.podspec, ...) live in scattered subdirs
+    // the config never enumerates, so the Podfile's references to them would go unattested.
+    // Capture them here (podspecs only -- not core's full native source/scripts).
+    const rnPath = config.reactNativePath
+    if (typeof rnPath === 'string' && isAbsolute(rnPath)) {
+      try {
+        this.#state.relative(rnPath)
+        this.#capturePodspecTree(rnPath)
+      } catch { /* react-native resolved outside the project root -- unattestable */ }
+    }
+  }
+
+  // Recursively attest every podspec (*.podspec / *.podspec.json) under `dir`, pruning the same
+  // build-output/binary subtrees as #captureNativeTree. Used for react-native core, whose podspecs
+  // `react-native config` never lists (see #captureNativeModules). Podspecs are UTF-8 Ruby text,
+  // attested as resources through the same addFile path as any other capture.
+  #capturePodspecTree(dir) {
+    let entries
+    try {
+      entries = realReaddirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const ent of entries) {
+      if (ent.isSymbolicLink()) continue
+      const full = join(dir, ent.name)
+      if (ent.isDirectory()) {
+        if (!NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) this.#capturePodspecTree(full)
+        continue
+      }
+      if (!ent.isFile() || !isPodspec(ent.name)) continue
+      if (this.#seen.has(full)) continue
+      this.#seen.add(full)
+      const source = realReadFileSync(full)
+      assert.ok(isUtf8(source), `StasisMetro: podspec has non-UTF-8 bytes: ${full}`)
+      this.#state.addFile(pathToFileURL(full).toString(), { source, resource: true, reason: 'StasisMetro' })
     }
   }
 
