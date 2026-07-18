@@ -374,9 +374,10 @@ export class Config {
 
   // Opt-in (EXODUS_STASIS_SHARD_SIGNAL_FLUSH, env-only): a capturing CHILD flushes its
   // shard when ended by SIGTERM, then re-delivers the signal (hooks.js). Set on
-  // process.env by StasisMetro's capture wiring so the transform workers Metro forks
-  // inherit it -- jest-worker force-kills a worker whose event loop doesn't drain within
-  // 500ms of its END message, which would otherwise silently drop the worker's shard.
+  // process.env by StasisMetro's capture wiring, so every capturing child the build forks
+  // after config time inherits it -- Metro's transform workers are the intended audience:
+  // jest-worker force-kills a worker whose event loop doesn't drain within 500ms of its
+  // END message, which would otherwise silently drop the worker's shard.
   // Deliberately NOT a global default (a signal listener changes a child's default-kill
   // disposition -- the user's domain in arbitrary children) and NOT a user option: it is
   // channel plumbing like EXODUS_STASIS_SHARD_DIR/_KEY, but parsed strictly through

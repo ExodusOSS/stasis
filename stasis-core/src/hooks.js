@@ -542,9 +542,19 @@ function initState(root) {
   //   - the `once` listener is already removed when the handler runs, so when no user
   //     listener remains the OS default disposition is restored and the re-kill terminates
   //     the process BY that signal (the parent still observes code=null, signal=SIGTERM);
-  //   - when user code registered its own handler, we only flush and do NOT re-kill -- the
-  //     user's handler owns process lifetime, and if it later exits normally the exit-hook
-  //     write dedups via lastShardWritten;
+  //     the finally makes that re-delivery unconditional even if a future save() edit
+  //     grows a throw path (today it cannot throw on the child branch);
+  //   - when user code owns process lifetime we only flush and do NOT re-kill. "User code"
+  //     is detected two ways, because a `once` listener that ran EARLIER in this same emit
+  //     has already removed itself and is invisible to a post-emit listenerCount: listeners
+  //     present at REGISTRATION time (a --require preload's graceful-shutdown hook -- those
+  //     always precede this initState-time registration) are remembered in
+  //     `userOwnedSigterm`, and listeners added later are still attached when the handler
+  //     runs. A user handler that exits normally re-flushes via the exit hooks
+  //     (lastShardWritten dedups); if a SECOND signal kills it instead, capture accrued
+  //     after this one-shot flush is lost -- an accepted residual, fail-closed at verify.
+  //     The conservative direction is deliberate: when in doubt, don't re-kill -- the
+  //     worst case is jest-worker's own SIGKILL landing 500ms later;
   //   - signal listeners don't ref the event loop, so a cleanly-draining worker still
   //     exits (and writes) exactly as before.
   // NOT a global default: a signal listener changes a process's default-kill disposition,
@@ -553,13 +563,23 @@ function initState(root) {
   // to a CHILD (the root's signal behavior stays untouched -- servers own it) with shard
   // forwarding on; a channel that was never minted (root mint failure cleared DIR+KEY) just
   // makes the flush a no-op via writeChildShard's own guard. SIGTERM only -- it's what
-  // jest-worker's forceExit sends (Metro doesn't override killSignal); SIGKILL remains
-  // uncatchable (jest-worker's memory-limit killChild), the documented best-effort
-  // residual -- a later frozen/load run fails closed on anything genuinely missing.
+  // jest-worker's forceExit sends (Metro doesn't override killSignal). Best-effort
+  // residuals, all fail-closed at a later frozen/load run: the flush must fit inside
+  // forceExit's 500ms SIGTERM->SIGKILL window; SIGKILL and any OTHER signal (group
+  // SIGINT/SIGHUP, a killSignal override) are not covered; and a capturing child that
+  // is itself the process EVALUATING metro.config.js (a nested orchestration) snapshots
+  // its Config before the plugin sets the flag, so only its DESCENDANTS are covered --
+  // see the plugin's KNOWN LIMITATIONS bullet.
   if (isChildProcess && shardForwardingEnabled() && state.config.shardSignalFlush) {
+    const userOwnedSigterm = process.listenerCount('SIGTERM') > 0
     process.once('SIGTERM', () => {
-      save()
-      if (process.listenerCount('SIGTERM') === 0) process.kill(process.pid, 'SIGTERM')
+      try {
+        save()
+      } finally {
+        if (!userOwnedSigterm && process.listenerCount('SIGTERM') === 0) {
+          process.kill(process.pid, 'SIGTERM')
+        }
+      }
     })
   }
 }

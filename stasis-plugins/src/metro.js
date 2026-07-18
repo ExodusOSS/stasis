@@ -126,14 +126,19 @@ function metroDefaultSerializer() {
 //   - Child-process capture is best-effort within that one shot. A writing plugin opts the
 //     build's workers into the loader's SIGTERM shard flush (EXODUS_STASIS_SHARD_SIGNAL_FLUSH,
 //     set in the constructor), so a worker force-killed by jest-worker's forceExit -- SIGTERM
-//     500ms after END, routine for a transform worker whose event loop doesn't drain -- still
-//     contributes its shard. SIGKILL remains uncatchable (jest-worker's memory-limit killChild,
-//     a killSignal:'SIGKILL' override): such a worker loses its shard SILENTLY at capture time
-//     -- a later frozen run still catches the gap (fail-closed), but nothing warns during
-//     capture. And it relies on the loader's exit/signal-time writes, which standalone (no
-//     stasis loader) Metro never reaches -- it mints no shard dir and produces no
-//     toolchain-complete lockfile. Use a one-shot `metro build` under
-//     `stasis run --child-process` to capture, then verify with `--lock=frozen`.
+//     500ms after END, routine for a transform worker whose event loop doesn't drain --
+//     contributes its shard best-effort: the flush must complete inside forceExit's follow-up
+//     500ms SIGTERM->SIGKILL window. A worker killed any OTHER way still loses its shard
+//     SILENTLY at capture time -- SIGKILL (jest-worker's memory-limit killChild, a
+//     killSignal:'SIGKILL' override), a non-SIGTERM signal (group SIGINT/SIGHUP, another
+//     killSignal override; the flush handler is SIGTERM-only), or a nested orchestration's
+//     Metro MAIN process (itself a capturing child, it snapshots its config before this
+//     constructor sets the flag, so only its descendants are covered). A later frozen run
+//     catches every such gap (fail-closed), but nothing warns during capture. And it relies
+//     on the loader's exit/signal-time writes, which standalone (no stasis loader) Metro
+//     never reaches -- it mints no shard dir and produces no toolchain-complete lockfile.
+//     Use a one-shot `metro build` under `stasis run --child-process` to capture, then
+//     verify with `--lock=frozen`.
 //   - Scaled asset variants: `import x from './logo.png'` is ONE module in the graph, keyed
 //     by the base path; Metro discovers `logo@2x.png` / `@3x` via its AssetData (parallel
 //     scales/files arrays), NOT as separate graph modules, so only the base file is attested
@@ -178,12 +183,23 @@ export class StasisMetro {
       // Opt this build's children into the loader's SIGTERM shard flush: jest-worker's
       // forceExit would otherwise silently drop a non-draining worker's shard (mechanics in
       // the KNOWN LIMITATIONS bullet above; the handler lives in hooks.js). The flag rides
-      // process.env, so the workers Metro forks AFTER config time inherit it -- the plugin
-      // can't act inside the workers (only the loader runs there), so an env opt-in is the
-      // seam. Scoped HERE, not globally: a signal listener changes a child's default-kill
-      // disposition, which is the user's domain in arbitrary children, but Metro's transform
-      // workers are known tool processes where flush-then-redeliver is the right trade.
-      process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH = '1'
+      // process.env, so EVERY capturing child forked after config time inherits it --
+      // Metro's transform workers are the intended audience, but a codegen fork the build
+      // spawns rides along; the loader's own gates (child + shard forwarding) bound what it
+      // can do there to a flush-then-redeliver on SIGTERM. The plugin can't act inside the
+      // workers (only the loader runs there), so an env opt-in is the seam; scoped HERE,
+      // not globally, because changing a child's default-kill disposition is otherwise the
+      // user's domain. Two deliberate softenings:
+      //   - keyed on the PRELOAD where one exists: the shard channel is minted by, and the
+      //     children's capture mode follows, the preload's config -- a Rule-6 sidecar's own
+      //     bundle mode says nothing about either, and setting the flag under a frozen
+      //     preload would claim an opt-in that can never engage;
+      //   - `||=`, not `=`: an explicit ambient opt-out ('0'/'false', envBool's disable
+      //     values) is the user's call and is honored; only unset/empty is claimed.
+      const channel = State.preload ?? state
+      if (channel.config.writeLockfile || channel.config.writeBundle) {
+        process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH ||= '1'
+      }
     }
     // resources is a Config field now (validated + coordinated against any preload in
     // resolvePluginState); cache the resolved Set for the per-file classify hot path.

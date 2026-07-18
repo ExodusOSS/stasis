@@ -25,6 +25,7 @@ const {
   EXODUS_STASIS_BUNDLE: _b,
   EXODUS_STASIS_BUNDLE_FILE: _bf,
   EXODUS_STASIS_DEBUG: _d,
+  EXODUS_STASIS_SHARD_SIGNAL_FLUSH: _ssf,
   ...cleanEnv
 } = process.env
 
