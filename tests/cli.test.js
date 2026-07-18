@@ -2452,15 +2452,48 @@ const processChildEdge = (lock) => {
   return undefined
 }
 
+// Can THIS Node serve require.resolve() of an OFF-DISK target from a bundle-served CJS
+// module? Some Node lines can't (the ESM->CJS translator's require.resolve skips the sync
+// hooks and stats disk) -- see commonjs.test.js's RESOLVE_RESOLVE_FROM_BUNDLE for the full
+// story; this is the same behavior probe, lazy + memoized since only the pruned-load test
+// below needs it. On a "no" Node that test skips its load half with a diagnostic, exactly
+// like the commonjs suite; the disk-present load path (Metro's model) works on every Node
+// and stays asserted unconditionally.
+let resolveResolveFromBundleMemo
+const resolveResolveFromBundle = () => {
+  if (resolveResolveFromBundleMemo !== undefined) return resolveResolveFromBundleMemo
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-fork-resolve-probe-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', private: true }))
+    writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'packages: []\n')
+    writeFileSync(join(dir, 'index.mjs'), "import './r.cjs'\n")
+    writeFileSync(join(dir, 'r.cjs'), "require.resolve('pd')\nconsole.log('ok')\n") // resolve-only
+    const pd = join(dir, 'node_modules', 'pd')
+    mkdirSync(pd, { recursive: true })
+    writeFileSync(join(pd, 'package.json'), JSON.stringify({ name: 'pd', version: '1.0.0', main: 'index.js' }))
+    writeFileSync(join(pd, 'index.js'), 'module.exports = 1\n')
+    const bundlePath = join(dir, 'p.br')
+    const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'index.mjs'], { cwd: dir })
+    if (save.status !== 0) return (resolveResolveFromBundleMemo = false)
+    rmSync(join(dir, 'node_modules'), { recursive: true, force: true })
+    const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'index.mjs'], { cwd: dir })
+    return (resolveResolveFromBundleMemo = load.status === 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 test('run --child-process: a force-killed worker still contributes its shard under the Metro-plugin signal-flush opt-in', withTmp((t, tmp) => {
   cpSync(forkResolveFixture, tmp, { recursive: true })
   // HOLD_HANDLE keeps the worker's event loop busy after the END message, so the parent
-  // force-kills it jest-worker-style. Only the SIGTERM flush can save this worker's shard.
-  // EXODUS_STASIS_SHARD_SIGNAL_FLUSH stands in for StasisMetro's capture wiring, which sets
-  // it on process.env so the build's forked workers inherit it (metro.test.js pins that).
+  // force-kills it jest-worker-style (FORCE_EXIT_DELAY shortened -- the call round-trip
+  // has completed, so the kill path is identical at any positive delay). Only the SIGTERM
+  // flush can save this worker's shard. EXODUS_STASIS_SHARD_SIGNAL_FLUSH stands in for
+  // StasisMetro's capture wiring, which sets it on process.env so the build's forked
+  // workers inherit it (metro.test.js pins that).
   const cap = run(
     ['run', '--lock=add', '--bundle=add', '--bundle-file=snapshot.br', '--child-process', 'src/entry.js'],
-    { cwd: tmp, env: { ...cleanEnv, HOLD_HANDLE: '1', EXODUS_STASIS_SHARD_SIGNAL_FLUSH: '1' } }
+    { cwd: tmp, env: { ...cleanEnv, HOLD_HANDLE: '1', FORCE_EXIT_DELAY: '50', EXODUS_STASIS_SHARD_SIGNAL_FLUSH: '1' } }
   )
   t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
   t.assert.match(cap.stdout, /ENTRY result=worked on input-1/, 'the forked worker ran')
@@ -2480,10 +2513,11 @@ test('run --child-process: a force-killed worker still contributes its shard und
     'the worker-only toolchain module is attested via the flushed shard')
   t.assert.equal(lock.formats['node_modules/fake-jest-worker/build/workers/processChild.js'], 'commonjs')
 
-  // The load half of the regression: with node_modules gone, the bundle is the only place
-  // the forked child's entry and its worker-only dep can come from. This threw "file not
-  // attested in bundle: .../processChild.js" when the kill lost the shard.
-  rmSync(join(tmp, 'node_modules'), { recursive: true })
+  // The load half of the regression, with sources ON DISK (Metro's model -- and the shape
+  // of the original report): resolution goes to disk, but the forked child's entry is
+  // SERVED from the bundle, which threw "file not attested in bundle: .../processChild.js"
+  // when the kill lost the shard. Disk-present so it runs on every Node line; the pruned
+  // (off-disk require.resolve) variant is the next test, gated on the Node behavior probe.
   const r = run(
     ['run', '--lock=frozen', '--bundle=load', '--bundle-file=snapshot.br', 'src/entry.js'],
     { cwd: tmp }
@@ -2500,14 +2534,15 @@ test('run --child-process: WITHOUT the signal-flush opt-in a force-killed worker
   // documented best-effort behavior -- kill loses the shard, capture completes without it.
   const cap = run(
     ['run', '--lock=add', '--child-process', 'src/entry.js'],
-    { cwd: tmp, env: { ...cleanEnv, HOLD_HANDLE: '1' } }
+    { cwd: tmp, env: { ...cleanEnv, HOLD_HANDLE: '1', FORCE_EXIT_DELAY: '50' } }
   )
   t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
   t.assert.match(cap.stdout, /PARENT worker-exit code=null signal=SIGTERM/, 'the worker was force-killed')
   const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
   const files = lock.modules['node_modules/fake-jest-worker'].files
+  // One absence suffices: the whole shard is one atomically-written file, so its records
+  // (processChild.js, workerDep.js) can't land partially.
   t.assert.equal(files['build/workers/processChild.js'], undefined, 'no flush without the opt-in: the killed worker contributed nothing')
-  t.assert.equal(files['build/workerDep.js'], undefined, 'no flush without the opt-in: the killed worker contributed nothing')
 }))
 
 test('run --bundle=load: a jest-worker-style forked child runs from the bundle with node_modules removed', withTmp((t, tmp) => {
@@ -2520,8 +2555,18 @@ test('run --bundle=load: a jest-worker-style forked child runs from the bundle w
   )
   t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
   t.assert.match(cap.stdout, /PARENT worker-exit code=0 signal=null/, 'the worker exited gracefully (exit-hook shard)')
-  // Remove the dependency tree: the bundle is the only place the package -- including the
-  // fork target the parent only ever require.resolve()d -- can come from.
+  const files = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).modules['node_modules/fake-jest-worker'].files
+  t.assert.ok(files['build/workers/processChild.js']?.startsWith('sha512-'), 'fork target attested via the exit-hook shard')
+  t.assert.ok(files['build/workerDep.js']?.startsWith('sha512-'), 'worker-only dep attested via the exit-hook shard')
+
+  // Self-containment: with the dependency tree REMOVED, the bundle is the only place the
+  // package -- including the fork target the parent only ever require.resolve()s -- can come
+  // from. That needs the off-disk require.resolve served from the bundle, which some Node
+  // lines can't do (see the probe above); the attestation asserts above ran regardless.
+  if (!resolveResolveFromBundle()) {
+    t.diagnostic(`skipping bundle-only require.resolve load on ${process.version} (Node loader limitation)`)
+    return
+  }
   rmSync(join(tmp, 'node_modules'), { recursive: true })
   const r = run(
     ['run', '--lock=frozen', '--bundle=load', '--bundle-file=snapshot.br', 'src/entry.js'],
