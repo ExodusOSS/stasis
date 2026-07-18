@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from 'node:zlib'
 
-import { brotliOptions } from '@exodus/stasis-core/brotli'
+import { DEFAULT_BROTLI_QUALITY, brotliOptions } from '@exodus/stasis-core/brotli'
 
 // Save/restore EXODUS_STASIS_BROTLI_QUALITY across tests so env-driven tests don't leak.
 const withEnv = (value, fn) => (t) => {
@@ -18,8 +18,9 @@ const withEnv = (value, fn) => (t) => {
 
 const QUALITY = zlibConstants.BROTLI_PARAM_QUALITY
 
-test('brotliOptions() with no env and no quality is undefined (brotli default)', withEnv(undefined, (t) => {
-  t.assert.equal(brotliOptions(), undefined)
+test('brotliOptions() with no env and no quality falls back to the stasis default', withEnv(undefined, (t) => {
+  t.assert.equal(DEFAULT_BROTLI_QUALITY, 9)
+  t.assert.deepEqual(brotliOptions(), { params: { [QUALITY]: DEFAULT_BROTLI_QUALITY } })
 }))
 
 test('brotliOptions(quality) returns the quality param', withEnv(undefined, (t) => {
@@ -42,8 +43,8 @@ test('brotliOptions falls back to EXODUS_STASIS_BROTLI_QUALITY', withEnv('3', (t
   t.assert.deepEqual(brotliOptions(), { params: { [QUALITY]: 3 } })
 }))
 
-test('brotliOptions env "" is unset; an explicit quality still applies', withEnv('', (t) => {
-  t.assert.equal(brotliOptions(), undefined)
+test('brotliOptions env "" is unset; falls back to the default, explicit quality still applies', withEnv('', (t) => {
+  t.assert.deepEqual(brotliOptions(), { params: { [QUALITY]: DEFAULT_BROTLI_QUALITY } })
   t.assert.deepEqual(brotliOptions(2), { params: { [QUALITY]: 2 } })
 }))
 

@@ -29,7 +29,7 @@ function usage(prefix = '') {
  stasis bundle [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
-  --brotli-quality=0..11 tunes bundle compression for any entry language, default 11 = smallest/slowest)
+  --brotli-quality=0..11 tunes bundle compression for any entry language, default 9)
  stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
@@ -107,7 +107,7 @@ if (command === '-v' || command === '--version') {
   // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
   // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
   const resources = values.resources ?? ''
-  // --brotli-quality: bundle compression quality (0..11; unset = brotli's default 11).
+  // --brotli-quality: bundle compression quality (0..11; unset -> stasis default 9).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
     try {
