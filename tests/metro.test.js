@@ -21,6 +21,11 @@ import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
+// In-process import for the withStasis transparency unit test below. Safe here: constructing an
+// inert plugin (no options, no loader, no preload) mints no State, so it can't disturb the
+// preload-singleton invariant the spawned tests rely on.
+import { withStasis } from '../stasis-plugins/src/metro.js'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const helper = join(here, 'metro-run.helper.js')
 const fullFixture = join(here, 'fixtures', 'metro-full')
@@ -444,6 +449,41 @@ test('rule 1: plugin lockfile without preload is a hard throw', withTmp((t, tmp)
   t.assert.notEqual(r.status, 0)
   t.assert.match(r.stderr, /lockfile mode 'add' requires a stasis preload/)
 }))
+
+test('rule 0: plugin with no options, no preload, not under stasis run does nothing', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+
+  // No capture options and not under `stasis run` -> the plugin is inert (Rule 0). Wiring
+  // withStasis() into a config is a no-op on a plain build; it neither throws nor writes.
+  const r = run('src/entry.js', { cwd: tmp, env: standalone(withOpts({})) })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore,
+    'inert plugin must not touch the lockfile')
+}))
+
+test('rule 0: inert withStasis is transparent -- it installs no serializer wrapper', (t) => {
+  // The spawned e2e above runs the default `hook` mode and always has a base serializer, so it
+  // can't catch a wrapper that falls back to metroDefaultSerializer(). Exercise the actual
+  // withStasis()/customSerializer seam directly: an inert plugin (no options, no stasis run, no
+  // preload) must hand the serializer back untouched -- NOT wrap it with one that would load
+  // Metro internals and override Metro's own default when no base serializer exists.
+  const saved = process.env.EXODUS_STASIS_LOCK
+  delete process.env.EXODUS_STASIS_LOCK
+  try {
+    const base = () => '// base'
+    const wrapped = withStasis({ serializer: { customSerializer: base } })
+    t.assert.equal(wrapped.serializer.customSerializer, base,
+      'an existing customSerializer is returned unchanged, not wrapped')
+
+    const bare = withStasis({})
+    t.assert.equal(bare.serializer?.customSerializer, undefined,
+      'no wrapper is installed when the config had no customSerializer (Metro keeps its default)')
+  } finally {
+    if (saved === undefined) delete process.env.EXODUS_STASIS_LOCK
+    else process.env.EXODUS_STASIS_LOCK = saved
+  }
+})
 
 test('rule 7: plugin with lock=none + bundle=none and no preload is a no-op', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })

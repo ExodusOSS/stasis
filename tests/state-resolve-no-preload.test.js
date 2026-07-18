@@ -19,7 +19,7 @@ const fixture = () => {
   return dir
 }
 
-test('rule 1: lockfile mode without preload is a hard throw', (t) => {
+test('rule 1: an explicit lockfile mode without preload is a hard throw', (t) => {
   const dir = fixture()
   try {
     t.assert.throws(
@@ -34,11 +34,54 @@ test('rule 1: lockfile mode without preload is a hard throw', (t) => {
       () => resolvePluginState('Test', { lock: 'replace' }, dir),
       /lockfile mode 'replace' requires a stasis preload/
     )
+    // A writing BUNDLE with no explicit lock defaults the lock to 'add', which likewise
+    // needs a preload -- still a throw (Rule 0 only fires when NEITHER is given).
     t.assert.throws(
-      () => resolvePluginState('Test', {}, dir),
+      () => resolvePluginState('Test', { bundle: 'add', bundleFile: join(dir, 'b.br') }, dir),
       /the default lockfile mode \('add'\) requires a stasis preload/
     )
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('rule 0: no options + no preload + not under stasis run is an inert no-op', (t) => {
+  // The plugin has no capture instruction (neither lock nor bundle) and nothing ambient
+  // governing it, so it does nothing instead of throwing about the default lock mode. This
+  // is what lets a bare withStasis()/StasisWebpack()/StasisEsbuild() sit inertly in a
+  // config on a plain (non-stasis) build.
+  const saved = process.env.EXODUS_STASIS_LOCK
+  delete process.env.EXODUS_STASIS_LOCK
+  const dir = fixture()
+  try {
+    const r = resolvePluginState('Test', {}, dir)
+    t.assert.equal(r.isNoop, true)
+    t.assert.equal(r.state, null)
+    // Non-capture options (no lock/bundle) don't change that.
+    const r2 = resolvePluginState('Test', { scope: 'full' }, dir)
+    t.assert.equal(r2.isNoop, true)
+    t.assert.equal(r2.state, null)
+  } finally {
+    if (saved === undefined) delete process.env.EXODUS_STASIS_LOCK
+    else process.env.EXODUS_STASIS_LOCK = saved
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('rule 0 does NOT fire under stasis run: env lock governs, plugin builds a State', (t) => {
+  // With EXODUS_STASIS_LOCK set (the `stasis run` signal), a no-option plugin is governed by
+  // the loader's env rather than going inert -- it constructs a State that adopts that lock.
+  const saved = process.env.EXODUS_STASIS_LOCK
+  process.env.EXODUS_STASIS_LOCK = 'add'
+  const dir = fixture()
+  try {
+    const r = resolvePluginState('Test', {}, dir)
+    t.assert.equal(r.isNoop, false)
+    t.assert.ok(r.state)
+    t.assert.equal(r.state.config.lock, 'add')
+  } finally {
+    if (saved === undefined) delete process.env.EXODUS_STASIS_LOCK
+    else process.env.EXODUS_STASIS_LOCK = saved
     rmSync(dir, { recursive: true, force: true })
   }
 })
