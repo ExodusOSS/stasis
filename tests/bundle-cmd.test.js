@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
-import { brotliDecompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
@@ -2217,3 +2217,59 @@ test('CLI: bundle --add with --output=- prints usage', (t) => {
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /--add cannot be combined with --output=-/)
 })
+
+// --- `reason` provenance: `stasis bundle` attributes its files to `bundle` ---
+//
+// Unlike the runtime (`stasis run`), which drops a single-consumer reason map as
+// noise, a statically built bundle ALWAYS names `bundle` as the consumer of the files
+// it wrote -- so a `--add` that merges these into a bundle other consumers touched
+// keeps the provenance map complete.
+
+test('bundleCommand attributes every bundled file to the `bundle` consumer', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual(parsed.reason, { bundle: ['src/A.sol', 'src/B.sol'] })
+}))
+
+test('buildBundle attributes files to `bundle`, matching what bundleCommand writes', async (t) => {
+  const bundle = await buildBundle({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'] })
+  t.assert.deepEqual(bundle.reason, { bundle: ['src/A.sol', 'src/B.sol'] })
+})
+
+test('bundleCommand --add unions the `bundle` attribution across builds', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const cwd = join(fixtures, 'shared')
+  await bundleCommand({ cwd, entries: ['src/A.sol'], output: outPath })
+  await bundleCommand({ cwd, entries: ['src/B.sol'], output: outPath, add: true })
+  const merged = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  // Both builds attributed under `bundle`; the union covers every merged file.
+  t.assert.deepEqual(merged.reason, { bundle: ['src/A.sol', 'src/B.sol', 'src/Shared.sol'] })
+}))
+
+test('bundleCommand --add preserves other consumers when growing a captured bundle', withTmp(async (t, tmp) => {
+  // Seed an existing bundle that looks like a multi-consumer runtime/plugin capture
+  // (it carries a `reason` naming `run` and `StasisWebpack`). A static `--add` must
+  // keep those and attribute only the newly added file to `bundle`.
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const seed = new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(['src/A.sol']),
+    modules: new Map([['.', { name: 'solidity-bundle', version: '0.0.0', files: {
+      'src/A.sol': readFileSync(join(fixtures, 'shared', 'src/A.sol'), 'utf8'),
+      'src/Shared.sol': readFileSync(join(fixtures, 'shared', 'src/Shared.sol'), 'utf8'),
+    } }]]),
+    formats: new Map([['src/A.sol', 'solidity'], ['src/Shared.sol', 'solidity']]),
+    imports: new Map([['solidity', new Map([['src/A.sol', new Map([['./Shared.sol', 'src/Shared.sol']])]])]]),
+    reason: { run: ['src/A.sol'], StasisWebpack: ['src/Shared.sol'] },
+  })
+  writeFileSync(outPath, brotliCompressSync(seed.serialize()))
+
+  await bundleCommand({ cwd: join(fixtures, 'shared'), entries: ['src/B.sol'], output: outPath, add: true })
+  const merged = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  // Original consumers survive; the added file (B.sol) is attributed to `bundle`.
+  // (Shared.sol was re-bundled by the static build too, so `bundle` names it as well.)
+  t.assert.deepEqual(merged.reason.run, ['src/A.sol'])
+  t.assert.deepEqual(merged.reason.StasisWebpack, ['src/Shared.sol'])
+  t.assert.deepEqual(merged.reason.bundle, ['src/B.sol', 'src/Shared.sol'])
+}))

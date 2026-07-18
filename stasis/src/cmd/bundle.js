@@ -313,13 +313,16 @@ function assembleCodeBundle({
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([[conditionKey, importsForKey]])
 
+  // Every statically built bundle attributes its files to the `bundle` consumer in the
+  // informational reason map (the static builders don't go through State's per-file
+  // consumer tagging), so `stasis bundle` names itself as their source.
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(entries),
     modules,
     formats: formatsMap,
     imports,
-  })
+  }).withReason('bundle')
 }
 
 // Build a stasis Bundle (in-memory) from a list of entry .sol files and
@@ -533,13 +536,15 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([['php', importsForKey]])
 
+  // Attribute to the `bundle` consumer like the other static builders (see
+  // assembleCodeBundle); PHP builds its own Bundle rather than going through it.
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(normalized),
     modules,
     formats,
     imports,
-  })
+  }).withReason('bundle')
 }
 
 // Classify a scanner's unresolved edges + parse errors into `fatal` (the bundle
@@ -946,7 +951,8 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory
 // Bundle from a list of entry files, without writing anything to disk
 // (serialize with bundle.serialize() to get the JSON that `stasis bundle`
-// brotli-compresses into stasis.code.br).
+// brotli-compresses into stasis.code.br). Every file is attributed to the `bundle`
+// consumer in the informational `reason` map, the same way the CLI records it.
 //
 // Dispatch by extension matches the CLI: all entries must be one language —
 // .sol (Solidity), .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static
@@ -981,7 +987,9 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
     return bundle
   }
   const state = await buildJsBundle({ cwd, entries, scope, conditions })
-  return state.sourceBundle
+  // state.sourceBundle carries no reason (a single-consumer static build), so stamp the
+  // `bundle` consumer here, matching assembleCodeBundle's non-JS path.
+  return state.sourceBundle.withReason('bundle')
 }
 
 // Where `stasis bundle` writes when no --output is given: stasis.code.br, the
@@ -1031,6 +1039,11 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // resolution differ from what the existing bundle attests throws. `--add` can't target
 // stdout (there is nothing to merge into), and when a `lockfile` is written too it is
 // unioned into any existing one on disk so it keeps attesting the whole merged graph.
+//
+// Every file this command bundles is attributed to the `bundle` consumer in the
+// bundle's informational `reason` map. On `--add` that attribution is unioned with the
+// existing bundle's, so a bundle grown from a runtime/plugin capture keeps naming those
+// consumers alongside `bundle` for the statically added files.
 export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality, add = false } = {}) {
   const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
 
@@ -1062,7 +1075,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     // The companion lockfile attests file hashes, which only State carries —
     // a Bundle holds sources, not digests — so this path keeps the State.
     const state = await buildJsBundle({ cwd, entries, scope, conditions })
-    bundle = state.sourceBundle
+    // Stamp the `bundle` consumer, like buildBundle's plain-JS path (this branch
+    // bypasses buildBundle to keep the State for its lockfile digests).
+    bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
     bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions })

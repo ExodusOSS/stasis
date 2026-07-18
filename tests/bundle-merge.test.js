@@ -209,6 +209,34 @@ test('Bundle.merge throws when an edge resolves to a different target', (t) => {
   t.assert.throws(() => a.merge(b), /import '\.\/x' from 'src\/a\.js' resolves differently/)
 })
 
+// --- Bundle.withReason ------------------------------------------------------
+
+test('Bundle.withReason attributes every file to the consumer in the reason map', (t) => {
+  const b = jsBundle({
+    entries: ['src/a.js'],
+    modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/a.js': 'A', 'src/b.js': 'B' } }]],
+    formats: [['src/a.js', 'module'], ['src/b.js', 'module']],
+  })
+  const stamped = b.withReason('bundle')
+  t.assert.deepEqual(stamped.reason, { bundle: ['src/a.js', 'src/b.js'] })
+  // The original is untouched, and the file set / structure is preserved.
+  t.assert.equal(b.reason, undefined)
+  t.assert.deepEqual([...stamped.sources.keys()].toSorted(), ['src/a.js', 'src/b.js'])
+  // It round-trips through serialize/parse with the reason intact.
+  t.assert.deepEqual(Bundle.parse(stamped.serialize()).reason, { bundle: ['src/a.js', 'src/b.js'] })
+})
+
+test('Bundle.withReason unions with an existing attribution instead of replacing it', (t) => {
+  const b = jsBundle({
+    entries: ['src/a.js'],
+    modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/a.js': 'A' } }]],
+    formats: [['src/a.js', 'module']],
+    reason: { run: ['src/a.js'] },
+  })
+  const stamped = b.withReason('bundle')
+  t.assert.deepEqual(stamped.reason, { run: ['src/a.js'], bundle: ['src/a.js'] })
+})
+
 // --- Lockfile.merge ---------------------------------------------------------
 
 const lock = ({ scope = 'full', entries, modules, imports = null, formats = null } = {}) =>

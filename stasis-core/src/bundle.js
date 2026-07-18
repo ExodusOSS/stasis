@@ -30,14 +30,15 @@ const inferModuleDir = (path) =>
 
 // Union the informational `reason` provenance of two bundles (consumer -> the files
 // it contributed). Undefined on one side yields the other; present on both unions
-// each consumer's file list. Never attested, so a best-effort union is fine.
+// each consumer's file list (sorted the way State serializes it -- see #bundleReason).
+// Never attested, so a best-effort union is fine.
 const mergeReason = (a, b) => {
   if (a === undefined) return b
   if (b === undefined) return a
   const out = {}
   for (const src of [a, b]) {
     for (const [consumer, files] of Object.entries(src)) {
-      out[consumer] = [...new Set([...(out[consumer] ?? []), ...files])].toSorted()
+      out[consumer] = [...new Set([...(out[consumer] ?? []), ...files])].toSorted(sortPaths)
     }
   }
   return out
@@ -279,6 +280,26 @@ export class Bundle {
     // Informational provenance, last: only present when set (more than one consumer).
     if (this.reason !== undefined) data.reason = this.reason
     return JSON.stringify(data, undefined, 2)
+  }
+
+  // Return a NEW Bundle attributing every file it carries to `consumer` in the
+  // informational `reason` map (unioned with any attribution already present). This is
+  // how `stasis bundle` names itself ('bundle') as the source of the files it writes:
+  // the runtime path tags files with a consumer (`run`, `StasisWebpack`, ...) as it
+  // records them, but the static builders construct a Bundle directly, so they stamp
+  // the consumer here instead. It keeps the provenance map complete when `--add` merges
+  // statically bundled files into a bundle other consumers also touched.
+  withReason(consumer) {
+    const files = [...this.sources.keys()]
+    return new Bundle({
+      version: this.version,
+      config: this.config,
+      entries: this.entries,
+      modules: this.modules,
+      formats: this.formats,
+      imports: this.imports,
+      reason: mergeReason(this.reason, { [consumer]: files }),
+    })
   }
 
   // Merge another Bundle into this one, returning a NEW Bundle carrying the union of
