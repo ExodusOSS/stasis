@@ -2,10 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { brotliDecompressSync } from 'node:zlib'
 
-import { Bundle } from '@exodus/stasis-core/bundle'
-import { Lockfile } from '@exodus/stasis-core/lockfile'
-import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { moduleFileKey } from '@exodus/stasis-core/util'
+import { Bundle } from './bundle.js'
+import { Lockfile } from './lockfile.js'
+import { sha512integrity } from './state-util.js'
+import { moduleFileKey } from './util.js'
 
 const FILE_LOCK = 'stasis.lock.json'
 

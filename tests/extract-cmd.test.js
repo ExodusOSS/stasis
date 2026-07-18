@@ -11,7 +11,7 @@ import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { State } from '@exodus/stasis-core/state'
 import { buildSolidityBundle, bundleCommand } from '../stasis/src/cmd/bundle.js'
-import { extractCommand, lockfileFromBundle } from '../stasis/src/cmd/extract.js'
+import { extractCommand, lockfileFromBundle } from '@exodus/stasis-core/extract'
 import { prune } from '@exodus/stasis-core/prune'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 
