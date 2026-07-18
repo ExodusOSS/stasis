@@ -25,7 +25,7 @@ function usage(prefix = '') {
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro --platforms=ios,android [--platforms=web] [--asyncRequireModulePath=specifier] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
@@ -188,7 +188,7 @@ if (command === '-v' || command === '--version') {
   process.exitCode = code ?? 128 + (osConstants.signals[signal] ?? 0)
 } else if (command === 'bundle') {
   const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--brotli-quality', '-o'])
+  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--asyncRequireModulePath', '--brotli-quality', '-o'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -201,6 +201,7 @@ if (command === '-v' || command === '--version') {
     mainFields: { type: 'string' },
     metro: { type: 'boolean' },
     platforms: { type: 'string', multiple: true },
+    asyncRequireModulePath: { type: 'string' },
     'brotli-quality': { type: 'string' },
   }
   let values
@@ -271,6 +272,18 @@ if (command === '-v' || command === '--version') {
   } else if (platforms.length > 0) {
     usage('Error: --platforms is only valid with --metro')
   }
+  // --asyncRequireModulePath: which async-import helper `--metro` injects for dynamic
+  // import()s, mirroring Metro's `transformer.asyncRequireModulePath` config key.
+  // Default: Metro's own ('metro-runtime/src/modules/asyncRequire'); a project whose
+  // Metro config overrides it passes the same specifier here (e.g. Expo's
+  // 'expo/internal/async-require-module'). Only --metro injects, so it's metro-only.
+  const asyncRequireModulePath = values.asyncRequireModulePath?.trim()
+  if (values.asyncRequireModulePath !== undefined) {
+    if (!metro) usage('Error: --asyncRequireModulePath is only valid with --metro')
+    if (!asyncRequireModulePath) {
+      usage('Error: --asyncRequireModulePath must name a module specifier (e.g. expo/internal/async-require-module)')
+    }
+  }
   // --brotli-quality: output-encoding knob, valid for every entry language (no allJs gate).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
@@ -292,6 +305,7 @@ if (command === '-v' || command === '--version') {
     mainFields,
     metro,
     platforms,
+    asyncRequireModulePath,
     brotliQuality,
   })
 } else if (command === 'build') {

@@ -1265,6 +1265,110 @@ test('CLI: extract unpacks a --metro multi-platform bundle (both variants + a pl
   t.assert.deepEqual(lock.imports['*']['src/entry.js']['./Button'], { android: 'src/Button.android.js', ios: 'src/Button.ios.js' })
 }))
 
+// --- Metro async-import helper injection (`--metro` + dynamic import()) --------------
+//
+// Metro's transform rewrites every dynamic `import()` callsite into
+// `require(<transformer.asyncRequireModulePath>)(...)` -- default
+// metro-runtime/src/modules/asyncRequire -- so the helper is a real dependency of every
+// async-importing module and ships in the bundle WITHOUT any source file naming it.
+// `--metro` mirrors that injection (see injectMetroAsyncRequire); these fixtures carry a
+// hoisted metro-runtime stub plus a NESTED copy under lazydep, so the per-parent
+// resolution (exactly how Metro resolves the injected dependency) is observable.
+const ASYNC_REQUIRE = 'metro-runtime/src/modules/asyncRequire'
+
+test("buildBundle --metro: a dynamic import() pulls in Metro's async-import helper, resolved per parent", async (t) => {
+  const bundle = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry-async.js'], metro: true, platforms: ['ios', 'android'] })
+  const files = new Set(bundle.sources.keys())
+  // Both copies ship: the helper resolves from each async-importing module (as Metro
+  // resolves the injected dependency), so workspace code lands on the hoisted copy and
+  // lazydep's own dynamic import lands on its nested one.
+  t.assert.ok(files.has('node_modules/metro-runtime/src/modules/asyncRequire.js'))
+  t.assert.ok(files.has('node_modules/lazydep/node_modules/metro-runtime/src/modules/asyncRequire.js'))
+  // The injected edges mirror what a runtime StasisMetro capture of the real Metro
+  // graph records: (parent, <asyncRequireModulePath>) -> resolved helper. Same target
+  // on every platform -> flat edge.
+  t.assert.equal(importTarget(bundle, 'src/entry-async.js', ASYNC_REQUIRE), 'node_modules/metro-runtime/src/modules/asyncRequire.js')
+  t.assert.equal(importTarget(bundle, 'node_modules/lazydep/index.js', ASYNC_REQUIRE), 'node_modules/lazydep/node_modules/metro-runtime/src/modules/asyncRequire.js')
+  // The dynamic-import targets themselves keep their ordinary edges and files.
+  t.assert.equal(importTarget(bundle, 'src/entry-async.js', './lazy.js'), 'src/lazy.js')
+  t.assert.ok(files.has('src/lazy.js') && files.has('node_modules/lazydep/inner.js'))
+  // The helper copies bucketize as ordinary npm packages, each under its own dir.
+  t.assert.equal(bundle.modules.get('node_modules/metro-runtime').version, '0.80.0')
+  t.assert.equal(bundle.modules.get('node_modules/lazydep/node_modules/metro-runtime').version, '0.79.0')
+})
+
+test('buildBundle --metro: no dynamic import() -> no helper injected; --mainFields never injects', async (t) => {
+  // src/entry.js has no dynamic import anywhere in its graph.
+  const noAsync = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], metro: true, platforms: ['ios', 'android'] })
+  t.assert.ok(![...noAsync.sources.keys()].some((f) => f.includes('metro-runtime')))
+  // --mainFields models plain legacy-field resolution, not Metro's transform: the same
+  // async-importing entry gets no injection there.
+  const mf = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry-async.js'], mainFields: ['react-native', 'browser', 'main'] })
+  t.assert.ok(![...mf.sources.keys()].some((f) => f.includes('metro-runtime')))
+  t.assert.equal(mf.imports.get('*').get('src/entry-async.js').get(ASYNC_REQUIRE), undefined)
+})
+
+test('buildBundle --metro --asyncRequireModulePath overrides the helper; injection runs to a fixpoint', async (t) => {
+  // Mirrors a Metro config that swaps `transformer.asyncRequireModulePath` (as Expo
+  // does). asyncshim itself dynamic-imports ./extra.js, so it must get its OWN injected
+  // edge -- onto itself -- and pull extra.js in: the fixpoint case.
+  const bundle = await buildBundle({
+    cwd: fieldsFixture, entries: ['src/entry-async.js'], metro: true, platforms: ['ios'],
+    asyncRequireModulePath: 'asyncshim',
+  })
+  const files = new Set(bundle.sources.keys())
+  t.assert.ok(files.has('node_modules/asyncshim/index.js') && files.has('node_modules/asyncshim/extra.js'))
+  t.assert.ok(![...files].some((f) => f.includes('metro-runtime')), 'the default helper must not also be injected')
+  t.assert.equal(importTarget(bundle, 'src/entry-async.js', 'asyncshim'), 'node_modules/asyncshim/index.js')
+  t.assert.equal(importTarget(bundle, 'node_modules/asyncshim/index.js', 'asyncshim'), 'node_modules/asyncshim/index.js')
+  t.assert.equal(importTarget(bundle, 'node_modules/asyncshim/index.js', './extra.js'), 'node_modules/asyncshim/extra.js')
+})
+
+test('buildBundle --metro fails closed when the async-import helper is not installed', withTmp(async (t, tmp) => {
+  // A dynamic import() means Metro WOULD ship the helper; a bundle silently missing it
+  // would leave shipped code unattested, so the build must refuse instead.
+  writeFileSync(join(tmp, 'package.json'), '{ "name": "no-mr", "version": "0.0.0", "type": "module", "private": true }\n')
+  mkdirSync(join(tmp, 'src'), { recursive: true })
+  writeFileSync(join(tmp, 'src', 'entry.js'), 'export const p = import("./lazy.js")\n')
+  writeFileSync(join(tmp, 'src', 'lazy.js'), 'export default 1\n')
+  await t.assert.rejects(
+    () => buildBundle({ cwd: tmp, entries: ['src/entry.js'], metro: true, platforms: ['ios'] }),
+    /Can't resolve Metro's async-import helper 'metro-runtime\/src\/modules\/asyncRequire'/u,
+  )
+}))
+
+test('CLI: bundle --metro --lockfile attests the injected async-import helper and its edge', withTmp((t, tmp) => {
+  const out = join(tmp, 'metro.br')
+  const lock = join(tmp, 'metro.lock.json')
+  const r = runCli(
+    ['bundle', '--metro', '--platforms=ios,android', `--lockfile=${lock}`, `--output=${out}`, 'src/entry-async.js'],
+    { cwd: fieldsFixture },
+  )
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  t.assert.equal(bundle.imports.get('*').get('src/entry-async.js').get(ASYNC_REQUIRE), 'node_modules/metro-runtime/src/modules/asyncRequire.js')
+  t.assert.equal(bundle.sources.get('node_modules/metro-runtime/src/modules/asyncRequire.js'), readFileSync(join(fieldsFixture, 'node_modules/metro-runtime/src/modules/asyncRequire.js'), 'utf8'))
+  // The companion lockfile attests the same edge and the helper's integrity.
+  const lockfile = Lockfile.parse(readFileSync(lock, 'utf8'))
+  t.assert.equal(lockfile.imports.get('*').get('src/entry-async.js').get(ASYNC_REQUIRE), 'node_modules/metro-runtime/src/modules/asyncRequire.js')
+  t.assert.match(lockfile.modules.get('node_modules/metro-runtime').files['src/modules/asyncRequire.js'], /^sha512-/u)
+}))
+
+test('CLI: --asyncRequireModulePath requires --metro and a non-empty specifier', async (t) => {
+  t.assert.match(
+    runCli(['bundle', '--asyncRequireModulePath=asyncshim', 'src/entry-async.js'], { cwd: fieldsFixture }).stderr,
+    /--asyncRequireModulePath is only valid with --metro/u,
+  )
+  t.assert.match(
+    runCli(['bundle', '--metro', '--platforms=ios', '--asyncRequireModulePath=', 'src/entry-async.js'], { cwd: fieldsFixture }).stderr,
+    /--asyncRequireModulePath must name a module specifier/u,
+  )
+  await t.assert.rejects(
+    () => buildBundle({ cwd: fieldsFixture, entries: ['src/entry-async.js'], mainFields: ['main'], asyncRequireModulePath: 'asyncshim' }),
+    /--asyncRequireModulePath is only valid with --metro/u,
+  )
+})
+
 test('CLI: bundle --mainFields rejects a non-JS bundle and an empty value', (t) => {
   t.assert.match(runCli(['bundle', '--mainFields=browser', 'a.sol']).stderr, /--mainFields is only valid for JS bundles/)
   const empty = runCli(['bundle', '--mainFields=', 'src/entry.js'], { cwd: fieldsFixture })

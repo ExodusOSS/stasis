@@ -140,13 +140,27 @@ export class Scan {
   }
 
   walk(entries) {
-    const queue = []
     for (const entry of entries) {
       const abs = resolvePath(entry)
       assert.ok(existsSync(abs), `entry not found: ${abs}`)
-      const url = pathToFileURL(abs).toString()
-      this.entries.add(url)
-      queue.push(url)
+      this.entries.add(pathToFileURL(abs).toString())
+    }
+    return this.walkFiles(entries)
+  }
+
+  // Scan additional root files (and their subtrees) WITHOUT marking them entries.
+  // For modules a bundler INJECTS into its graph rather than user code importing
+  // them (e.g. Metro's asyncRequire helper): they must be scanned like any other
+  // reachable file, but entry-driven logic (missing-entry checks, the static-
+  // reachability seed in the fatal/tolerated classification) must not treat them
+  // as user entry points. Safe to call after walk(): files already scanned are
+  // skipped, new ones are scanned recursively through the same resolver.
+  walkFiles(files) {
+    const queue = []
+    for (const file of files) {
+      const abs = resolvePath(file)
+      assert.ok(existsSync(abs), `file not found: ${abs}`)
+      queue.push(pathToFileURL(abs).toString())
     }
     while (queue.length > 0) {
       const url = queue.shift()

@@ -721,10 +721,90 @@ const SOURCE_EXTS = ['js', 'json', 'ts']
 // react-native/browser conditions and platform suffixes, so the user supplies neither
 // --mainFields nor --conditions alongside it).
 const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
+// Metro's default `transformer.asyncRequireModulePath`. Metro's transform rewrites
+// every dynamic `import()` callsite (and its prefetch/importMaybeSync variants) into
+// `require(<asyncRequireModulePath>)(...)` -- see transformImportCall in
+// metro/src/ModuleGraph/worker/collectDependencies.js -- so the helper module is a
+// real dependency of every module that async-imports, resolved per parent and shipped
+// in the bundle, without ANY source file naming it. A static scan can only cover it by
+// mirroring the injection (see injectMetroAsyncRequire). Overridable via the
+// `asyncRequireModulePath` option because Metro configs override the config key it
+// mirrors (Expo sets 'expo/internal/async-require-module' when `expo` is installed).
+const METRO_ASYNC_REQUIRE_MODULE_PATH = 'metro-runtime/src/modules/asyncRequire'
 // Synthetic, project-relative path for the empty module a browser/react-native
 // `false` redirect resolves to. Carried in the bundle as a real (empty) CJS file
 // so the edge points at attestable bytes rather than a sentinel.
 const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
+
+// Mirror Metro's async-import injection into a platform scan (`--metro` only). Metro's
+// transform makes its async-import helper (METRO_ASYNC_REQUIRE_MODULE_PATH, or the
+// project's configured override) a dependency of every module that uses a dynamic
+// import(): the helper is resolved from each such module like any other bare specifier
+// and ships in the bundle, without any source file naming it -- invisible to a plain
+// import walk. So: for every scanned module with a dynamic-import edge, resolve the
+// helper from that module through the same platform resolver (per-parent, so distinct
+// copies in a non-hoisted tree land per parent, exactly like Metro), pull the resolved
+// file and its subtree into the scan, and record the edge a runtime StasisMetro capture
+// of the real graph would attest: (parent, <asyncRequireModulePath>) -> helper. The
+// edge is recorded as a require edge -- that's what the injected callsite compiles to
+// -- so the fatal/tolerated gate treats the helper's subtree like any other
+// require()-boundary subtree.
+//
+// The trigger is ANY dynamic-import edge (resolved, unresolved, non-literal, or
+// browser-map-emptied): Metro wraps the callsite before resolution, so this errs toward
+// attesting the helper, never toward omitting a shipped file. Runs to a fixpoint
+// because an injected helper is scanned like any module and may itself dynamic-import
+// (a custom helper then gets its own injected edge, possibly onto itself).
+//
+// Fails closed when the helper can't be resolved (or resolves to a file a source
+// bundle can't carry): a bundle silently missing a file Metro ships would defeat the
+// attestation -- a frozen/load run against the real build rejects it anyway.
+//
+// SCOPE: this mirrors the one module Metro's TRANSFORM injects as a graph dependency.
+// Metro's serializer-level preModules (the prepended polyfills/runtime, e.g.
+// metro-runtime/src/polyfills/require.js, chosen by the config's getPolyfills) are not
+// dependencies of any module and not statically knowable here -- they're covered by the
+// runtime StasisMetro capture (which receives preModules), not by `stasis bundle --metro`.
+function injectMetroAsyncRequire(scanner, resolver, specifier) {
+  const done = new Set()
+  let pending = [...scanner.files.keys()]
+  while (pending.length > 0) {
+    for (const url of pending) {
+      done.add(url)
+      const info = scanner.files.get(url)
+      if (!info.edges.some((e) => e.kind === 'dynamic-import')) continue
+      const parentFile = fileURLToPath(url)
+      const r = resolver(parentFile, specifier)
+      // The parent package's browser map applies to the injected resolution like to any
+      // other (it's a normal dependency resolution in Metro too): `false` records an
+      // empty-module edge; a remap onto a builtin leaves no file edge to record.
+      if (r?.builtin) continue
+      if (r?.empty) {
+        info.edges.push({ kind: 'require', spec: specifier, empty: true })
+        continue
+      }
+      if (!r?.url) {
+        throw new Error(
+          `Can't resolve Metro's async-import helper '${specifier}' from ${parentFile} -- ` +
+          `Metro injects a require() of it into every module that uses a dynamic import(), so it ` +
+          `ships in the real bundle and the stasis bundle must attest it. Install it (metro-runtime ` +
+          `for Metro's default config), or pass the project's configured ` +
+          `transformer.asyncRequireModulePath via --asyncRequireModulePath.`
+        )
+      }
+      const target = fileURLToPath(r.url)
+      const ext = extname(target)
+      if (!JS_EXTS.has(ext) && ext !== '.json') {
+        throw new Error(
+          `Metro's async-import helper '${specifier}' resolves to ${target}, which a source bundle can't carry`
+        )
+      }
+      info.edges.push({ kind: 'require', spec: specifier, child: r.url })
+      scanner.walkFiles([target])
+    }
+    pending = [...scanner.files.keys()].filter((u) => !done.has(u))
+  }
+}
 
 // Build a JS/TS Bundle (and companion Lockfile) through the legacy-field resolver
 // (src/resolve-fields.js) rather than Node's resolver -- the `--mainFields` and
@@ -735,9 +815,16 @@ const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 // `{ platform: target }` map only where platforms genuinely diverge. A single platform
 // therefore never unflattens; platform keys are exactly the supplied platforms (no
 // wildcard). A browser/react-native `false` redirect resolves to a synthetic empty
-// module carried in the bundle. Returns { bundle, lockfile } (the lockfile attests the
-// same files + the same -- possibly per-platform -- edges, by integrity).
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false }) {
+// module carried in the bundle. In `--metro` mode the scan also mirrors Metro's
+// async-import injection (see injectMetroAsyncRequire): any dynamic import() pulls in
+// `asyncRequireModulePath` (Metro's default helper unless overridden) with a
+// per-parent edge, exactly as the transformed bundle ships it. Returns
+// { bundle, lockfile } (the lockfile attests the same files + the same -- possibly
+// per-platform -- edges, by integrity).
+async function buildResolvedJsBundle({
+  cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false,
+  asyncRequireModulePath = METRO_ASYNC_REQUIRE_MODULE_PATH,
+}) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -774,6 +861,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       conditions: resolveConditions('commonjs', extras),
     })
     const scanner = scan(absEntries, { conditions: extras, resolve: resolver })
+    // Metro mode: mirror the async-import helper injection BEFORE gating/recording, so
+    // the helper's files and edges flow through the same checks as everything else.
+    if (metro) injectMetroAsyncRequire(scanner, resolver, asyncRequireModulePath)
     reportScanIssues(analyzeScanner(scanner), { label: platform ?? 'mainFields' })
 
     const platformKey = platform ?? '*' // '*' is a private placeholder for the single mainFields pass; it never unflattens
@@ -876,7 +966,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 // Classify entries into the single bundle language they all share and check
 // option applicability. Shared by buildBundle and bundleCommand; `name`
 // prefixes error messages with the caller.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, asyncRequireModulePath }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -935,6 +1025,15 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   } else if (Array.isArray(platforms) && platforms.length > 0) {
     throw new Error(`${name}: --platforms is only valid with --metro`)
   }
+  // --asyncRequireModulePath overrides which async-import helper `--metro` injects for
+  // dynamic import()s (mirroring Metro's `transformer.asyncRequireModulePath` config
+  // key); outside --metro nothing injects, so the option would be silently ignored.
+  if (asyncRequireModulePath !== undefined) {
+    if (!metro) throw new Error(`${name}: --asyncRequireModulePath is only valid with --metro`)
+    if (typeof asyncRequireModulePath !== 'string' || asyncRequireModulePath.length === 0) {
+      throw new Error(`${name}: --asyncRequireModulePath must be a non-empty module specifier`)
+    }
+  }
   // The field resolver always emits a full-scope bundle (no node_modules-only mode), so
   // --scope alongside --mainFields/--metro would be silently ignored -- reject it.
   if (scope !== undefined && (mainFields !== undefined || metro)) {
@@ -962,9 +1061,13 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // redirection, and composes with `conditions`. `metro: true` is instead a preset that
 // sets its OWN React Native fields + conditions + platform suffixes (so it is not
 // combined with `mainFields`/`conditions`) and requires `platforms` (e.g.
-// `['ios','android']`); the edge graph is then per-platform. JS/TS-only.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro })
+// `['ios','android']`); the edge graph is then per-platform, and any dynamic import()
+// additionally pulls in Metro's async-import helper the way Metro's transform injects
+// it -- `asyncRequireModulePath` (metro-only) overrides which helper, mirroring the
+// Metro config key of the same name (e.g. Expo's 'expo/internal/async-require-module').
+// JS/TS-only.
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, asyncRequireModulePath } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, asyncRequireModulePath })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
@@ -977,6 +1080,7 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
+      ...(asyncRequireModulePath === undefined ? {} : { asyncRequireModulePath }),
     })
     return bundle
   }
@@ -1008,6 +1112,10 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // affect `exports`/`imports` condition matching -- not legacy mainFields -- so on
 // their own they don't honour a package's legacy entry fields. See buildJsBundle.
 //
+// `metro`/`platforms` resolve the way Metro does (see buildResolvedJsBundle); with
+// them, `asyncRequireModulePath` overrides which async-import helper a dynamic
+// import() injects, mirroring Metro's `transformer.asyncRequireModulePath` config key.
+//
 // For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
 // attests every file in the bundle. The static scan walks both branches of
 // conditional requires (e.g. debug/src/index.js' `if (browser) require('./browser')
@@ -1022,8 +1130,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // replay the same `--conditions` at run time, so the attested and observed graphs agree.
 // `brotliQuality` (integer 0..11, optional; unset = brotli's default 11) tunes the
 // output compression, forwarded to brotliOptions().
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, asyncRequireModulePath, brotliQuality } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, asyncRequireModulePath })
 
   let bundle
   let lockData
@@ -1039,6 +1147,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
+      ...(asyncRequireModulePath === undefined ? {} : { asyncRequireModulePath }),
     })
     bundle = built.bundle
     if (lockfile) lockData = built.lockfile.serialize()
