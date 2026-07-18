@@ -13,6 +13,7 @@ const ENV_KEYS = [
   'EXODUS_STASIS_RESOURCES',
   'EXODUS_STASIS_DEBUG',
   'EXODUS_STASIS_CHILD_PROCESS',
+  'EXODUS_STASIS_SHARD_SIGNAL_FLUSH',
   'EXODUS_STASIS_FS',
   'EXODUS_STASIS_BROTLI_QUALITY',
 ]
@@ -716,6 +717,43 @@ test('Config childProcess=true option conflicts with env childProcess=0', withEn
     t.assert.throws(() => new Config({ childProcess: true }), /Config options can not override stasis env/)
   }
 ))
+
+// shardSignalFlush is env-ONLY plumbing (no option, no stasis.config.json key), set by
+// StasisMetro for its build's children -- but its parse is the same strict envBool as every
+// boolean toggle, and the SIGTERM flush handler keys off it, so '0'/'false' MUST disable
+// (a truthiness parse would flip a signal-disposition change ON) and garbage must fail loudly.
+test('Config shardSignalFlush env "1" is true', withEnv(
+  { EXODUS_STASIS_SHARD_SIGNAL_FLUSH: '1' },
+  (t) => { t.assert.equal(new Config().shardSignalFlush, true) }
+))
+
+test('Config shardSignalFlush env "0"/"false" disable (not truthy-parsed)', withEnv(
+  { EXODUS_STASIS_SHARD_SIGNAL_FLUSH: '0' },
+  (t) => { t.assert.equal(new Config().shardSignalFlush, false) }
+))
+
+test('Config shardSignalFlush env "" is unset and keeps the default (false)', withEnv(
+  { EXODUS_STASIS_SHARD_SIGNAL_FLUSH: '' },
+  (t) => { t.assert.equal(new Config().shardSignalFlush, false) }
+))
+
+test('Config shardSignalFlush defaults to false', withEnv({}, (t) => {
+  t.assert.equal(new Config().shardSignalFlush, false)
+}))
+
+test('Config shardSignalFlush env rejects unrecognized values', withEnv(
+  { EXODUS_STASIS_SHARD_SIGNAL_FLUSH: 'yes' },
+  (t) => {
+    t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_SHARD_SIGNAL_FLUSH must be/ })
+  }
+))
+
+// Env-only: neither an option nor a stasis.config.json key admits it.
+test('Config rejects a shardSignalFlush option and loadConfig rejects the key', (t) => {
+  t.assert.throws(() => new Config({ shardSignalFlush: true }), /Unknown Config options: shardSignalFlush/)
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ shardSignalFlush: true })))
+})
 
 // fs mirrors lock/bundle: a 'sync'|'async' enum read from --fs / EXODUS_STASIS_FS / "fs" in
 // stasis.config.json, requiring an active read/write bundle mode (add|replace|load), and -- like

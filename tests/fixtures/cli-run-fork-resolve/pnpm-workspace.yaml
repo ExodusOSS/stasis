@@ -1,0 +1,2 @@
+# Marks the fixture root so the copied-to-tmp fixture never walks up past itself.
+packages: []

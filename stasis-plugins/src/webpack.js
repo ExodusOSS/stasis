@@ -536,10 +536,14 @@ export class StasisWebpack {
   // KNOWN LIMITATION: the flush runs at process exit, so a multi-compiler one-shot build inside
   // a process that never exits normally -- one that stays alive after building and is then
   // killed by a signal (SIGINT/SIGTERM/SIGKILL), which bypass both beforeExit and exit -- would
-  // not flush. That is the same capture-then-exit assumption the preload already relies on
-  // (hooks.js) and metro documents; the common build-and-exit flow is unaffected, a
-  // single-compiler build never reaches here (it writes on `done`), and watch (`--watch`,
-  // dev-server) capture is refused outright at watchRun (see #applyCaptureMode).
+  // not flush. That is the same capture-then-exit assumption the preload's ROOT write relies
+  // on (hooks.js). NB: the SIGTERM shard flush metro opts its workers into
+  // (EXODUS_STASIS_SHARD_SIGNAL_FLUSH, hooks.js) does NOT help here and setting it wouldn't
+  // either -- it covers a capturing CHILD's shard forward, while this deferred write is the
+  // MAIN process's State.write via THIS plugin's own beforeExit/exit listeners, which a signal
+  // death (or the loader's re-delivered SIGTERM) still bypasses. The common build-and-exit
+  // flow is unaffected, a single-compiler build never reaches here (it writes on `done`), and
+  // watch (`--watch`, dev-server) capture is refused outright at watchRun (see #applyCaptureMode).
   #deferWrite() {
     this.#deferredWriteDirty = true
     if (this.#deferredWriteArmed) return
