@@ -2273,3 +2273,24 @@ test('bundleCommand --add preserves other consumers when growing a captured bund
   t.assert.deepEqual(merged.reason.StasisWebpack, ['src/Shared.sol'])
   t.assert.deepEqual(merged.reason.bundle, ['src/B.sol', 'src/Shared.sol'])
 }))
+
+test('bundleCommand --add refuses to write an under-attesting lockfile when the bundle exists but its lockfile does not', withTmp(async (t, tmp) => {
+  // Build a bundle WITHOUT a companion lockfile.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'add-nolock', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'a.js'), 'export const a = 1\n')
+  writeFileSync(join(tmp, 'b.js'), 'export const b = 2\n')
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  await bundleCommand({ cwd: tmp, entries: ['a.js'], output: outPath })
+  t.assert.ok(!existsSync(lockPath))
+
+  // --add WITH a lockfile now: the bundle carries a.js already, but a fresh lockfile
+  // would attest only b.js, and there's no prior lockfile to merge into -> refuse
+  // rather than write a lockfile that a later --lock=frozen --bundle=load would reject.
+  await t.assert.rejects(
+    () => bundleCommand({ cwd: tmp, entries: ['b.js'], output: outPath, lockfile: lockPath, add: true }),
+    /can't write a complete lockfile/,
+  )
+  t.assert.ok(!existsSync(lockPath), 'no lockfile is written on refusal')
+}))

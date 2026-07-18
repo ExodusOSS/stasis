@@ -1088,32 +1088,36 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   // formats; a conflict (same path, different bytes/format/resolution) throws. When
   // nothing is on disk yet this branch is skipped and the write below is a fresh one.
   const outAbs = target === '-' ? undefined : resolve(cwd, target)
-  let addedCount
-  if (add && outAbs !== undefined && existsSync(outAbs)) {
+  // Count of files the pre-existing bundle carried; stays undefined when no merge
+  // happened (fresh write), which the summary line below uses as the merged sentinel.
+  let mergedFrom
+  if (add && existsSync(outAbs)) {
     let existing
     try {
       existing = Bundle.parse(brotliDecompressSync(readFileSync(outAbs)).toString('utf8'))
     } catch (cause) {
       throw new Error(`bundleCommand: --add failed to read the existing bundle at ${target}`, { cause })
     }
-    const before = existing.sources.size
+    mergedFrom = existing.sources.size
     bundle = existing.merge(bundle)
-    addedCount = bundle.sources.size - before
-    // Keep the companion lockfile consistent with the merged bundle: union it into
-    // the one already on disk so it attests the whole merged graph, not just the
-    // newly added subset. (No existing lockfile -> the fresh one already covers the
-    // merged bundle, since the pre-existing bundle contributed no new lockfile.)
+    // Keep the companion lockfile consistent with the merged bundle. When one exists on
+    // disk, union it so it attests the whole merged graph. When it DOESN'T, the fresh
+    // lockData attests only the newly added files -- not the pre-existing bundle's -- so
+    // a --lock=frozen --bundle=load pair would fail closed. The hashes for the old files
+    // live only in that missing lockfile, so we can't reconstruct a complete one here;
+    // refuse rather than write an under-attesting lockfile.
     if (lockData && lockfile) {
       const lockAbs = resolve(cwd, lockfile)
-      if (existsSync(lockAbs)) {
-        let existingLock
-        try {
-          existingLock = Lockfile.parse(readFileSync(lockAbs, 'utf8'))
-        } catch (cause) {
-          throw new Error(`bundleCommand: --add failed to read the existing lockfile at ${lockfile}`, { cause })
-        }
-        lockData = existingLock.merge(Lockfile.parse(lockData)).serialize()
+      if (!existsSync(lockAbs)) {
+        throw new Error(`bundleCommand: --add can't write a complete lockfile at ${lockfile}: the bundle at ${target} already carries files a fresh lockfile wouldn't attest, and there's no existing lockfile to merge into. Write --lockfile alongside the bundle from the first build, or drop --lockfile.`)
       }
+      let existingLock
+      try {
+        existingLock = Lockfile.parse(readFileSync(lockAbs, 'utf8'))
+      } catch (cause) {
+        throw new Error(`bundleCommand: --add failed to read the existing lockfile at ${lockfile}`, { cause })
+      }
+      lockData = existingLock.merge(Lockfile.parse(lockData)).serialize()
     }
   }
 
@@ -1144,8 +1148,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   // When we merged into an existing bundle, report how many files were newly added
   // alongside the merged totals; a fresh write (including --add with nothing on disk)
   // keeps the plain "Bundled N files" line.
-  if (addedCount !== undefined) {
-    console.warn(`[stasis] Added ${addedCount} file${addedCount === 1 ? '' : 's'} (${files.length} total in ${pkgLabel}) from ${fromDir} to ${dest}`)
+  if (mergedFrom !== undefined) {
+    const added = files.length - mergedFrom
+    console.warn(`[stasis] Added ${added} file${added === 1 ? '' : 's'} (${files.length} total in ${pkgLabel}) from ${fromDir} to ${dest}`)
   } else {
     console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
   }

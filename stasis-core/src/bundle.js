@@ -38,7 +38,7 @@ const mergeReason = (a, b) => {
   const out = {}
   for (const src of [a, b]) {
     for (const [consumer, files] of Object.entries(src)) {
-      out[consumer] = [...new Set([...(out[consumer] ?? []), ...files])].toSorted(sortPaths)
+      out[consumer] = fileSetToObject(new Set([...(out[consumer] ?? []), ...files]))
     }
   }
   return out
@@ -315,7 +315,7 @@ export class Bundle {
     return new Bundle({
       config: { scope: this.config.scope },
       entries: new Set([...this.entries, ...other.entries]),
-      modules: mergeModuleMaps(this.modules, other.modules, { label: 'bundle merge', fileKey: moduleFileKey }),
+      modules: mergeModuleMaps(this.modules, other.modules, 'bundle merge'),
       formats: mergeFormatMaps(this.formats, other.formats, 'bundle merge'),
       imports: mergeImportMaps(this.imports, other.imports, 'bundle merge'),
       reason: mergeReason(this.reason, other.reason),

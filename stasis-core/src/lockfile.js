@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKey, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -167,18 +167,22 @@ export class Lockfile {
   merge(other) {
     assert(this.config.scope === other.config.scope,
       `lockfile merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
-    const mergeNullable = (a, b, merge, what) => {
-      if (a === null && b === null) return null
-      assert(a !== null && b !== null,
-        `lockfile merge: cannot merge ${what} (one lockfile attests ${what}, the other does not)`)
-      return merge(a, b)
-    }
     return new Lockfile({
       config: { scope: this.config.scope },
       entries: new Set([...this.entries, ...other.entries]),
-      modules: mergeModuleMaps(this.modules, other.modules, { label: 'lockfile merge', fileKey: moduleFileKey }),
+      modules: mergeModuleMaps(this.modules, other.modules, 'lockfile merge'),
       imports: mergeNullable(this.imports, other.imports, (a, b) => mergeImportMaps(a, b, 'lockfile merge'), 'imports'),
       formats: mergeNullable(this.formats, other.formats, (a, b) => mergeFormatMaps(a, b, 'lockfile merge'), 'formats'),
     })
   }
+}
+
+// Merge two nullable lockfile facets (imports/formats): both-null stays null (a legacy
+// lockfile that predates attesting them), both-present merges via `merge`, and a
+// one-sided null throws rather than silently dropping the attestation the other carries.
+const mergeNullable = (a, b, merge, what) => {
+  if (a === null && b === null) return null
+  assert(a !== null && b !== null,
+    `lockfile merge: cannot merge ${what} (one lockfile attests ${what}, the other does not)`)
+  return merge(a, b)
 }

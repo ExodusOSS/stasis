@@ -239,7 +239,7 @@ export function posixPathEscapes(path) {
 // Value-equality for one import-edge target: a plain resolved-file string, or a
 // { platform: file } Map (a `--metro` per-platform edge). Different kinds, or any
 // differing platform->file pair, are unequal.
-export function importTargetsEqual(a, b) {
+function importTargetsEqual(a, b) {
   const aMap = a instanceof Map
   if (aMap !== (b instanceof Map)) return false
   if (!aMap) return a === b
@@ -301,10 +301,10 @@ export function mergeFormatMaps(a, b, label) {
 // into a fresh Map. Overlapping buckets must agree on name/version/ecosystem, and a
 // file present in both must carry the identical value (source bytes for a bundle,
 // integrity hash for a lockfile) -- a real divergence throws rather than letting the
-// newer artifact silently mask what the existing one attested. `fileKey(dir, rel)`
-// names a conflicting file; `label` tags every message. Result `files` objects are
-// null-prototype (like the parsers'), so a `__proto__` file name is a plain own key.
-export function mergeModuleMaps(a, b, { label, fileKey }) {
+// newer artifact silently mask what the existing one attested. `label` tags every
+// message. Result `files` objects are null-prototype (like the parsers'), so a
+// `__proto__` file name is a plain own key.
+export function mergeModuleMaps(a, b, label) {
   const out = new Map()
   const absorb = (modules) => {
     for (const [dir, info] of modules) {
@@ -326,7 +326,7 @@ export function mergeModuleMaps(a, b, { label, fileKey }) {
         `${label}: module '${dir}' ecosystem mismatch ('${existing.ecosystem ?? '(none)'}' vs '${info.ecosystem ?? '(none)'}')`)
       for (const [rel, value] of Object.entries(info.files)) {
         if (Object.hasOwn(existing.files, rel)) {
-          assert(existing.files[rel] === value, `${label}: content mismatch for '${fileKey(dir, rel)}'`)
+          assert(existing.files[rel] === value, `${label}: content mismatch for '${moduleFileKey(dir, rel)}'`)
         } else {
           existing.files[rel] = value
         }
