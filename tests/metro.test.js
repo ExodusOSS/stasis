@@ -712,6 +712,196 @@ test('auto-includes: an auto-include that is also a graph module is captured onc
   t.assert.ok(lock.modules['node_modules/metro-runtime'].files['src/modules/asyncRequire.js'].startsWith('sha512-'))
 }))
 
+// ----- Native modules (react-native config autolinking) -------------------------------
+
+// A faithful stand-in for the `react-native` CLI: the plugin resolves `react-native/cli.js`
+// from the project and spawns `node cli.js config`, so this mock is invoked EXACTLY as the
+// real one is. It emits the real `react-native config` JSON shape (absolute root/podspecPath/
+// sourceDir paths), parameterized by env so a test picks the native/JS deps -- and can force a
+// failure/garbage output to exercise the fail-closed path. Real RN isn't a dependency of this
+// repo, mirroring how the suite mocks Metro's graph rather than running Metro.
+const RN_CLI_JS = `
+const path = require('node:path')
+const proj = process.cwd()
+const nm = (n) => path.join(proj, 'node_modules', n)
+if (process.env.__FAKE_RN_FAIL === 'exit') { process.stderr.write('boom from react-native config\\n'); process.exit(3) }
+if (process.env.__FAKE_RN_FAIL === 'garbage') { process.stdout.write('not json at all'); process.exit(0) }
+const dependencies = {}
+for (const n of JSON.parse(process.env.__FAKE_NATIVE_DEPS || '[]')) {
+  dependencies[n] = { root: nm(n), name: n, platforms: {
+    ios: { podspecPath: path.join(nm(n), n + '.podspec') },
+    android: { sourceDir: path.join(nm(n), 'android') },
+  } }
+}
+for (const n of JSON.parse(process.env.__FAKE_JS_DEPS || '[]')) {
+  dependencies[n] = { root: nm(n), name: n, platforms: { ios: null, android: null } }
+}
+if (process.argv[2] === 'config') { process.stdout.write(JSON.stringify({ root: proj, dependencies })); process.exit(0) }
+process.exit(1)
+`
+const writeReactNativeCli = (tmp) => {
+  const dir = join(tmp, 'node_modules', 'react-native')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0' }))
+  writeFileSync(join(dir, 'cli.js'), RN_CLI_JS)
+}
+
+// A native dependency package: native sources across ios/ + android/ (should be attested as
+// resources), a package.json carrying codegenConfig (attested + kept in full by prune), some
+// UNused JS (should be skipped -- not a native input, not reachable), and two subtrees that
+// must be pruned from the walk: the library's own example app and Gradle build output.
+const writeNativeDep = (tmp, name) => {
+  const root = join(tmp, 'node_modules', name)
+  mkdirSync(join(root, 'ios'), { recursive: true })
+  mkdirSync(join(root, 'android', 'src', 'main', 'java', 'com'), { recursive: true })
+  mkdirSync(join(root, 'android', 'build'), { recursive: true })
+  mkdirSync(join(root, 'src'), { recursive: true })
+  mkdirSync(join(root, 'example', 'ios'), { recursive: true })
+  writeFileSync(join(root, 'package.json'), JSON.stringify({
+    name, version: '1.2.3', codegenConfig: { name: 'RNThingSpec', type: 'modules', jsSrcsDir: 'src' },
+  }))
+  writeFileSync(join(root, `${name}.podspec`), `Pod::Spec.new do |s|\n  s.name = "${name}"\nend\n`)
+  writeFileSync(join(root, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
+  writeFileSync(join(root, 'ios', 'RNThing.m'), '#import "RNThing.h"\n@implementation RNThing\n@end\n')
+  writeFileSync(join(root, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
+  writeFileSync(join(root, 'android', 'src', 'main', 'AndroidManifest.xml'), '<manifest/>\n')
+  writeFileSync(join(root, 'android', 'src', 'main', 'java', 'com', 'Thing.java'), 'package com;\nclass Thing {}\n')
+  writeFileSync(join(root, 'src', 'index.js'), 'export default {}\n')                 // unused JS -> skipped
+  writeFileSync(join(root, 'android', 'build', 'generated.o'), 'BUILDOUTPUT')         // build output -> excluded
+  writeFileSync(join(root, 'example', 'ios', 'Example.m'), '// example app source\n') // example app -> excluded
+  return root
+}
+
+const NATIVE_INPUTS = [
+  'react-native-native-lib.podspec',
+  'ios/RNThing.h', 'ios/RNThing.m',
+  'android/build.gradle',
+  'android/src/main/AndroidManifest.xml',
+  'android/src/main/java/com/Thing.java',
+  'package.json',
+]
+
+test('native modules: config discovers native deps; native sources attested, unused JS + example/build excluded', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeReactNativeCli(tmp)
+  writeNativeDep(tmp, 'react-native-native-lib')
+  // A JS-only autolinked dependency: `react-native config` reports it with null platforms, so
+  // it has no native surface to attest (its used JS, if any, rides Metro's graph).
+  mkdirSync(join(tmp, 'node_modules', 'js-only-lib'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'js-only-lib', 'package.json'), JSON.stringify({ name: 'js-only-lib', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'js-only-lib', 'ios-not-really.m'), '// never walked -- dep is JS-only\n')
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: {
+      EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full',
+      __FAKE_NATIVE_DEPS: JSON.stringify(['react-native-native-lib']),
+      __FAKE_JS_DEPS: JSON.stringify(['js-only-lib']),
+    },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const mod = lock.modules['node_modules/react-native-native-lib']
+  t.assert.ok(mod, 'native dependency module bucket recorded')
+  for (const f of NATIVE_INPUTS) {
+    t.assert.ok(mod.files[f]?.startsWith('sha512-'), `expected native input ${f} to be attested`)
+  }
+  t.assert.equal(mod.files['src/index.js'], undefined, 'unused JS in a native dep is not attested')
+  t.assert.equal(mod.files['example/ios/Example.m'], undefined, 'the example app subtree is excluded')
+  t.assert.equal(mod.files['android/build/generated.o'], undefined, 'build output is excluded')
+  // Native sources are attested as resources; package.json rides the code path as json.
+  t.assert.equal(lock.formats['node_modules/react-native-native-lib/react-native-native-lib.podspec'], 'resource')
+  t.assert.equal(lock.formats['node_modules/react-native-native-lib/ios/RNThing.m'], 'resource')
+  t.assert.equal(lock.formats['node_modules/react-native-native-lib/android/build.gradle'], 'resource')
+  t.assert.equal(lock.formats['node_modules/react-native-native-lib/package.json'], 'json')
+  // The JS-only dep contributes no native surface at all -- not even walked.
+  t.assert.equal(lock.modules['node_modules/js-only-lib'], undefined, 'a JS-only autolinked dep has no native surface')
+  // codegenConfig survives in the attested package.json bundle payload (prune keeps it in full).
+  const pkg = JSON.parse(readFileSync(join(tmp, 'node_modules', 'react-native-native-lib', 'package.json'), 'utf-8'))
+  t.assert.ok(pkg.codegenConfig, 'the attested package.json carries codegenConfig for the native build')
+}))
+
+test('native modules: frozen verifies the native surface and rejects a tampered native source', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeReactNativeCli(tmp)
+  writeNativeDep(tmp, 'react-native-native-lib')
+  const base = { EXODUS_STASIS_SCOPE: 'full', __FAKE_NATIVE_DEPS: JSON.stringify(['react-native-native-lib']) }
+
+  let r = run('src/entry.js', { cwd: tmp, env: { ...base, EXODUS_STASIS_LOCK: 'add' } })
+  t.assert.equal(r.status, 0, `capture stderr: ${r.stderr}`)
+  r = run('src/entry.js', { cwd: tmp, env: { ...base, EXODUS_STASIS_LOCK: 'frozen' } })
+  t.assert.equal(r.status, 0, `frozen must pass on captured native sources; stderr: ${r.stderr}`)
+
+  // Native sources go through the same addFile path as graph modules, so tampering one after
+  // capture must fail a frozen run closed -- the very reason to attest them (prune safety).
+  writeFileSync(join(tmp, 'node_modules', 'react-native-native-lib', 'ios', 'RNThing.m'), '// tampered\n')
+  r = run('src/entry.js', { cwd: tmp, env: { ...base, EXODUS_STASIS_LOCK: 'frozen' } })
+  t.assert.notEqual(r.status, 0, 'tampered native source must be rejected')
+  t.assert.match(r.stderr, /ERR_ASSERTION|sha512-/)
+}))
+
+test('native modules: a failing react-native config aborts capture (fail-closed, no silent under-attest)', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeReactNativeCli(tmp)
+
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', __FAKE_RN_FAIL: 'exit' },
+  })
+  t.assert.notEqual(r.status, 0, 'capture must abort when react-native config fails rather than under-attest')
+  t.assert.match(r.stderr, /react-native config/)
+  // A garbage (unparseable) config output must abort too.
+  const r2 = run('src/entry.js', {
+    cwd: tmp,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', __FAKE_RN_FAIL: 'garbage' },
+  })
+  t.assert.notEqual(r2.status, 0, 'unparseable config output must abort capture')
+  t.assert.match(r2.stderr, /parse 'react-native config'/)
+}))
+
+test('native modules: no react-native CLI installed -> native capture is skipped, capture still succeeds', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  // Deliberately do NOT install a react-native CLI: a non-RN Metro build has nothing native.
+  const r = run('src/entry.js', { cwd: tmp, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  t.assert.deepEqual(lock.modules, {}, 'no native modules attested when the RN CLI is absent')
+}))
+
+test('native modules: a native dep whose JS is imported is captured once; its native surface is still added', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeReactNativeCli(tmp)
+  writeNativeDep(tmp, 'react-native-native-lib')
+
+  const graph = {
+    modules: [
+      { path: 'src/entry.js', deps: [['react-native-native-lib', 'node_modules/react-native-native-lib/src/index.js']] },
+      { path: 'node_modules/react-native-native-lib/src/index.js', deps: [] },
+    ],
+  }
+  const r = run('src/entry.js', {
+    cwd: tmp,
+    graph,
+    env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', __FAKE_NATIVE_DEPS: JSON.stringify(['react-native-native-lib']) },
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const files = lock.modules['node_modules/react-native-native-lib'].files
+  // The imported JS is attested via the graph as CODE (not skipped, not double-recorded).
+  t.assert.ok(files['src/index.js']?.startsWith('sha512-'), 'imported dep JS attested via the graph')
+  t.assert.equal(lock.formats['node_modules/react-native-native-lib/src/index.js'], 'commonjs')
+  // The native pass still adds the native build-input surface alongside it.
+  t.assert.ok(files['react-native-native-lib.podspec']?.startsWith('sha512-'), 'podspec attested by the native pass')
+  t.assert.ok(files['ios/RNThing.m']?.startsWith('sha512-'), 'native source attested by the native pass')
+}))
+
 // ----- Metro-specific: serializer wiring, preModules, virtual modules -----------------
 
 const POLYFILL_GRAPH = {
