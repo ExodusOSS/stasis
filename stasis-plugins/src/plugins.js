@@ -27,7 +27,11 @@ import { extSetsEqual, parseResourcesOption } from '@exodus/stasis-core/util'
 // Rules:
 //  1. Plugin asking for any lockfile mode other than 'none' / 'ignore' requires a preload.
 //     Without one it's a hard throw -- the lockfile would otherwise only cover the bundled
-//     app and silently miss every dependency the bundler itself pulled in.
+//     app and silently miss every dependency the bundler itself pulled in. EXCEPTION: a
+//     plugin given NO capture options at all (neither lock nor bundle) and NOT running under
+//     `stasis run` is inert -- it does nothing (Rule 0) rather than throwing, so wiring the
+//     plugin into a config is safe on a plain build. Capture then activates only under
+//     `stasis run` (which governs the mode via its env) or when explicit options ask for it.
 //  2. With a preload, the plugin's lock mode must agree with the preload's.
 //  3. Lockfile is unified: when plugin and preload align we reuse the preload State so a
 //     single lockfile is written.
@@ -55,6 +59,28 @@ export function resolvePluginState(label, options, cwd) {
   const ambient = State.preload
 
   if (!ambient) {
+    // Cross-instance "running under stasis run" detection: `stasis run`'s bin script exports
+    // EXODUS_STASIS_LOCK on the spawned child for every run (unconditionally -- even at its own
+    // `--lock` default of `none`, a non-writing mode), so the env var is a reliable process-wide
+    // signal regardless of which stasis-core copy is hosting this code. When set, the runtime's
+    // loader is providing full lockfile coverage for the process; the plugin's lockfile (at its
+    // own path, typically a sidecar like `sources.stasis.lock.json`) is a sibling artifact
+    // covering bundler-side resolutions.
+    const underStasisRun = process.env.EXODUS_STASIS_LOCK !== undefined
+
+    // Rule 0: no preload, not under `stasis run`, and no capture instruction (neither lock nor
+    // bundle given) -- the plugin has nothing telling it to capture, so it does NOTHING instead
+    // of defaulting to a writing lock and demanding a preload. This is what lets a bare
+    // `withStasis(config)` / `new StasisWebpack()` / `new StasisEsbuild()` sit inertly in a
+    // config on a plain (non-stasis) build. Capture is governed elsewhere: `stasis run` sets
+    // EXODUS_STASIS_LOCK (so this branch is skipped and Config below adopts the env-driven
+    // lock/scope/bundle), or the caller passes explicit lock/bundle options. Config's
+    // DEFAULT_LOCK is untouched -- it still governs a run UNDER the loader, which never reaches
+    // this branch.
+    if (!underStasisRun && lock === undefined && bundle === undefined) {
+      return { state: null, isNoop: true }
+    }
+
     if (lock === 'none' && bundle === 'none') return { state: null, isNoop: true } // Rule 7
     // Rule 7 needs BOTH to be 'none'. A partial opt-out -- one field is 'none' but
     // the other was simply omitted -- would otherwise fall through to either a
@@ -63,7 +89,8 @@ export function resolvePluginState(label, options, cwd) {
     // case explicitly. Only fires when the OTHER field is undefined: an active
     // bundle mode like `bundle:'load'` / `'frozen'` / `'add'` paired with
     // `lock:'none'` is a legitimate "bundle as trust root" config that Config
-    // accepts (see config.js's bundle=load / bundle=frozen rules).
+    // accepts (see config.js's bundle=load / bundle=frozen rules). (Rule 0 already
+    // returned for the neither-given case, so at least one of lock/bundle is set here.)
     if ((lock === 'none' && bundle === undefined) || (bundle === 'none' && lock === undefined)) {
       throw new Error(
         `${label}: to opt out of stasis without a preload, pass BOTH lock='none' and bundle='none' ` +
@@ -71,18 +98,12 @@ export function resolvePluginState(label, options, cwd) {
         `bundle=${bundle === undefined ? 'default' : `'${bundle}'`})`
       )
     }
-    // Cross-instance "running under stasis run" detection: `stasis run`'s
-    // bin script always sets EXODUS_STASIS_LOCK on the spawned child (even
-    // for the default `--lock=add`), so the env var is a reliable
-    // process-wide signal regardless of which stasis-core copy is hosting
-    // this code. When set, the runtime's loader is providing full lockfile
-    // coverage for the process; the plugin's lockfile (at its own path,
-    // typically a sidecar like `sources.stasis.lock.json`) is a sibling
-    // artifact covering bundler-side resolutions, and the "lock=add needs
-    // a preload" rationale doesn't apply. Skip that rule under stasis run;
-    // Config below will pick up env-var defaults (lock/scope/bundle) for
-    // the standalone plugin State.
-    const underStasisRun = process.env.EXODUS_STASIS_LOCK !== undefined
+    // A writing/verifying effective lock (add|replace|frozen) still needs a preload UNLESS we're
+    // under stasis run, whose loader provides full lockfile coverage -- there the "lock=add needs
+    // a preload" rationale doesn't apply and Config picks up the env-var defaults. Rule 0 already
+    // returned for the neither-given case, but `lock` can still be undefined here when only a
+    // writing `bundle` was passed (e.g. `{ bundle: 'add' }`, which defaults lock to add) -- so
+    // the message distinguishes the defaulted mode from an explicit one.
     const effectiveLock = lock ?? DEFAULT_LOCK
     if (!underStasisRun && effectiveLock !== 'none' && effectiveLock !== 'ignore') {
       const phrasing = lock === undefined

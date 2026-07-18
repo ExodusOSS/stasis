@@ -196,7 +196,7 @@ export class StasisMetro {
 
   constructor(options = {}) {
     const { state } = resolvePluginState('StasisMetro', options, process.cwd())
-    this.#state = state // null when the plugin should be inert (Rule 7)
+    this.#state = state // null when the plugin should be inert (Rule 0 or Rule 7)
     // A CAPTURE-THAT-WRITES requires child-process forwarding: Metro transforms every file in a
     // pool of worker processes (see the class note), and the toolchain those workers load --
     // babel.config.js, @babel/core, the React Native preset + its plugins -- is observed only
@@ -245,11 +245,22 @@ export class StasisMetro {
   // (Metro's prepended polyfills/runtime -- real shipped files that the experimental hook
   // never sees), writes state, then produces output. With a `baseSerializer` we delegate to
   // it; with none we reproduce Metro's default output. This is the stable, full-coverage
-  // surface (withStasis wires it for you).
+  // surface (withStasis wires it for you). When the plugin is inert (see the guard below) it
+  // returns the base unchanged and captures nothing.
   customSerializer(baseSerializer = undefined) {
     if (baseSerializer !== undefined && typeof baseSerializer !== 'function') {
       throw new TypeError('StasisMetro.customSerializer(base?): base must be a function or omitted')
     }
+    // Inert (Rule 0 / Rule 7 in resolvePluginState -> #state === null): be TRANSPARENT and hand
+    // the base serializer straight back (undefined when the caller had none) instead of wrapping
+    // it. The wrapper below falls back to metroDefaultSerializer() when there is no base, which
+    // loads Metro internals, OVERRIDES Metro's own serializer selection, and throws outright on
+    // Metro versions where that internal path doesn't resolve -- none of which a do-nothing
+    // plugin may do. Returning the base leaves the caller's serializer (or, via withStasis,
+    // Metro's own default path) untouched, so wiring an inert plugin into a config is a genuine
+    // no-op. The other plugins get this for free (their apply/onStart early-returns on a null
+    // state); Metro's serializer seam has to opt out explicitly here.
+    if (!this.#state) return baseSerializer
     return (entryPoint, preModules, graph, options) => {
       this.#run(graph, preModules)
       const serialize = baseSerializer ?? metroDefaultSerializer()

@@ -612,6 +612,18 @@ test('no-ambient plugin under stasis run (env-var detected) accepts default lock
     'plugin must not write a phantom lockfile at the default path')
 }))
 
+test('rule 0: plugin with no options, no preload, not under stasis run does nothing', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
+
+  // No capture options and not under `stasis run` -> the plugin is inert (Rule 0). Wiring
+  // StasisWebpack into a config is a no-op on a plain build; it neither throws nor writes.
+  const r = run('src/entry.js', { cwd: tmp, env: standalone(withOpts({})) })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'), lockBefore,
+    'inert plugin must not touch the lockfile')
+}))
+
 test('rule 7: plugin with lock=none + bundle=none and no preload is a no-op', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
