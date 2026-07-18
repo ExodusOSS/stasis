@@ -227,6 +227,117 @@ export function posixPathEscapes(path) {
   return normalized === '..' || normalized.startsWith('../') || posix.isAbsolute(normalized)
 }
 
+// --- Artifact merge helpers -------------------------------------------------
+// Shared by Bundle.merge and Lockfile.merge (`stasis bundle --add`): both grow an
+// artifact already on disk by unioning a freshly built one into it. Bundles and
+// lockfiles carry the same module/import/format shapes -- a bundle stores each
+// file's CONTENT where a lockfile stores its integrity HASH -- but the merge rule is
+// identical: an overlapping entry must match exactly, and a genuine conflict throws
+// rather than letting the newer artifact silently mask what the existing one
+// attested. Keeping the union logic here stops the two `merge` methods from drifting.
+
+// Value-equality for one import-edge target: a plain resolved-file string, or a
+// { platform: file } Map (a `--metro` per-platform edge). Different kinds, or any
+// differing platform->file pair, are unequal.
+export function importTargetsEqual(a, b) {
+  const aMap = a instanceof Map
+  if (aMap !== (b instanceof Map)) return false
+  if (!aMap) return a === b
+  if (a.size !== b.size) return false
+  for (const [platform, file] of a) if (b.get(platform) !== file) return false
+  return true
+}
+
+const fmtTarget = (t) => (t instanceof Map ? `{${[...t].map(([p, f]) => `${p}: ${f}`).join(', ')}}` : t)
+
+// Merge two import maps (conditions -> parent -> specifier -> target) into a fresh
+// Map. An edge present on both sides must resolve to the same target; a real redirect
+// conflict throws. `label` tags the error for the calling artifact.
+export function mergeImportMaps(a, b, label) {
+  const out = new Map()
+  const absorb = (imports) => {
+    for (const [conditions, byParent] of imports) {
+      let outByParent = out.get(conditions)
+      if (outByParent === undefined) out.set(conditions, (outByParent = new Map()))
+      for (const [parent, specs] of byParent) {
+        let outSpecs = outByParent.get(parent)
+        if (outSpecs === undefined) outByParent.set(parent, (outSpecs = new Map()))
+        for (const [spec, target] of specs) {
+          if (outSpecs.has(spec)) {
+            assert(importTargetsEqual(outSpecs.get(spec), target),
+              `${label}: import '${spec}' from '${parent}' resolves differently ('${fmtTarget(outSpecs.get(spec))}' vs '${fmtTarget(target)}')`)
+          } else {
+            outSpecs.set(spec, target instanceof Map ? new Map(target) : target)
+          }
+        }
+      }
+    }
+  }
+  absorb(a)
+  absorb(b)
+  return out
+}
+
+// Merge two per-file format maps (file -> Node format string) into a fresh Map. A
+// file present on both sides must carry the same format; a conflict throws.
+export function mergeFormatMaps(a, b, label) {
+  const out = new Map()
+  const absorb = (formats) => {
+    for (const [file, format] of formats) {
+      const existing = out.get(file)
+      if (existing !== undefined) {
+        assert(existing === format, `${label}: format conflict for '${file}' ('${existing}' vs '${format}')`)
+      } else {
+        out.set(file, format)
+      }
+    }
+  }
+  absorb(a)
+  absorb(b)
+  return out
+}
+
+// Merge two per-package module maps (dir -> { name, version, ecosystem?, files })
+// into a fresh Map. Overlapping buckets must agree on name/version/ecosystem, and a
+// file present in both must carry the identical value (source bytes for a bundle,
+// integrity hash for a lockfile) -- a real divergence throws rather than letting the
+// newer artifact silently mask what the existing one attested. `fileKey(dir, rel)`
+// names a conflicting file; `label` tags every message. Result `files` objects are
+// null-prototype (like the parsers'), so a `__proto__` file name is a plain own key.
+export function mergeModuleMaps(a, b, { label, fileKey }) {
+  const out = new Map()
+  const absorb = (modules) => {
+    for (const [dir, info] of modules) {
+      const existing = out.get(dir)
+      if (existing === undefined) {
+        out.set(dir, {
+          name: info.name,
+          version: info.version,
+          ...(info.ecosystem === undefined ? {} : { ecosystem: info.ecosystem }),
+          files: Object.assign(Object.create(null), info.files),
+        })
+        continue
+      }
+      assert(existing.name === info.name,
+        `${label}: module '${dir}' name mismatch ('${existing.name}' vs '${info.name}')`)
+      assert(existing.version === info.version,
+        `${label}: module '${dir}' version mismatch ('${existing.version}' vs '${info.version}')`)
+      assert(existing.ecosystem === info.ecosystem,
+        `${label}: module '${dir}' ecosystem mismatch ('${existing.ecosystem ?? '(none)'}' vs '${info.ecosystem ?? '(none)'}')`)
+      for (const [rel, value] of Object.entries(info.files)) {
+        if (Object.hasOwn(existing.files, rel)) {
+          assert(existing.files[rel] === value, `${label}: content mismatch for '${fileKey(dir, rel)}'`)
+        } else {
+          existing.files[rel] = value
+        }
+      }
+    }
+  }
+  absorb(a)
+  absorb(b)
+  return out
+}
+
 export function splitNodeModulesPath(path) {
   const marker = 'node_modules/'
   const idx = path.lastIndexOf(marker)

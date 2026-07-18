@@ -2,7 +2,7 @@ import { isUtf8 } from 'node:buffer'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { brotliCompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
@@ -1022,8 +1022,24 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // replay the same `--conditions` at run time, so the attested and observed graphs agree.
 // `brotliQuality` (integer 0..11, optional; unset = brotli's default 11) tunes the
 // output compression, forwarded to brotliOptions().
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality } = {}) {
+//
+// `add` merges the freshly built bundle INTO the one already at `output` (or
+// stasis.code.br) instead of replacing it: the file set, entries, import graph, and
+// formats are unioned (see Bundle.merge). When the target doesn't exist yet this is a
+// plain write, so `stasis bundle --add` bootstraps on the first run and accretes on
+// every run after. The merge is strict -- a file whose bytes/identity/format/
+// resolution differ from what the existing bundle attests throws. `--add` can't target
+// stdout (there is nothing to merge into), and when a `lockfile` is written too it is
+// unioned into any existing one on disk so it keeps attesting the whole merged graph.
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality, add = false } = {}) {
   const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
+
+  const target = output ?? DEFAULT_BUNDLE_FILE
+  // --add reads the artifact already at `target` back and unions the new build into
+  // it; a stdout stream is write-only, so there is nothing to merge into there.
+  if (add && target === '-') {
+    throw new Error('bundleCommand: --add cannot be combined with --output=- (nothing to merge into on stdout)')
+  }
 
   let bundle
   let lockData
@@ -1051,6 +1067,41 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   } else {
     bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions })
   }
+
+  // --add: grow the artifact already on disk rather than replacing it. Merging a
+  // freshly built bundle into the existing one unions their files/entries/imports/
+  // formats; a conflict (same path, different bytes/format/resolution) throws. When
+  // nothing is on disk yet this branch is skipped and the write below is a fresh one.
+  const outAbs = target === '-' ? undefined : resolve(cwd, target)
+  let addedCount
+  if (add && outAbs !== undefined && existsSync(outAbs)) {
+    let existing
+    try {
+      existing = Bundle.parse(brotliDecompressSync(readFileSync(outAbs)).toString('utf8'))
+    } catch (cause) {
+      throw new Error(`bundleCommand: --add failed to read the existing bundle at ${target}`, { cause })
+    }
+    const before = existing.sources.size
+    bundle = existing.merge(bundle)
+    addedCount = bundle.sources.size - before
+    // Keep the companion lockfile consistent with the merged bundle: union it into
+    // the one already on disk so it attests the whole merged graph, not just the
+    // newly added subset. (No existing lockfile -> the fresh one already covers the
+    // merged bundle, since the pre-existing bundle contributed no new lockfile.)
+    if (lockData && lockfile) {
+      const lockAbs = resolve(cwd, lockfile)
+      if (existsSync(lockAbs)) {
+        let existingLock
+        try {
+          existingLock = Lockfile.parse(readFileSync(lockAbs, 'utf8'))
+        } catch (cause) {
+          throw new Error(`bundleCommand: --add failed to read the existing lockfile at ${lockfile}`, { cause })
+        }
+        lockData = existingLock.merge(Lockfile.parse(lockData)).serialize()
+      }
+    }
+  }
+
   const serialized = bundle.serialize()
   const files = [...bundle.sources.keys()]
   const modules = bundle.modules
@@ -1058,11 +1109,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   const data = brotliCompressSync(serialized, brotliOptions(brotliQuality))
   // Default to writing stasis.code.br in cwd; `-` is the conventional opt-in
   // for streaming the raw brotli bytes to stdout (e.g. to pipe somewhere else).
-  const target = output ?? DEFAULT_BUNDLE_FILE
   if (target === '-') {
     process.stdout.write(data)
   } else {
-    const outAbs = resolve(cwd, target)
     mkdirSync(dirname(outAbs), { recursive: true })
     writeFileSync(outAbs, data)
   }
@@ -1077,5 +1126,12 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   // "." workspace bucket) counting as one package alongside each dependency.
   const packages = [...modules.values()].filter((m) => Object.keys(m.files).length > 0).length
   const pkgLabel = `${packages} package${packages === 1 ? '' : 's'}`
-  console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
+  // When we merged into an existing bundle, report how many files were newly added
+  // alongside the merged totals; a fresh write (including --add with nothing on disk)
+  // keeps the plain "Bundled N files" line.
+  if (addedCount !== undefined) {
+    console.warn(`[stasis] Added ${addedCount} file${addedCount === 1 ? '' : 's'} (${files.length} total in ${pkgLabel}) from ${fromDir} to ${dest}`)
+  } else {
+    console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
+  }
 }
