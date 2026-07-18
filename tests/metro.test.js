@@ -897,6 +897,38 @@ test('native modules: a failing react-native config aborts capture (fail-closed,
   t.assert.match(r2.stderr, /parse 'react-native config'/)
 }))
 
+test('native modules: a reached but NON-autolinked native module (podspec under lib/ios) is captured', withTmp((t, tmp) => {
+  cpSync(fullFixture, tmp, { recursive: true })
+  rmSync(join(tmp, 'stasis.lock.json'))
+  writeReactNativeCli(tmp)
+  // Manually-integrated native module (à la @exodus/react-native-payments): imported JS, a podspec
+  // + native source under a non-standard lib/ios dir, and NOT reported by autolinking.
+  const dep = join(tmp, 'node_modules', '@exodus', 'react-native-payments')
+  mkdirSync(join(dep, 'lib', 'ios'), { recursive: true })
+  writeFileSync(join(dep, 'package.json'), JSON.stringify({ name: '@exodus/react-native-payments', version: '1.0.0' }))
+  writeFileSync(join(dep, 'lib', 'index.js'), 'module.exports = 1\n')
+  writeFileSync(join(dep, 'lib', 'ios', 'ReactNativePayments.podspec'), "Pod::Spec.new { |s| s.name = 'ReactNativePayments' }\n")
+  writeFileSync(join(dep, 'lib', 'ios', 'ReactNativePayments.m'), '@implementation ReactNativePayments @end\n')
+
+  // config reports NO native deps (autolinking misses it) -- only reactNativePath; the module is
+  // reached purely through the JS graph edge below.
+  const graph = {
+    modules: [
+      { path: 'src/entry.js', deps: [['@exodus/react-native-payments', 'node_modules/@exodus/react-native-payments/lib/index.js']] },
+      { path: 'node_modules/@exodus/react-native-payments/lib/index.js', deps: [] },
+    ],
+  }
+  const r = run('src/entry.js', { cwd: tmp, graph, env: { EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full' } })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+  const mod = lock.modules['node_modules/@exodus/react-native-payments']
+  t.assert.ok(mod, 'the reached, non-autolinked native module is captured')
+  t.assert.ok(mod.files['lib/ios/ReactNativePayments.podspec']?.startsWith('sha512-'), 'its podspec (under lib/ios) is captured')
+  t.assert.ok(mod.files['lib/ios/ReactNativePayments.m']?.startsWith('sha512-'), 'its native source (under lib/ios) is captured')
+  t.assert.equal(lock.formats['node_modules/@exodus/react-native-payments/lib/ios/ReactNativePayments.podspec'], 'resource')
+}))
+
 test('native modules: no react-native CLI installed -> native capture is skipped, capture still succeeds', withTmp((t, tmp) => {
   cpSync(fullFixture, tmp, { recursive: true })
   rmSync(join(tmp, 'stasis.lock.json'))

@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { classifyExtension, isNativeArtifact, isPodspec } from '@exodus/stasis-core/util'
+import { classifyExtension, isNativeArtifact, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -230,7 +230,10 @@ function metroDefaultSerializer() {
 //   react-native-skia's `libs/` of .a/.xcframework) are NOT captured -- generated output, not
 //   source, and often non-deterministic across installs (isNativeArtifact). React Native CORE
 //   isn't a `dependencies` entry (config reports only `reactNativePath`), so its own scattered
-//   podspecs -- third-party-podspecs/*, Libraries/*/*.podspec -- are captured separately.
+//   podspecs -- third-party-podspecs/*, Libraries/*/*.podspec -- are captured separately. A
+//   native module that autolinking never reports but the app IMPORTS and wires up manually in the
+//   Podfile (e.g. a podspec under lib/ios) is also captured: any reached node_modules package
+//   that ships native code (a podspec / ios/ / android/) has its native surface attested.
 //
 // KNOWN LIMITATIONS (Metro-specific coverage gaps -- documented, not silently ignored):
 //   - Capture is ONE-SHOT ONLY, enforced: a dev server (`metro start`) re-invokes the serializer
@@ -466,19 +469,22 @@ export class StasisMetro {
   #captureNativeModules() {
     const config = loadReactNativeConfig(this.#projectDir)
     if (!config) return
-    const deps = config.dependencies
-    if (deps && typeof deps === 'object') {
-      for (const dep of Object.values(deps)) {
-        if (!isNativeDependency(dep)) continue
-        const root = dep?.root
-        if (typeof root !== 'string' || !isAbsolute(root)) continue
-        try {
-          this.#state.relative(root) // asserts the dependency lives inside the project root
-        } catch {
-          continue // outside the project root -- unattestable
-        }
-        this.#captureNativeTree(root)
+    const roots = new Set()
+    // Autolinked native deps: linked into the app regardless of whether their JS is imported.
+    for (const dep of Object.values(config.dependencies ?? {})) {
+      if (isNativeDependency(dep) && typeof dep.root === 'string' && isAbsolute(dep.root)) roots.add(dep.root)
+    }
+    // Native modules the app IMPORTS but autolinking never reports -- manually integrated via the
+    // Podfile (e.g. @exodus/react-native-payments, whose podspec sits under lib/ios). Their JS is
+    // in the graph; their podspec + native source are real build inputs config omits entirely.
+    for (const root of this.#reachedNativePackageRoots()) roots.add(root)
+    for (const root of roots) {
+      try {
+        this.#state.relative(root) // asserts the package lives inside the project root
+      } catch {
+        continue // outside the project root -- unattestable
       }
+      this.#captureNativeTree(root)
     }
     // React Native CORE is NOT a `dependencies` entry -- `react-native config` reports only
     // `reactNativePath` and leaves build tools to find react-native's own podspecs there. Those
@@ -492,6 +498,47 @@ export class StasisMetro {
         this.#capturePodspecTree(rnPath)
       } catch { /* react-native resolved outside the project root -- unattestable */ }
     }
+  }
+
+  // node_modules package roots the graph reached this build that ALSO ship native code (a podspec
+  // anywhere, or an ios/android dir) -- the manually-integrated native modules `react-native
+  // config` doesn't list. Derived from #seen (populated by the graph + auto-include passes that
+  // run before this one). react-native CORE is excluded (handled podspecs-only via reactNativePath;
+  // whole-package capturing its huge native source is out of scope).
+  #reachedNativePackageRoots() {
+    const pkgRoots = new Set()
+    for (const abs of this.#seen) {
+      const nm = splitNodeModulesPath(abs)
+      if (!nm || nm.name === 'react-native') continue
+      pkgRoots.add(nm.dir)
+    }
+    return [...pkgRoots].filter((root) => this.#looksNative(root))
+  }
+
+  // A package ships native code if it has an ios/ or android/ dir, or any podspec anywhere.
+  #looksNative(root) {
+    if (existsSync(join(root, 'ios')) || existsSync(join(root, 'android'))) return true
+    return this.#hasPodspec(root)
+  }
+
+  // True if any *.podspec exists under `dir` (early-exit), pruning the same subtrees the capture
+  // walks skip. Uses the genuine reader -- plugin bookkeeping, not a program fs read.
+  #hasPodspec(dir) {
+    let entries
+    try {
+      entries = realReaddirSync(dir, { withFileTypes: true })
+    } catch {
+      return false
+    }
+    for (const ent of entries) {
+      if (ent.isSymbolicLink()) continue
+      if (ent.isFile()) {
+        if (isPodspec(ent.name)) return true
+      } else if (ent.isDirectory() && !NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) {
+        if (this.#hasPodspec(join(dir, ent.name))) return true
+      }
+    }
+    return false
   }
 
   // Recursively attest every podspec (*.podspec / *.podspec.json) under `dir`, pruning the same
