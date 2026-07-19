@@ -1279,6 +1279,15 @@ const writeRnFixture = (root) => {
   writeFileSync(join(dep, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a', 'librnthing.so'), 'ELF\0\xff')
   writeFileSync(join(dep, 'ios', 'RNThing.xcframework', 'Info.plist'), '<plist/>\n') // text, but inside a skipped bundle dir
   writeFileSync(join(dep, 'ios', 'RNThing.xcframework', 'ios-arm64', 'RNThing.a'), '!<arch>\0\xff')
+  // Non-build-input noise + an Xcode project bundle under ios/ -> excluded (RNThing-Info.plist is
+  // written above as a kept build input; the Apple privacy manifest is kept here too).
+  writeFileSync(join(dep, 'ios', 'README.md'), '# doc\n')
+  writeFileSync(join(dep, 'ios', 'install.bat'), '@echo off\n')
+  writeFileSync(join(dep, 'ios', 'RNThing.js.map'), '{"version":3}\n')
+  mkdirSync(join(dep, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace'), { recursive: true })
+  writeFileSync(join(dep, 'ios', 'RNThing.xcodeproj', 'project.pbxproj'), '// pbxproj\n')
+  writeFileSync(join(dep, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace', 'contents.xcworkspacedata'), '<Workspace/>\n')
+  writeFileSync(join(dep, 'ios', 'PrivacyInfo.xcprivacy'), '<dict/>\n')
 
   const js = join(root, 'node_modules', 'js-only')
   mkdirSync(js, { recursive: true })
@@ -1299,6 +1308,11 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   }
   t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
   t.assert.ok(!files.has('android/build/generated.o'), 'build output is excluded')
+  // Non-build-input noise + Xcode project bundle excluded; podspec-referenced plist/xcprivacy kept.
+  for (const f of ['ios/README.md', 'ios/install.bat', 'ios/RNThing.js.map', 'ios/RNThing.xcodeproj/project.pbxproj', 'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata']) {
+    t.assert.ok(!files.has(f), `${f} is excluded`)
+  }
+  t.assert.ok(files.has('ios/PrivacyInfo.xcprivacy'), 'Apple privacy manifest is kept')
   // Prebuilt/installed binary artifacts are excluded: a jniLibs .so, and everything inside an
   // Apple *.xcframework bundle (including its text Info.plist -- the dir is skipped whole).
   t.assert.ok(!files.has('android/src/main/jniLibs/arm64-v8a/librnthing.so'), 'a jniLibs .so is excluded')

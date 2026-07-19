@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, classifyNativeCapture, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -501,7 +501,7 @@ export class StasisMetro {
       } catch {
         continue // outside the project root -- unattestable
       }
-      this.#captureNativeTree(root)
+      this.#captureNativeTree(root, true)
     }
     // React Native CORE is NOT a `dependencies` entry -- `react-native config` reports only
     // `reactNativePath` and leaves build tools to find react-native's own podspecs there. Those
@@ -613,7 +613,7 @@ export class StasisMetro {
   // (state-util.js) for the same reason as #captureModules: the walk is plugin bookkeeping,
   // not a program fs read, so a --fs patched readdir/readFile must not re-record it into the
   // preload/main state. Symlinks are not followed (cycle/escape hazard).
-  #captureNativeTree(dir) {
+  #captureNativeTree(dir, atRoot = false) {
     let entries
     try {
       entries = realReaddirSync(dir, { withFileTypes: true })
@@ -624,8 +624,10 @@ export class StasisMetro {
       if (ent.isSymbolicLink()) continue
       const full = join(dir, ent.name)
       if (ent.isDirectory()) {
-        // Skip build-output subtrees and Apple binary bundles (*.framework/*.xcframework).
-        if (!NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) this.#captureNativeTree(full)
+        // Skip build-output subtrees, Apple binary bundles (*.framework/*.xcframework), and a
+        // toplevel platform dir we're not capturing (windows/ off Windows).
+        const skipDir = NATIVE_WALK_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
+        if (!skipDir) this.#captureNativeTree(full)
         continue
       }
       if (!ent.isFile()) continue // sockets/FIFOs/etc. -- no attestable bytes
