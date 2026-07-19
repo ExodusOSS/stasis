@@ -149,14 +149,58 @@ function pathsTo(adjRev, isHead, targetDir) {
   return { results, truncated }
 }
 
-// Map each targeted package (`name@version`) to the set of `--why` lines for it.
+// Compress one reason bucket's chains (node-name arrays, all ending at the same
+// target) into rendered lines. A chain that is a proper suffix of a longer one
+// is redundant -- its full form already shows inside that longer chain -- so it
+// collapses to `head -> ... -> target` (only when there is an interior to hide,
+// i.e. length >= 3; a 1- or 2-node chain has nothing to elide and stays whole).
+// Distinct chains can collapse to the same abbreviation, so rendered forms are
+// deduped. Order places highly-reused chains (those that subsume the most
+// others) first so the rest read as references to them, then alphabetically.
+function compressChains(chains) {
+  const chainKey = (c) => c.join('\0')
+  const present = new Set(chains.map(chainKey))
+  // Every proper suffix that occurs across the bucket; a chain is "covered" when
+  // it is itself a proper suffix of some longer chain here.
+  const properSuffixes = new Set()
+  for (const c of chains) for (let i = 1; i < c.length; i++) properSuffixes.add(chainKey(c.slice(i)))
+  const covered = (c) => properSuffixes.has(chainKey(c))
+  // reuse(c) = how many other chains are a proper suffix OF c (c subsumes them).
+  const reuse = (c) => {
+    let n = 0
+    for (let i = 1; i < c.length; i++) if (present.has(chainKey(c.slice(i)))) n += 1
+    return n
+  }
+  const render = (c) => (covered(c) && c.length >= 3 ? `${c[0]} -> ... -> ${c[c.length - 1]}` : c.join(' -> '))
+  const best = new Map() // rendered line -> highest reuse score seen for it
+  for (const c of chains) {
+    const line = render(c)
+    const score = reuse(c)
+    if (!best.has(line) || best.get(line) < score) best.set(line, score)
+  }
+  return [...best.keys()].toSorted((a, b) => best.get(b) - best.get(a) || a.localeCompare(b))
+}
+
+// Map each targeted package (`name@version`) to its ordered `--why` lines.
 // `targetKeys` (optional) restricts work to the packages that matter (the ones
 // carrying advisories); omit it to compute for every node_modules package.
 // `reasonFilter` (optional, from --reason) keeps only chains attributed to that
 // consumer, dropping every other chain (and bare, unattributed chains).
+// Chains are deduplicated and compressed per reason bucket (see compressChains).
 // Artifacts without a resolution graph (`imports`) contribute nothing.
 export function collectWhy(files, targetKeys, reasonFilter = null) {
-  const byPkg = new Map()
+  // key -> reason bucket ('' = unattributed) -> Map(chainKey -> node-name array)
+  const acc = new Map()
+  const truncatedKeys = new Set()
+  const bucketChains = (key, bucket) => {
+    let buckets = acc.get(key)
+    if (buckets === undefined) acc.set(key, (buckets = new Map()))
+    let chains = buckets.get(bucket)
+    if (chains === undefined) buckets.set(bucket, (chains = new Map()))
+    return chains
+  }
+  const addChain = (key, bucket, nodes) => bucketChains(key, bucket).set(nodes.join('\0'), nodes)
+
   for (const file of files) {
     const artifact = parseFile(file)
     const imports = artifact.imports
@@ -184,29 +228,38 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
     if (dirsByKey.size === 0) continue
 
     for (const [key, dirs] of dirsByKey) {
-      let set = byPkg.get(key)
-      const add = (line) => {
-        if (set === undefined) byPkg.set(key, (set = new Set()))
-        set.add(line)
-      }
       for (const targetDir of dirs) {
         const { results, truncated } = pathsTo(adjRev, isHead, targetDir)
+        if (truncated) truncatedKeys.add(key)
         for (const p of results) {
-          const chain = p.map((d) => dirInfo.get(d)?.name ?? d).join(' -> ')
+          const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
           const reasons = reasonsForHead(p[0], { srcImporters, dirFiles, fileReasons })
           if (reasonFilter) {
             // Keep this chain only when the requested consumer accounts for it;
             // an unattributed (bare) chain can never match a named reason.
-            if (reasons.includes(reasonFilter)) add(`${reasonFilter}: ${chain}`)
+            if (reasons.includes(reasonFilter)) addChain(key, reasonFilter, nodes)
           } else if (reasons.length === 0) {
-            add(chain)
+            addChain(key, '', nodes)
           } else {
-            for (const r of reasons.toSorted((a, b) => a.localeCompare(b))) add(`${r}: ${chain}`)
+            for (const r of reasons) addChain(key, r, nodes)
           }
         }
-        if (truncated) add(`… (${PATH_CAP}+ paths, truncated)`)
       }
     }
+  }
+
+  // Compress each bucket and render, bucket by bucket (buckets sorted so a
+  // consumer's chains group together; bare '' sorts first).
+  const byPkg = new Map()
+  for (const [key, buckets] of acc) {
+    const lines = []
+    for (const bucket of [...buckets.keys()].toSorted((a, b) => a.localeCompare(b))) {
+      for (const rendered of compressChains([...buckets.get(bucket).values()])) {
+        lines.push(bucket ? `${bucket}: ${rendered}` : rendered)
+      }
+    }
+    if (truncatedKeys.has(key)) lines.push(`… (${PATH_CAP}+ paths, truncated)`)
+    byPkg.set(key, lines)
   }
   return byPkg
 }

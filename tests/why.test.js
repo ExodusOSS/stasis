@@ -194,3 +194,59 @@ test('collectWhy returns nothing for an artifact without an imports graph', with
   }))
   t.assert.equal(collectWhy([path]).size, 0)
 }))
+
+// --- chain dedup / compression --------------------------------------------
+
+test('collectWhy compresses a chain that is a proper suffix of a longer one', withTmp((t, tmp) => {
+  // src imports a and b; a -> b -> c -> d, and b (imported directly) -> c -> d.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c', 'd'],
+    edges: [['e', 'a'], ['e', 'b'], ['a', 'b'], ['b', 'c'], ['c', 'd']],
+  })
+  // Full chain first (it subsumes the other); the suffix collapses to `b -> ... -> d`.
+  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
+    'a -> b -> c -> d',
+    'b -> ... -> d',
+  ])
+}))
+
+test('collectWhy orders highly-reused chains first, then alphabetically', withTmp((t, tmp) => {
+  // a and x both go through b -> c -> d; b is imported directly too.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'x', 'b', 'c', 'd'],
+    edges: [['e', 'a'], ['e', 'x'], ['e', 'b'], ['a', 'b'], ['x', 'b'], ['b', 'c'], ['c', 'd']],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
+    'a -> b -> c -> d', // reuse=1, alpha before x
+    'x -> b -> c -> d', // reuse=1
+    'b -> ... -> d',    // reuse=0 (the collapsed suffix) comes last
+  ])
+}))
+
+test('collectWhy dedups distinct chains that collapse to the same abbreviation', withTmp((t, tmp) => {
+  // b reaches d two ways (via c and via f); both suffixes collapse to `b -> ... -> d`.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c', 'f', 'd'],
+    edges: [['e', 'a'], ['e', 'b'], ['a', 'b'], ['b', 'c'], ['b', 'f'], ['c', 'd'], ['f', 'd']],
+  })
+  const lines = collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0')
+  t.assert.deepEqual(lines, ['a -> b -> c -> d', 'a -> b -> f -> d', 'b -> ... -> d'])
+  t.assert.equal(lines.filter((l) => l === 'b -> ... -> d').length, 1)
+}))
+
+test('collectWhy compresses only within a single reason bucket', withTmp((t, tmp) => {
+  // run imports a (-> b -> c -> d); webpack imports b (-> c -> d) directly.
+  // b -> c -> d must NOT collapse: nothing longer sits in the webpack bucket.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c', 'd'],
+    edges: [['runEntry', 'a'], ['wpEntry', 'b'], ['a', 'b'], ['b', 'c'], ['c', 'd']],
+    reason: {
+      run: ['runEntry', 'a', 'b', 'c', 'd'],
+      webpack: ['wpEntry', 'b', 'c', 'd'],
+    },
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
+    'run: a -> b -> c -> d',
+    'webpack: b -> c -> d',
+  ])
+}))
