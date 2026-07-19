@@ -32,6 +32,9 @@ const NODEJS_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript
 // generic "unrecognized format" message. Kept separate from NODEJS_FORMATS so
 // the allowlist stays the single trust gate and the message is just UX.
 const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'bash', 'rust'])
+// Native build-input source the Metro capture attests for the CocoaPods/Gradle toolchain
+// (prune keeps them, frozen verifies them) -- code, but never executable by Node.
+const NATIVE_SOURCE_FORMATS = new Set(['java', 'kotlin', 'gradle', 'objcpp', 'podspec', 'template', 'xml'])
 const RESOURCE_FORMATS = new Set(['resource', 'resource:base64'])
 const STAT_FORMATS = new Set(['stat:file', 'stat:directory'])
 // The executable CommonJS formats (plain CJS + TS-CJS). Named like the sets above so
@@ -43,6 +46,13 @@ function refuseNonNodeFormat(format, url) {
     throw new Error(
       `[stasis] cannot execute a '${format}' bundle: ${format} bundles are ` +
       `produced for external analysis, not for 'stasis run --bundle=load' (${url})`
+    )
+  }
+  if (NATIVE_SOURCE_FORMATS.has(format)) {
+    throw new Error(
+      `[stasis] cannot execute a '${format}' file: native build inputs ` +
+      `(podspec/gradle/Java/Kotlin/ObjC++/...) are attested for the CocoaPods/Gradle ` +
+      `toolchain, not executable by Node (${url})`
     )
   }
   if (RESOURCE_FORMATS.has(format)) {

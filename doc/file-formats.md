@@ -140,8 +140,11 @@ into the lockfile/bundle `config` block (`debug`, `childProcess`, `fs` and
   and fails closed on a per-platform edge (`ERR_STASIS_PLATFORM_SPECIFIC`).
 - `formats` records each file's format in the same shape as the bundle's
   `formats` map. Code files use a Node loader format (`module`, `commonjs`,
-  `json`, `module-typescript`, `commonjs-typescript`) or a source-language tag
-  (`solidity`, `php`, `bash`, `rust`). Resource files use `resource` (content is
+  `json`, `module-typescript`, `commonjs-typescript`), a source-language tag
+  (`solidity`, `php`, `bash`, `rust`), or a native build-input tag
+  (`java`, `kotlin`, `gradle`, `objcpp`, `podspec`, `template`, `xml` — attested
+  by the Metro native capture for the CocoaPods/Gradle toolchain, not runnable by
+  Node). Resource files use `resource` (content is
   raw UTF-8) or `resource:base64` (content is binary, base64-encoded) — this is
   what distinguishes a resource from code per file, and tells a reader how to
   decode the bundle payload. Filesystem captures (`stasis run --fs=sync`) add
@@ -215,7 +218,9 @@ reporting failures) still persists what it cleanly captured.
   may have none.
 - `formats`: project-relative path → format. Code files use a Node loader
   format (`module`, `commonjs`, `module-typescript`, `commonjs-typescript`,
-  `json`) or a source-language tag (`solidity`, `php`, `bash`, `rust`).
+  `json`), a source-language tag (`solidity`, `php`, `bash`, `rust`), or a
+  native build-input tag (`java`, `kotlin`, `gradle`, `objcpp`, `podspec`,
+  `template`, `xml` — the Metro native capture's build-input surface).
   Resource files use `resource` (raw UTF-8 payload) or `resource:base64`
   (base64 payload) — the per-file tag that both marks a file as a resource
   and says how to decode its bundle bytes. A `directory` tag (a `stasis run

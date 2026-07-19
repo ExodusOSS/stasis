@@ -17,6 +17,9 @@ const sep = '/'
 // Categories:
 //   Executable by Node's loader — module, commonjs, json, *-typescript
 //   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
+//   Native build inputs (analysis-only, not runnable by Node; the Metro native capture
+//     attests them for the CocoaPods/Gradle toolchain, so they carry a source tag rather
+//     than being lumped into 'resource') — java, kotlin, gradle, objcpp, podspec, template, xml
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
 //     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload), and the
@@ -36,6 +39,13 @@ export const KNOWN_FORMATS = new Set([
   'php',
   'bash',
   'rust',
+  'java',
+  'kotlin',
+  'gradle',
+  'objcpp',
+  'podspec',
+  'template',
+  'xml',
   'resource',
   'resource:base64',
   'directory',
@@ -154,6 +164,31 @@ export function isNativeArtifact(name) {
 // native capture discovers them by name rather than by a fixed location.
 export function isPodspec(name) {
   return name.endsWith('.podspec') || name.endsWith('.podspec.json')
+}
+
+// Native (React Native) build-input files that are CODE, not asset resources: the
+// authored/versioned source a native build compiles or reads (as opposed to the
+// generated binaries and image/font assets a package ships). Unlike CODE_EXTENSIONS
+// these aren't runnable by Node, so each carries a source-language format TAG (like
+// solidity/php/bash/rust) rather than a Node loader format -- the Metro native capture
+// records them as code under that tag instead of lumping them into 'resource'. Keyed by
+// lowercase, dot-less extension (pathExt); every value here is also in KNOWN_FORMATS.
+const NATIVE_CODE_FORMATS = new Map([
+  ['java', 'java'], // Java source
+  ['kt', 'kotlin'], // Kotlin source
+  ['gradle', 'gradle'], // Gradle build script
+  ['mm', 'objcpp'], // Objective-C++ source
+  ['podspec', 'podspec'], // CocoaPods spec
+  ['template', 'template'], // build-input template
+  ['xml', 'xml'], // e.g. AndroidManifest.xml
+])
+
+// The source-language format tag for a native build-input file, or undefined when it
+// isn't one of the recognized native-code kinds (so the caller records it as a resource
+// instead). Keyed by extension; a `.podspec.json` has extension `json` (a code extension
+// handled by the normal loader path) and never resolves to a tag here.
+export function nativeCodeFormat(name) {
+  return NATIVE_CODE_FORMATS.get(pathExt(name))
 }
 
 // Files `pod install` READS while LOADING podspecs, beyond the podspec itself: the Ruby helpers a

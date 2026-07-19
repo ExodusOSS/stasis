@@ -814,14 +814,17 @@ const writeReactNativeCli = (tmp) => {
   writeFileSync(join(dir, 'sdks', 'hermesc', 'linux64-bin', 'hermesc'), 'ELF\0\xff') // prebuilt, no ext
 }
 
-// A native dependency package: native sources across ios/ + android/ (should be attested as
-// resources), a package.json carrying codegenConfig (attested + kept in full by prune), some
-// UNused JS (should be skipped -- not a native input, not reachable), and two subtrees that
-// must be pruned from the walk: the library's own example app and Gradle build output.
+// A native dependency package: native sources across ios/ + android/ (build-input source --
+// podspec/gradle/Java/Kotlin/ObjC++/template/xml -- attested as CODE under a source tag; other
+// assets like ObjC .m/.h as resources), a package.json carrying codegenConfig (attested + kept
+// in full by prune), some UNused JS (should be skipped -- not a native input, not reachable),
+// and two subtrees that must be pruned from the walk: the library's own example app and Gradle
+// build output.
 const writeNativeDep = (tmp, name) => {
   const root = join(tmp, 'node_modules', name)
   mkdirSync(join(root, 'ios'), { recursive: true })
   mkdirSync(join(root, 'android', 'src', 'main', 'java', 'com'), { recursive: true })
+  mkdirSync(join(root, 'android', 'src', 'main', 'kotlin', 'com'), { recursive: true })
   mkdirSync(join(root, 'android', 'build'), { recursive: true })
   mkdirSync(join(root, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a'), { recursive: true })
   mkdirSync(join(root, 'src'), { recursive: true })
@@ -835,9 +838,12 @@ const writeNativeDep = (tmp, name) => {
   writeFileSync(join(root, `${name}.podspec`), `Pod::Spec.new do |s|\n  s.name = "${name}"\nend\n`)
   writeFileSync(join(root, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
   writeFileSync(join(root, 'ios', 'RNThing.m'), '#import "RNThing.h"\n@implementation RNThing\n@end\n')
+  writeFileSync(join(root, 'ios', 'RNThing.mm'), '#import "RNThing.h"\n@implementation RNThing\n@end\n')
   writeFileSync(join(root, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
   writeFileSync(join(root, 'android', 'src', 'main', 'AndroidManifest.xml'), '<manifest/>\n')
   writeFileSync(join(root, 'android', 'src', 'main', 'java', 'com', 'Thing.java'), 'package com;\nclass Thing {}\n')
+  writeFileSync(join(root, 'android', 'src', 'main', 'kotlin', 'com', 'Thing.kt'), 'package com\nclass Thing\n')
+  writeFileSync(join(root, 'android', 'BuildConfig.java.template'), 'package {{applicationId}};\n')
   writeFileSync(join(root, 'src', 'index.js'), 'export default {}\n')                 // unused JS -> skipped
   writeFileSync(join(root, 'android', 'build', 'generated.o'), 'BUILDOUTPUT')         // build output -> excluded
   writeFileSync(join(root, 'example', 'ios', 'Example.m'), '// example app source\n') // example app -> excluded
@@ -851,10 +857,12 @@ const writeNativeDep = (tmp, name) => {
 
 const NATIVE_INPUTS = [
   'react-native-native-lib.podspec',
-  'ios/RNThing.h', 'ios/RNThing.m',
+  'ios/RNThing.h', 'ios/RNThing.m', 'ios/RNThing.mm',
   'android/build.gradle',
   'android/src/main/AndroidManifest.xml',
   'android/src/main/java/com/Thing.java',
+  'android/src/main/kotlin/com/Thing.kt',
+  'android/BuildConfig.java.template',
   'package.json',
 ]
 
@@ -895,11 +903,19 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.equal(mod.files['android/src/main/jniLibs/arm64-v8a/librnthing.so'], undefined, 'a jniLibs .so is excluded')
   t.assert.equal(mod.files['libs/apple/Skia.xcframework/ios-arm64/Skia.a'], undefined, 'a lib inside an xcframework is excluded')
   t.assert.equal(mod.files['libs/apple/Skia.xcframework/Info.plist'], undefined, 'the whole *.xcframework bundle dir is skipped, not descended into')
-  // Native sources are attested as resources; package.json rides the code path as json.
-  t.assert.equal(lock.formats['node_modules/react-native-native-lib/react-native-native-lib.podspec'], 'resource')
-  t.assert.equal(lock.formats['node_modules/react-native-native-lib/ios/RNThing.m'], 'resource')
-  t.assert.equal(lock.formats['node_modules/react-native-native-lib/android/build.gradle'], 'resource')
-  t.assert.equal(lock.formats['node_modules/react-native-native-lib/package.json'], 'json')
+  // Native build-input source is attested as CODE under a source-language tag; other native
+  // assets (ObjC .m/.h) stay resources; package.json rides the code path as json.
+  const nlfmt = (rel) => lock.formats[`node_modules/react-native-native-lib/${rel}`]
+  t.assert.equal(nlfmt('react-native-native-lib.podspec'), 'podspec')
+  t.assert.equal(nlfmt('android/build.gradle'), 'gradle')
+  t.assert.equal(nlfmt('android/src/main/java/com/Thing.java'), 'java')
+  t.assert.equal(nlfmt('android/src/main/kotlin/com/Thing.kt'), 'kotlin')
+  t.assert.equal(nlfmt('ios/RNThing.mm'), 'objcpp')
+  t.assert.equal(nlfmt('android/src/main/AndroidManifest.xml'), 'xml')
+  t.assert.equal(nlfmt('android/BuildConfig.java.template'), 'template')
+  t.assert.equal(nlfmt('ios/RNThing.m'), 'resource') // ObjC (not .mm) stays a resource
+  t.assert.equal(nlfmt('ios/RNThing.h'), 'resource') // a C/ObjC header stays a resource
+  t.assert.equal(nlfmt('package.json'), 'json')
   // The JS-only dep contributes no native surface at all -- not even walked.
   t.assert.equal(lock.modules['node_modules/js-only-lib'], undefined, 'a JS-only autolinked dep has no native surface')
   // codegenConfig survives in the attested package.json bundle payload (prune keeps it in full).
@@ -910,11 +926,11 @@ test('native modules: config discovers native deps; native sources attested, unu
   const core = lock.modules['node_modules/react-native']
   t.assert.ok(core.files['third-party-podspecs/DoubleConversion.podspec']?.startsWith('sha512-'), 'core third-party podspec captured')
   t.assert.ok(core.files['Libraries/FBLazyVector/FBLazyVector.podspec']?.startsWith('sha512-'), 'core Libraries podspec captured')
-  t.assert.equal(lock.formats['node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'], 'resource')
+  t.assert.equal(lock.formats['node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'], 'podspec')
   // A podspec's required Ruby helper + the package.json podspecs parse are captured too.
   t.assert.ok(core.files['sdks/hermes-engine/hermes-engine.podspec']?.startsWith('sha512-'), 'core hermes podspec captured')
   t.assert.ok(core.files['sdks/hermes-engine/hermes-utils.rb']?.startsWith('sha512-'), 'the Ruby helper a podspec requires is captured')
-  t.assert.equal(lock.formats['node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'], 'resource')
+  t.assert.equal(lock.formats['node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'], 'resource') // a .rb helper stays a resource
   t.assert.ok(core.files['package.json']?.startsWith('sha512-'), 'core package.json (parsed by podspecs) captured')
   t.assert.equal(lock.formats['node_modules/react-native/package.json'], 'json')
   // Vetted core dirs/files are captured IN FULL: Yoga sources + cmake, the CocoaPods scripts,
@@ -998,7 +1014,8 @@ test('native modules: a reached but NON-autolinked native module (podspec under 
   t.assert.ok(mod, 'the reached, non-autolinked native module is captured')
   t.assert.ok(mod.files['lib/ios/ReactNativePayments.podspec']?.startsWith('sha512-'), 'its podspec (under lib/ios) is captured')
   t.assert.ok(mod.files['lib/ios/ReactNativePayments.m']?.startsWith('sha512-'), 'its native source (under lib/ios) is captured')
-  t.assert.equal(lock.formats['node_modules/@exodus/react-native-payments/lib/ios/ReactNativePayments.podspec'], 'resource')
+  t.assert.equal(lock.formats['node_modules/@exodus/react-native-payments/lib/ios/ReactNativePayments.podspec'], 'podspec')
+  t.assert.equal(lock.formats['node_modules/@exodus/react-native-payments/lib/ios/ReactNativePayments.m'], 'resource') // ObjC stays a resource
 }))
 
 test('native modules: no react-native CLI installed -> native capture is skipped, capture still succeeds', withTmp((t, tmp) => {
