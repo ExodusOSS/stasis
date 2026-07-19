@@ -407,3 +407,25 @@ test('collectWhy keeps every reason for a terminal head, even one src-imported u
     'run: @babel/core -> victim',
   ])
 }))
+
+test('collectWhy credits a terminal by its importers, not its (hoisted) own file record', withTmp((t, tmp) => {
+  // @babel/core is reached by run (a -> b -> @babel/core) and metro (c -> d ->
+  // @babel/core), but its own file is recorded ONLY under run -- a hoisted dep is
+  // recorded once. Its reasons must come from what IMPORTS it (b under run, d under
+  // metro), so both reasons show; relying on its own file record would drop metro.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c', 'd', '@babel/core'],
+    edges: [
+      ['runEntry', 'a'], ['a', 'b'], ['b', '@babel/core'],
+      ['metroEntry', 'c'], ['c', 'd'], ['d', '@babel/core'],
+    ],
+    reason: {
+      run: ['runEntry', 'a', 'b', '@babel/core'], // @babel/core recorded here only
+      metro: ['metroEntry', 'c', 'd'], //            metro reaches it via d, doesn't record it
+    },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['@babel/core@1.0.0'])), '@babel/core@1.0.0'), [
+    'metro: @babel/core',
+    'run: @babel/core',
+  ])
+}))
