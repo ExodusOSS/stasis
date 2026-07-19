@@ -4,13 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { parseFile } from '../parse.js'
 import { collectComponents, generateSbom } from '../sbom.js'
 
-// Run the `stasis sbom` CLI command end-to-end: read the given lockfiles/bundles
-// from disk (this is the layer that pulls in brotli, via `parseFile`), build an
-// SBOM in the requested `format` (spdx | cyclonedx) through the file-free
-// `@exodus/stasis/sbom` API, and write the pretty-printed JSON to `output` (a
-// file, or stdout when `output` is `-` or unset). The one-line summary goes to
-// stderr so it never corrupts a document streamed to stdout. `now`/`uuid` are
-// injectable for deterministic output.
+// The one-line summary goes to stderr so it never corrupts an SBOM streamed to stdout.
 export function sbomCommand({ cwd = process.cwd(), files, format, output, now, uuid } = {}) {
   if (!Array.isArray(files) || files.length === 0) {
     throw new Error('sbom: at least one lockfile or bundle is required')

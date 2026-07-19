@@ -20,29 +20,24 @@ A `scope = full` bundle writes workspace sources under their relative paths
 `scope = node_modules` bundle writes only the `node_modules` tree. Either way a
 `stasis.lock.json` lands in the output directory.
 
-The lockfile is derived from the bundle's own contents: each file's recorded
-UTF-8 bytes are hashed (sha512) into the same SRI digest `stasis run` would
-record, and the bundle's `entries`, package dirs, `name`/`version`, and
-`imports` (resolution map) are carried across verbatim. The extracted tree
-therefore validates out of the box — `stasis prune` works directly against the
-extracted `node_modules`; `stasis run --lock=frozen` additionally needs the
+The lockfile is derived from the bundle: each file's recorded UTF-8 bytes are
+hashed (sha512) into the same SRI digest `stasis run` would record, and the
+bundle's `entries`, package dirs, `name`/`version`, and `imports` are carried
+across verbatim. The extracted tree validates out of the box — `stasis prune`
+works directly against it; `stasis run --lock=frozen` additionally needs the
 project's `package.json` files, present only if the bundle recorded them.
 
-Legacy `version: 0` bundles record no package `name`/`version`, so no lockfile
-can be restored: the sources are still extracted, the lockfile is skipped with a
-warning.
+Legacy `version: 0` bundles record no `name`/`version`, so no lockfile can be
+restored: sources are still extracted, the lockfile is skipped with a warning.
 
-Existing files at target paths are overwritten, including a pre-existing
-`stasis.lock.json`.
+Existing files at target paths are overwritten, including a pre-existing `stasis.lock.json`.
 
 ## Untrusted input
 
 `extract` treats the bundle as untrusted and plans the whole tree before writing
-anything, so a malformed bundle fails before the first write rather than leaving
-a partial tree behind. It refuses bundles with:
+anything, so a malformed bundle fails before the first write. It refuses bundles with:
 
-- paths that escape the output directory (checked both as not-`..`-relative to it
-  and as lexically under `<dir>/`),
+- paths that escape the output directory (checked as not-`..`-relative to it and as lexically under `<dir>/`),
 - non-canonical paths (mid-path `..` or `.`, empty segments or file names),
 - duplicate paths, or a path used as both a file and a directory,
 - non-string file contents,
@@ -50,10 +45,9 @@ a partial tree behind. It refuses bundles with:
 
 The path checks are lexical: `extract` does not resolve symlinks, so writes pass
 through any symlink already present inside the output directory (e.g. a
-pnpm-managed `node_modules`). Extract untrusted bundles into a fresh, empty
-directory.
+pnpm-managed `node_modules`). Extract untrusted bundles into a fresh, empty directory.
 
 > [!NOTE]
-> `extract` operates on `stasis.code.br`. Code files are written as their source
-> text; resource files are decoded back to their original bytes (`resource:base64`
-> from base64, `resource` from raw UTF-8) per their `formats` entry.
+> Code files are written as their source text; resource files are decoded back to
+> their original bytes (`resource:base64` from base64, `resource` from raw UTF-8)
+> per their `formats` entry.

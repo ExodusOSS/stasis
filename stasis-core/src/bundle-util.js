@@ -3,13 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { findPackageJSON } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
-// Helpers the static bundlers share -- the deep bundler (@exodus/stasis) and the zero-dep
-// `add` packer (add.js) both need them. Here in stasis-core because the dependency only goes
-// one way: `stasis` imports `stasis-core`, never the reverse.
-
-// Module system for a `.js`/`.ts` file, read from the nearest package.json `type`, or null
-// when there is none / it's unrecognized (the caller then falls back to syntax detection, or
-// -- in `add`, which never parses -- to commonjs).
+// Module system from the nearest package.json `type`, or null when absent/unrecognized.
 export function packageType(file) {
   const pkg = findPackageJSON(pathToFileURL(file).toString())
   if (!pkg) return null
@@ -21,9 +15,7 @@ export function packageType(file) {
   }
 }
 
-// Walk up from the file's directory looking for the nearest package.json with both `name` and
-// `version`. Returns { pkgDir, name, version } (pkgDir relative to `baseDir`, "." for the
-// project root) or null when no such package.json exists at or above the file.
+// Nearest package.json (walking up) that has both name and version; returns { pkgDir, name, version } (pkgDir relative to baseDir, "." for root) or null.
 export function findPackageMetadata(baseDir, fileRelPath) {
   let dir = dirname(fileRelPath)
   while (true) {
@@ -47,8 +39,7 @@ export function normalizeEntries(entries, cwd) {
   return entries.map((e) => {
     const abs = resolve(cwd, e)
     const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
-    // On Windows `path.relative()` returns an absolute path across drives -- that wouldn't
-    // start with `..` but still escapes, so reject both forms.
+    // On Windows path.relative() returns an absolute path across drives (no leading '..'), so reject that form too.
     if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Entry escapes baseDir: ${e}`)
     return rel.replace(/^\.\//u, '')
   })

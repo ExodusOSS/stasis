@@ -2,11 +2,7 @@ import { constants as zlibConstants } from 'node:zlib'
 
 import { assert, isBrotliQuality, parseBrotliQuality } from './util.js'
 
-// Default brotli quality. 11 (brotli's max) is superlinear in input size and
-// dominates write time on a multi-MB bundle for a marginal gain over 9. Tunable
-// via `quality` or the env var (which must agree when both are set). Kept out of
-// util.js so its generic helpers don't transitively pull in node:zlib -- only
-// bundle-compressing code needs this.
+// Default brotli quality; 11 (max) costs far more for a marginal gain over 9.
 export const DEFAULT_BROTLI_QUALITY = 9
 
 export function brotliOptions(quality) {

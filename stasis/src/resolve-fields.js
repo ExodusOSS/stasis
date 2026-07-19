@@ -3,32 +3,16 @@ import { createRequire, isBuiltin } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-// Static module resolver for legacy package fields + platform suffixes. `scan`
-// (src/scan.js) resolves through Node's own resolver, which only understands `main` +
-// `exports`/conditions. Older packages (and the React Native ecosystem) rely on two
-// mechanisms Node has no equivalent for, and this module reproduces them so a static
-// `stasis bundle --mainFields`/`--metro` picks the same files Metro/React Native would:
-//
-//   1. Legacy package `mainFields` (`react-native`/`browser`/`main`): the entry field
-//      consulted in order (first non-empty string wins; default `index`), PLUS the
-//      browser-field-spec object form -- a `{ "./a.js": "./b.js", "mod": false }` map
-//      that redirects specific subpaths/bare modules to another file or to an empty
-//      module (`false`). See https://github.com/defunctzombie/package-browser-field-spec.
-//   2. Platform suffixes (`.ios`/`.android`/`.native`): for a target platform P and
-//      source extension E, try `name.P.E`, then `name.native.E` (native platforms only
-//      -- web opts out), then `name.E`; the bare name (no added ext) is tried first.
-//      Driven by `--metro`; `--mainFields` alone passes no platform (suffixes disabled).
-//
-// `exports` still wins over `mainFields` when a package declares it, and Node resolves
-// `exports`/conditions correctly, so packages with an `exports` field are delegated to
-// Node's resolver. Everything else is resolved here, against the real filesystem (no
-// user code is executed -- this only stats/reads package.json and probes paths).
+// Static module resolver for legacy package fields (`react-native`/`browser`/`main` + browser-spec
+// redirect maps) and platform suffixes (`.ios`/`.android`/`.native`), reproducing Metro/React-Native
+// resolution that Node's own resolver (used by scan.js) can't. `exports`-bearing packages are
+// delegated to Node. No user code is executed (only package.json is stat/read).
 //
 // Returns, for each specifier:
 //   { url }      resolved to a real file (file: URL string)
 //   { empty }    a browser/react-native field mapped it to `false` (empty module)
-//   { builtin }  a Node builtin (`fs`, `node:path`, ...)
-//   null         unresolved (caller records it like any other miss)
+//   { builtin }  a Node builtin
+//   null         unresolved
 
 function readJson(file) {
   let text
@@ -37,9 +21,7 @@ function readJson(file) {
   } catch {
     return null // absent / unreadable -- no package manifest here
   }
-  // A manifest that EXISTS but is malformed must fail closed: Node throws
-  // ERR_INVALID_PACKAGE_CONFIG rather than resolving past it, and a bundle that
-  // resolved where real Node rejects would diverge silently.
+  // A manifest that EXISTS but is malformed must fail closed (Node throws rather than resolving past it).
   try {
     return JSON.parse(text)
   } catch (cause) {
@@ -63,10 +45,8 @@ function isDir(p) {
   }
 }
 
-// Walk up from `fromDir` to the nearest `node_modules/<pkg>` directory for the bare
-// specifier `spec` (handling `@scope/name`). Returns { pkgDir, subpath } where subpath
-// is '' for a bare package import or the in-package path otherwise, or null when the
-// package isn't installed anywhere up the tree. Mirrors Node's node_modules walk.
+// Nearest node_modules/<pkg> up from `fromDir` (handles @scope/name). Returns { pkgDir, subpath }
+// (subpath '' = bare package import), or null if not installed up the tree.
 function locatePackage(fromDir, spec) {
   const parts = spec.split('/')
   const pkgLen = spec.startsWith('@') ? 2 : 1
@@ -75,8 +55,7 @@ function locatePackage(fromDir, spec) {
   const subpath = parts.slice(pkgLen).join('/')
   let dir = fromDir
   while (true) {
-    // Don't descend into a node_modules whose own last segment is node_modules
-    // (basename, not endsWith -- a dir like `my-node_modules` must not be skipped).
+    // Skip a dir literally named node_modules (basename, not endsWith — `my-node_modules` must not match).
     if (basename(dir) !== 'node_modules') {
       const pkgDir = join(dir, 'node_modules', pkgName)
       if (isDir(pkgDir)) return { pkgDir, subpath }
@@ -87,8 +66,7 @@ function locatePackage(fromDir, spec) {
   }
 }
 
-// Nearest package.json at or above `file`'s directory. Returns { pkgDir, pkg } or null.
-// This is the package whose `browser`/`react-native` map governs `file`'s own imports.
+// Nearest package.json at/above `file`'s dir — the package whose browser/RN map governs its imports.
 function nearestPackage(file) {
   let dir = dirname(file)
   while (true) {
@@ -103,8 +81,7 @@ function nearestPackage(file) {
   }
 }
 
-// First `mainFields` entry that is a non-empty string, else `index`. (Object-valued
-// fields are redirection maps, handled separately.)
+// First mainFields entry that's a non-empty string, else `index` (object-valued fields are redirect maps).
 function packageEntry(pkg, mainFields) {
   for (const name of mainFields) {
     if (typeof pkg?.[name] === 'string' && pkg[name].length > 0) return pkg[name]
@@ -112,12 +89,8 @@ function packageEntry(pkg, mainFields) {
   return 'index'
 }
 
-// Merge the object-valued `mainFields` (browser-spec maps) into one redirection map.
-// Iterate in REVERSE so earlier mainFields win on a key conflict (earlier fields take
-// precedence). Keys are matched VERBATIM: a relative key is written `./x` (a `./`-less
-// `x` is a BARE module name, not `./x`), and bare module keys -- including dotted ones
-// like `socket.io` -- stay bare. Values are a string target or `false` (ignore ->
-// empty module).
+// Merge object-valued mainFields (browser-spec maps) into one redirect map. Iterate in REVERSE
+// so earlier mainFields win on conflict. Keys are verbatim: `./x` relative vs bare `x` (kept bare).
 function mergeRedirectMap(pkg, mainFields) {
   const map = new Map()
   for (let i = mainFields.length - 1; i >= 0; i--) {
@@ -131,14 +104,9 @@ function mergeRedirectMap(pkg, mainFields) {
   return map
 }
 
-// Match the package ENTRY against the browser map. A string target redirects the
-// entry; `false` disables it (empty module), per the browser-field spec. `main` and
-// the key may each be written with or without a leading `./`, so probe both spellings
-// (plus the extension stripped / `.js`/`.json` appended). The bare, extension-LESS form
-// is deliberately EXCLUDED: a `./`-less, extension-less key is a BARE MODULE name per
-// the spec (e.g. remapping the `stream` module used inside the package), not the
-// package's own entry file -- matching it here would wrongly hijack a same-basename
-// entry (esbuild and browser-resolve don't).
+// Match the package ENTRY against the browser map (string redirects, `false` = empty module).
+// Probe with/without leading `./` and with ext stripped or `.js`/`.json` appended — but NOT the
+// bare extension-less form: that spelling is a BARE MODULE name, not the entry file.
 function entryRedirect(map, entry) {
   if (map.size === 0) return undefined
   const bare = entry.replace(/^\.\//u, '')
@@ -156,9 +124,7 @@ function entryRedirect(map, entry) {
   return undefined
 }
 
-// Match a package-relative path (`./x`) against the redirect map, trying the path as
-// written and with `.js`/`.json` appended. Returns the mapped value (string | false)
-// or undefined when nothing matches.
+// Match a package-relative path (`./x`) against the redirect map, trying `.js`/`.json` appended.
 function matchRedirect(map, relPath) {
   if (map.size === 0) return undefined
   for (const cand of [relPath, `${relPath}.js`, `${relPath}.json`]) {
@@ -172,10 +138,8 @@ function matchBareRedirect(map, spec) {
   return map.size === 0 ? undefined : map.get(spec)
 }
 
-// Probe `base` (an absolute path without a guaranteed extension) for a source file, in
-// platform-aware order: the bare name first (handles imports that already include the
-// extension), then for each source ext `base.<platform>.<ext>`, `base.native.<ext>`
-// (native platforms only), `base.<ext>`. `platform: null` disables suffix probing.
+// Probe `base` for a source file in platform order: bare name first, then per ext
+// `base.<platform>.<ext>`, `base.native.<ext>` (native only), `base.<ext>`. `platform: null` disables suffixes.
 function resolveSourceFile(base, { platform, preferNative, sourceExts }) {
   const tryExt = (sourceExt) => {
     if (platform) {
@@ -198,11 +162,9 @@ function resolveSourceFile(base, { platform, preferNative, sourceExts }) {
   return null
 }
 
-// Resolve an absolute `base` as a file (with extension probing) or, failing that, as a
-// directory: its package.json `main` (via mainFields, with the browser-map entry
-// redirect), else `index`. `exports` is deliberately NOT consulted here -- Node only
-// applies it to BARE package-name imports, not to a relative/absolute path that lands
-// on a directory, so `main`/`index` win exactly as Node's directory resolution does.
+// Resolve absolute `base` as a file (ext probing) else as a directory (package.json `main` via
+// mainFields + entry redirect, else `index`). `exports` is NOT consulted — Node applies it only to
+// bare package-name imports, not to a path landing on a directory.
 function resolveFileOrDir(base, opts) {
   const file = resolveSourceFile(base, opts)
   if (file) return { url: pathToFileURL(file).toString() }
@@ -211,11 +173,10 @@ function resolveFileOrDir(base, opts) {
     if (dpkg) {
       let entry = packageEntry(dpkg, opts.mainFields)
       const redirect = entryRedirect(mergeRedirectMap(dpkg, opts.mainFields), entry)
-      if (redirect === false) return { empty: true } // browser map disables the package entry
+      if (redirect === false) return { empty: true }
       if (typeof redirect === 'string') entry = redirect
-      // Node's LOAD_AS_DIRECTORY resolves `main` as a file AND, failing that, as a
-      // directory (its index) -- so `main: "./lib/"` resolves `lib/index.js`. A broken
-      // `main` then falls back to the package's own index below.
+      // Node's LOAD_AS_DIRECTORY resolves `main` as a file, else as a directory index
+      // (`main: "./lib/"` -> lib/index.js); a broken `main` falls back to the package index below.
       const entryBase = join(base, entry)
       const inner = resolveSourceFile(entryBase, opts) ?? resolveSourceFile(join(entryBase, 'index'), opts)
       if (inner) return { url: pathToFileURL(inner).toString() }
@@ -226,11 +187,8 @@ function resolveFileOrDir(base, opts) {
   return null
 }
 
-// Build a resolver bound to a set of options. `conditions` is the full condition set
-// used for `exports`-bearing packages (delegated to Node); `mainFields` drives the
-// legacy-field path; `platform`/`preferNative` drive platform-suffix probing
-// (`platform: null` disables it -- the `--mainFields` case); `sourceExts` are the
-// extensions probed when an entry/redirect target names no extension.
+// Build a resolver bound to options: `conditions` gates `exports` packages (delegated to Node),
+// `mainFields`/`platform`/`preferNative`/`sourceExts` drive the legacy-field + suffix probing.
 export function createFieldResolver({
   conditions = [],
   mainFields = ['main'],
@@ -239,10 +197,8 @@ export function createFieldResolver({
   sourceExts = ['js', 'json', 'ts'],
 } = {}) {
   const opts = { platform, preferNative, sourceExts, mainFields }
-  // `callConditions` (when scan passes it) is the parent file's format-driven
-  // condition set (ESM -> import, CJS -> require, + the configured extras), so
-  // `exports` delegation matches how Node would resolve from THAT file. Falls back to
-  // the resolver's configured `conditions` when called without one.
+  // `callConditions` (from scan) is the parent's format-driven condition set, so `exports`
+  // delegation matches Node resolving from THAT file; falls back to configured `conditions`.
   return function resolve(parentFile, specifier, callConditions) {
     const conds = new Set(callConditions ?? conditions)
     // `#name` subpath imports use the `imports` field + conditions; Node handles them.
@@ -256,11 +212,8 @@ export function createFieldResolver({
     }
 
     let spec = specifier
-    // Redirect the specifier via the IMPORTER's package browser/react-native map. This
-    // runs BEFORE the builtin check on purpose: replacing Node-only modules is the
-    // browser field's whole purpose, so a map entry can disable or shim a builtin
-    // (`{"crypto": false}` / `{"crypto": "crypto-browserify"}`), per the browser-field
-    // spec (the key is "the name of a module or file you wish to replace").
+    // Redirect via the IMPORTER's browser/react-native map, BEFORE the builtin check on purpose:
+    // a map entry can disable or shim a builtin (`{"crypto": false}` / `"crypto-browserify"`).
     const imp = nearestPackage(parentFile)
     if (imp) {
       const map = mergeRedirectMap(imp.pkg, mainFields)
@@ -273,10 +226,8 @@ export function createFieldResolver({
       }
       if (r === false) return { empty: true }
       if (typeof r === 'string') {
-        // Browser-map targets are relative to the PACKAGE ROOT (not the importing
-        // file), per the browser-field spec. A relative or absolute target resolves
-        // there directly; a bare-module target re-enters resolution below (and may
-        // itself be a builtin, e.g. remapping one builtin onto another).
+        // Browser-map targets are relative to the PACKAGE ROOT, not the importing file; a
+        // bare-module target re-enters resolution below.
         if (r.startsWith('.') || isAbsolute(r)) {
           return resolveFileOrDir(isAbsolute(r) ? r : resolvePath(imp.pkgDir, r), opts)
         }
@@ -292,7 +243,6 @@ export function createFieldResolver({
       return resolveFileOrDir(base, opts)
     }
 
-    // Bare specifier.
     const loc = locatePackage(dirname(parentFile), spec)
     if (!loc) return null
     const pkg = readJson(join(loc.pkgDir, 'package.json')) ?? {}
@@ -305,8 +255,7 @@ export function createFieldResolver({
         return null
       }
     }
-    // A bare package import resolves the package directory through the SAME directory
-    // algorithm as any other dir (main -> file/index, entry redirect, index fallback).
+    // A bare package import resolves its directory via the same dir algorithm as any other.
     if (loc.subpath === '') return resolveFileOrDir(loc.pkgDir, opts)
     const sub = `./${loc.subpath}`
     const r = matchRedirect(mergeRedirectMap(pkg, mainFields), sub)
@@ -321,10 +270,8 @@ function isModuleFormat(format) {
   return format === 'module' || format === 'module-typescript'
 }
 
-// The condition set a field-based resolution asserts for a parent of the given format:
-// Node's format-driven base (matching scan's #conditionsFor) plus the supplied extras
-// (e.g. `react-native`, `browser`). Returned as an array (order is irrelevant -- Node
-// membership-tests it against the package's own `exports` key order).
+// Condition set for a parent of the given format: Node's format-driven base (matching scan's
+// #conditionsFor) plus extras. Order is irrelevant (Node membership-tests against exports key order).
 export function resolveConditions(format, extras = []) {
   const base = isModuleFormat(format)
     ? ['node', 'import', 'module-sync', 'node-addons']

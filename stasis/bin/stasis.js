@@ -16,7 +16,7 @@ assert(['node', 'node.exe'].includes(basename(argv.shift())))
 assert(['node', 'node.exe'].includes(basename(process.argv0)))
 
 const jsname = argv.shift()
-const pathsEqual = (a, b) => a === b || (existsSync(a) && realpathSync(a) === b) // resolve symlinks
+const pathsEqual = (a, b) => a === b || (existsSync(a) && realpathSync(a) === b)
 assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.meta.url)))
 
 function usage(prefix = '') {
@@ -94,25 +94,18 @@ if (command === '-v' || command === '--version') {
   const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
-  // Unlike --bundle-file (which is inert-but-harmless under --bundle=ignore, so Config allows
-  // it), --resources-bundle-file needs an active bundle: Config rejects bundle=none AND ignore
-  // (resourcesBundleFile requires an active bundle mode). Front-run that with a clean usage error.
+  // --resources-bundle-file needs an active bundle mode (unlike --bundle-file, inert under ignore).
   if (resourcesBundleFile && (bundle === 'none' || bundle === 'ignore')) usage('Error: --resources-bundle-file requires --bundle=(add|replace|load|frozen)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
   if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
   if (values.mock && bundle === 'load') usage('Error: --mock is for capturing imports while building a bundle; not compatible with --bundle=load')
-  // --fs monkey-patches the fs readers (readFileSync/readdirSync + lstatSync/statSync)
-  // to capture them into the bundle (add|replace) or serve them from it (load); it has
-  // nothing to record into or read from without one of those bundle modes. The mode
-  // argument is required: `sync` patches the sync readers, `async` adds their async
-  // (callback + fs.promises) counterparts on top.
+  // --fs requires a bundle mode (add|replace|load); `sync` patches the sync fs readers,
+  // `async` adds their callback + fs.promises counterparts on top.
   if (values.fs !== undefined && !['sync', 'async'].includes(values.fs)) usage("Error: --fs must be 'sync' or 'async'")
   if (values.fs !== undefined && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
   const captureFs = values.fs ?? ''
-  // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
-  // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
+  // --resources: comma-separated extension/filename allowlist for `--fs` captures.
   const resources = values.resources ?? ''
-  // --brotli-quality: bundle compression quality (0..11; unset -> stasis default 9).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
     try {
@@ -121,8 +114,7 @@ if (command === '-v' || command === '--version') {
       usage(`Error: ${cause.message}`)
     }
   }
-  // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
-  // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
+  // --child-process: forward forked-child (e.g. Metro worker) capture to the root via per-pid shards.
   const childProcess = values['child-process'] ? '1' : ''
   console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
@@ -135,56 +127,35 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
-  // Only set when given, so an ambient EXODUS_STASIS_BROTLI_QUALITY still passes through
-  // to the child (an unconditional setEnv('') would reject it as a conflict).
+  // Only set when given; an unconditional setEnv('') would conflict with an ambient value.
   if (brotliQuality !== undefined) setEnv('EXODUS_STASIS_BROTLI_QUALITY', String(brotliQuality))
-  // --mock: capture imports by running user code with side-effects denied,
-  // fail-closed. Node's permission system blocks fs writes, child processes,
-  // worker threads, native addons (no --allow-addons -- addons would bypass
-  // the whole model), and the inspector. Network and timers have no
-  // --allow-* counterparts, so src/mock.js neutralizes them in JS. We --import
-  // src/loader-mock.js (instead of core's plain loader): it evaluates the core
-  // hooks lib first -- snapshotting stasis's real fs bindings -- then src/mock.js
-  // (whose syncBuiltinESMExports() refresh reaches user-code ESM imports), then
-  // installs the hooks. So the mock runs after stasis's snapshots and before
-  // registration, by static import order and with no env var. Reads stay open
-  // (--allow-fs-read=*) so node_modules resolution works; reads aren't a side
-  // effect. Writes are still scoped at the kernel level as defense in depth (the
-  // JS layer covers user code, --permission covers anything that bypasses JS,
-  // e.g. process.binding or a future leak).
+  // --mock: capture imports by running user code with side-effects denied (fail-closed).
+  // --permission blocks fs writes/child procs/workers/addons/inspector at the kernel level;
+  // src/mock.js neutralizes network + timers in JS (no --allow-* for those). Reads stay open
+  // so node_modules resolution works.
   // Node 24 dropped comma-separated --allow-fs-write; repeat the flag instead.
   const nodeArgs = []
   if (values.mock) {
     const writeAllow = [process.cwd()]
-    // --allow-fs-write paths must already exist on disk; granting a bundle file's own path is not
-    // enough when state.write()'s mkdirSync has to create the parent chain. For each out-of-cwd
-    // bundle target (code and/or split resources), walk up to the nearest existing ancestor and
-    // grant write there -- broader than ideal, but the user explicitly chose these locations.
-    // (Note: the cwd check uses '/' as a separator and is therefore unix-only; that matches the
-    //  rest of the project's path handling.)
+    // --allow-fs-write paths must already exist on disk, so for each out-of-cwd bundle target
+    // walk up to the nearest existing ancestor and grant write there.
     for (const [flag, file] of [['--bundle-file', bundleFile], ['--resources-bundle-file', resourcesBundleFile]]) {
       if (!file || file.startsWith(`${process.cwd()}/`)) continue
       let p = dirname(file)
       while (!existsSync(p) && dirname(p) !== p) p = dirname(p)
-      // Refuse to grant write access to the filesystem root: it would effectively disable the
-      // --permission layer everywhere, and reaching it means none of the path's ancestors exist --
-      // the user almost certainly didn't intend this. Ask them to create a parent.
+      // Refuse write access to the filesystem root -- it would disable the --permission layer everywhere.
       if (p === dirname(p)) {
         usage(`Error: no existing parent directory for ${flag}=${file}; create one first or choose a path under an existing directory`)
       }
-      if (!writeAllow.includes(p)) writeAllow.push(p) // both targets often share a parent dir
+      if (!writeAllow.includes(p)) writeAllow.push(p)
     }
     nodeArgs.push('--permission', '--allow-fs-read=*')
     for (const p of writeAllow) nodeArgs.push(`--allow-fs-write=${p}`)
-    // --permission without --allow-addons removes "node-addons" from resolution
-    // conditions, which would change how packages with conditional exports
-    // resolve and make the captured import map incompatible with a normal
-    // replay. Restore the condition so resolution matches a non-mock run; this
-    // doesn't allow native addons to actually load (--allow-addons still off).
+    // Restore the node-addons resolution condition (dropped by --permission) so the captured
+    // import map matches a non-mock run; native addons still can't load (--allow-addons off).
     nodeArgs.push('--conditions=node-addons')
   }
-  // Non-mock runs use core's loader directly; --mock uses stasis's loader-mock
-  // entry, which composes the mock into the same hooks lib (see comment above).
+  // --mock uses stasis's loader-mock entry (composes the mock before installing the hooks).
   const loaderEntry = values.mock ? '../src/loader-mock.js' : '@exodus/stasis-core/loader'
   nodeArgs.push('--import', import.meta.resolve(loaderEntry))
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
@@ -230,16 +201,12 @@ if (command === '-v' || command === '--version') {
     usage('Error: --scope must be node_modules or full')
   }
   if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
-  // --scope selects a bundle subset; the field resolver (--mainFields/--metro) always
-  // emits a full-scope bundle, so the two together would silently ignore --scope.
+  // --mainFields/--metro always emit a full-scope bundle, so they'd silently ignore --scope.
   if (values.scope !== undefined && (values.mainFields !== undefined || values.metro)) {
     usage('Error: --scope is not supported with --mainFields or --metro')
   }
-  // --conditions: comma-separated extra `exports`/`imports` resolution conditions
-  // (e.g. react-native,browser) merged on top of the conditions Node always asserts.
-  // They steer which branch of a package's conditional `exports` the static scan
-  // follows. NOTE: conditions alone do not honour legacy package `mainFields` or
-  // platform-specific file suffixes -- see --mainFields.
+  // --conditions: extra exports/imports resolution conditions merged onto Node's defaults;
+  // they don't honour legacy `mainFields` or platform suffixes (see --mainFields).
   if (values.conditions !== undefined && !allJs) usage('Error: --conditions is only valid for JS bundles')
   const conditions = values.conditions === undefined
     ? []
@@ -247,9 +214,7 @@ if (command === '-v' || command === '--version') {
   if (values.conditions !== undefined && conditions.length === 0) {
     usage('Error: --conditions must list at least one condition name (e.g. --conditions=react-native,browser)')
   }
-  // --mainFields: comma-separated legacy package entry fields (e.g.
-  // react-native,browser,main). Drives the legacy-field resolver for non-`exports`
-  // packages -- the entry it picks plus the browser-field-spec object redirection.
+  // --mainFields: legacy package entry fields (e.g. react-native,browser,main) for the non-exports resolver.
   if (values.mainFields !== undefined && !allJs) usage('Error: --mainFields is only valid for JS bundles')
   const mainFields = values.mainFields === undefined
     ? undefined
@@ -257,15 +222,11 @@ if (command === '-v' || command === '--version') {
   if (values.mainFields !== undefined && mainFields.length === 0) {
     usage('Error: --mainFields must list at least one field (e.g. --mainFields=react-native,browser,main)')
   }
-  // --metro: resolve like Metro/React Native -- it sets its own conditions
-  // (react-native, +browser for web) and mainFields, and resolves platform suffixes
-  // (.ios/.android/.native) for each --platforms target, bundling all of them at once.
-  // --platforms is repeatable and/or comma-separated; the values union.
+  // --metro: resolve like Metro/RN (its own conditions + mainFields, platform suffixes per
+  // --platforms target). --platforms is repeatable and/or comma-separated; the values union.
   const metro = Boolean(values.metro)
   const platforms = [...new Set((values.platforms ?? []).flatMap((p) => p.split(',')).map((s) => s.trim()).filter(Boolean))]
-  // A platform name becomes a bundle/lockfile edge key, which the parsers reject if it
-  // contains '/'; '*' is the reserved private placeholder. Reject both here so we never
-  // emit a bundle the readers can't parse (the divergent-edge case is data-dependent).
+  // A platform name becomes an edge key: reject '/' (parsers reject it) and '*' (reserved placeholder).
   for (const p of platforms) {
     if (p === '*' || p.includes('/')) usage(`Error: invalid --platforms value '${p}' (a platform name can't contain '/' or be '*')`)
   }
@@ -277,7 +238,7 @@ if (command === '-v' || command === '--version') {
   } else if (platforms.length > 0) {
     usage('Error: --platforms is only valid with --metro')
   }
-  // --brotli-quality: output-encoding knob, valid for every entry language (no allJs gate).
+  // --brotli-quality: valid for every entry language (no allJs gate).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
     try {
@@ -286,9 +247,7 @@ if (command === '-v' || command === '--version') {
       usage(`Error: ${cause.message}`)
     }
   }
-  // --add: merge into the bundle already at --output (default stasis.code.br) instead
-  // of replacing it. Reading the existing artifact back is the whole point, so it can't
-  // target the write-only stdout stream.
+  // --add merges into the existing bundle at --output, so it can't target write-only stdout.
   const add = Boolean(values.add)
   if (add && values.output === '-') usage('Error: --add cannot be combined with --output=-')
   const { bundleCommand } = await import('../src/cmd/bundle.js')
@@ -307,14 +266,12 @@ if (command === '-v' || command === '--version') {
     add,
   })
 } else if (command === 'add') {
-  // add packs the explicitly listed files (no scanner/loaders/resolver), reading
-  // stasis.config.json for the split targets + resource allowlist -- so it shares the zero-dep
-  // core implementation. It takes no flags; everything comes from the config.
+  // add packs the listed files (no resolver), taking split targets + resource allowlist from
+  // stasis.config.json; it takes no flags.
   if (argv.length === 0) usage('Nothing to add: no file given')
   if (argv.some((a) => a.startsWith('-'))) usage('Error: add takes no options; its targets and resource allowlist come from stasis.config.json')
   const { addCommand } = await import('@exodus/stasis-core/add')
-  // Let addCommand's runtime errors propagate as-is (see `stasis-core add`), like the deep
-  // bundleCommand above -- dumping the full usage block or swallowing the stack buries the cause.
+  // Let addCommand's runtime errors propagate as-is; wrapping in usage() would bury the cause.
   addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis' })
 } else if (command === 'build') {
   const flags = []
@@ -328,9 +285,7 @@ if (command === '-v' || command === '--version') {
     platform: { type: 'string' },
     minify: { type: 'boolean' },
     sourcemap: { type: 'boolean' },
-    // Repeatable esbuild passthroughs: --define=K=V (one substitution each),
-    // --external=PATTERN (one external each), and --loader=.ext:name (one extension
-    // loader override each). Each collects into an array.
+    // Repeatable esbuild passthroughs (--define=K=V, --external=PATTERN, --loader=.ext:name).
     define: { type: 'string', multiple: true },
     external: { type: 'string', multiple: true },
     loader: { type: 'string', multiple: true },
@@ -351,20 +306,17 @@ if (command === '-v' || command === '--version') {
     usage('Error: --platform must be node, browser, or neutral')
   }
   if (!values.output) usage('Error: --output is required (a .js/.cjs/.mjs file, or a directory)')
-  // `-` is the stdout sentinel for `bundle`/`sbom`, but `build` writes via esbuild and can't
-  // stream; without this it would silently create a directory literally named `-`.
+  // build can't stream to stdout; without this, --output=- would create a dir literally named `-`.
   if (values.output === '-') usage('Error: stasis build cannot stream to stdout; --output must be a .js/.cjs/.mjs file or a directory')
-  // --define=KEY=VALUE -> esbuild's define map. The value is forwarded to esbuild verbatim,
-  // so it must be valid JS the same way esbuild's CLI requires (a JSON literal, an
-  // identifier, ...): e.g. --define=process.env.NODE_ENV='"production"' or --define=DEBUG=false.
+  // --define=KEY=VALUE -> esbuild define map; VALUE is forwarded verbatim and must be valid JS
+  // (a JSON literal or an identifier), e.g. --define=DEBUG=false.
   const define = {}
   for (const entry of values.define ?? []) {
     const eq = entry.indexOf('=')
     if (eq <= 0) usage(`Error: --define must be KEY=VALUE (got '${entry}')`)
     define[entry.slice(0, eq)] = entry.slice(eq + 1)
   }
-  // --loader=.ext:NAME -> esbuild loader override for that extension, e.g.
-  // --loader=.js:jsx so a .js file carrying JSX (the React Native convention) parses.
+  // --loader=.ext:NAME -> esbuild loader override for that extension (e.g. --loader=.js:jsx).
   const loader = {}
   for (const entry of values.loader ?? []) {
     const colon = entry.indexOf(':')
@@ -417,17 +369,14 @@ if (command === '-v' || command === '--version') {
   } catch (cause) {
     usage(`Error: ${cause.message}`)
   }
-  // --stat is required until full text diffs land: it reports what changed
-  // (modules/files), not the differing content. Reserving bare `stasis diff`
-  // keeps the door open for a future content-level diff without a breaking flag.
+  // --stat is required for now (it reports what changed, not the content); bare `stasis diff`
+  // is reserved for a future content-level diff.
   if (!values.stat) usage('Error: stasis diff currently requires --stat')
   if (argv.length !== 2) usage('Error: stasis diff takes exactly two files (lockfile or bundle)')
-  // --imports additionally diffs the resolution graphs (which import edges were
-  // added/removed/redirected); off by default since the edge list is verbose.
+  // --imports also diffs the resolution graphs (added/removed/redirected edges); off by default (verbose).
   const { diffCommand } = await import('../src/cmd/diff.js')
   const { differences } = diffCommand({ cwd: process.cwd(), left: argv[0], right: argv[1], stat: true, imports: values.imports })
-  // Exit non-zero when the artifacts differ, so the command composes in CI
-  // (e.g. fail a build when a bundle drifts from its lockfile).
+  // Exit non-zero when the artifacts differ, so it composes in CI.
   process.exitCode = differences ? 1 : 0
 } else if (command === 'prune') {
   if (argv.length > 1) usage('Error: prune takes at most one path argument')

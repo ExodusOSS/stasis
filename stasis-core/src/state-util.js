@@ -3,16 +3,8 @@ import { hash } from 'node:crypto'
 import * as fs from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
-// The genuine fs readers, snapshotted off the namespace before any --fs patch. The single source
-// of truth for "the real reader" -- used by stasis's own internals (here; fs.js's --fs hook, so its
-// capture path sees real bytes and never recurses) AND by every bundler plugin (webpack/esbuild/
-// metro). A plugin's capture read is stasis-internal bookkeeping, not a program fs read: routing it
-// through the patched fs would re-record the bundler's module graph into the main bundle. A plain
-// `import { readFileSync }` won't do -- `stasis run --fs` monkey-patches fs.readFileSync then
-// syncBuiltinESMExports() rebinds that named import, and a plugin loads AFTER the patch; snapshotting
-// off the namespace dodges that. state-util.js is a leaf evaluated during the `--import` preload
-// before any patch, so these are always the real builtins. (`fs.promises` IS node:fs/promises, so
-// realReadFile also covers its `readFile`.)
+// Genuine fs readers snapshotted off the namespace before any --fs patch. A plain `import { readFileSync }`
+// won't do: --fs monkey-patches fs then syncBuiltinESMExports() rebinds named imports, so snapshotting dodges that.
 export const realReadFileSync = fs.readFileSync
 export const realReadFile = fs.promises.readFile
 export const realReaddirSync = fs.readdirSync
@@ -39,13 +31,8 @@ export function noupsert(map, key, value) {
   }
 }
 
-// Canonicalize a filesystem path for write-target collision detection. `resolve()` normalizes
-// `./` and `../` but NOT symlinks -- two paths through different symlink chains naming the same
-// inode would compare as distinct strings, letting a "same target?" check silently fork the
-// claim sets. `realpathSync` closes that hole when the file exists; for not-yet-written targets
-// (the common case for a fresh capture), fall back to lexical `resolve()` -- there's no symlink
-// to follow, and a later writer claiming the same target's realpath canonicalizes to the same
-// string this resolve() produced.
+// Canonicalize for write-target collision detection: resolve() misses symlinks, so two chains to one inode
+// would compare distinct. realpathSync closes that; fall back to lexical resolve() for not-yet-written targets.
 export function canonicalizePath(p) {
   const abs = resolve(p)
   try {

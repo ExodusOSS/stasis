@@ -10,54 +10,43 @@ stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundl
 
 | Flag | Meaning |
 | - | - |
-| `--stat` (**required** for now) | Print a summary of *what* changed — added/removed/changed modules and added/removed/differing files — rather than the differing file contents. |
-| `--imports` (optional) | Also diff the **resolution graphs**: which import edges were added, removed, or redirected (see below). Off by default because the edge list is verbose. |
+| `--stat` (**required** for now) | Print a summary of *what* changed — added/removed/changed modules and added/removed/differing files — not the differing contents. |
+| `--imports` (optional) | Also diff the **resolution graphs**: added/removed/redirected import edges (see below). Off by default (verbose). |
 
-`--stat` is the only mode today, and must be requested explicitly because a future
-content-level diff will take over the bare `stasis diff` invocation. Pass exactly
-two positional arguments: the baseline (`from`) and the comparison (`to`), in that
-order.
+`--stat` is the only mode today and must be explicit (a future content-level diff
+will take over the bare invocation). Pass exactly two positionals: the baseline
+(`from`) then the comparison (`to`).
 
-The command exits **0** when the two artifacts are equivalent and **1** when they
-differ (a read/parse error also exits non-zero), so it composes in CI — e.g.
-failing a build when a shipped bundle has drifted from its committed lockfile.
+Exits **0** when equivalent, **1** when they differ (a read/parse error also
+exits non-zero), so it composes in CI.
 
 ## Comparing across kinds (lockfile vs bundle)
 
-A lockfile records each file as an SRI digest (`sha512-<base64>`); a bundle records
-the actual bytes. `stasis diff` re-hashes each bundle file into that same digest —
-code and raw-UTF-8 `resource` files hash their text directly, `resource:base64`
-files are decoded from base64 first — while a lockfile's digest is used as-is. Both
-sides thus land in one digest space, so a file that is byte-identical in both never
-shows up as a difference, whichever kind each side is.
+A lockfile records each file as an SRI digest (`sha512-<base64>`); a bundle
+records the bytes. `stasis diff` re-hashes each bundle file into that same digest
+(`resource:base64` decoded first), so both sides land in one digest space and a
+byte-identical file never shows as a difference.
 
 ## What it reports
 
 **Modules** (whole-package granularity):
 
 - **added** / **removed** — a package directory present on only one side (the
-  workspace `"."` bucket, a `node_modules/<pkg>` dependency, …). The entry carries
-  the package `name@version` and how many files it contributes.
-- **changed** — a package present on both sides whose `name` or `version` differs
-  (a dependency upgrade is the common case), reported only when both sides actually
-  record one. A legacy `version: 0` bundle records neither, so it is never flagged
-  as a spurious change.
+  workspace `"."` bucket, a `node_modules/<pkg>` dependency, …). Carries the
+  package `name@version` and its file count.
+- **changed** — a package on both sides whose `name` or `version` differs,
+  reported only when both sides record one. A legacy `version: 0` bundle records
+  neither, so it is never flagged.
 
 **Files** (within packages present on **both** sides):
 
-- **added** / **removed** — a file that appears or disappears inside a package that
-  exists on both sides.
+- **added** / **removed** — a file that appears or disappears inside a shared package.
 - **differing** — a file present on both sides whose content digest differs.
 
-The two levels are complementary: a package on only one side is counted once as an
-added/removed **module** (with its file count) and its files are *not* re-listed
-under Files. The file section is the granular churn *within* packages that survived
-on both sides — where a dependency upgrade's real changes show. So the `Files
-(within shared modules): …` count is scoped to shared packages: remove a whole
-200-file dependency and it shows as `- pkg (200 files)` under **Modules** while the
-Files line stays `0 removed`.
-
-Output uses diff-style markers:
+The Files count is scoped to shared packages: a package on only one side is
+counted once as an added/removed **module** (with its file count) and its files
+are *not* re-listed. So removing a whole 200-file dependency shows as
+`- pkg (200 files)` under **Modules** while the Files line stays `0 removed`.
 
 | Marker | Meaning |
 | - | - |
@@ -67,49 +56,38 @@ Output uses diff-style markers:
 
 ## Import resolutions (`--imports`)
 
-Both lockfiles and bundles record a **resolution graph**: per condition set, which
-file every `(parent, specifier)` import resolved to. `--imports` compares these at
-the **resolution** level — the set of files each `(parent, specifier)` resolves to
-— and reports each one that was:
+Both lockfiles and bundles record a **resolution graph**: per condition set,
+which file every `(parent, specifier)` import resolved to. `--imports` compares
+the set of files each `(parent, specifier)` resolves to and reports each one:
 
 - **removed** — resolved only by the first artifact;
 - **added** — resolved only by the second;
 - **changed** — resolved on both sides but to a *different* file (a **redirect**).
 
-A redirect is a real difference even when every file hash is unchanged — a specifier
-now points at a different, still-hash-valid file, which a byte-level diff can't see
-— so `--imports` makes `stasis diff` exit non-zero on it.
-
-The comparison folds the *conditions* dimension away on purpose: a statically built
-bundle (`stasis bundle`) records every edge under the wildcard `"*"`, while a
-runtime lockfile records precise condition sets like `"node, import"`. Comparing
-resolved targets per `(parent, specifier)`, rather than raw edge keys, lets a
-`stasis bundle` artifact and a runtime lockfile compare cleanly — only a genuine
-redirect shows, not a relabeled condition.
-
-When either side doesn't attest resolutions — a lockfile written before stasis
-recorded `imports` (a bundle always carries an `imports` map) — the import diff is
-skipped with a note rather than reporting one side's whole graph as added.
+A redirect is a real difference even when every file hash is unchanged, so
+`--imports` exits non-zero on it. The *conditions* dimension is folded away:
+comparing resolved targets per `(parent, specifier)` rather than raw edge keys
+lets a statically built `"*"` bundle and a runtime lockfile's precise condition
+sets (e.g. `"node, import"`) compare cleanly. When either side doesn't attest
+resolutions (a lockfile written before stasis recorded `imports`) the import diff
+is skipped with a note.
 
 ## Scope differences
 
-Each artifact records its `scope` (`full` or `node_modules`); `stasis diff` compares
-whatever each side records and notes a scope mismatch in the header. Diffing a
-`scope = full` lockfile against a `scope = node_modules` bundle reports the
-workspace/first-party packages as **removed** modules, because the `node_modules`
-side omits them by design — the note calls this out so it isn't mistaken for real
-drift. Likewise, diffing a full lockfile (every file, code and binary resources
-alike) against a `stasis.code.br` (code only) surfaces the resource files as
-**removed** within their packages — the bundle genuinely doesn't carry them.
+Each artifact records its `scope` (`full` or `node_modules`); a mismatch is noted
+in the header. Diffing a `full` side against a `node_modules` side reports
+workspace/first-party packages as **removed** modules (omitted by design);
+diffing a full lockfile against a code-only `stasis.code.br` surfaces resource
+files as **removed** within their packages. The header note flags these so they
+aren't mistaken for drift.
 
 ## Programmatic API (`@exodus/stasis/diff`)
 
-The diff is also a library, exported as `@exodus/stasis/diff`. Like
-`@exodus/stasis/sbom`, it operates on already-parsed `@exodus/stasis-core`
-`Bundle`/`Lockfile` instances and pulls in **no disk, brotli (`node:zlib`), or
-crypto (`node:crypto`)**: the caller supplies the artifacts (each paired with its
-`kind`) and, to compare a bundle, the **hash function** that re-hashes its bytes
-into a lockfile-style digest.
+Exported as `@exodus/stasis/diff`. It operates on already-parsed
+`@exodus/stasis-core` `Bundle`/`Lockfile` instances and pulls in **no disk,
+brotli (`node:zlib`), or crypto (`node:crypto`)**: the caller supplies the
+artifacts (each paired with its `kind`) and, to compare a bundle, the **hash
+function** that re-hashes its bytes into a lockfile-style digest.
 
 ```js
 import { Bundle } from '@exodus/stasis-core/bundle'
@@ -126,15 +104,12 @@ if (hasDifferences(diff)) console.log(formatDiffStat(diff, { left: 'a', right: '
 ```
 
 - `normalizeArtifact({ artifact, kind }, { hash })` — project an artifact onto the
-  shared digest space (`kind` is `'lockfile' | 'bundle'`; `hash` re-hashes bundle
-  bytes and is required for bundles).
+  shared digest space (`kind` is `'lockfile' | 'bundle'`; `hash` required for bundles).
 - `diffArtifacts(left, right, { hash, imports })` — the structured
   `{ scope, modules, files, imports? }` report (`left` is the baseline; `imports`
-  is included only when `imports: true`).
+  included only when `imports: true`).
 - `hasDifferences(diff)` — whether any module/file/import edge changed.
-- `formatDiffStat(diff, labels)` — render the `--stat` summary string (the whole
-  report, including the trailing `Artifacts differ` / `No differences` line, goes to
-  stdout).
+- `formatDiffStat(diff, labels)` — render the `--stat` summary string.
 
-The `stasis diff` CLI is the thin file-reading wrapper around this API: it brings in
-brotli (to read `.br` bundles off disk) and injects `sha512integrity` as the hash.
+The `stasis diff` CLI is the thin file-reading wrapper around this API: it brings
+in brotli (to read `.br` bundles off disk) and injects `sha512integrity` as the hash.

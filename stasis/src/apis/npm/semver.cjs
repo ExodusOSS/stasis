@@ -10,11 +10,9 @@ const argv0 = process.argv[0] // not process.argv0 which lacks path
 function getSemver() {
   if (semver) return semver
 
-  // Coherence check that we got Node.js path there
   assert(['node', 'node.exe'].includes(basename(argv0)))
   assert.equal(basename(argv0), basename(process.argv0))
 
-  // Load semver from npm bundled with Node.js
   const semverDir = resolve(dirname(argv0), '../lib/node_modules/npm/node_modules/semver')
   semver = require(semverDir)
   return semver

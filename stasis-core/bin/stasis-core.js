@@ -77,21 +77,15 @@ if (command === '-v' || command === '--version') {
   const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
-  // Unlike --bundle-file (which is inert-but-harmless under --bundle=ignore, so Config allows
-  // it), --resources-bundle-file needs an active bundle: Config rejects bundle=none AND ignore
-  // (resourcesBundleFile requires an active bundle mode). Front-run that with a clean usage error.
+  // --resources-bundle-file needs an active bundle mode; front-run Config's rejection with a clean usage error.
   if (resourcesBundleFile && (bundle === 'none' || bundle === 'ignore')) usage('Error: --resources-bundle-file requires --bundle=(add|replace|load|frozen)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
   if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
-  // --fs monkey-patches the fs readers (readFileSync/readdirSync + lstatSync/statSync)
-  // to capture them into the bundle (add|replace) or serve them from it (load); nothing
-  // to record/read without one. The mode argument is required: `sync` patches the sync
-  // readers, `async` adds their async (callback + fs.promises) counterparts on top.
+  // --fs=sync patches the sync fs readers; --fs=async adds their async (callback + fs.promises) counterparts on top.
   if (values.fs !== undefined && !['sync', 'async'].includes(values.fs)) usage("Error: --fs must be 'sync' or 'async'")
   if (values.fs !== undefined && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
   const captureFs = values.fs ?? ''
-  // --resources: comma-separated extension/filename allowlist for `--fs` resource captures
-  // (e.g. png,svg,LICENSE). The child's Config validates each entry via parseResourcesOption.
+  // --resources: comma-separated ext/filename allowlist for --fs resource captures (e.g. png,svg,LICENSE).
   const resources = values.resources ?? ''
   // --brotli-quality: bundle compression quality (0..11; unset -> stasis default 9).
   let brotliQuality
@@ -102,8 +96,7 @@ if (command === '-v' || command === '--version') {
       usage(`Error: ${cause.message}`)
     }
   }
-  // --child-process: forward forked-child (e.g. Metro transform worker) capture to the root
-  // via per-pid shards. Opt-in -- it stands up a process-coordination channel, off by default.
+  // --child-process: forward forked-child (e.g. Metro worker) capture to the root via per-pid shards; opt-in.
   const childProcess = values['child-process'] ? '1' : ''
   console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
@@ -116,8 +109,7 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
-  // Only set when given, so an ambient EXODUS_STASIS_BROTLI_QUALITY still passes through
-  // to the child (an unconditional setEnv('') would reject it as a conflict).
+  // Only set when given: an unconditional setEnv('') would reject an ambient EXODUS_STASIS_BROTLI_QUALITY as a conflict.
   if (brotliQuality !== undefined) setEnv('EXODUS_STASIS_BROTLI_QUALITY', String(brotliQuality))
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
@@ -131,15 +123,10 @@ if (command === '-v' || command === '--version') {
   const { removed, validated, minimized } = prune({ root })
   console.warn(`[stasis-core] prune: validated ${validated.length} file(s), removed ${removed.length} file(s), minimized ${minimized.length} package.json file(s)`)
 } else if (command === 'add') {
-  // add just packs the explicitly listed files (no scanner/loaders/resolver), reading
-  // stasis.config.json for the split targets + resource allowlist -- so it lives in the zero-dep
-  // core. It takes no flags; everything comes from the config.
   if (argv.length === 0) usage('Nothing to add: no file given')
   if (argv.some((a) => a.startsWith('-'))) usage('Error: add takes no options; its targets and resource allowlist come from stasis.config.json')
   const { addCommand } = await import('../src/add.js')
-  // Let addCommand's runtime errors (missing/invalid config, an unclassifiable file, a merge
-  // conflict) propagate as-is, like prune below: they're specific, actionable messages, so
-  // dumping the whole usage block over them -- or swallowing the stack -- only buries the cause.
+  // Let addCommand's errors propagate as-is (specific, actionable); don't bury them under the usage block.
   addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis-core' })
 } else {
   usage()
