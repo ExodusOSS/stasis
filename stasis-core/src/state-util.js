@@ -3,22 +3,16 @@ import { hash } from 'node:crypto'
 import * as fs from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
-// The genuine fs readers, snapshotted off the namespace before any --fs patch. This
-// module is the single source of truth for "the real reader" -- imported by stasis's
-// own internals (here; and fs.js's --fs hook imports realReadFileSync so its capture
-// path sees real bytes and never recurses) AND by every bundler plugin (webpack.js /
-// esbuild.js / metro.js; esbuild uses the async realReadFile for its async onLoad). A
-// plugin's capture read is stasis-internal bookkeeping, NOT a program fs
-// read, so routing it through the patched fs would re-record the bundler's module graph
-// into the preload/main bundle -- duplicating into main what the plugin captured into
-// its own sidecar. `import { readFileSync } from 'node:fs'` would NOT do: `stasis run
-// --fs` monkey-patches fs.readFileSync then calls module.syncBuiltinESMExports(), which
-// rebinds that named import to the patched fn -- and a plugin loads AFTER the patch.
-// Snapshotting off the namespace dodges that. state-util.js is the lowest-level module
-// (a leaf with no internal imports), evaluated during the `--import` preload before any
-// patch, so these are always the real builtins -- and the snapshot is taken as early as
-// possible. (`fs.promises` IS node:fs/promises, the same object, so realReadFile also
-// covers `import { readFile } from 'node:fs/promises'`.)
+// The genuine fs readers, snapshotted off the namespace before any --fs patch. The single source
+// of truth for "the real reader" -- used by stasis's own internals (here; fs.js's --fs hook, so its
+// capture path sees real bytes and never recurses) AND by every bundler plugin (webpack/esbuild/
+// metro). A plugin's capture read is stasis-internal bookkeeping, not a program fs read: routing it
+// through the patched fs would re-record the bundler's module graph into the main bundle. A plain
+// `import { readFileSync }` won't do -- `stasis run --fs` monkey-patches fs.readFileSync then
+// syncBuiltinESMExports() rebinds that named import, and a plugin loads AFTER the patch; snapshotting
+// off the namespace dodges that. state-util.js is a leaf evaluated during the `--import` preload
+// before any patch, so these are always the real builtins. (`fs.promises` IS node:fs/promises, so
+// realReadFile also covers its `readFile`.)
 export const realReadFileSync = fs.readFileSync
 export const realReadFile = fs.promises.readFile
 export const realReaddirSync = fs.readdirSync
@@ -45,16 +39,13 @@ export function noupsert(map, key, value) {
   }
 }
 
-// Canonicalize a filesystem path for write-target collision detection.
-// `resolve()` normalizes `./` and `../` but NOT symlinks -- two paths through
-// different symlink chains that ultimately name the same inode would compare as
-// distinct strings, letting a "is this the same target?" check silently fork
-// (the resourcesBundleFile/lockFile/bundleFile claim sets). `realpathSync`
-// closes that hole when the file already exists;
-// for not-yet-written targets (the common case for a fresh capture's write
-// path), fall back to the lexical `resolve()` -- there's no symlink to follow,
-// and a later writer claiming the realpath of the same target will canonicalize
-// to the same string the first writer's resolve() produced.
+// Canonicalize a filesystem path for write-target collision detection. `resolve()` normalizes
+// `./` and `../` but NOT symlinks -- two paths through different symlink chains naming the same
+// inode would compare as distinct strings, letting a "same target?" check silently fork the
+// claim sets. `realpathSync` closes that hole when the file exists; for not-yet-written targets
+// (the common case for a fresh capture), fall back to lexical `resolve()` -- there's no symlink
+// to follow, and a later writer claiming the same target's realpath canonicalizes to the same
+// string this resolve() produced.
 export function canonicalizePath(p) {
   const abs = resolve(p)
   try {

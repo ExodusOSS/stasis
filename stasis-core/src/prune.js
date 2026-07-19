@@ -17,12 +17,11 @@ import { isPlainObject, moduleFileKey, posixPathEscapes, splitNodeModulesPath } 
 
 const LOCKFILE = 'stasis.lock.json'
 
-// Fields we copy (sanitised) from a dependency's on-disk package.json into the
-// minimised rewrite. Everything else -- scripts, dependencies, engines, config,
-// ... -- is dropped: it isn't recorded in the lockfile, isn't needed to resolve
-// or load the package, and (scripts especially) is pure attack surface in an
-// installed tree. `name`/`version` are NOT read from disk; they come from the
-// lockfile, which is the attested source of the package's identity.
+// Fields copied (sanitised) from a dependency's on-disk package.json into the
+// minimised rewrite. Everything else (scripts, dependencies, engines, ...) is
+// dropped: not in the lockfile, not needed to resolve/load the package, and
+// (scripts especially) pure attack surface. `name`/`version` are NOT read from
+// disk -- they come from the lockfile, the attested source of package identity.
 const ROOT_FIELD_ORDER = [
   'license',
   'type',
@@ -40,11 +39,10 @@ const ROOT_FIELD_ORDER = [
 ]
 
 function assertGlobalVirtualStoreDisabled() {
-  // pnpm exports its settings as `npm_config_*` env vars to hooks and
-  // lifecycle scripts. When the global virtual store is enabled, node_modules
-  // is dominated by symlinks into a shared store; pruning would walk past
-  // most files (we skip symlinks) and the lockfile-vs-disk comparison stops
-  // being meaningful. Reject before touching anything.
+  // pnpm exports its settings as `npm_config_*` env vars. With the global
+  // virtual store enabled, node_modules is dominated by symlinks into a shared
+  // store; prune skips symlinks, so the lockfile-vs-disk comparison stops being
+  // meaningful. Reject before touching anything.
   const env = process.env.npm_config_enable_global_virtual_store
   if (env !== undefined && env !== 'false' && env !== '') {
     throw new Error(
@@ -66,14 +64,14 @@ function buildExpected(lockfile) {
     if (!dir.includes('node_modules')) continue // workspace sources, not pnpm-managed
     knownDirs.add(dir)
     for (const [rel, hash] of Object.entries(files)) {
-      // moduleFileKey (not `${dir}/${rel}`): a readdir of a package ROOT records
-      // rel === '', whose trailing-slash join would miss the `directory` format
-      // lookup below and wrongly demand a file at `node_modules/<pkg>/`.
+      // moduleFileKey (not `${dir}/${rel}`): a package ROOT readdir records
+      // rel === '', whose trailing-slash join would miss the `directory` lookup
+      // below and wrongly demand a file at `node_modules/<pkg>/`.
       const file = moduleFileKey(dir, rel)
-      // A `directory` entry (`stasis run --fs` readdir capture) is a JSON listing
-      // attested by hash, NOT a file on disk -- the on-disk path is a real directory
-      // whose contents prune walks separately. Excluding it keeps prune from
-      // demanding a regular file at the directory's path ("missing on disk").
+      // A `directory` entry (`stasis run --fs` readdir capture) is a hash-attested
+      // JSON listing, not a file on disk -- the path is a real directory prune
+      // walks separately. Excluding it avoids demanding a regular file there
+      // ("missing on disk").
       if (lockfile.formats?.get(file) === 'directory') continue
       expected.set(file, hash)
     }
@@ -82,16 +80,13 @@ function buildExpected(lockfile) {
 }
 
 // True when `ref` (a package.json file reference like "./a.js", "a/b", "./dir")
-// names a file the lockfile records for this module, so a rewritten manifest
-// never points resolution at a path prune is about to delete. A ref that
-// escapes the module (`..`/absolute) is rejected outright -- it can never name a
-// recorded file. A subpath pattern ("./*") can't be enumerated against a fixed
-// file list, but the only files left after prune are the attested ones -- so a
-// (non-escaping) pattern can only ever resolve onto an attested file -- and it's
-// kept as-is. `exact` selects the resolution discipline for a concrete path:
-// exports/imports targets are matched verbatim (Node applies no CommonJS
-// extension/index resolution to them), whereas main/module/browser/bin get the
-// legacy expansion (`main: "lib"` -> `lib/index.js`).
+// names a file the lockfile records, so a rewritten manifest never points
+// resolution at a path prune is about to delete. An escaping ref (`..`/absolute)
+// is rejected -- it can't name a recorded file. A subpath pattern ("./*") can't
+// be enumerated, but the only surviving files are attested ones, so a
+// (non-escaping) pattern is kept as-is. `exact` picks the resolution discipline:
+// exports/imports match verbatim (no CommonJS extension/index resolution),
+// main/module/browser/bin get the legacy expansion (`main: "lib"` -> `lib/index.js`).
 const EXTENSIONS = ['.js', '.cjs', '.mjs', '.json', '.node']
 
 function normalizeRef(ref) {
@@ -112,20 +107,18 @@ function referencesPresentFile(ref, present, { exact = false } = {}) {
 }
 
 // Real exports/imports trees nest only a few conditions deep; anything past this
-// is a malformed or hostile manifest. We cap the recursion (rather than risk a
-// stack overflow that would abort the whole prune and leave the offending
-// package's unattested files in place) and drop the over-deep subtree.
+// is malformed or hostile. Cap the recursion and drop the over-deep subtree,
+// rather than risk a stack overflow that aborts the whole prune and leaves the
+// package's unattested files in place.
 const MAX_TARGET_DEPTH = 64
 
-// Recursively filter an exports/imports/browser subtree down to the mappings
-// whose targets are still present. `allowBare` keeps bare specifiers (imports
-// may map "#x" to another package; browser may stub/redirect a bare module);
-// `allowFalse` keeps `false` (browser/react-native module stubbing); `exact` is
-// passed through to referencesPresentFile (exports/imports match verbatim). A
-// `null` target (exports/imports blocking a subpath) is always kept. An object
-// or array that filters down to nothing is dropped, so we never emit an empty
-// `exports: {}` -- which would block every subpath rather than fall back to
-// `main`.
+// Recursively filter an exports/imports/browser subtree to the mappings whose
+// targets are still present. `allowBare` keeps bare specifiers (imports "#x" to
+// another package; browser stub/redirect); `allowFalse` keeps `false` (browser/
+// react-native stubbing); `exact` passes through to referencesPresentFile. A
+// `null` target (blocking a subpath) is always kept. An object/array that filters
+// to nothing is dropped, so we never emit an empty `exports: {}` -- which would
+// block every subpath instead of falling back to `main`.
 function filterTargets(value, present, opts, depth = 0) {
   if (depth > MAX_TARGET_DEPTH) return { keep: false }
   const { allowBare, allowFalse, exact } = opts
@@ -160,8 +153,8 @@ function filterTargets(value, present, opts, depth = 0) {
   return { keep: false }
 }
 
-// Printable ASCII only: rejects the C0 (incl. DEL) and C1 control ranges and all
-// non-ASCII, so a copied `license` can't smuggle control or escape characters.
+// Printable ASCII only: rejects C0 (incl. DEL)/C1 control ranges and non-ASCII,
+// so a copied `license` can't smuggle control or escape characters.
 const isAscii = (s) => /^[\x20-\x7e]*$/u.test(s)
 
 // `browser`/`react-native`: a string (an alternate entry, like `main`) or a map
@@ -176,12 +169,12 @@ function browserField(value, present) {
   return undefined
 }
 
-// The fields that govern how a package's own files resolve and load: the module
-// system flag (`type`), the entry points (`main`/`module`/`browser`/
-// `react-native`), and the subpath maps (`exports`/`imports`). Shared by the
-// package root and by nested markers -- a nested marker is exactly this subset.
-// Every file reference is filtered to a present (attested) file: exports/imports
-// match verbatim (`exact`), the entry fields get Node's extension/index expansion.
+// Fields governing how a package's own files resolve and load: the module-system
+// flag (`type`), the entry points (`main`/`module`/`browser`/`react-native`),
+// and the subpath maps (`exports`/`imports`). Shared by the package root and
+// nested markers. Every file reference is filtered to a present (attested) file:
+// exports/imports match verbatim (`exact`), entry fields get Node's
+// extension/index expansion.
 function resolutionFields(pkg, present) {
   const out = { __proto__: null }
 
@@ -194,10 +187,10 @@ function resolutionFields(pkg, present) {
   // prefer over `main`; kept on the same "points at a present file" basis.
   if (referencesPresentFile(pkg.module, present)) out.module = pkg.module
 
-  // Legacy / framework entry points read via bundler `mainFields`: `jsnext:main`
+  // Legacy/framework entry points read via bundler `mainFields`: `jsnext:main`
   // and `jsnext` (in Vite's default list -- dropping them downgrades an older
-  // dep ESM->CJS under Vite) and `source` (Parcel, Metro/React Native). String
-  // entries, kept like main/module; inert for resolvers that don't read them.
+  // dep ESM->CJS under Vite) and `source` (Parcel, Metro/React Native). Kept
+  // like main/module; inert for resolvers that don't read them.
   for (const field of ['jsnext:main', 'jsnext', 'source']) {
     if (referencesPresentFile(pkg[field], present)) out[field] = pkg[field]
   }
@@ -215,12 +208,11 @@ function resolutionFields(pkg, present) {
   return out
 }
 
-// Compute the sanitised field set for a package *root* package.json (the dir is
-// a module the lockfile records). `name`/`version` are authoritative from the
-// lockfile; the rest are copied from `pkg` (the untrusted on-disk manifest)
-// only after passing their field-specific guard. On top of the shared
-// resolution fields, a root also carries `license` and the package-level
-// `bin`/`sideEffects`.
+// Sanitised field set for a package *root* package.json (its dir is a module the
+// lockfile records). `name`/`version` are authoritative from the lockfile; the
+// rest are copied from the untrusted on-disk `pkg` only after passing their
+// field-specific guard. Beyond the shared resolution fields, a root also carries
+// `license` and the package-level `bin`/`sideEffects`.
 function minimalRootFields(pkg, { name, version, present }) {
   const fields = resolutionFields(pkg, present)
 
@@ -246,10 +238,10 @@ function minimalRootFields(pkg, { name, version, present }) {
     if (any) fields.bin = bin
   }
 
-  // sideEffects: a boolean is kept verbatim; an array is filtered to entries
-  // that are present files (glob patterns are kept, see referencesPresentFile).
-  // A list that filters to empty is dropped rather than emitted as `[]`, which
-  // would assert "no side effects" and over-eagerly tree-shake.
+  // sideEffects: a boolean is kept verbatim; an array is filtered to present
+  // files (glob patterns kept, see referencesPresentFile). A list that filters
+  // to empty is dropped rather than emitted as `[]`, which would assert "no side
+  // effects" and over-eagerly tree-shake.
   if (typeof pkg.sideEffects === 'boolean') {
     fields.sideEffects = pkg.sideEffects
   } else if (Array.isArray(pkg.sideEffects)) {
@@ -263,35 +255,32 @@ function minimalRootFields(pkg, { name, version, present }) {
   return out
 }
 
-// A nested package.json (e.g. a `dist/cjs/package.json` that flips the module
-// system for that subtree) carries no package identity, so we drop name/version
-// and the package-level fields (license/bin/sideEffects) and keep exactly the
-// resolution fields, filtered relative to this dir. Dropping them outright -- as
-// the old prune did, since their dir isn't a recorded module and they aren't in
-// the lockfile file list -- would silently revert this subtree's .js files to
-// the package root's module system and break `require('pkg/subdir')` and
-// `#imports` resolution within it.
+// A nested package.json (e.g. `dist/cjs/package.json` flipping the module system
+// for that subtree) carries no package identity, so we drop name/version and the
+// package-level fields (license/bin/sideEffects) and keep only the resolution
+// fields, filtered relative to this dir. Dropping it outright (as the old prune
+// did) would silently revert this subtree's .js files to the root's module system
+// and break `require('pkg/subdir')` and `#imports` resolution within it.
 function minimalNestedFields(pkg, present) {
   return resolutionFields(pkg, present)
 }
 
 const PNPM_WORKSPACE = 'pnpm-workspace.yaml'
 
-// A pnpm workspace root is marked by a pnpm-workspace.yaml. In a workspace,
-// prune covers every package's node_modules (not just the root's) and widens
-// the symlink-containment boundary from node_modules to the whole workspace --
-// a workspace dependency legitimately links to a sibling package's source dir,
-// which lives outside any node_modules but inside the workspace. Outside a
-// workspace the boundary stays at node_modules (a self-contained install must
-// not reach beyond it).
+// A pnpm workspace root is marked by a pnpm-workspace.yaml. In a workspace, prune
+// covers every package's node_modules (not just the root's) and widens the
+// symlink-containment boundary from node_modules to the whole workspace -- a
+// workspace dependency legitimately links to a sibling package's source dir,
+// outside any node_modules but inside the workspace. Otherwise the boundary stays
+// at node_modules (a self-contained install must not reach beyond it).
 function isPnpmWorkspaceRoot(root) {
   return existsSync(join(root, PNPM_WORKSPACE))
 }
 
 // Every node_modules directory in the workspace (the root's and each package's).
-// We don't descend into a node_modules once found -- prune walks its internals
-// itself -- nor into dotdirs (.git, ...), and we never leave `root` (symlinked
-// dirs that aren't node_modules aren't followed).
+// Don't descend into a node_modules once found (prune walks its internals) nor
+// into dotdirs (.git, ...), and never leave `root` (non-node_modules symlinked
+// dirs aren't followed).
 function discoverNodeModulesDirs(root) {
   const found = []
   const stack = [root]
@@ -307,10 +296,10 @@ function discoverNodeModulesDirs(root) {
       if (entry.name.startsWith('.')) continue // .git, .pnpm-* state, other dotdirs
       const full = join(dir, entry.name)
       if (entry.name === 'node_modules') {
-        // Only a real node_modules dir is a prune target. A package whose
-        // node_modules is itself a symlink is skipped here (not a real pnpm
-        // layout); if the lockfile records files under it, prune fails closed
-        // ("missing on disk") rather than walking through the link.
+        // Only a real node_modules dir is a prune target. A symlinked
+        // node_modules is skipped here (not a real pnpm layout); if the lockfile
+        // records files under it, prune fails closed ("missing on disk") rather
+        // than walking through the link.
         if (entry.isDirectory()) found.push(full)
         continue // don't descend; prune walks node_modules internals itself
       }
@@ -321,18 +310,17 @@ function discoverNodeModulesDirs(root) {
 }
 
 // A symlink is left in place only if its real target stays inside `boundary`
-// (`label` names it in the error): node_modules for a self-contained install,
-// or the whole workspace when pruning a pnpm workspace. That boundary is prune's
-// containment perimeter -- a link reaching outside it would keep bytes prune
-// never walks reachable from the pruned tree. pnpm's public `node_modules/<pkg>`
-// links into `.pnpm`, whose real bytes are walked directly, so the link needs no
-// validation or deletion; in a workspace a dep also links to a sibling source
-// dir (inside the workspace, outside any node_modules), which is left as-is and
-// not validated. An escaping link fails closed; because this runs during the
-// planning walk, before any unlink/rewrite, it aborts prune without touching
-// disk. A dangling link points at nothing and can't leak, so it's left as-is.
+// (`label` names it in the error): node_modules for a self-contained install, or
+// the whole workspace for a pnpm workspace. That perimeter is prune's containment
+// -- a link reaching outside it would keep bytes prune never walks. pnpm's public
+// `node_modules/<pkg>` links into `.pnpm`, whose bytes are walked directly, so the
+// link needs no validation; in a workspace a dep also links to a sibling source
+// dir (inside the workspace, outside node_modules), left as-is. An escaping link
+// fails closed -- running during the planning walk, before any unlink/rewrite, it
+// aborts prune without touching disk. A dangling link can't leak, so it's left
+// as-is.
 //
-// (Deliberately NOT the loaders' assertRealPathWithinBase: it rethrows ENOENT,
+// (Deliberately NOT the loaders' assertRealPathWithinBase: that rethrows ENOENT,
 // whereas here a dangling link is tolerated.)
 function assertSymlinkInternal({ root, realBoundary, label }, linkPath) {
   let real
@@ -393,9 +381,9 @@ function pruneEmptyDirs(dir, stopAt) {
 export function prune({ root = process.cwd() } = {}) {
   assertGlobalVirtualStoreDisabled()
   root = resolve(root)
-  // In a pnpm workspace, prune every package's node_modules (not just the
-  // root's) and bound symlinks by the whole workspace; otherwise just the root's
-  // node_modules, bounded by node_modules itself.
+  // In a pnpm workspace, prune every package's node_modules and bound symlinks by
+  // the whole workspace; otherwise just the root's node_modules, bounded by
+  // node_modules itself. (see isPnpmWorkspaceRoot)
   const workspace = isPnpmWorkspaceRoot(root)
   const nmRoots = workspace ? discoverNodeModulesDirs(root) : [join(root, 'node_modules')]
   const boundary = workspace ? root : join(root, 'node_modules')
@@ -407,10 +395,10 @@ export function prune({ root = process.cwd() } = {}) {
   const lockfile = loadLockfile(root)
   const { expected, knownDirs } = buildExpected(lockfile)
 
-  // Plan first, mutate later: walk the tree, validate every tracked file,
-  // collect the deletion and package.json-rewrite lists, and verify nothing in
-  // the lockfile is missing. Bail with a thrown error before touching disk on
-  // any failure.
+  // Plan first, mutate later: walk the tree, validate every tracked file, collect
+  // the deletion and package.json-rewrite lists, and verify nothing in the
+  // lockfile is missing. Bail with a thrown error before touching disk on any
+  // failure.
   const toRemove = []
   const toMinimize = []
   const validated = []
@@ -433,12 +421,11 @@ export function prune({ root = process.cwd() } = {}) {
       continue
     }
 
-    // package.json files aren't enumerated in the lockfile (their contents
-    // aren't recorded), but they're load-bearing for resolution, so rather than
-    // keep them verbatim we rewrite them down to the minimal, lockfile-derived
-    // field set when they belong to a module the lockfile recognises. A
-    // package.json that IS in the lockfile (imported directly, so its bytes are
-    // attested) took the hash-validated branch above and is kept in full.
+    // package.json files aren't enumerated in the lockfile (contents unrecorded)
+    // but are load-bearing for resolution, so we rewrite them to the minimal,
+    // lockfile-derived field set when they belong to a recognised module. A
+    // package.json that IS in the lockfile (imported directly, bytes attested)
+    // took the hash-validated branch above and is kept in full.
     if (basename(rel) === 'package.json') {
       const owner = splitNodeModulesPath(rel)
       if (owner && knownDirs.has(owner.dir)) {
@@ -478,8 +465,8 @@ export function prune({ root = process.cwd() } = {}) {
     }
 
     // Defense-in-depth: the path must resolve inside the node_modules we're
-    // walking (no symlink escape, no `..` traversal) before we queue it for
-    // deletion -- so prune never deletes anything outside a node_modules.
+    // walking (no symlink escape, no `..`) before we queue it for deletion, so
+    // prune never deletes anything outside a node_modules.
     assert.ok(
       full.startsWith(`${nmRoot}${sep}`),
       `refusing to remove path outside node_modules: ${full}`,
@@ -506,11 +493,10 @@ export function prune({ root = process.cwd() } = {}) {
   const minimized = []
   for (const [i, { full, rel, text }] of toMinimize.entries()) {
     // Replace, never modify in place: a dependency's package.json is commonly a
-    // hardlink into pnpm's content-addressable store, so it shares an inode with
-    // every other project (and other versions) linked from that store. An
-    // in-place write would mutate all of them. Write a fresh file and rename it
-    // over the entry -- atomic, and it breaks the hardlink, leaving the store
-    // copy untouched.
+    // hardlink into pnpm's content-addressable store, sharing an inode with every
+    // other project linked from it -- an in-place write would mutate them all.
+    // Write a fresh file and rename over the entry: atomic, and it breaks the
+    // hardlink, leaving the store copy untouched.
     const tmp = `${full}.stasis-${process.pid}-${i}.tmp`
     writeFileSync(tmp, text)
     renameSync(tmp, full)

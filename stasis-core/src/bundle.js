@@ -44,38 +44,35 @@ const mergeReason = (a, b) => {
   return out
 }
 
-// Bundle handles the JSON shape of stasis.code.br; callers (State) are responsible
-// for the brotli wrapper around the JSON text. One unified shape carries both code
-// and resources, distinguished per file by `formats[file]` ('resource' = raw UTF-8
-// payload, 'resource:base64' = base64-encoded; everything else is code). On-disk
-// version:
+// Bundle handles the JSON shape of stasis.code.br; callers (State) own the brotli
+// wrapper. One unified shape carries code and resources, distinguished per file by
+// `formats[file]` ('resource' = raw UTF-8, 'resource:base64' = base64; else code).
+// On-disk version:
 //   v0 — legacy flat layout: top-level `sources` keyed by project-relative path.
 //        No entries / modules / formats / imports.
-//   v1 — current layout, mirrors stasis.lock.json: per-package buckets under
-//        `sources` (workspace) and `modules` (node_modules) with name+version+files,
-//        plus `entries`, `formats`, and `imports`.
-// `Bundle.parse` accepts both; offline tooling (stasis extract / diff / audit /
-// sbom) reads v0 -- paths are regrouped by package dir via `inferModuleDir`
-// (best-effort, last-wins); name/version stay null since v0 records neither,
-// which State uses as a marker to skip metadata cross-checks. `stasis run`
-// refuses v0 -- see State's load path. We always serialize v1.
+//   v1 — current layout, mirrors stasis.lock.json: per-package `sources` (workspace)
+//        and `modules` (node_modules) buckets with name+version+files, plus
+//        `entries`, `formats`, `imports`.
+// parse accepts both; offline tooling (extract / diff / audit / sbom) reads v0,
+// regrouping paths by package dir via `inferModuleDir` (best-effort, last-wins). v0
+// leaves name/version null, State's marker to skip metadata cross-checks. `stasis run`
+// refuses v0 (see State's load path). We always serialize v1.
 export class Bundle {
   static VERSION = VERSION
 
-  // The on-disk version this instance represents. Defaults to VERSION; parse*
-  // sets it to whatever the file declared (LEGACY_VERSION for v0 input).
-  // Serialization always writes the current VERSION regardless — loading v0 and
-  // re-saving promotes the bundle to v1.
+  // On-disk version this instance represents. Defaults to VERSION; parse sets it to
+  // whatever the file declared (LEGACY_VERSION for v0). Serialization always writes
+  // VERSION, so loading v0 and re-saving promotes the bundle to v1.
   version = VERSION
   config
   entries
   modules
   formats
   imports
-  // Informational only (NOT attested): maps each consumer that recorded a bundled file --
-  // 'run' (the loader/CLI), 'StasisWebpack', 'StasisMetro', etc. -- to the files it contributed.
-  // Present only when a single bundle had MORE THAN ONE consumer (e.g. `run` plus a plugin sharing
-  // the same bundleFile); a single-consumer bundle omits it. Never consulted for verification.
+  // Informational only (NOT attested): maps each consumer that recorded a bundled file
+  // ('run', 'StasisWebpack', ...) to the files it contributed. Present only when a bundle
+  // had MORE THAN ONE consumer (e.g. `run` plus a plugin sharing the same bundleFile);
+  // omitted otherwise. Never consulted for verification.
   reason
 
   constructor({ config = { scope: 'full' }, entries, modules, formats, imports, reason, version = VERSION } = {}) {
@@ -90,10 +87,9 @@ export class Bundle {
     this.reason = reason
   }
 
-  // Flat project-relative view of file contents collected from this.modules.
-  // Per-file encoding is signalled by `formats[file]`: 'resource:base64' is a
-  // base64 string, everything else (including 'resource' and 'directory') is a
-  // raw UTF-8 string.
+  // Flat project-relative view of file contents from this.modules. Per-file encoding is
+  // signalled by `formats[file]`: 'resource:base64' is base64, everything else
+  // (including 'resource' and 'directory') is raw UTF-8.
   get sources() {
     const m = new Map()
     for (const [dir, { files }] of this.modules) {
@@ -104,19 +100,17 @@ export class Bundle {
     return m
   }
 
-  // True for the resource-like, non-executable payload formats. Their bundle
-  // content is a raw UTF-8 string ('resource', and 'directory' — a JSON-serialized
-  // `fs.readdirSync` listing) or a base64 blob ('resource:base64'). State stores
-  // all three in `this.resources` (vs `this.sources` for code) and the loader's
-  // executable allowlist rejects them, so this is the single "is this a code file?"
-  // discriminator. Only 'resource:base64' is base64-decoded; the others are raw.
+  // True for the resource-like, non-executable payload formats: raw UTF-8 ('resource',
+  // and 'directory' — a JSON-serialized `fs.readdirSync` listing) or a base64 blob
+  // ('resource:base64'). State stores all three in `this.resources` (vs `this.sources`
+  // for code) and the loader's allowlist rejects them, so this is the single "is this a
+  // code file?" discriminator. Only 'resource:base64' is base64-decoded.
   static isResourceFormat(format) {
     return format === 'resource' || format === 'resource:base64' || format === 'directory'
   }
 
   // One parser for the unified shape (and legacy v0 code bundles). Resources are just
-  // files tagged 'resource'/'resource:base64' in `formats`; State splits them back out
-  // by consulting the formats map.
+  // files tagged 'resource'/'resource:base64' in `formats`; State splits them back out.
   static parse(text) {
     const json = JSON.parse(text)
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
@@ -124,18 +118,16 @@ export class Bundle {
     assert(isPlainObject(json.formats))
     assert(isPlainObject(json.imports))
 
-    // Validate `formats` early so downstream branches (hasCode, etc.) can consult
-    // the typed Map instead of the raw `json.formats` object -- a missing key like
-    // `__proto__` would otherwise short-circuit on the prototype, and an unknown
-    // tag would only surface late at a string compare.
+    // Validate `formats` early so downstream branches (hasCode, etc.) consult the typed
+    // Map, not the raw `json.formats` object -- a key like `__proto__` would short-circuit
+    // on the prototype, and an unknown tag would only surface late at a string compare.
     const formats = new Map()
     for (const [file, format] of Object.entries(json.formats)) {
       assert(!posixPathEscapes(file))
       assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
-      // The project root's `directory` listing is keyed '.' -- bundles written before
-      // that normalization keyed it '' (see moduleFileKey), which no lookup ever hits
-      // again at load. Normalize on parse so those artifacts keep serving; the alias
-      // makes '' and '.' the SAME key, so both appearing is a duplicate -- fail closed.
+      // The root `directory` listing is keyed '.'; older bundles keyed it '' (see
+      // moduleFileKey), which no load-time lookup hits. Normalize on parse so they keep
+      // serving; '' and '.' alias to the SAME key, so both appearing is a duplicate -- fail closed.
       const key = file === '' ? '.' : file
       assert(!formats.has(key), `duplicate format key '${key}'`)
       formats.set(key, format)
@@ -163,17 +155,17 @@ export class Bundle {
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
-        // A bundle that carries code in full scope must declare at least one entry:
-        // empty entries would let `state.assertEntry` skip its check (it short-circuits
-        // on entries.size === 0 for v0+no-lockfile compatibility), which a tampered
-        // bundle could exploit. A resources-only bundle has no code files and thus no
-        // entries -- allowed, since there is nothing for assertEntry to guard.
+        // A bundle carrying code in full scope must declare at least one entry: empty
+        // entries would let `state.assertEntry` skip its check (it short-circuits on
+        // entries.size === 0 for v0+no-lockfile compat), which a tampered bundle could
+        // exploit. A resources-only bundle has no code and thus no entries -- allowed,
+        // nothing for assertEntry to guard.
         let hasCode = false
         for (const [dir, { files }] of modules) {
           for (const rel of Object.keys(files)) {
-            // moduleFileKey (not `${dir}/${rel}`): a `directory` capture at a module
-            // root keys at rel === '', whose trailing-slash join would miss its
-            // resource-format lookup and miscount the listing as code here.
+            // moduleFileKey (not `${dir}/${rel}`): a `directory` capture at a module root
+            // keys at rel === '', whose trailing-slash join would miss its resource-format
+            // lookup and miscount the listing as code.
             const fp = moduleFileKey(dir, rel)
             if (!Bundle.isResourceFormat(formats.get(fp))) { hasCode = true; break }
           }
@@ -191,9 +183,9 @@ export class Bundle {
         assert(json.sources === undefined)
       }
       for (const [, { files }] of modules) {
-        // posixPathEscapes (not a '..' prefix check) so a mid-path escape or an
-        // absolute path fails too, matching Lockfile.parse. rel === '' (a
-        // `directory` capture keyed at a module root) normalizes to '.' and passes.
+        // posixPathEscapes (not a '..' prefix check) so a mid-path escape or absolute
+        // path fails too, matching Lockfile.parse. rel === '' (a `directory` capture at a
+        // module root) normalizes to '.' and passes.
         for (const rel of Object.keys(files)) assert(!posixPathEscapes(rel))
       }
     } else {
@@ -208,15 +200,13 @@ export class Bundle {
       }
     }
 
-    // Resolution edges name project-relative files on both sides; getImport
-    // resolves the target against the project root, so a path that escapes the
-    // root (including a mid-path `a/../../x`) must be rejected here rather than
-    // pulling an out-of-tree file in at load time.
+    // Resolution edges name project-relative files on both sides; getImport resolves the
+    // target against the project root, so a path escaping the root (including a mid-path
+    // `a/../../x`) must be rejected here rather than pulling an out-of-tree file in at load.
     const imports = objectToMaps(json.imports)
-    // An edge target is normally a file string. A `stasis bundle --metro` edge that
-    // resolves differently per platform is instead a { platform: file } map (which
-    // objectToMaps has turned into a Map). Validate both shapes; reject anything else
-    // (e.g. a deeper nesting) so a tampered artifact fails closed at the schema edge.
+    // An edge target is normally a file string, or a { platform: file } map (turned into
+    // a Map by objectToMaps) for a `stasis bundle --metro` edge that resolves per platform.
+    // Validate both shapes; reject anything else so a tampered artifact fails closed.
     const assertTarget = (target) => {
       if (typeof target === 'string') {
         assert(!posixPathEscapes(target))
@@ -265,10 +255,9 @@ export class Bundle {
     return { modules: fromEntries(moduleEntries), sources: fromEntries(sourceEntries) }
   }
 
-  // One unified on-disk shape for code AND resources. A file is a resource when its
-  // `formats` entry is 'resource' (raw UTF-8 content) or 'resource:base64' (binary,
-  // base64-encoded); every other format is code carrying a raw UTF-8 source string.
-  // A single bundle can therefore hold both; readers split by consulting `formats`.
+  // One unified on-disk shape for code AND resources, distinguished per file by `formats`
+  // ('resource'/'resource:base64' = resource, else code). A bundle can hold both; readers
+  // split by consulting `formats`.
   serialize() {
     const entries = fileSetToObject(this.entries)
     const { modules, sources } = this.#groupedFromModules()
@@ -283,12 +272,10 @@ export class Bundle {
   }
 
   // Return a NEW Bundle attributing every file it carries to `consumer` in the
-  // informational `reason` map (unioned with any attribution already present). This is
-  // how `stasis bundle` names itself ('bundle') as the source of the files it writes:
-  // the runtime path tags files with a consumer (`run`, `StasisWebpack`, ...) as it
-  // records them, but the static builders construct a Bundle directly, so they stamp
-  // the consumer here instead. It keeps the provenance map complete when `--add` merges
-  // statically bundled files into a bundle other consumers also touched.
+  // informational `reason` map (unioned with any existing attribution). The runtime path
+  // tags files with a consumer as it records them, but static builders construct a Bundle
+  // directly, so they stamp the consumer here -- keeping provenance complete when `--add`
+  // merges statically bundled files into a bundle other consumers also touched.
   withReason(consumer) {
     const files = [...this.sources.keys()]
     return new Bundle({
@@ -302,13 +289,12 @@ export class Bundle {
     })
   }
 
-  // Merge another Bundle into this one, returning a NEW Bundle carrying the union of
-  // both. Backs `stasis bundle --add`: a freshly built bundle is merged into the one
-  // already on disk so the artifact GROWS instead of being overwritten. Strict by
-  // design -- a bundle is an attestation, so any genuine conflict (a differing scope,
-  // module identity, file's bytes, format tag, or resolved import target) throws
-  // rather than silently picking a winner; re-adding an identical file is a no-op. The
-  // informational `reason` provenance is unioned per consumer.
+  // Merge another Bundle into this one, returning a NEW Bundle carrying the union of both.
+  // Backs `stasis bundle --add`: a freshly built bundle merges into the one on disk so the
+  // artifact GROWS instead of being overwritten. Strict -- a bundle is an attestation, so
+  // any genuine conflict (scope, module identity, bytes, format, import target) throws
+  // rather than picking a winner; re-adding an identical file is a no-op. `reason` is
+  // unioned per consumer.
   merge(other) {
     assert(this.config.scope === other.config.scope,
       `bundle merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
