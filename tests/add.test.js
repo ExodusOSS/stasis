@@ -131,6 +131,17 @@ test('addCommand classifies the native build-input vocabulary as code (shared wi
   t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'native build inputs are code, not resources')
 }))
 
+test('addCommand attributes packed files to the `add` consumer in `reason`', withTmp(async (t, tmp) => {
+  seed(tmp)
+  addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })
+  const code = decode(join(tmp, 'dist/code.br'))
+  t.assert.deepEqual(Object.keys(code.reason), ['add'], 'add attributes under `add`, not `bundle`')
+  t.assert.deepEqual(code.reason.add.toSorted(), ['src/a.js'])
+  const res = decode(join(tmp, 'dist/res.br'))
+  t.assert.deepEqual(Object.keys(res.reason), ['add'])
+  t.assert.deepEqual(res.reason.add.toSorted(), ['src/icon.svg'])
+}))
+
 test('addCommand is additive across runs (merges into each split bundle)', withTmp(async (t, tmp) => {
   seed(tmp)
   addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })

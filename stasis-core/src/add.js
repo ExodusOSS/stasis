@@ -119,15 +119,15 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     if (!Bundle.isResourceFormat(format)) entries.push(rel)
   }
 
-  // Attribute the packed files to the `bundle` consumer, like the deep static builders, so an
-  // add into a bundle other consumers touched keeps the provenance map complete.
+  // Attribute the packed files to the `add` consumer, so a bundle `add` touches keeps its
+  // provenance map complete (and distinct from the deep bundler's `bundle` attribution).
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(entries),
     modules,
     formats,
     imports: new Map(),
-  }).withReason('bundle')
+  }).withReason('add')
 }
 
 // Add `bundle` to the artifact already at `targetPath` (Bundle.merge is strict -- a file whose
