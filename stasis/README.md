@@ -54,7 +54,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --bundle=add --fs=sync app.js` | build a bundle that also captures sync `fs.readFileSync`/`readdirSync` reads |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis bundle --add src/worker.js` | merge more entries (and their import graph) into an existing `stasis.code.br` instead of replacing it |
-| `stasis bundle --shallow a.js b.png` | pack exactly the listed files (any types, mixed) with no dependency resolution or graph walk — also available as `stasis-core bundle --shallow` |
+| `stasis bundle --shallow a.js b.png` | pack exactly the listed files (any types, mixed) with no dependency resolution |
 | `stasis bundle --conditions=react-native,browser app.js` | statically bundle, asserting extra `exports`/`imports` resolution conditions |
 | `stasis bundle --mainFields=react-native,browser,main app.js` | statically bundle, honoring legacy package `mainFields` (incl. browser-field object redirection) |
 | `stasis bundle --metro --platforms=ios,android app.js` | statically bundle the way Metro resolves: RN conditions + mainFields + `.ios`/`.android`/`.native` suffixes, all platforms at once, plus each bundled native dependency's `ios/`/`android/` sources + podspec |
@@ -70,7 +70,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 
 ## Runtime
 
-The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run`, `prune`, and a shallow-only `bundle --shallow` (which packs listed files verbatim, with no scanner or loaders); deep dependency-resolving bundling and the bundler plugins live in the full [`@exodus/stasis`](.) / [`@exodus/stasis-plugins`](../stasis-plugins) packages.
+The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run` and `prune`, and a shallow-only `bundle --shallow` commands only; the bundler plugins live in [`@exodus/stasis-plugins`](../stasis-plugins).
 
 ## License
 
