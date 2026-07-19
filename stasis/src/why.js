@@ -125,46 +125,49 @@ function invertReason(reason) {
 // src files importing `head` (its top-level importers). When `head` has no
 // top-level importer (not imported from src), fall back to the consumers that
 // recorded `head`'s own files. Empty when the artifact has no reason map.
-function reasonsForHead(head, { srcImporters, dirFiles, fileReasons }) {
+//
+// A TERMINAL head (@babel/core / react-native / metro) is special: it's a sink
+// that consumers reach through their OWN dep graphs, not only from src. Crediting
+// just its src importers would drop the reasons of consumers that pull it in
+// transitively (e.g. `run` reaching it via a -> b -> @babel/core while `metro`
+// imports it from src) -- so also credit its own recorded files, which every
+// consumer that bundles it contributes to. Otherwise those reasons are lost.
+function reasonsForHead(head, { srcImporters, dirFiles, fileReasons }, terminal = false) {
   if (fileReasons === null) return []
   const importers = srcImporters.get(head)
-  const sources = importers && importers.size > 0 ? importers : (dirFiles.get(head) ?? [])
+  const hasImporters = importers !== undefined && importers.size > 0
   const consumers = new Set()
-  for (const f of sources) {
-    for (const c of fileReasons.get(f) ?? []) consumers.add(c)
+  const credit = (files) => {
+    for (const f of files) for (const c of fileReasons.get(f) ?? []) consumers.add(c)
   }
+  if (hasImporters) credit(importers)
+  // Non-terminal heads use src importers alone (that's their provenance); when
+  // there are none, or the head is terminal, credit its own files too.
+  if (terminal || !hasImporters) credit(dirFiles.get(head) ?? [])
   return [...consumers]
 }
 
 // Every simple dep-only path that ends at `targetDir`, walking predecessors
 // backward and emitting a path each time its head is a HEAD node (`isHead`) or a
-// terminal package (`isTerminal`). A terminal *predecessor* ends the chain -- the
-// walk never goes past @babel/core / react-native / metro. The terminal check is
-// applied only to predecessors, never to `targetDir` itself: when the target is
-// terminal we must still climb above it, or every chain reaching it (and its
-// reasons) would be lost. Returns dirs head-first; `truncated` flags the cap.
+// terminal package (`isTerminal`). A terminal node ALSO stops the walk -- the
+// chain never goes past @babel/core / react-native / metro, and this applies to
+// `targetDir` too: a terminal target is emitted bare (just `[targetDir]`), never
+// climbed above. Its provenance instead comes from every consumer that recorded
+// it (see reasonsForHead), so no reason is lost. Returns dirs head-first;
+// `truncated` flags the cap.
 function pathsTo(adjRev, isHead, isTerminal, targetDir) {
   const results = []
   let truncated = false
-  const push = (suffix) => {
-    if (results.length >= PATH_CAP) {
-      truncated = true
-      return
-    }
-    results.push(suffix)
-  }
   const walk = (node, suffix, inPath) => {
     if (results.length >= PATH_CAP) {
       truncated = true
       return
     }
-    if (isHead(node)) push(suffix)
+    const terminal = isTerminal(node)
+    if (isHead(node) || terminal) results.push(suffix)
+    if (terminal) return // don't walk past @babel/core / react-native / metro
     for (const pred of adjRev.get(node) ?? []) {
       if (inPath.has(pred)) continue // no repeated module -> break cycles
-      if (isTerminal(pred)) {
-        push([pred, ...suffix]) // terminal head; don't walk past it
-        continue
-      }
       inPath.add(pred)
       walk(pred, [pred, ...suffix], inPath)
       inPath.delete(pred)
@@ -275,7 +278,7 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
         if (truncated) truncatedKeys.add(key)
         for (const p of results) {
           const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
-          const reasons = reasonsForHead(p[0], { srcImporters, dirFiles, fileReasons })
+          const reasons = reasonsForHead(p[0], { srcImporters, dirFiles, fileReasons }, isTerminal(p[0]))
           if (reasonFilter) {
             // Keep this chain only when the requested consumer accounts for it.
             // Under --reason the column is already all one consumer, so drop the
