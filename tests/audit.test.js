@@ -570,8 +570,10 @@ test('audit(--why) replaces the reason cell with per-consumer import paths', wit
       t.assert.equal(foo.reason, 'run: dep -> foo\nwebpack: dep -> foo')
 
       // --reason narrows the chains to that single consumer.
+      // Under --reason the chains render bare (no `run:` prefix -- the whole
+      // column is that one consumer).
       const filtered = await audit([path], { why: true, reason: 'run' })
-      t.assert.equal(filtered.rows.find((r) => r.package === 'foo').reason, 'run: dep -> foo')
+      t.assert.equal(filtered.rows.find((r) => r.package === 'foo').reason, 'dep -> foo')
 
       // --reason for a consumer that recorded nothing drops the row entirely.
       const none = await audit([path], { why: true, reason: 'metro' })
