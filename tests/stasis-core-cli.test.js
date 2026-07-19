@@ -6,10 +6,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 
-// The zero-dependency `stasis-core` CLI exposes only `run` and `prune` (no
-// bundle/extract/audit, and crucially no --mock, which lives in the @exodus/stasis
-// tooling package). These tests pin that surface; the run-time behaviour itself is
-// the same loader covered by tests/cli.test.js.
+// The zero-dependency `stasis-core` CLI exposes `run`, `prune`, and a shallow-only
+// `bundle` (which packs listed files verbatim -- no scanner/loaders). Deep bundling,
+// extract/audit, and --mock stay in the @exodus/stasis tooling package. These tests pin
+// that surface; the run-time behaviour itself is the same loader covered by tests/cli.test.js.
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis-core', 'bin', 'stasis-core.js')
 const runFixture = join(here, 'fixtures', 'cli-run')
@@ -42,14 +42,17 @@ const withTmp = (fn) => (t) => {
   }
 }
 
-test('no command prints usage limited to run + prune', (t) => {
+test('no command prints usage limited to run + prune + shallow bundle', (t) => {
   const r = run([])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /Usage:/)
   t.assert.match(r.stderr, /stasis-core run/)
   t.assert.match(r.stderr, /stasis-core prune/)
-  // bundle/extract/audit are tooling commands and must not appear here
-  t.assert.doesNotMatch(r.stderr, /stasis-core (?:bundle|extract|audit)/)
+  // The core CLI's only bundling is the zero-dep shallow packer (no scanner/loaders).
+  t.assert.match(r.stderr, /stasis-core bundle --shallow/)
+  // extract/audit and deep (dependency-resolving) bundling are tooling commands that
+  // stay on the full `stasis` CLI and must not appear here.
+  t.assert.doesNotMatch(r.stderr, /stasis-core (?:extract|audit)/)
 })
 
 test('--version prints the package version', (t) => {

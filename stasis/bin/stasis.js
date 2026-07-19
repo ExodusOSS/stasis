@@ -28,8 +28,10 @@ function usage(prefix = '') {
  stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
+ stasis bundle --shallow [--add] [--output=(path|-)] path/to/file ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
   --add merges into an existing bundle instead of replacing it (not with --output=-);
+  --shallow packs exactly the listed files, with no dependency resolution or graph walk;
   --brotli-quality=0..11 tunes bundle compression for any entry language, default 9)
  stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
@@ -204,6 +206,7 @@ if (command === '-v' || command === '--version') {
     platforms: { type: 'string', multiple: true },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
+    shallow: { type: 'boolean' },
   }
   let values
   try {
@@ -212,96 +215,127 @@ if (command === '-v' || command === '--version') {
     usage(`Error: ${cause.message}`)
   }
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
-  const allSol = argv.every((f) => f.endsWith('.sol'))
-  const allPhp = argv.every((f) => f.endsWith('.php'))
-  const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
-  const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))
-  const allRust = argv.every((f) => f.endsWith('.rs'))
-  if (!allSol && !allPhp && !allJs && !allBash && !allRust) {
-    usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
-  }
-  if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
-  if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
-  if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
-    usage('Error: --scope must be node_modules or full')
-  }
-  if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
-  // --scope selects a bundle subset; the field resolver (--mainFields/--metro) always
-  // emits a full-scope bundle, so the two together would silently ignore --scope.
-  if (values.scope !== undefined && (values.mainFields !== undefined || values.metro)) {
-    usage('Error: --scope is not supported with --mainFields or --metro')
-  }
-  // --conditions: comma-separated extra `exports`/`imports` resolution conditions
-  // (e.g. react-native,browser) merged on top of the conditions Node always asserts.
-  // They steer which branch of a package's conditional `exports` the static scan
-  // follows. NOTE: conditions alone do not honour legacy package `mainFields` or
-  // platform-specific file suffixes -- see --mainFields.
-  if (values.conditions !== undefined && !allJs) usage('Error: --conditions is only valid for JS bundles')
-  const conditions = values.conditions === undefined
-    ? []
-    : values.conditions.split(',').map((s) => s.trim()).filter(Boolean)
-  if (values.conditions !== undefined && conditions.length === 0) {
-    usage('Error: --conditions must list at least one condition name (e.g. --conditions=react-native,browser)')
-  }
-  // --mainFields: comma-separated legacy package entry fields (e.g.
-  // react-native,browser,main). Drives the legacy-field resolver for non-`exports`
-  // packages -- the entry it picks plus the browser-field-spec object redirection.
-  if (values.mainFields !== undefined && !allJs) usage('Error: --mainFields is only valid for JS bundles')
-  const mainFields = values.mainFields === undefined
-    ? undefined
-    : values.mainFields.split(',').map((s) => s.trim()).filter(Boolean)
-  if (values.mainFields !== undefined && mainFields.length === 0) {
-    usage('Error: --mainFields must list at least one field (e.g. --mainFields=react-native,browser,main)')
-  }
-  // --metro: resolve like Metro/React Native -- it sets its own conditions
-  // (react-native, +browser for web) and mainFields, and resolves platform suffixes
-  // (.ios/.android/.native) for each --platforms target, bundling all of them at once.
-  // --platforms is repeatable and/or comma-separated; the values union.
-  const metro = Boolean(values.metro)
-  const platforms = [...new Set((values.platforms ?? []).flatMap((p) => p.split(',')).map((s) => s.trim()).filter(Boolean))]
-  // A platform name becomes a bundle/lockfile edge key, which the parsers reject if it
-  // contains '/'; '*' is the reserved private placeholder. Reject both here so we never
-  // emit a bundle the readers can't parse (the divergent-edge case is data-dependent).
-  for (const p of platforms) {
-    if (p === '*' || p.includes('/')) usage(`Error: invalid --platforms value '${p}' (a platform name can't contain '/' or be '*')`)
-  }
-  if ((metro || platforms.length > 0) && !allJs) usage('Error: --metro is only valid for JS bundles')
-  if (metro) {
-    if (conditions.length > 0) usage("Error: --conditions can't be combined with --metro (it sets its own conditions)")
-    if (mainFields !== undefined) usage("Error: --mainFields can't be combined with --metro (it sets its own mainFields)")
-    if (platforms.length === 0) usage('Error: --metro requires --platforms (e.g. --platforms=ios,android)')
-  } else if (platforms.length > 0) {
-    usage('Error: --platforms is only valid with --metro')
-  }
-  // --brotli-quality: output-encoding knob, valid for every entry language (no allJs gate).
-  let brotliQuality
-  if (values['brotli-quality'] !== undefined) {
-    try {
-      brotliQuality = parseBrotliQuality('--brotli-quality', values['brotli-quality'])
-    } catch (cause) {
-      usage(`Error: ${cause.message}`)
+  if (values.shallow) {
+    // --shallow packs exactly the listed files, with no dependency resolution or graph
+    // walk, so it has no scanner/loaders and lives in stasis-core -- delegate to it. Every
+    // other bundle flag steers the resolution shallow skips, so allow ONLY these four and
+    // reject the rest: an allowlist means a future deep flag is refused here automatically,
+    // with no second edit.
+    const SHALLOW_FLAGS = new Set(['shallow', 'output', 'add', 'brotli-quality'])
+    for (const flag of Object.keys(values)) {
+      if (!SHALLOW_FLAGS.has(flag)) usage(`Error: --${flag} is not supported with --shallow (shallow packs files verbatim, resolving nothing)`)
     }
+    const add = Boolean(values.add)
+    if (add && values.output === '-') usage('Error: --add cannot be combined with --output=-')
+    let brotliQuality
+    if (values['brotli-quality'] !== undefined) {
+      try {
+        brotliQuality = parseBrotliQuality('--brotli-quality', values['brotli-quality'])
+      } catch (cause) {
+        usage(`Error: ${cause.message}`)
+      }
+    }
+    const { shallowBundleCommand } = await import('@exodus/stasis-core/bundle-cmd')
+    shallowBundleCommand({
+      cwd: process.cwd(),
+      entries: argv,
+      output: values.output,
+      add,
+      brotliQuality,
+      logLabel: 'stasis',
+    })
+  } else {
+    const allSol = argv.every((f) => f.endsWith('.sol'))
+    const allPhp = argv.every((f) => f.endsWith('.php'))
+    const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
+    const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))
+    const allRust = argv.every((f) => f.endsWith('.rs'))
+    if (!allSol && !allPhp && !allJs && !allBash && !allRust) {
+      usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
+    }
+    if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
+    if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
+    if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
+      usage('Error: --scope must be node_modules or full')
+    }
+    if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
+    // --scope selects a bundle subset; the field resolver (--mainFields/--metro) always
+    // emits a full-scope bundle, so the two together would silently ignore --scope.
+    if (values.scope !== undefined && (values.mainFields !== undefined || values.metro)) {
+      usage('Error: --scope is not supported with --mainFields or --metro')
+    }
+    // --conditions: comma-separated extra `exports`/`imports` resolution conditions
+    // (e.g. react-native,browser) merged on top of the conditions Node always asserts.
+    // They steer which branch of a package's conditional `exports` the static scan
+    // follows. NOTE: conditions alone do not honour legacy package `mainFields` or
+    // platform-specific file suffixes -- see --mainFields.
+    if (values.conditions !== undefined && !allJs) usage('Error: --conditions is only valid for JS bundles')
+    const conditions = values.conditions === undefined
+      ? []
+      : values.conditions.split(',').map((s) => s.trim()).filter(Boolean)
+    if (values.conditions !== undefined && conditions.length === 0) {
+      usage('Error: --conditions must list at least one condition name (e.g. --conditions=react-native,browser)')
+    }
+    // --mainFields: comma-separated legacy package entry fields (e.g.
+    // react-native,browser,main). Drives the legacy-field resolver for non-`exports`
+    // packages -- the entry it picks plus the browser-field-spec object redirection.
+    if (values.mainFields !== undefined && !allJs) usage('Error: --mainFields is only valid for JS bundles')
+    const mainFields = values.mainFields === undefined
+      ? undefined
+      : values.mainFields.split(',').map((s) => s.trim()).filter(Boolean)
+    if (values.mainFields !== undefined && mainFields.length === 0) {
+      usage('Error: --mainFields must list at least one field (e.g. --mainFields=react-native,browser,main)')
+    }
+    // --metro: resolve like Metro/React Native -- it sets its own conditions
+    // (react-native, +browser for web) and mainFields, and resolves platform suffixes
+    // (.ios/.android/.native) for each --platforms target, bundling all of them at once.
+    // --platforms is repeatable and/or comma-separated; the values union.
+    const metro = Boolean(values.metro)
+    const platforms = [...new Set((values.platforms ?? []).flatMap((p) => p.split(',')).map((s) => s.trim()).filter(Boolean))]
+    // A platform name becomes a bundle/lockfile edge key, which the parsers reject if it
+    // contains '/'; '*' is the reserved private placeholder. Reject both here so we never
+    // emit a bundle the readers can't parse (the divergent-edge case is data-dependent).
+    for (const p of platforms) {
+      if (p === '*' || p.includes('/')) usage(`Error: invalid --platforms value '${p}' (a platform name can't contain '/' or be '*')`)
+    }
+    if ((metro || platforms.length > 0) && !allJs) usage('Error: --metro is only valid for JS bundles')
+    if (metro) {
+      if (conditions.length > 0) usage("Error: --conditions can't be combined with --metro (it sets its own conditions)")
+      if (mainFields !== undefined) usage("Error: --mainFields can't be combined with --metro (it sets its own mainFields)")
+      if (platforms.length === 0) usage('Error: --metro requires --platforms (e.g. --platforms=ios,android)')
+    } else if (platforms.length > 0) {
+      usage('Error: --platforms is only valid with --metro')
+    }
+    // --brotli-quality: output-encoding knob, valid for every entry language (no allJs gate).
+    let brotliQuality
+    if (values['brotli-quality'] !== undefined) {
+      try {
+        brotliQuality = parseBrotliQuality('--brotli-quality', values['brotli-quality'])
+      } catch (cause) {
+        usage(`Error: ${cause.message}`)
+      }
+    }
+    // --add: merge into the bundle already at --output (default stasis.code.br) instead
+    // of replacing it. Reading the existing artifact back is the whole point, so it can't
+    // target the write-only stdout stream.
+    const add = Boolean(values.add)
+    if (add && values.output === '-') usage('Error: --add cannot be combined with --output=-')
+    const { bundleCommand } = await import('../src/cmd/bundle.js')
+    await bundleCommand({
+      cwd: process.cwd(),
+      entries: argv,
+      mappingFile: values.mapping,
+      output: values.output,
+      scope: values.scope,
+      lockfile: values.lockfile,
+      conditions,
+      mainFields,
+      metro,
+      platforms,
+      brotliQuality,
+      add,
+    })
   }
-  // --add: merge into the bundle already at --output (default stasis.code.br) instead
-  // of replacing it. Reading the existing artifact back is the whole point, so it can't
-  // target the write-only stdout stream.
-  const add = Boolean(values.add)
-  if (add && values.output === '-') usage('Error: --add cannot be combined with --output=-')
-  const { bundleCommand } = await import('../src/cmd/bundle.js')
-  await bundleCommand({
-    cwd: process.cwd(),
-    entries: argv,
-    mappingFile: values.mapping,
-    output: values.output,
-    scope: values.scope,
-    lockfile: values.lockfile,
-    conditions,
-    mainFields,
-    metro,
-    platforms,
-    brotliQuality,
-    add,
-  })
 } else if (command === 'build') {
   const flags = []
   const valueFlags = new Set(['--output', '-o', '--format', '--platform', '--define', '--external', '--loader'])
