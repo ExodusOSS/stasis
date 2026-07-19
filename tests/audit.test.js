@@ -283,6 +283,24 @@ test('flattenAdvisories uses the --why paths (newline-joined) as the reason cell
   t.assert.equal(rows[0].reason, 'run: a -> foo\nwebpack: b -> foo')
 })
 
+test('flattenAdvisories --reason narrows the consumer list and drops unrelated rows', (t) => {
+  const packages = [
+    { name: 'foo', version: '1.0.0' },
+    { name: 'bar', version: '1.0.0' },
+  ]
+  const result = {
+    foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }],
+    bar: [{ severity: 'low', title: 'y', url: 'u', vulnerable_versions: '*' }],
+  }
+  const reasons = new Map([
+    ['foo@1.0.0', new Set(['run', 'webpack'])],
+    ['bar@1.0.0', new Set(['webpack'])],
+  ])
+  const rows = flattenAdvisories(result, packages, reasons, null, 'run')
+  // bar is only webpack -> dropped; foo's cell is narrowed to run.
+  t.assert.deepEqual(rows.map((r) => [r.package, r.reason]), [['foo', 'run']])
+})
+
 test('formatTable renders a multiline cell across physical rows', (t) => {
   const out = formatTable([{ a: 'x', b: 'l1\nl2' }], ['a', 'b'], { multiline: ['b'] })
   const lines = out.split('\n')
@@ -394,6 +412,13 @@ test('audit rejects an unknown flag', (t) => {
 
 test('audit --why with no files prints usage', (t) => {
   const r = runCli(['audit', '--why'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /Nothing to audit/)
+})
+
+test('audit --reason consumes its value (space form) then reports no files', (t) => {
+  // `--reason run` must swallow `run` as the value, leaving no positional file.
+  const r = runCli(['audit', '--reason', 'run'])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /Nothing to audit/)
 })
@@ -513,6 +538,14 @@ test('audit(--why) replaces the reason cell with per-consumer import paths', wit
       t.assert.equal(report.why, true)
       const foo = report.rows.find((r) => r.package === 'foo')
       t.assert.equal(foo.reason, 'run: dep -> foo\nwebpack: dep -> foo')
+
+      // --reason narrows the chains to that single consumer.
+      const filtered = await audit([path], { why: true, reason: 'run' })
+      t.assert.equal(filtered.rows.find((r) => r.package === 'foo').reason, 'run: dep -> foo')
+
+      // --reason for a consumer that recorded nothing drops the row entirely.
+      const none = await audit([path], { why: true, reason: 'metro' })
+      t.assert.equal(none.rows.length, 0)
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }

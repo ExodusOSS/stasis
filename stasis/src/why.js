@@ -152,8 +152,10 @@ function pathsTo(adjRev, isHead, targetDir) {
 // Map each targeted package (`name@version`) to the set of `--why` lines for it.
 // `targetKeys` (optional) restricts work to the packages that matter (the ones
 // carrying advisories); omit it to compute for every node_modules package.
+// `reasonFilter` (optional, from --reason) keeps only chains attributed to that
+// consumer, dropping every other chain (and bare, unattributed chains).
 // Artifacts without a resolution graph (`imports`) contribute nothing.
-export function collectWhy(files, targetKeys) {
+export function collectWhy(files, targetKeys, reasonFilter = null) {
   const byPkg = new Map()
   for (const file of files) {
     const artifact = parseFile(file)
@@ -192,8 +194,15 @@ export function collectWhy(files, targetKeys) {
         for (const p of results) {
           const chain = p.map((d) => dirInfo.get(d)?.name ?? d).join(' -> ')
           const reasons = reasonsForHead(p[0], { srcImporters, dirFiles, fileReasons })
-          if (reasons.length === 0) add(chain)
-          else for (const r of reasons.toSorted((a, b) => a.localeCompare(b))) add(`${r}: ${chain}`)
+          if (reasonFilter) {
+            // Keep this chain only when the requested consumer accounts for it;
+            // an unattributed (bare) chain can never match a named reason.
+            if (reasons.includes(reasonFilter)) add(`${reasonFilter}: ${chain}`)
+          } else if (reasons.length === 0) {
+            add(chain)
+          } else {
+            for (const r of reasons.toSorted((a, b) => a.localeCompare(b))) add(`${r}: ${chain}`)
+          }
         }
         if (truncated) add(`… (${PATH_CAP}+ paths, truncated)`)
       }

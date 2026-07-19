@@ -82,6 +82,32 @@ test('collectWhy prefixes each chain with its head\'s top-level importer reasons
   ])
 }))
 
+test('collectWhy with a reason filter keeps only that consumer\'s chains', withTmp((t, tmp) => {
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c', 'x'],
+    edges: [
+      ['runEntry', 'a'], ['runEntry', 'b'], ['wpEntry', 'b'], ['wpEntry', 'x'],
+      ['a', 'b'], ['b', 'c'], ['x', 'c'],
+    ],
+    reason: {
+      run: ['runEntry', 'a', 'b', 'c'],
+      webpack: ['wpEntry', 'b', 'x', 'c'],
+    },
+  })
+  const why = collectWhy([file], new Set(['c@1.0.0']), 'run')
+  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: a -> b -> c', 'run: b -> c'])
+}))
+
+test('collectWhy with a reason filter drops bare (unattributed) chains', withTmp((t, tmp) => {
+  // No reason map -> chains are unattributed and can't match a named reason.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c'],
+    edges: [['e', 'a'], ['a', 'b'], ['b', 'c']],
+  })
+  const why = collectWhy([file], new Set(['c@1.0.0']), 'run')
+  t.assert.equal(why.has('c@1.0.0'), false)
+}))
+
 test('collectWhy renders bare chains when a bundle has no reason map', withTmp((t, tmp) => {
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c', 'x'],

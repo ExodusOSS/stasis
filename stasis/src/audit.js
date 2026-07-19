@@ -65,7 +65,10 @@ const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, non
 // covers. Without `--why` that's the `, `-joined set of bundle consumers; with
 // `--why` it's the newline-joined `consumer: a -> b -> c` import-path lines
 // (which REPLACE the consumer list). Both are sorted for a stable cell.
-function reasonCell(pkg, affected, reasonsByPkg, whyByPkg) {
+// `reasonFilter`, when set, narrows the cell to a single consumer: the `--why`
+// chains are already filtered upstream (see collectWhy), so only the consumer
+// list needs pruning here.
+function reasonCell(pkg, affected, reasonsByPkg, whyByPkg, reasonFilter) {
   const parts = new Set()
   const source = whyByPkg ?? reasonsByPkg
   for (const v of affected) {
@@ -75,10 +78,11 @@ function reasonCell(pkg, affected, reasonsByPkg, whyByPkg) {
   // group together (localeCompare puts e.g. `run` before `webpack`).
   // Otherwise: the `, `-joined consumer set, in the original stable order.
   if (whyByPkg) return [...parts].toSorted((a, b) => a.localeCompare(b)).join('\n')
-  return [...parts].toSorted().join(', ')
+  const consumers = reasonFilter ? [...parts].filter((c) => c === reasonFilter) : [...parts]
+  return consumers.toSorted().join(', ')
 }
 
-export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(), whyByPkg = null) {
+export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(), whyByPkg = null, reasonFilter = null) {
   const installed = new Map()
   for (const { name, version } of packages) {
     if (!installed.has(name)) installed.set(name, [])
@@ -96,6 +100,10 @@ export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(
       // npm sometimes returns advisories whose range matches none of the versions we submitted; drop
       // them so the table and exit code reflect only real hits.
       if (installedVersions.length > 0 && affected.length === 0) continue
+      const reason = reasonCell(pkg, affected, reasonsByPkg, whyByPkg, reasonFilter)
+      // --reason keeps only advisories tied to that consumer: once the cell is
+      // narrowed to it, an empty cell means this package isn't related to it.
+      if (reasonFilter && reason === '') continue
       rows.push({
         package: pkg,
         installed: affected.join(', '),
@@ -103,7 +111,7 @@ export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(
         severity: adv.severity ?? '',
         title: adv.title ?? '',
         url: adv.url ?? '',
-        reason: reasonCell(pkg, affected, reasonsByPkg, whyByPkg),
+        reason,
       })
     }
   }
@@ -157,7 +165,7 @@ export function formatTable(rows, columns, { multiline = [] } = {}) {
   ].join('\n')
 }
 
-export async function audit(files, { why = false } = {}) {
+export async function audit(files, { why = false, reason = null } = {}) {
   const packages = collectPackages(files)
   if (packages.length === 0) {
     return { packages, advisories: {}, rows: [], why }
@@ -165,7 +173,9 @@ export async function audit(files, { why = false } = {}) {
   const result = await advisories(packages)
   // `--why` REPLACES the consumer list with per-consumer import paths, so only
   // one of the two is computed. Restrict the (potentially expensive) path search
-  // to the packages that actually carry an advisory.
+  // to the packages that actually carry an advisory. `reason` (--reason) narrows
+  // both the paths (in collectWhy) and the consumer list (in flattenAdvisories)
+  // to a single consumer, dropping advisories unrelated to it.
   let rows
   if (why) {
     const vulnerable = new Set(
@@ -174,9 +184,9 @@ export async function audit(files, { why = false } = {}) {
     const targetKeys = new Set(
       packages.filter((p) => vulnerable.has(p.name)).map((p) => `${p.name}@${p.version}`)
     )
-    rows = flattenAdvisories(result, packages, undefined, collectWhy(files, targetKeys))
+    rows = flattenAdvisories(result, packages, undefined, collectWhy(files, targetKeys, reason), reason)
   } else {
-    rows = flattenAdvisories(result, packages, collectReasons(files))
+    rows = flattenAdvisories(result, packages, collectReasons(files), null, reason)
   }
   return { packages, advisories: result, rows, why }
 }
