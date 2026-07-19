@@ -2,6 +2,7 @@ import { moduleFileKey } from '@exodus/stasis-core/util'
 import { advisories } from './apis/npm/index.js'
 import semver from './apis/npm/semver.cjs'
 import { parseFile } from './parse.js'
+import { collectWhy } from './why.js'
 
 // Only audit installed dependencies; workspace/first-party packages live under
 // non-`node_modules` keys in .modules (Lockfile/Bundle merge sources in) and
@@ -63,7 +64,24 @@ export function collectReasons(files) {
 
 const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, none: 5 }
 
-export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map()) {
+// Build a row's `reason` cell by unioning over exactly the affected versions it
+// covers. Without `--why` that's the `, `-joined set of bundle consumers; with
+// `--why` it's the newline-joined `consumer: a -> b -> c` import-path lines
+// (which REPLACE the consumer list). Both are sorted for a stable cell.
+function reasonCell(pkg, affected, reasonsByPkg, whyByPkg) {
+  const parts = new Set()
+  const source = whyByPkg ?? reasonsByPkg
+  for (const v of affected) {
+    for (const p of source.get(`${pkg}@${v}`) ?? []) parts.add(p)
+  }
+  // --why: `consumer: path` lines, one per row, ordered so a consumer's chains
+  // group together (localeCompare puts e.g. `run` before `StasisWebpack`).
+  // Otherwise: the `, `-joined consumer set, in the original stable order.
+  if (whyByPkg) return [...parts].toSorted((a, b) => a.localeCompare(b)).join('\n')
+  return [...parts].toSorted().join(', ')
+}
+
+export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(), whyByPkg = null) {
   const installed = new Map()
   for (const { name, version } of packages) {
     if (!installed.has(name)) installed.set(name, [])
@@ -82,12 +100,6 @@ export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(
       // of the versions we submitted; drop them so the table (and the CLI exit
       // code) reflect only real hits.
       if (installedVersions.length > 0 && affected.length === 0) continue
-      // Union the reasons of every affected version this row covers (the same
-      // versions listed in `installed`), sorted for a stable, `, `-joined cell.
-      const reasons = new Set()
-      for (const v of affected) {
-        for (const r of reasonsByPkg.get(`${pkg}@${v}`) ?? []) reasons.add(r)
-      }
       rows.push({
         package: pkg,
         installed: affected.join(', '),
@@ -95,7 +107,7 @@ export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(
         severity: adv.severity ?? '',
         title: adv.title ?? '',
         url: adv.url ?? '',
-        reason: [...reasons].toSorted().join(', '),
+        reason: reasonCell(pkg, affected, reasonsByPkg, whyByPkg),
       })
     }
   }
@@ -113,33 +125,68 @@ export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(
 // Covers LF, bare CR (and CRLF), and U+2028 / U+2029 line/paragraph separators.
 const cell = (v) => String(v ?? '').replace(/[\r\n\u2028\u2029]+/gu, ' ')
 
-export function formatTable(rows, columns) {
+// Split a value into the physical lines a cell occupies. Non-multiline columns
+// collapse every line break to a space via `cell` (one line). A column named in
+// `multiline` (the `--why` reason column) keeps intentional `\n` breaks -- one
+// physical line per entry -- while still flattening stray CR/separators in each.
+const cellLines = (v, multiline) =>
+  multiline ? String(v ?? '').split('\n').map((s) => cell(s)) : [cell(v)]
+
+export function formatTable(rows, columns, { multiline = [] } = {}) {
   if (rows.length === 0) return ''
-  const widths = columns.map((c) => Math.max(c.length, ...rows.map((r) => cell(r[c]).length)))
+  const ml = new Set(multiline)
+  const linesOf = (obj) => columns.map((c) => cellLines(obj[c], ml.has(c)))
+  const header = columns.map((c) => [c])
+  const body = rows.map((r) => linesOf(r))
+  const widths = columns.map((c, i) =>
+    Math.max(c.length, ...body.map((cells) => Math.max(0, ...cells[i].map((l) => l.length))))
+  )
   const pad = (s, w) => s.padEnd(w)
   const line = (l, m, r, fill) => l + widths.map((w) => fill.repeat(w + 2)).join(m) + r
-  const row = (vals) => '│ ' + vals.map((v, i) => pad(cell(v), widths[i])).join(' │ ') + ' │'
+  // A row spans as many physical lines as its tallest cell; shorter cells pad
+  // out with blanks so the borders stay aligned.
+  const render = (cells) => {
+    const height = Math.max(...cells.map((c) => c.length))
+    const out = []
+    for (let i = 0; i < height; i++) {
+      out.push('│ ' + cells.map((c, j) => pad(c[i] ?? '', widths[j])).join(' │ ') + ' │')
+    }
+    return out.join('\n')
+  }
   return [
     line('┌', '┬', '┐', '─'),
-    row(columns),
+    render(header),
     line('├', '┼', '┤', '─'),
-    ...rows.map((r) => row(columns.map((c) => r[c]))),
+    ...body.map(render),
     line('└', '┴', '┘', '─'),
   ].join('\n')
 }
 
-export async function audit(files) {
+export async function audit(files, { why = false } = {}) {
   const packages = collectPackages(files)
   if (packages.length === 0) {
-    return { packages, advisories: {}, rows: [] }
+    return { packages, advisories: {}, rows: [], why }
   }
   const result = await advisories(packages)
-  const reasons = collectReasons(files)
-  const rows = flattenAdvisories(result, packages, reasons)
-  return { packages, advisories: result, rows }
+  // `--why` REPLACES the consumer list with per-consumer import paths, so only
+  // one of the two is computed. Restrict the (potentially expensive) path search
+  // to the packages that actually carry an advisory.
+  let rows
+  if (why) {
+    const vulnerable = new Set(
+      Object.entries(result).filter(([, v]) => Array.isArray(v) && v.length > 0).map(([name]) => name)
+    )
+    const targetKeys = new Set(
+      packages.filter((p) => vulnerable.has(p.name)).map((p) => `${p.name}@${p.version}`)
+    )
+    rows = flattenAdvisories(result, packages, undefined, collectWhy(files, targetKeys))
+  } else {
+    rows = flattenAdvisories(result, packages, collectReasons(files))
+  }
+  return { packages, advisories: result, rows, why }
 }
 
-export function printAuditReport({ packages, rows }, { out = process.stdout, err = process.stderr } = {}) {
+export function printAuditReport({ packages, rows, why = false }, { out = process.stdout, err = process.stderr } = {}) {
   err.write(`Scanned ${packages.length} package${packages.length === 1 ? '' : 's'}\n`)
   if (packages.length === 0) {
     err.write('No node_modules entries found in the input files\n')
@@ -150,8 +197,11 @@ export function printAuditReport({ packages, rows }, { out = process.stdout, err
     return
   }
   const columns = ['severity', 'package', 'installed', 'vulnerable', 'title', 'url']
-  // Surface the reason column only when at least one advisory maps to a bundle
-  // consumer; lockfiles (and single-consumer bundles) carry no reason provenance.
+  // Surface the reason column only when at least one advisory has provenance:
+  // the bundle consumers that recorded it, or (with --why) the import paths that
+  // reach it. Lockfiles / single-consumer bundles without either leave it off.
   if (rows.some((r) => r.reason)) columns.splice(3, 0, 'reason')
-  out.write(formatTable(rows, columns) + '\n')
+  // Under --why the reason cell is a list of `consumer: path` lines; let it span
+  // multiple physical rows instead of collapsing to one.
+  out.write(formatTable(rows, columns, { multiline: why ? ['reason'] : [] }) + '\n')
 }

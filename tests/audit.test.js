@@ -274,6 +274,38 @@ test('flattenAdvisories leaves reason empty when a package has none', (t) => {
   t.assert.equal(rows[0].reason, '')
 })
 
+test('flattenAdvisories uses the --why paths (newline-joined) as the reason cell', (t) => {
+  const packages = [{ name: 'foo', version: '1.0.0' }]
+  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
+  const why = new Map([['foo@1.0.0', new Set(['run: a -> foo', 'StasisWebpack: b -> foo'])]])
+  const rows = flattenAdvisories(result, packages, undefined, why)
+  // The why map wins over the (absent) consumer list, and lines are newline-joined.
+  t.assert.equal(rows[0].reason, 'run: a -> foo\nStasisWebpack: b -> foo')
+})
+
+test('formatTable renders a multiline cell across physical rows', (t) => {
+  const out = formatTable([{ a: 'x', b: 'l1\nl2' }], ['a', 'b'], { multiline: ['b'] })
+  const lines = out.split('\n')
+  // top border + header + separator + 2 body lines + bottom border
+  t.assert.equal(lines.length, 6)
+  t.assert.match(lines[3], /│ x +│ l1 +│/u)
+  t.assert.match(lines[4], /│ +│ l2 +│/u) // the 'a' cell is blank on the continuation row
+})
+
+test('printAuditReport renders the --why reason column across multiple lines', (t) => {
+  const out = []
+  printAuditReport(
+    {
+      why: true,
+      packages: [{ name: 'foo', version: '1.0.0' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '*', title: 't', url: 'u', reason: 'run: a -> foo\nrun: b -> foo' }],
+    },
+    { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
+  )
+  const text = stripVTControlCharacters(out.join(''))
+  t.assert.equal(text.split('\n').filter((l) => l.includes('-> foo')).length, 2)
+})
+
 test('printAuditReport shows a reason column when a row has reasons', (t) => {
   const out = []
   printAuditReport(
@@ -354,6 +386,18 @@ test('audit rejects unknown file shape', withTmp((t, tmp) => {
   t.assert.match(r.stderr, /Failed to parse stasis lockfile/)
 }))
 
+test('audit rejects an unknown flag', (t) => {
+  const r = runCli(['audit', '--nope'])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /Error:/)
+})
+
+test('audit --why with no files prints usage', (t) => {
+  const r = runCli(['audit', '--why'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /Nothing to audit/)
+})
+
 const withFetch = (impl, fn) => async (t) => {
   const original = globalThis.fetch
   const calls = []
@@ -430,6 +474,45 @@ test('audit() attaches bundle reasons to advisory rows', withFetch(
       const report = await audit([bundle])
       const foo = report.rows.find((r) => r.package === 'foo')
       t.assert.equal(foo.reason, 'StasisWebpack, run')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+))
+
+test('audit(--why) replaces the reason cell with per-consumer import paths', withFetch(
+  () => new Response(JSON.stringify({
+    foo: [{ id: 1, severity: 'high', title: 'bug', url: 'https://x', vulnerable_versions: '*' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const path = join(tmp, 'stasis.code.br')
+      writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify({
+        version: 1,
+        config: { scope: 'full' },
+        entries: ['src/entry.js'],
+        sources: { '.': { name: 'top', version: '1.0.0', files: { 'src/entry.js': '// e\n' } } },
+        modules: {
+          'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// foo\n' } },
+          'node_modules/dep': { name: 'dep', version: '1.0.0', files: { 'index.js': '// dep\n' } },
+        },
+        formats: {},
+        imports: {
+          '*': {
+            'src/entry.js': { dep: 'node_modules/dep/index.js' },
+            'node_modules/dep/index.js': { foo: 'node_modules/foo/index.js' },
+          },
+        },
+        reason: {
+          run: ['src/entry.js', 'node_modules/dep/index.js', 'node_modules/foo/index.js'],
+          StasisWebpack: ['src/entry.js', 'node_modules/dep/index.js', 'node_modules/foo/index.js'],
+        },
+      }))))
+      const report = await audit([path], { why: true })
+      t.assert.equal(report.why, true)
+      const foo = report.rows.find((r) => r.package === 'foo')
+      t.assert.equal(foo.reason, 'run: dep -> foo\nStasisWebpack: dep -> foo')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }

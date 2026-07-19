@@ -37,7 +37,9 @@ function usage(prefix = '') {
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
- stasis audit path/to/file ...
+ stasis audit [--why] path/to/file ...
+ (--why lists, per advisory, the cross-module import paths that pull the package in,
+  prefixed by the bundle consumer that imports each chain at the top level, e.g. "run: a -> b -> c")
  stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
  (streams to stdout by default; --output=- is explicit stdout)
 `.trim())
@@ -434,10 +436,18 @@ if (command === '-v' || command === '--version') {
   const { removed, validated } = prune({ root })
   console.warn(`[stasis] prune: validated ${validated.length} file(s), removed ${removed.length} file(s)`)
 } else if (command === 'audit') {
+  const flags = []
+  while (argv.length > 0 && argv[0].startsWith('-')) flags.push(argv.shift())
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options: { why: { type: 'boolean' } } }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
   if (argv.length === 0) usage('Nothing to audit: no path to file given')
   const { audit, printAuditReport } = await import('../src/audit.js')
   const files = argv.map((f) => resolve(f))
-  const report = await audit(files)
+  const report = await audit(files, { why: Boolean(values.why) })
   printAuditReport(report)
   process.exitCode = report.rows.length === 0 ? 0 : 1
 } else if (command === 'sbom') {
