@@ -139,6 +139,29 @@ test('addCommand is additive across runs (merges into each split bundle)', withT
   t.assert.deepEqual(Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(), ['src/icon.svg', 'src/logo.png'])
 }))
 
+test('addCommand expands a directory entry to the files under it (recursive glob)', withTmp(async (t, tmp) => {
+  seed(tmp)
+  rmSync(join(tmp, 'src', 'data.txt')) // undeclared -- would be refused if swept in
+  mkdirSync(join(tmp, 'src', 'nested'), { recursive: true }) // prove the glob recurses
+  writeFileSync(join(tmp, 'src', 'nested', 'c.mjs'), 'export const c = 3\n')
+  addCommand({ cwd: tmp, entries: ['src'] })
+
+  // Every file under src/ is classified and split, at any depth.
+  t.assert.deepEqual(
+    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
+    ['src/a.js', 'src/b.cjs', 'src/nested/c.mjs'],
+  )
+  t.assert.deepEqual(
+    Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(),
+    ['src/icon.svg', 'src/logo.png'],
+  )
+}))
+
+test('addCommand refuses an undeclared file swept in by a directory entry', withTmp(async (t, tmp) => {
+  seed(tmp) // src/data.txt is present and .txt is not declared
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src'] }), /src\/data\.txt is neither a recognized source file nor a declared resource/)
+}))
+
 test('addCommand buckets a node_modules file into its own npm package bucket', withTmp(async (t, tmp) => {
   seed(tmp)
   addCommand({ cwd: tmp, entries: ['src/a.js', 'node_modules/dep/index.js'] })
@@ -179,12 +202,24 @@ test('addCommand rejects a config whose two split targets resolve to the same fi
   t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/a.js'] }), /must name distinct paths/)
 }))
 
-test('addCommand requires resourcesBundleFile to add a resource, bundleFile to add source', withTmp(async (t, tmp) => {
-  seed(tmp, { bundleFile: 'dist/code.br', resources: ['svg'] }) // no resourcesBundleFile
-  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/icon.svg'] }), /must set "resourcesBundleFile"/)
+test('addCommand defaults a missing bundleFile to stasis.code.br', withTmp(async (t, tmp) => {
+  seed(tmp, { resources: ['svg'] }) // config present, but no bundleFile / resourcesBundleFile
+  addCommand({ cwd: tmp, entries: ['src/a.js'] })
+  const code = decode(join(tmp, 'stasis.code.br'))
+  t.assert.deepEqual(Object.keys(code.modules.get('.').files), ['src/a.js'])
+  t.assert.equal(code.formats.get('src/a.js'), 'module')
+}))
 
-  seed(tmp, { resourcesBundleFile: 'dist/res.br', resources: ['svg'] }) // no bundleFile
-  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/a.js'] }), /must set "bundleFile"/)
+test('addCommand without a resourcesBundleFile writes resources into bundleFile (non-split)', withTmp(async (t, tmp) => {
+  seed(tmp, { bundleFile: 'dist/code.br', resources: ['svg', 'png'] }) // no resourcesBundleFile
+  addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg', 'src/logo.png'] })
+  t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'no separate resources bundle in non-split mode')
+  // Code and declared resources coexist in the one bundle; code is an entry, resources are not.
+  const bundle = decode(join(tmp, 'dist/code.br'))
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/a.js', 'src/icon.svg', 'src/logo.png'])
+  t.assert.deepEqual([...bundle.entries].toSorted(), ['src/a.js'])
+  t.assert.equal(bundle.formats.get('src/icon.svg'), 'resource')
+  t.assert.equal(bundle.formats.get('src/logo.png'), 'resource:base64')
 }))
 
 test('addCommand rejects a missing file, an escaping path, and a symlink escaping the root', withTmp(async (t, tmp) => {
@@ -211,6 +246,17 @@ test('CLI (stasis-core): add splits into the configured bundles', withTmp(async 
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stderr, /\[stasis-core\] add: \+1 source \(1 total\) -> dist\/code\.br; \+1 resource \(1 total\) -> dist\/res\.br/)
   t.assert.ok(existsSync(join(tmp, 'dist/code.br')) && existsSync(join(tmp, 'dist/res.br')))
+}))
+
+test('CLI (stasis-core): add expands a directory argument', withTmp(async (t, tmp) => {
+  seed(tmp)
+  rmSync(join(tmp, 'src', 'data.txt'))
+  const r = runCli(coreCli, ['add', 'src'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.deepEqual(
+    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
+    ['src/a.js', 'src/b.cjs'],
+  )
 }))
 
 test('CLI (stasis-core): add with no file, an option, or no config errors', withTmp(async (t, tmp) => {

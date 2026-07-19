@@ -22,11 +22,13 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
- stasis-core add path/to/file ...
- (adds the listed files to the project's split bundles -- no dependency resolution or graph walk.
-  Requires a stasis.config.json declaring bundleFile (code target), resourcesBundleFile (resource
-  target), and the resources allowlist; each source file is added to bundleFile, each declared
-  resource to resourcesBundleFile, and anything else is refused.)
+ stasis-core add path/to/(file|dir) ...
+ (adds the listed files -- a directory expands to the files under it -- to the project's bundle(s),
+  with no dependency resolution or graph walk. Requires a stasis.config.json, but its fields are
+  optional: bundleFile defaults to stasis.code.br; with a resourcesBundleFile, declared resources
+  split into it, else they go into bundleFile; the resources allowlist defaults to none. Source
+  files go to bundleFile, declared resources per the split, and undeclared non-source files are
+  refused.)
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)

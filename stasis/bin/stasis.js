@@ -31,10 +31,12 @@ function usage(prefix = '') {
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
   --add merges into an existing bundle instead of replacing it (not with --output=-);
   --brotli-quality=0..11 tunes bundle compression for any entry language, default 9)
- stasis add path/to/file ...
- (adds the listed files to the project's split bundles with no dependency resolution -- requires a
-  stasis.config.json declaring bundleFile (code), resourcesBundleFile (resources), and the resources
-  allowlist; source files go to bundleFile, declared resources to resourcesBundleFile, else refused)
+ stasis add path/to/(file|dir) ...
+ (adds the listed files -- a directory expands to the files under it -- to the project's bundle(s)
+  with no dependency resolution; requires a stasis.config.json but its fields are optional:
+  bundleFile defaults to stasis.code.br, a resourcesBundleFile splits declared resources out (else
+  they go into bundleFile), the resources allowlist defaults to none; undeclared non-source files
+  are refused)
  stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
