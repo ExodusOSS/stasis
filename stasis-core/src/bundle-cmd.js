@@ -7,7 +7,7 @@ import { Bundle } from './bundle.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath } from './state-util.js'
-import { assertRealPathWithinBase, isBrotliQuality, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, isBrotliQuality, nativeSourceFormat, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 
@@ -38,7 +38,12 @@ function sourceFormat(absFile) {
   const fixed = FIXED_FORMATS.get(ext)
   if (fixed) return fixed
   if (ext === '.js' || ext === '.ts') return `${packageType(absFile) ?? 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
-  return null
+  // Native build inputs (podspec/gradle/Swift/ObjC/Java/Kotlin/Podfile/gradlew/env/AASA/...):
+  // the same name-based classifier the Metro capture uses, so `stasis add` tags them the same
+  // way the packager would. Unlike the packager, `add` attests exactly the files it's handed --
+  // no node_modules deep-walk, no IDE-metadata exclusion -- so it can pick up files (e.g. inside
+  // `.xcodeproj`) the packager skips.
+  return nativeSourceFormat(absFile) ?? null
 }
 
 // Total file count + non-empty-package count from a bundle's module buckets, in one pass --

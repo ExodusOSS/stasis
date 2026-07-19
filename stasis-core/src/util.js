@@ -269,13 +269,26 @@ export function isExcludedNativeDir(name, { win32 = process.platform === 'win32'
   return !win32 && name === 'windows'
 }
 
+// The format tag for a native build-input file by NAME alone (exact basename, then extension),
+// or undefined when it isn't a recognized native build input. This is the SINGLE source of
+// truth for "what format is this native file", shared so every attestation path agrees on a
+// given file's tag no matter how it's captured: the Metro native capture (classifyNativeCapture)
+// and `stasis add` (bundle-cmd's sourceFormat) both consult it. It decides FORMAT only, never
+// capture-vs-skip -- that's each caller's concern (the packager excludes IDE metadata /
+// node_modules noise; `stasis add` attests exactly the files it's handed).
+//   - package.json and JSON podspecs (`*.podspec.json`) -> 'json' (a Node loader format)
+//   - Ruby podspecs, Podfile(.lock), CMakeLists.txt, gradlew, Appfile/Fastfile, AASA, and the
+//     per-language native source -> their own source tag (NATIVE_CODE_FILENAMES / FORMATS)
+export function nativeSourceFormat(name) {
+  const base = basename(name).toLowerCase()
+  if (base === 'package.json' || base.endsWith('.podspec.json')) return 'json'
+  return NATIVE_CODE_FILENAMES.get(base) ?? NATIVE_CODE_FORMATS.get(pathExt(name))
+}
+
 // The SINGLE decision for how the Metro native capture -- the StasisMetro plugin AND
 // `stasis bundle --metro` -- records one build-input file `name`, so the capture sites can't
 // drift. Returns `{ action, format }`:
-//   - action 'code' + a format tag: a native build input that rides the CODE bundle.
-//     package.json and JSON podspecs (`*.podspec.json`) are code 'json' (a Node loader
-//     format); Ruby podspecs, Podfile(.lock), CMakeLists.txt, and the per-language native
-//     source carry their own source tag.
+//   - action 'code' + a format tag (nativeSourceFormat): a native build input for the CODE bundle.
 //   - action 'skip': Node-runnable JS/TS captured via Metro's module graph, not here
 //     (reachable JS is in the graph; unused JS is neither a native input nor reachable).
 //   - action 'resource': any other file -- an asset payload (State derives 'resource' vs
@@ -285,10 +298,7 @@ export function isExcludedNativeDir(name, { win32 = process.platform === 'win32'
 // files (isExcludedNativeFile) return action 'skip' -- they aren't build inputs.
 export function classifyNativeCapture(name, { win32 = process.platform === 'win32' } = {}) {
   if (isExcludedNativeFile(name, { win32 })) return { action: 'skip' }
-  const base = basename(name).toLowerCase()
-  // package.json and JSON podspecs are JSON build inputs -> Node 'json' loader format.
-  if (base === 'package.json' || base.endsWith('.podspec.json')) return { action: 'code', format: 'json' }
-  const format = NATIVE_CODE_FILENAMES.get(base) ?? NATIVE_CODE_FORMATS.get(pathExt(name))
+  const format = nativeSourceFormat(name)
   if (format !== undefined) return { action: 'code', format }
   if (CODE_EXTENSIONS.has(pathExt(name))) return { action: 'skip' }
   return { action: 'resource' }

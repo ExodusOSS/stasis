@@ -95,6 +95,42 @@ test('addCommand classifies Xcode project-bundle inputs the Metro packager exclu
   t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'both are code -> no resources bundle written')
 }))
 
+test('addCommand classifies the native build-input vocabulary as code (shared with the Metro capture)', withTmp(async (t, tmp) => {
+  // `stasis add` recognizes the same native formats the packager does (via nativeSourceFormat),
+  // so a user can attest a native file by hand and get the right tag -- no `resources` allowlist
+  // needed. Unlike the packager, `add` has no deep-walk/exclusion; it attests what it's handed.
+  seed(tmp)
+  mkdirSync(join(tmp, 'ios'), { recursive: true })
+  mkdirSync(join(tmp, 'android'), { recursive: true })
+  writeFileSync(join(tmp, 'ios', 'RNThing.podspec'), 'Pod::Spec.new {}\n')
+  writeFileSync(join(tmp, 'ios', 'RNThing.swift'), 'import Foundation\n')
+  writeFileSync(join(tmp, 'ios', 'RNThing.mm'), '@implementation X @end\n')
+  writeFileSync(join(tmp, 'ios', 'Podfile'), "pod 'X'\n")
+  writeFileSync(join(tmp, 'android', 'build.gradle'), 'apply plugin: "x"\n')
+  writeFileSync(join(tmp, 'android', 'AndroidManifest.xml'), '<manifest/>\n')
+  writeFileSync(join(tmp, 'gradlew'), '#!/usr/bin/env sh\nexec gradle "$@"\n')
+  writeFileSync(join(tmp, '.env'), 'API_URL=x\n')
+  writeFileSync(join(tmp, 'apple-app-site-association'), '{ "applinks": {} }\n')
+
+  const entries = ['ios/RNThing.podspec', 'ios/RNThing.swift', 'ios/RNThing.mm', 'ios/Podfile',
+    'android/build.gradle', 'android/AndroidManifest.xml', 'gradlew', '.env', 'apple-app-site-association']
+  addCommand({ cwd: tmp, entries })
+
+  const code = decode(join(tmp, 'dist/code.br'))
+  const fmt = (rel) => code.formats.get(rel)
+  t.assert.equal(fmt('ios/RNThing.podspec'), 'podspec')
+  t.assert.equal(fmt('ios/RNThing.swift'), 'swift')
+  t.assert.equal(fmt('ios/RNThing.mm'), 'objcpp')
+  t.assert.equal(fmt('ios/Podfile'), 'podfile')
+  t.assert.equal(fmt('android/build.gradle'), 'gradle')
+  t.assert.equal(fmt('android/AndroidManifest.xml'), 'xml')
+  t.assert.equal(fmt('gradlew'), 'shell')
+  t.assert.equal(fmt('.env'), 'env')
+  t.assert.equal(fmt('apple-app-site-association'), 'json')
+  // All are code -> all entries, none in a resources bundle.
+  t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'native build inputs are code, not resources')
+}))
+
 test('addCommand is additive across runs (merges into each split bundle)', withTmp(async (t, tmp) => {
   seed(tmp)
   addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })
