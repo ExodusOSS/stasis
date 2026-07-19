@@ -197,6 +197,9 @@ export class State {
           }
           this.formats = bundle.formats
           this.imports = bundle.imports
+          // Carry `reason` forward like #absorbCodeBundle (this inlined sidecar absorb is its twin), else
+          // a plugin writing its own bundleFile drops every other consumer's attribution on a bundle=add re-run.
+          this.#seedReasonFromBundle(bundle)
           if (this.config.frozenBundle) {
             // Snapshot the attested set so addFile/addImport reject anything the bundle didn't carry.
             this.#bundleSources = new Set(this.sources.keys())
@@ -1402,6 +1405,7 @@ export class State {
 
   // Seed `reason` provenance from an absorbed on-disk bundle so a bundle=add re-run preserves other
   // consumers' attribution (else #bundleReason would rebuild from this run alone and drop it). Write-mode only.
+  // Called from every absorb site -- #absorbCodeBundle/#absorbResourcesBundle AND the sidecar's inlined absorb.
   #seedReasonFromBundle(bundle) {
     if (!this.config.writeBundle || bundle.reason === undefined) return
     for (const [consumer, files] of Object.entries(bundle.reason)) {
