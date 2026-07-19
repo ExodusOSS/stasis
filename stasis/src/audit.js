@@ -188,10 +188,10 @@ export async function audit(files, { why = false, reason = null } = {}) {
   } else {
     rows = flattenAdvisories(result, packages, collectReasons(files), null, reason)
   }
-  return { packages, advisories: result, rows, why }
+  return { packages, advisories: result, rows, why, reason }
 }
 
-export function printAuditReport({ packages, rows, why = false }, { out = process.stdout, err = process.stderr } = {}) {
+export function printAuditReport({ packages, rows, why = false, reason = null }, { out = process.stdout, err = process.stderr } = {}) {
   err.write(`Scanned ${packages.length} package${packages.length === 1 ? '' : 's'}\n`)
   if (packages.length === 0) {
     err.write('No node_modules entries found in the input files\n')
@@ -202,8 +202,11 @@ export function printAuditReport({ packages, rows, why = false }, { out = proces
     return
   }
   const columns = ['severity', 'package', 'installed', 'vulnerable', 'title', 'url']
-  // Surface the reason column only when some advisory has provenance -- bundle consumers, or (with --why) import paths.
-  if (rows.some((r) => r.reason)) columns.splice(3, 0, 'reason')
+  // Surface the reason column only when some advisory has provenance -- bundle
+  // consumers, or (with --why) import paths. Under --reason WITHOUT --why every
+  // cell is just the filter value repeated, so drop the column then; --why still
+  // earns it (the import chains differ per row).
+  if (rows.some((r) => r.reason) && !(reason && !why)) columns.splice(3, 0, 'reason')
   // Under --why the reason cell is a list of `consumer: path` lines; let it span
   // multiple physical rows instead of collapsing to one.
   out.write(formatTable(rows, columns, { multiline: why ? ['reason'] : [] }) + '\n')
