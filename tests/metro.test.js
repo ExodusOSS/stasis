@@ -1027,12 +1027,13 @@ test('native modules: config discovers native deps; native sources attested, unu
   for (const f of ['ReactCommon/yoga/CMakeLists.txt', 'ReactCommon/yoga/yoga/Yoga.cpp', 'ReactCommon/yoga/cmake/yoga.cmake', 'scripts/react_native_pods.rb', 'scripts/react-native-xcode.sh', 'sdks/.hermesversion']) {
     t.assert.ok(core.files[f]?.startsWith('sha512-'), `expected core include ${f} to be captured`)
   }
-  // C++ source, the CocoaPods Ruby script, and CMake files are code; the shell script stays a resource.
+  // C++ source, the CocoaPods Ruby script, CMake files, and the shell script are all code, each
+  // under its own tag from the ONE shared classifier (a .sh is 'shell', like gradlew).
   t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/yoga/Yoga.cpp'], 'cpp')
   t.assert.equal(lock.formats['node_modules/react-native/scripts/react_native_pods.rb'], 'ruby')
   t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'], 'cmake') // matched by basename
   t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/cmake/yoga.cmake'], 'cmake')
-  t.assert.equal(lock.formats['node_modules/react-native/scripts/react-native-xcode.sh'], 'resource') // a .sh script stays a resource
+  t.assert.equal(lock.formats['node_modules/react-native/scripts/react-native-xcode.sh'], 'shell') // a .sh script is shell code (unified vocab)
   // ...but NOT core's JS, native source outside the include dirs, or prebuilt binaries.
   t.assert.equal(core.files['index.js'], undefined, 'core JS is not captured')
   t.assert.equal(core.files['scripts/build.js'], undefined, 'a code file inside an include dir is still skipped')

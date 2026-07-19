@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire, isBuiltin } from 'node:module'
 import assert from 'node:assert/strict'
 import { packageType } from '@exodus/stasis-core/bundle-util'
+import { classifyFormat } from '@exodus/stasis-core/util'
 
 // Static require/import graph walker. Reads source files and parses them; never
 // loads or executes any user code. Resolves specifiers through Node's own
@@ -28,23 +29,21 @@ function getParser() {
   return _parser
 }
 
-// Format per Node's own rules. TypeScript files get Node's type-stripping
-// formats ('module-typescript' / 'commonjs-typescript'), matching what Node's
-// load hook reports for them. For .js/.ts the module system comes from the
-// nearest package.json `type`; when that's absent (or unrecognized), Node
-// falls back to module-syntax detection, which requires the parse — null
-// signals "detect from syntax" to the caller.
+// Format per Node's own rules, via classifyFormat -- the ONE name->format authority, shared with
+// the runtime capture so a static bundle and a runtime one agree on every file's format.
+// classifyFormat fixes the extension-determined Node formats (.mjs/.cjs/.json/.mts/.cts) and
+// returns null for the JS-family whose module system is NOT fixed by extension (.js/.ts): that
+// comes from the nearest package.json `type`, and when it's absent (or unrecognized) Node falls
+// back to module-syntax detection, which requires the parse -- null is signaled up to mean "detect
+// from syntax". TypeScript files get Node's type-stripping formats, matching the load hook. (scan
+// only ever reaches JS/TS files -- RESOLVABLE_EXTS -- so a native/source-language format never
+// comes back here.)
 function formatForFile(file) {
-  const ext = extname(file)
-  if (ext === '.mjs') return 'module'
-  if (ext === '.cjs') return 'commonjs'
-  if (ext === '.json') return 'json'
-  if (ext === '.mts') return 'module-typescript'
-  if (ext === '.cts') return 'commonjs-typescript'
+  const format = classifyFormat(file)
+  if (format != null) return format
   const type = packageType(file)
   if (type === null) return null
-  const suffix = ext === '.ts' ? '-typescript' : ''
-  return `${type}${suffix}`
+  return `${type}${extname(file) === '.ts' ? '-typescript' : ''}`
 }
 
 function literalSpec(node) {

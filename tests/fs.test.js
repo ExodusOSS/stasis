@@ -102,6 +102,44 @@ test('addFsFile records a .jsx fs-read as code, never a resource', withProject((
   t.assert.match(state.hashes.get('comp.jsx'), /^sha512-/)
 }))
 
+test('addFsFile follows the full classifyFormat vocabulary: a native/source file is code, no allowlist', withProject((t, dir) => {
+  // `--fs` classifies WIDER than the JS-graph bundlers: it follows classifyFormat's full
+  // vocabulary, so an fs-read of a native build input / source-language file is captured as CODE
+  // under its own format -- no `resources` entry required (that's the "--fs follows that
+  // classifier" unification). No allowlist is configured here.
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  writeFileSync(join(dir, 'Native.swift'), 'import Foundation\n')
+  writeFileSync(join(dir, 'Token.sol'), '// SPDX\npragma solidity ^0.8.0;\n')
+  writeFileSync(join(dir, 'AndroidManifest.xml'), '<manifest/>\n')
+  state.addFsFile(fileURL(dir, 'Native.swift'), Buffer.from('import Foundation\n'))
+  state.addFsFile(fileURL(dir, 'Token.sol'), Buffer.from('// SPDX\npragma solidity ^0.8.0;\n'))
+  state.addFsFile(fileURL(dir, 'AndroidManifest.xml'), Buffer.from('<manifest/>\n'))
+  t.assert.equal(state.formats.get('Native.swift'), 'swift')
+  t.assert.equal(state.formats.get('Token.sol'), 'solidity')
+  t.assert.equal(state.formats.get('AndroidManifest.xml'), 'xml')
+  t.assert.equal(state.sources.get('Native.swift'), 'import Foundation\n')
+  t.assert.equal(state.resources.has('Native.swift'), false, 'a code file is never a resource')
+}))
+
+test('addFsFile recognizes an extensionless shell shebang as shell code (content-based)', withProject((t, dir) => {
+  // The "content for no-extension bash" arm of classifyFormat: an extensionless file whose first
+  // line is a POSIX shell shebang is 'shell' code, not an undeclared resource. A non-shell
+  // interpreter (or no shebang) still falls through to the resources allowlist / throw.
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  const wrapper = '#!/usr/bin/env bash\nexec gradle "$@"\n'
+  writeFileSync(join(dir, 'run-tool'), wrapper)
+  state.addFsFile(fileURL(dir, 'run-tool'), Buffer.from(wrapper))
+  t.assert.equal(state.formats.get('run-tool'), 'shell')
+  t.assert.equal(state.sources.get('run-tool'), wrapper)
+
+  // An extensionless file with no shell shebang is still undeclared -> throws (fail-closed).
+  writeFileSync(join(dir, 'NOTES'), 'just prose\n')
+  t.assert.throws(
+    () => state.addFsFile(fileURL(dir, 'NOTES'), Buffer.from('just prose\n')),
+    /neither code nor a declared resource/
+  )
+}))
+
 test('addFsDir stores a sorted JSON listing as a directory payload, integrity over the JSON', withProject((t, dir) => {
   const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
 

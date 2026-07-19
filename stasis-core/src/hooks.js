@@ -8,6 +8,13 @@ import assert from 'node:assert/strict'
 
 import { State } from './state.js'
 import { installFsHooks } from './fs.js'
+import {
+  NATIVE_BUILD_FORMATS as NATIVE_SOURCE_FORMATS,
+  NODE_FORMATS as NODEJS_FORMATS,
+  RESOURCE_FORMATS,
+  SOURCE_LANGUAGE_FORMATS as NON_NODE_SOURCE_LANGUAGES,
+  STAT_FORMATS,
+} from './util.js'
 
 // Snapshot off the namespace so `--fs` (which patches fs.readFileSync and then
 // syncBuiltinESMExports()s for user code) can't redirect the read the CJS-source
@@ -18,27 +25,17 @@ const { mkdtempSync, opendirSync, readFileSync, renameSync, rmSync, statSync, wr
 
 // Warning: only covers code imports, not file reads
 
-// Formats Node's module loader recognizes (and either executes, like `module`/
-// `commonjs`/typescript variants, or imports as data, like `json`). The runtime
-// loader treats this as the trust boundary -- a file served from the bundle whose
-// attested format is outside this allowlist is refused at load time (and earlier
-// at resolve, where applicable) with a contextual message. Adding a tag here
-// means "Node can handle it"; everything else (resource/asset content,
-// source-language bundles, an unknown string from a tampered or newer bundle)
-// fails closed.
-const NODEJS_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript'])
+// The format-category trust partition is imported from util.js (the single partition of
+// KNOWN_FORMATS -- see above), under the loader's historical local names. NODEJS_FORMATS
+// (util's NODE_FORMATS) is the trust boundary: a file served from the bundle whose attested
+// format is outside it is refused at load time (and earlier at resolve, where applicable) with a
+// contextual message -- everything else (resource/asset content, source-language + native
+// build-input bundles, an unknown string from a tampered or newer bundle) fails closed. The other
+// sets (NON_NODE_SOURCE_LANGUAGES, NATIVE_SOURCE_FORMATS, RESOURCE_FORMATS, STAT_FORMATS) only
+// shape the per-kind UX message in refuseNonNodeFormat.
 
-// Per-kind messages for the few categories we recognize; everything else gets a
-// generic "unrecognized format" message. Kept separate from NODEJS_FORMATS so
-// the allowlist stays the single trust gate and the message is just UX.
-const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'shell', 'rust'])
-// Native build-input source the Metro capture attests for the CocoaPods/Gradle toolchain
-// (prune keeps them, frozen verifies them) -- code, but never executable by Node.
-const NATIVE_SOURCE_FORMATS = new Set(['java', 'kotlin', 'gradle', 'objc', 'objcpp', 'swift', 'c', 'cpp', 'c-header', 'cpp-header', 'ruby', 'cmake', 'podspec', 'podfile', 'podfile-lock', 'template', 'xml', 'env', 'fastlane', 'pbxproj'])
-const RESOURCE_FORMATS = new Set(['resource', 'resource:base64'])
-const STAT_FORMATS = new Set(['stat:file', 'stat:directory'])
-// The executable CommonJS formats (plain CJS + TS-CJS). Named like the sets above so
-// "which formats are CJS" lives in one place; the require-repair below keys off it.
+// The executable CommonJS formats (plain CJS + TS-CJS). Kept local -- a sub-partition of
+// NODEJS_FORMATS the require-repair below keys off.
 const CJS_FORMATS = new Set(['commonjs', 'commonjs-typescript'])
 
 function refuseNonNodeFormat(format, url) {

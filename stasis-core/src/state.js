@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyExtension, fileMapToObject, isStatFormat, moduleFileKey, objectToMaps, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, isStatFormat, moduleFileKey, objectToMaps, pathExt, sortPaths, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Object-destructure off the namespace rather than `import { ... } from 'node:fs'`:
@@ -1344,41 +1344,41 @@ export class State {
     if (format) noupsert(this.formats, file, format)
   }
 
-  // Record an `fs.readFileSync` capture (`stasis run --fs`, capture side). `source` is
-  // the raw bytes (a Buffer). Classification is the SAME classifyExtension the bundler
-  // plugins use (against this.config.resources), so the two capture paths can't disagree:
-  //  - 'code' (any CODE_EXTENSIONS file) → addFile infers the Node loader format from the
-  //    extension. .js/.ts defer it (inferFormat:false): module-vs-commonjs is Node's
-  //    syntax-detection call, the loader is the authority, and forcing a default here
-  //    would collide (noupsert) with the loader's record when a file is both imported and
-  //    fs-read. .jsx/.tsx are code but have no Node loader format, so none is imposed.
-  //    addFile asserts the bytes are UTF-8 -- a non-UTF-8 code file is malformed input,
-  //    refused there rather than silently re-tagged as a resource.
-  //  - 'resource' (an extension in the resources allowlist) → a 'resource'/'resource:base64'
-  //    payload, encoding chosen from the bytes.
-  //  - 'unknown' (neither code nor an allowlisted resource) → THROW. Recording it as a
-  //    resource would silently widen the attested set (the exact desync this guards); the
-  //    --fs hook catches the throw, warns, and writes nothing. Declare the extension in
-  //    `resources` (the --resources flag / EXODUS_STASIS_RESOURCES / a plugin's resources
-  //    option) or stop reading it.
-  // Routing through addFile means a file that is BOTH imported and fs-read lands in one
-  // consistent, deduped entry, hashed and bucketed exactly like every other file.
+  // Record an `fs.readFileSync` capture (`stasis run --fs`, capture side). `source` is the raw
+  // bytes (a Buffer). Classification FOLLOWS classifyFormat's full vocabulary -- the single
+  // name->format authority -- so `--fs` attests exactly what the classifier recognizes, WIDER than
+  // the JS-graph bundlers' classifyExtension: a native/source-language file it reads is code, no
+  // resources allowlist entry required.
+  //  - a concrete code format (mjs/cjs/json/*-ts, a source language like solidity/shell, or a
+  //    native build input like swift/podspec/xml) → recorded as code under that format. addFile
+  //    asserts the bytes are UTF-8 -- a non-UTF-8 code file is malformed input, refused there
+  //    rather than silently re-tagged as a resource.
+  //  - `null` (a JS-family file: .js/.ts by package `type`/syntax, .jsx/.tsx none) → recorded as
+  //    code with NO format imposed, so the loader stays the authority when the file is also
+  //    imported (forcing a default here would collide at noupsert with the loader's record).
+  //  - undefined (not recognized code) → a 'resource'/'resource:base64' payload IFF its extension
+  //    (or basename, when it has none) is in the resources allowlist, else THROW. Recording an
+  //    undeclared file as a resource would silently widen the attested set (the exact desync this
+  //    guards); the --fs hook catches the throw, warns, and writes nothing.
+  // Routing through addFile means a file that is BOTH imported and fs-read lands in one consistent,
+  // deduped entry, hashed and bucketed exactly like every other file. `content` is passed so an
+  // extensionless shell wrapper (a `#!/usr/bin/env bash` script) is recognized as 'shell'.
   addFsFile(url, source) {
     assert.ok(Buffer.isBuffer(source), 'addFsFile requires a Buffer source')
     const path = fileURLToPath(url)
-    const kind = classifyExtension(path, this.config.resources)
-    if (kind === 'resource') {
-      this.addFile(url, { source, resource: true, fsRead: true })
-      return
-    }
-    const ext = extname(path).toLowerCase()
-    if (kind === 'unknown') {
+    const format = classifyFormat(path, { content: source })
+    if (format === undefined) {
+      if (this.config.resources.has(pathExt(path) || basename(path).toLowerCase())) {
+        this.addFile(url, { source, resource: true, fsRead: true })
+        return
+      }
       throw new Error(
         `addFsFile: ${path} is neither code nor a declared resource; ` +
         `add its extension or filename to the resources allowlist or stop reading it`
       )
     }
-    this.addFile(url, { source, inferFormat: ext !== '.js' && ext !== '.ts', fsRead: true })
+    // format === null defers to the loader (impose nothing); a concrete format is recorded as-is.
+    this.addFile(url, { source, format: format ?? undefined, inferFormat: false, fsRead: true })
   }
 
   // Record an `fs.readdirSync(path)` capture (single-arg form only). The listing is

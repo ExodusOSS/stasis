@@ -24,11 +24,12 @@ const CONFIG_FILE = 'stasis.config.json'
 // LIMITATION: a `.js`/`.ts` file in a package with no (or an unrecognized) `type` field falls
 // back to commonjs here. The deep bundler resolves that case by parsing for module syntax;
 // add deliberately doesn't parse, so use `.mjs`/`.cjs` or a package.json `type` when
-// the module system matters.
-function sourceFormat(absFile) {
+// the module system matters. `content` (the file bytes) is passed to addSourceFormat only so an
+// extensionless shell wrapper (a `#!/usr/bin/env bash` script) is recognized as 'shell'.
+function sourceFormat(absFile, content) {
   const ext = extname(absFile).toLowerCase()
   if (ext === '.js' || ext === '.ts') return `${packageType(absFile) ?? 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
-  return addSourceFormat(absFile) ?? null
+  return addSourceFormat(absFile, { content }) ?? null
 }
 
 // Total file count + non-empty-package count from a bundle's module buckets, in one pass --
@@ -185,7 +186,7 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     // symlink whose target escapes the project root (matches the deep bundler / loaders).
     assertRealPathWithinBase(realBase, baseDir, rel)
     const buf = readFileSync(abs)
-    const format = sourceFormat(abs)
+    const format = sourceFormat(abs, buf)
     if (format !== null) {
       // Stored source is a UTF-8 string, so the bytes must BE UTF-8 or the stored text would
       // lossily diverge from the file on disk.
