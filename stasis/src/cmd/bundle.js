@@ -11,6 +11,7 @@ import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
+import { findPackageMetadata, normalizeEntries, readJson } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
@@ -50,42 +51,6 @@ const PHP_WORKSPACE_NAME = 'php-bundle'
 const PHP_WORKSPACE_VERSION = '0.0.0'
 const PHP_FORMAT = 'php'
 
-// Walk up from the file's directory looking for the nearest package.json
-// with both `name` and `version`. Returns { pkgDir, name, version }
-// (pkgDir relative to `baseDir`, "." for the project root) or null when no
-// such package.json exists at or above the file.
-function findPackageMetadata(baseDir, fileRelPath) {
-  let dir = dirname(fileRelPath)
-  while (true) {
-    const pkgPath = join(baseDir, dir, 'package.json')
-    if (existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
-        if (pkg.name && pkg.version) {
-          return { pkgDir: dir, name: pkg.name, version: pkg.version }
-        }
-      } catch { /* malformed — keep walking */ }
-    }
-    if (dir === '.' || dir === '/' || dir === '') return null
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
-  }
-}
-
-function normalizeEntries(entries, cwd) {
-  const baseDir = resolve(cwd)
-  return entries.map((e) => {
-    const abs = resolve(cwd, e)
-    const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
-    // On Windows, `path.relative()` returns an absolute path when `abs` is on
-    // a different drive than `baseDir` — that wouldn't start with `..` but
-    // still escapes, so reject both forms.
-    if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Entry escapes baseDir: ${e}`)
-    return rel.replace(/^\.\//u, '')
-  })
-}
-
 // Deepest directory that is a parent of every file in `paths`, expressed
 // relative to `cwd`. `paths` may be POSIX-relative-to-cwd; entries that
 // escape cwd (e.g. `../deps/X.sol` via remapping) push the result above
@@ -105,14 +70,6 @@ export function outermostDir(paths, cwd) {
   const absCommon = common.join('/') || '/'
   const rel = posix.relative(cwdAbs, absCommon)
   return rel === '' ? '.' : rel
-}
-
-function readJson(file) {
-  try {
-    return JSON.parse(readFileSync(file, 'utf8'))
-  } catch {
-    return null
-  }
 }
 
 // Split a Soldeer dependency dir name (`<name>-<version>`) into its parts, e.g.

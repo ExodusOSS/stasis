@@ -1,8 +1,9 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { extname, resolve as resolvePath, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createRequire, isBuiltin, findPackageJSON } from 'node:module'
+import { createRequire, isBuiltin } from 'node:module'
 import assert from 'node:assert/strict'
+import { packageType } from '@exodus/stasis-core/bundle-util'
 
 // Static require/import graph walker. Reads source files and parses them; never
 // loads or executes any user code. Resolves specifiers through Node's own
@@ -25,17 +26,6 @@ let _parser
 function getParser() {
   _parser ??= createRequire(import.meta.url)('oxc-parser')
   return _parser
-}
-
-function packageType(file) {
-  const pkg = findPackageJSON(pathToFileURL(file).toString())
-  if (!pkg) return null
-  try {
-    const type = JSON.parse(readFileSync(pkg, 'utf8')).type
-    return type === 'module' || type === 'commonjs' ? type : null
-  } catch {
-    return null
-  }
 }
 
 // Format per Node's own rules. TypeScript files get Node's type-stripping
