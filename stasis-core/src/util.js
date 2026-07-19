@@ -191,7 +191,7 @@ export function isPodspec(name) {
 // authored/versioned source a native build compiles or reads (as opposed to the
 // generated binaries and image/font assets a package ships). Unlike CODE_EXTENSIONS
 // these aren't runnable by Node, so each carries a source-language format TAG (like
-// solidity/php/bash/rust) rather than a Node loader format -- the Metro native capture
+// solidity/php/shell/rust) rather than a Node loader format -- the Metro native capture
 // records them as code under that tag instead of lumping them into 'resource'. Keyed by
 // lowercase, dot-less extension (pathExt); every value here is also in KNOWN_FORMATS.
 const NATIVE_CODE_FORMATS = new Map([
@@ -223,10 +223,13 @@ const NATIVE_CODE_FORMATS = new Map([
   ['storyboard', 'xml'], // Interface Builder storyboard (XML)
   ['entitlements', 'xml'], // Apple entitlements (XML plist)
   ['env', 'env'], // dotenv config
-  // NB: project.pbxproj / *.xcworkspacedata are NOT here -- they live inside `.xcodeproj`/
-  // `.xcworkspace` bundle dirs, which the Metro native capture excludes as IDE metadata
-  // (isNativeArtifact). They're classifiable via `stasis add` (see bundle-cmd's FIXED_FORMATS),
-  // not auto-deep-added from node_modules by the packager.
+  ['pbxproj', 'pbxproj'], // Xcode project file (old-style plist) -- see NB below
+  ['xcworkspacedata', 'xml'], // Xcode workspace descriptor (XML) -- see NB below
+  // NB: project.pbxproj / *.xcworkspacedata live inside the `.xcodeproj`/`.xcworkspace` bundle
+  // dirs the Metro native capture excludes as IDE metadata (isNativeArtifact), so the packager's
+  // deep walk never reaches them; they're attestable only via `stasis add`, which walks no tree
+  // and classifies exactly the files it's handed. Their tags live here (not in an add-only map)
+  // so the two paths agree on the format -- the SINGLE native vocabulary both consult.
 ])
 
 // Native build-input files recognized by exact (lowercased) BASENAME rather than extension:
@@ -241,6 +244,24 @@ const NATIVE_CODE_FILENAMES = new Map([
   ['appfile', 'fastlane'], // Fastlane config (Ruby DSL, no extension)
   ['fastfile', 'fastlane'], // Fastlane config (Ruby DSL, no extension)
   ['apple-app-site-association', 'json'], // Associated Domains manifest (JSON, no extension)
+])
+
+// Extensions whose stasis format is fixed by the EXTENSION ALONE -- no package.json `type`, no
+// content parse. `stasis add` layers this over the shared native build-input vocabulary
+// (NATIVE_CODE_FORMATS / NATIVE_CODE_FILENAMES) and its own .js/.ts package-type rule; see
+// addSourceFormat. Deliberately kept OUT of the native vocabulary, so neither the Metro native
+// capture (classifyNativeCapture) nor classifyExtension consults it:
+//   - the Node loader formats (mjs/cjs/json/mts/cts) are JS-shaped code Metro captures through its
+//     module graph, so the native walk must keep SKIPPING them (folding them in would double-count
+//     the reachable ones and wrongly attest the unused ones), and classifyExtension already covers
+//     them via CODE_EXTENSIONS;
+//   - the analysis-only source languages (solidity/php/shell/rust) are `add` / dedicated-bundler
+//     inputs, not files a React Native native-dependency tree ships.
+// Keyed by lowercase, dot-less extension (pathExt); every value here is also in KNOWN_FORMATS.
+const ADD_FIXED_FORMATS = new Map([
+  ['mjs', 'module'], ['cjs', 'commonjs'], ['json', 'json'],
+  ['mts', 'module-typescript'], ['cts', 'commonjs-typescript'],
+  ['sol', 'solidity'], ['php', 'php'], ['sh', 'shell'], ['bash', 'shell'], ['rs', 'rust'],
 ])
 
 // Files a native package ships that are NOT build inputs -- docs, editor/lint/CI/tooling config,
@@ -273,7 +294,7 @@ export function isExcludedNativeDir(name, { win32 = process.platform === 'win32'
 // or undefined when it isn't a recognized native build input. This is the SINGLE source of
 // truth for "what format is this native file", shared so every attestation path agrees on a
 // given file's tag no matter how it's captured: the Metro native capture (classifyNativeCapture)
-// and `stasis add` (bundle-cmd's sourceFormat) both consult it. It decides FORMAT only, never
+// and `stasis add` (via addSourceFormat) both consult it. It decides FORMAT only, never
 // capture-vs-skip -- that's each caller's concern (the packager excludes IDE metadata /
 // node_modules noise; `stasis add` attests exactly the files it's handed).
 //   - package.json and JSON podspecs (`*.podspec.json`) -> 'json' (a Node loader format)
@@ -283,6 +304,17 @@ export function nativeSourceFormat(name) {
   const base = basename(name).toLowerCase()
   if (base === 'package.json' || base.endsWith('.podspec.json')) return 'json'
   return NATIVE_CODE_FILENAMES.get(base) ?? NATIVE_CODE_FORMATS.get(pathExt(name))
+}
+
+// The stasis format for a source file `stasis add` is handed, by NAME alone: the extension-fixed
+// loader/source formats (ADD_FIXED_FORMATS) unioned with the shared native build-input vocabulary
+// (nativeSourceFormat), so `add` tags a native file EXACTLY as the Metro native capture would --
+// one authority, no drift. Returns undefined when the name isn't a recognized source file (the
+// caller then treats it as a resource iff it's declared in the config `resources` allowlist, else
+// refuses it). `add` applies the .js/.ts package-`type` rule itself BEFORE calling this: those
+// formats depend on the nearest package.json, which a name-only lookup can't see.
+export function addSourceFormat(name) {
+  return ADD_FIXED_FORMATS.get(pathExt(name)) ?? nativeSourceFormat(name)
 }
 
 // The SINGLE decision for how the Metro native capture -- the StasisMetro plugin AND
