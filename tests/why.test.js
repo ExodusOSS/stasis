@@ -263,8 +263,10 @@ test('collectWhy orders shortest-first, then alphabetically', withTmp((t, tmp) =
   ])
 }))
 
-test('collectWhy does not collapse when paths branch above the target', withTmp((t, tmp) => {
-  // b reaches d via c AND via f, so nothing deeper than d is shared -- no collapse.
+test('collectWhy collapses through a branch hub once both sub-paths are shown', withTmp((t, tmp) => {
+  // b reaches d via c AND via f, both shown in full (b -> c -> d, b -> f -> d).
+  // `a` then imports b, so both of a's paths through b collapse to a single
+  // `a -> b -> ... -> d` -- b's two sub-paths are already spelled out above.
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c', 'f', 'd'],
     edges: [['e', 'a'], ['e', 'b'], ['a', 'b'], ['b', 'c'], ['b', 'f'], ['c', 'd'], ['f', 'd']],
@@ -272,8 +274,26 @@ test('collectWhy does not collapse when paths branch above the target', withTmp(
   t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
     'b -> c -> d',
     'b -> f -> d',
-    'a -> b -> c -> d',
-    'a -> b -> f -> d',
+    'a -> b -> ... -> d',
+  ])
+}))
+
+test('collectWhy collapses every importer of a hub to one line per importer', withTmp((t, tmp) => {
+  // Hub B reaches A via C and via D, both shown in full. P and Q each import B, so
+  // both of each importer's paths through B collapse to a single line -- the hub's
+  // sub-paths (via C, via D) are written out once, not repeated per importer.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'P', 'Q'],
+    edges: [
+      ['s', 'B'], ['s', 'P'], ['s', 'Q'],
+      ['B', 'C'], ['C', 'A'], ['B', 'D'], ['D', 'A'], ['P', 'B'], ['Q', 'B'],
+    ],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+    'B -> C -> A',
+    'B -> D -> A',
+    'P -> B -> ... -> A',
+    'Q -> B -> ... -> A',
   ])
 }))
 

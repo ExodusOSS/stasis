@@ -183,39 +183,26 @@ function pathsTo(adjRev, isHead, isTerminal, targetDir) {
 }
 
 // Compress one reason bucket's chains (node-name arrays, all ending at the same
-// target). A node has a UNIQUE DESCENT when every chain passing through it
-// continues to the target the same way -- i.e. nothing branches there. Such a tail
-// can be shown once, in full, on the shortest chain that reveals it, and every
-// LONGER chain that also passes through the node collapses there to
-// `prefix -> node -> ... -> target`, hiding the tail's interior (recoverable from
-// the full line). A node where routes to the target branch has no unique descent
-// and is never a collapse point, so distinct branches stay expanded. So
-//   C -> B -> A / D -> B -> A / E -> C -> B -> A / F -> C -> B -> A
-// keeps C,D full and collapses E,F at C (`E -> C -> ... -> A`), and a plain shared
-// tail like D -> C -> B -> A / E -> C -> B -> A keeps the first full and collapses
-// the rest at C -- whether or not the tail is a standalone line. Order is
-// shortest-first then alphabetical, so a tail is always printed in full before the
-// chains that collapse onto it.
+// target). A chain collapses its tail to `prefix -> node -> ... -> target` when
+// that tail -- the sub-path from `node` on -- has already been printed IN FULL by a
+// shorter chain (as its own line or as the tail of a longer one). So a repeated
+// tail is written out once and every longer chain through it references it with
+// `...`, keeping the tail's head node visible and hiding only the nodes between it
+// and the target. Chains are ordered shortest-first (then alphabetically) so the
+// full version always prints before the chains that collapse onto it, and when a
+// hub is reached by several already-shown sub-paths every importer of it collapses
+// to a single `importer -> hub -> ... -> target` line (deduped). Example:
+//   B -> C -> A / B -> D -> A / P -> B -> C -> A / P -> B -> D -> A
+// prints B -> C -> A, B -> D -> A, and P -> B -> ... -> A once.
 function compressChains(chains) {
   const full = (c) => c.join(' -> ')
+  const suffixKey = (c, i) => c.slice(i).join('\0')
   const uniq = [...new Map(chains.map((c) => [full(c), c])).values()]
   if (uniq.length <= 1) return uniq.map(full)
   const sorted = uniq.toSorted((a, b) => a.length - b.length || full(a).localeCompare(full(b)))
   const target = sorted[0][sorted[0].length - 1]
 
-  // node -> its descent (sub-path to target) as a key, or false if it branches
-  // (two chains leave it toward the target differently -> not a collapse point).
-  const descent = new Map()
-  for (const c of sorted) {
-    for (let i = 0; i < c.length; i++) {
-      const d = c.slice(i).join('\0')
-      const prev = descent.get(c[i])
-      if (prev === undefined) descent.set(c[i], d)
-      else if (prev !== d) descent.set(c[i], false)
-    }
-  }
-
-  const revealed = new Set() // nodes whose full descent has already been printed
+  const revealed = new Set() // suffix keys already printed in full by a shorter chain
   const out = []
   const seen = new Set()
   const push = (line) => {
@@ -225,19 +212,18 @@ function compressChains(chains) {
     }
   }
   for (const c of sorted) {
-    // Collapse at the earliest node (closest to the head, so the most is hidden)
-    // that is already revealed, has a unique descent, and hides >= 1 node
-    // (descent length c.length - i >= 3: node + >= 1 hidden + target).
+    // Collapse at the longest proper tail (earliest position, >= 3 nodes so >= 1 is
+    // hidden) that a shorter chain already printed in full.
     let at = -1
-    for (let i = 1; i < c.length; i++) {
-      if (revealed.has(c[i]) && descent.get(c[i]) !== false && c.length - i >= 3) {
+    for (let i = 1; c.length - i >= 3; i++) {
+      if (revealed.has(suffixKey(c, i))) {
         at = i
         break
       }
     }
     if (at === -1) {
       push(full(c))
-      for (const n of c) revealed.add(n) // this full line reveals its whole descent
+      for (let i = 0; i < c.length; i++) revealed.add(suffixKey(c, i)) // reveal every tail
     } else {
       push(`${c.slice(0, at + 1).join(' -> ')} -> ... -> ${target}`)
     }
