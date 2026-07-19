@@ -3,29 +3,27 @@ import * as fs from 'node:fs'
 import { basename, isAbsolute, join, posix, relative } from 'node:path'
 
 // Snapshot realpathSync at module-eval, BEFORE `stasis run --fs` patches fs.realpathSync.
-// The patch + syncBuiltinESMExports() repoint a LIVE `import { realpathSync }` binding to the
-// bundle-serving wrapper, which (by design, for user code) does NOT throw ENOENT for a
-// recorded-but-absent path -- which would silently defeat assertRealPathWithinBase's reliance
-// on that throw (see its comment). Stasis's own reads must stay on the genuine builtin, so we
-// snapshot here exactly like state.js / state-util.js / fs.js do for the other patched readers.
+// The patch repoints a live `import { realpathSync }` binding to the bundle-serving wrapper,
+// which by design does NOT throw ENOENT for a recorded-but-absent path -- silently defeating
+// assertRealPathWithinBase's reliance on that throw. Stasis's own reads stay on the genuine
+// builtin, like state.js / state-util.js / fs.js do for the other patched readers.
 const { realpathSync } = fs
 
 const sep = '/'
 
 // --- Format vocabulary --------------------------------------------------------
 // KNOWN_FORMATS is the finite universe of `format` strings; parsers reject anything outside it, so
-// a tampered/forward-incompatible artifact fails closed at the schema boundary. It's the union of
-// the category sets below -- the SINGLE partition every consumer's policy derives from:
-//   NODE_FORMATS             Node can execute/import (module/commonjs/json/*-ts); the runtime
-//                            loader serves ONLY these, everything else fails closed at load.
+// a tampered/forward-incompatible artifact fails closed. It's the union of the category sets below
+// -- the single partition every consumer's policy derives from:
+//   NODE_FORMATS             Node can execute/import; the runtime loader serves ONLY these.
 //   SOURCE_LANGUAGE_FORMATS  analysis-only code, never run by Node (solidity/php/shell/rust).
-//   NATIVE_BUILD_FORMATS     React Native native build inputs (code, not Node-executable). pbxproj
-//                            is here but reached only via `stasis add`/`--fs` -- the packager
-//                            excludes the `.xcodeproj`/`.xcworkspace` bundles it lives in.
+//   NATIVE_BUILD_FORMATS     React Native build inputs (code, not Node-executable). pbxproj is here
+//                            but reached only via `stasis add`/`--fs` -- the packager excludes the
+//                            `.xcodeproj`/`.xcworkspace` bundles it lives in.
 //   RESOURCE_FORMATS         asset payloads (resource = raw UTF-8, resource:base64 = binary).
 //   STAT_FORMATS             payload-free `--fs` lstat/stat records (existence + KIND, no bytes).
-//   'directory'              a JSON-serialized, sorted `fs.readdirSync` listing (`--fs`).
-// Adding a format is a schema change: add it to the right category, and to NODE_FORMATS if Node
+//   'directory'              a sorted `fs.readdirSync` listing (`--fs`).
+// Adding a format is a schema change: add it to the right category, + to NODE_FORMATS if Node
 // should serve it from a bundle.
 export const NODE_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript'])
 export const SOURCE_LANGUAGE_FORMATS = new Set(['solidity', 'php', 'shell', 'rust'])
@@ -46,10 +44,9 @@ export const KNOWN_FORMATS = new Set([
 
 // JS-shaped code extensions (dot-less, lowercase), split by how the Node loader format is found:
 // NODE_EXT_FORMATS fixes it by extension (mjs/cjs/json + TS variants); JS_UNRESOLVED_EXTS don't
-// (.js/.ts come from package.json `type`/syntax, .jsx/.tsx are bundler-transformed with no Node
-// format) -- classifyFormat returns null for those four. CODE_EXTENSIONS (their union) is the one
-// "is this JS-graph code" answer: classifyExtension counts exactly these as code, and
-// parseResourcesOption / State's resource:true guard reject them (a code file is never an asset).
+// (.js/.ts depend on package.json `type`/syntax, .jsx/.tsx are bundler-transformed), so classifyFormat
+// returns null for those four. CODE_EXTENSIONS (their union) is the one "is this JS-graph code" answer:
+// classifyExtension counts these as code; parseResourcesOption / State's resource:true guard reject them.
 const NODE_EXT_FORMATS = new Map([
   ['mjs', 'module'], ['cjs', 'commonjs'], ['json', 'json'],
   ['mts', 'module-typescript'], ['cts', 'commonjs-typescript'],
@@ -57,12 +54,11 @@ const NODE_EXT_FORMATS = new Map([
 const JS_UNRESOLVED_EXTS = new Set(['js', 'ts', 'jsx', 'tsx'])
 export const CODE_EXTENSIONS = new Set([...NODE_EXT_FORMATS.keys(), ...JS_UNRESOLVED_EXTS])
 
-// The payload-free stat-record formats (`stasis run --fs` lstatSync/statSync captures).
-// A stat record attests a path's KIND (file vs directory) without any content, so it
-// lives ONLY in the `formats` maps — never in a module's hashed `files`, never as a
-// bundle payload. It is deliberately WEAK: real content recorded for the same path (a
-// read, a readdir listing, an import) supersedes it — see State's addFile/addFsDir
-// stale-record drop and #mergedFormats' upgrade rule.
+// The payload-free stat-record formats (`stasis run --fs` lstatSync/statSync captures). A stat
+// record attests a path's KIND (file vs directory) with no content, so it lives ONLY in the
+// `formats` maps -- never in a module's hashed `files` or as a bundle payload. Deliberately WEAK:
+// real content recorded for the same path supersedes it -- see State's addFile/addFsDir stale-record
+// drop and #mergedFormats' upgrade rule.
 export const isStatFormat = (format) => STAT_FORMATS.has(format)
 
 // Lowercased, dot-less extension of a path, or '' if none.
@@ -71,15 +67,13 @@ export function pathExt(filePath) {
   return m ? m[1].toLowerCase() : ''
 }
 
-// Validates + normalizes a `resources` allowlist (plugin option, --resources flag,
-// EXODUS_STASIS_RESOURCES, or stasis.config.json) into a Set of lowercase entries. Each
-// entry is either a bare extension (`png`, `.png`) or an extensionless filename
-// (`LICENSE`, `Makefile`, `license-mit`); classifyExtension matches a file by its
-// extension, falling back to its basename when it has none. A dotted entry like
-// `data.bin` is rejected -- a file that HAS an extension is keyed by it, so the entry
-// would never match; declare the extension (`bin`) instead. Code extensions are rejected
-// too (always tracked). Throwing here surfaces misconfigurations immediately rather than
-// as silent capture drift. `resources` may be an array (option / config) or undefined.
+// Validates + normalizes a `resources` allowlist (option, --resources flag, env var, or config)
+// into a Set of lowercase entries. Each entry is a bare extension (`png`, `.png`) or an
+// extensionless filename (`LICENSE`, `Makefile`); classifyExtension matches by extension, falling
+// back to basename when there's none. A dotted entry (`data.bin`) is rejected -- a file with an
+// extension is keyed by it, so the entry would never match; declare the extension (`bin`) instead.
+// Code extensions are rejected too (always tracked). Throwing surfaces misconfig immediately rather
+// than as silent capture drift. `resources` may be an array or undefined.
 export function parseResourcesOption(label, resources) {
   if (resources === undefined) return new Set()
   if (!Array.isArray(resources)) {
@@ -104,10 +98,9 @@ export function parseResourcesOption(label, resources) {
 
 export const isBrotliQuality = (n) => Number.isInteger(n) && n >= 0 && n <= 11
 
-// Parse an EXODUS_STASIS_BROTLI_QUALITY / --brotli-quality string into a brotli quality
-// (integer 0..11). `${n}` must round-trip back to the input, so Number()-coercible
-// non-canonical forms ('5.0', '05', ' 5 ', whitespace -> 0) throw instead of silently
-// selecting an unintended quality. The single parser for the env var and both CLIs.
+// Parse an EXODUS_STASIS_BROTLI_QUALITY / --brotli-quality string into a brotli quality (0..11).
+// `${n}` must round-trip to the input, so non-canonical Number()-coercible forms ('5.0', '05', ' 5 ')
+// throw instead of silently selecting an unintended quality. The single parser for env var + CLIs.
 export function parseBrotliQuality(name, value) {
   const n = Number(value)
   if (`${n}` !== value || !isBrotliQuality(n)) {
@@ -116,11 +109,10 @@ export function parseBrotliQuality(name, value) {
   return n
 }
 
-// The JS-GRAPH bundlers' policy view over classifyFormat (webpack/esbuild/Metro modules). Returns
-// 'code', 'resource' (allowlisted asset -- by extension, or basename when it has none), or
-// 'unknown' (caller rejects -- no silent widening). Only JS-family code counts as 'code'; a
-// native/source format that happens to appear is a resource-or-unknown like any other non-JS file.
-// `stasis run --fs` classifies WIDER (State.addFsFile follows the full vocabulary).
+// The JS-graph bundlers' policy view over classifyFormat (webpack/esbuild/Metro). Returns 'code',
+// 'resource' (allowlisted asset -- by extension, or basename when it has none), or 'unknown' (caller
+// rejects). Only JS-family code counts as 'code'; a native/source format is resource-or-unknown like
+// any other non-JS file. `stasis run --fs` classifies WIDER (State.addFsFile follows the full vocabulary).
 export function classifyExtension(filePath, resources) {
   // null (js-family) + NODE_FORMATS (fixed mjs/cjs/json/*-ts) == exactly the JS-graph code set.
   const format = classifyFormat(filePath)
@@ -129,16 +121,13 @@ export function classifyExtension(filePath, resources) {
   return 'unknown'
 }
 
-// Compiled / installed / prebuilt native artifacts a package ships or generates on install
-// (e.g. react-native-skia's prebuilt Skia `libs/` -- hundreds of MiB of .a/.xcframework), plus
-// non-source directory BUNDLES that aren't a CocoaPods/Gradle build input. These are build
-// OUTPUTS / IDE metadata, not source, and typically non-deterministic across installs, so the
-// native capture skips them entirely -- bundling neither their bytes nor an integrity (a frozen
-// run would otherwise flake on regenerated blobs). Matched by suffix on a file OR directory name,
-// so an Apple `*.framework`/`*.xcframework` bundle (a directory of a binary + headers), or a
-// module's `*.xcodeproj`/`*.xcworkspace` (Xcode project/workspace metadata -- CocoaPods compiles
-// the podspec's source_files, never the module's own Xcode project), is skipped whole rather than
-// descended into and captured file-by-file.
+// Compiled / prebuilt native artifacts a package ships or generates on install (e.g. react-native-skia's
+// prebuilt Skia `libs/` -- hundreds of MiB of .a/.xcframework), plus non-source directory BUNDLES that
+// aren't a CocoaPods/Gradle build input. These are build outputs / IDE metadata, typically
+// non-deterministic across installs, so the native capture skips them entirely -- neither bytes nor
+// integrity (a frozen run would otherwise flake on regenerated blobs). Matched by suffix on a file OR
+// directory name, so an Apple `*.framework` bundle or a module's `*.xcodeproj`/`*.xcworkspace` (CocoaPods
+// compiles the podspec's source_files, never the module's own Xcode project) is skipped whole.
 const NATIVE_ARTIFACT_EXTS = new Set([
   'a', 'so', 'o', 'obj', 'dylib', 'lib', 'dll', 'exe', 'pdb', // native objects / libraries
   'aar', 'jar', 'class', 'dex', // JVM / Android build output
@@ -151,26 +140,25 @@ export function isNativeArtifact(name) {
   return NATIVE_ARTIFACT_EXTS.has(pathExt(name))
 }
 
-// A CocoaPods podspec manifest. React Native ships these in scattered subdirs
-// (third-party-podspecs/, Libraries/*/) that `react-native config` never enumerates, so the
-// native capture discovers them by name rather than by a fixed location.
+// A CocoaPods podspec manifest. React Native ships these in scattered subdirs that `react-native
+// config` never enumerates, so the native capture discovers them by name rather than by location.
 export function isPodspec(name) {
   return name.endsWith('.podspec') || name.endsWith('.podspec.json')
 }
 
-// Non-JS code formats by lowercase, dot-less extension (pathExt): the analysis-only source
-// languages + every React Native native build input. With NODE_EXT_FORMATS these are the extension
-// half of classifyFormat; every value is in KNOWN_FORMATS.
+// Non-JS code formats by lowercase, dot-less extension (pathExt): analysis-only source languages +
+// React Native native build inputs. With NODE_EXT_FORMATS, the extension half of classifyFormat;
+// every value is in KNOWN_FORMATS.
 const CODE_EXT_FORMATS = new Map([
   // Source languages (also emitted by `stasis bundle`'s dedicated per-language bundlers).
   ['sol', 'solidity'], // Solidity
   ['php', 'php'], // PHP
   ['sh', 'shell'], ['bash', 'shell'], // shell scripts
   ['rs', 'rust'], // Rust
-  // React Native native build inputs: compiled/read by CocoaPods/Xcode + Gradle, never by Node.
+  // React Native native build inputs: read by CocoaPods/Xcode/Gradle, never by Node.
   ['java', 'java'], // Java source
   ['kt', 'kotlin'], // Kotlin source
-  ['kts', 'kotlin'], // Kotlin build script (build.gradle.kts / settings.gradle.kts)
+  ['kts', 'kotlin'], // Kotlin build script (*.gradle.kts)
   ['gradle', 'gradle'], // Gradle build script
   ['m', 'objc'], // Objective-C source
   ['mm', 'objcpp'], // Objective-C++ source
@@ -193,14 +181,13 @@ const CODE_EXT_FORMATS = new Map([
   ['pbxproj', 'pbxproj'], // Xcode project file (old-style plist) -- see NB below
   ['xcworkspacedata', 'xml'], // Xcode workspace descriptor (XML) -- see NB below
   // NB: project.pbxproj / *.xcworkspacedata live inside the `.xcodeproj`/`.xcworkspace` bundle dirs
-  // the Metro capture excludes (isNativeArtifact), so the packager never reaches them -- only
-  // `stasis add` / `--fs` do. Tagged here (the one vocabulary) so every path agrees on the format.
+  // the Metro capture excludes (isNativeArtifact), so only `stasis add` / `--fs` reach them; tagged
+  // here (the one vocabulary) so every path agrees on the format.
 ])
 
 // Code formats by exact (lowercased) BASENAME, for names an extension can't key: Podfile,
-// Podfile.lock (`.lock` too generic), CMakeLists.txt (`.txt` too generic), gradlew (shell wrapper),
-// Appfile/Fastfile (Fastlane), apple-app-site-association (JSON). package.json / `*.podspec.json`
-// are handled in classifyFormat directly.
+// Podfile.lock (`.lock` too generic), CMakeLists.txt (`.txt` too generic), gradlew, Appfile/Fastfile,
+// apple-app-site-association. package.json / `*.podspec.json` are handled in classifyFormat directly.
 const CODE_NAME_FORMATS = new Map([
   ['podfile', 'podfile'],
   ['podfile.lock', 'podfile-lock'],
@@ -211,9 +198,9 @@ const CODE_NAME_FORMATS = new Map([
   ['apple-app-site-association', 'json'],
 ])
 
-// A POSIX shell shebang (`#!/bin/sh`, `#!/usr/bin/env bash`, ...) on an EXTENSIONLESS, UTF-8 file
-// -> 'shell' (classifyFormat's "content for no-extension bash" arm). Only the first line's
-// interpreter is inspected; a non-shell one falls through to the extension/name rules.
+// A POSIX shell shebang (`#!/bin/sh`, `#!/usr/bin/env bash`) on an EXTENSIONLESS, UTF-8 file ->
+// 'shell' (classifyFormat's no-extension arm). Only the first line's interpreter is inspected; a
+// non-shell one falls through to the extension/name rules.
 const SHELL_SHEBANG = /^#![^\n]*\b(?:bash|sh)\b/u
 function isShellShebang(content) {
   if (!Buffer.isBuffer(content) || !isUtf8(content)) return false
@@ -224,10 +211,8 @@ function isShellShebang(content) {
 
 // Files a native package ships that are NOT build inputs -- docs, editor/lint/CI/tooling config,
 // changelogs, logs. Excluded from the Metro native capture so the bundle carries only what the
-// CocoaPods/Gradle build actually consumes; none of these is a file a native build requires.
-// `.bat` is a Windows batch script, excluded off Windows. `win32` defaults to the capturing
-// host's platform (a bundle built on macOS/Linux for an iOS/Android app drops Windows-only files).
-//   - md: docs.  log: build/test logs.  map: source maps (a JS build output, not a native input).
+// CocoaPods/Gradle build consumes. `.bat` (Windows batch) is excluded off Windows; `win32` defaults
+// to the capturing host's platform. md: docs.  log: build/test logs.  map: source maps (JS output).
 const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map'])
 const NATIVE_EXCLUDE_NAMES = new Set([
   'license', '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc',
@@ -241,21 +226,19 @@ export function isExcludedNativeFile(name, { win32 = process.platform === 'win32
   return !win32 && ext === 'bat' // Windows batch scripts aren't a build input off Windows
 }
 
-// A native-module TOPLEVEL directory that's platform-specific to a platform we're not capturing:
-// react-native-windows' `windows/`, skipped off Windows -- its sources are never an iOS/Android
-// (or any off-Windows) build input. `win32` defaults to the capturing host's platform.
+// A native-module TOPLEVEL directory platform-specific to a platform we're not capturing:
+// react-native-windows' `windows/`, skipped off Windows. `win32` defaults to the host's platform.
 export function isExcludedNativeDir(name, { win32 = process.platform === 'win32' } = {}) {
   return !win32 && name === 'windows'
 }
 
 // THE single name->format classifier -- the one authority every capture path is a policy view of.
-// Given a file NAME (and, for the extensionless-shell case, its bytes as `content`), returns a
-// concrete format when the name determines one (source-language / native build inputs, the fixed
-// Node formats, package.json + JSON podspecs -> json, an extensionless shell shebang -> shell);
-// null for a JS-family file whose Node format is package-`type`/syntax dependent (.js/.ts) or none
-// (.jsx/.tsx); or undefined when the name isn't recognized code. FORMAT only -- each caller layers
-// its own policy (`run` executes only NODE_FORMATS; classifyExtension keeps the JS-graph narrow;
-// `--fs` follows this wholesale; classifyNativeCapture adds the Metro skip/resource rules).
+// Given a file NAME (+ bytes as `content` for the extensionless-shell case), returns a concrete
+// format when the name determines one; null for a JS-family file whose Node format is
+// package-`type`/syntax dependent (.js/.ts) or none (.jsx/.tsx); or undefined when the name isn't
+// recognized code. FORMAT only -- each caller layers its own policy (run executes only NODE_FORMATS,
+// classifyExtension keeps the JS-graph narrow, `--fs` follows this wholesale, classifyNativeCapture
+// adds the Metro skip/resource rules).
 export function classifyFormat(name, { content } = {}) {
   const base = basename(name).toLowerCase()
   // package.json / JSON podspecs are 'json' by name (a `*.podspec.json` is both, and Node reads it
@@ -275,8 +258,7 @@ export function classifyFormat(name, { content } = {}) {
 // for how a build-input file is recorded, so the sites can't drift. Returns { action, format }:
 //   - 'code' + tag: a native build input for the CODE bundle.
 //   - 'skip': excluded noise (isExcludedNativeFile), or a JS-family file matched BY EXTENSION
-//     (Metro's module graph owns those). Files matched BY NAME are the exception -- package.json /
-//     JSON podspecs, Podfile, gradlew, AASA, ... are build inputs, so they ride the code path.
+//     (Metro owns those). Name-matched files are the exception -- build inputs, so they ride 'code'.
 //   - 'resource': anything else (State derives resource vs resource:base64 from the bytes).
 // A code file must be UTF-8 (callers assert it). `content` (optional) enables the shell-shebang rule.
 export function classifyNativeCapture(name, { win32 = process.platform === 'win32', content } = {}) {
@@ -296,63 +278,55 @@ export function classifyNativeCapture(name, { win32 = process.platform === 'win3
 }
 
 // Files `pod install` READS while LOADING podspecs, beyond the podspec itself: the Ruby helpers a
-// podspec `require`s (react-native's hermes-engine.podspec -> hermes-utils.rb; the Podfile ->
-// scripts/*.rb) and the package.json podspecs parse for the version. Captured alongside podspecs
-// so every podspec can load from the artifact -- NOT the native source those podspecs later
-// compile. `name` is a basename (package.json is matched exactly).
+// podspec `require`s (hermes-engine.podspec -> hermes-utils.rb; Podfile -> scripts/*.rb) and the
+// package.json podspecs parse for the version. Captured alongside podspecs so every podspec loads
+// from the artifact -- NOT the native source those podspecs later compile. `name` is a basename.
 export function isNativeManifest(name) {
   return isPodspec(name) || pathExt(name) === 'rb' || name === 'package.json'
 }
 
-// React Native CORE subdirectories captured IN FULL (native source too, not just the podspec-load
-// surface) with a metro bundle: build inputs the native build compiles from react-native itself
-// that live outside the autolinked-dependency model and aren't reachable from the JS graph.
-// A stasis-vetted fixed list (like the metro plugin's AUTO_INCLUDES), project-relative to the
-// react-native package root; a dir that doesn't exist in a given react-native version is skipped.
+// React Native CORE subdirectories captured IN FULL (native source too) with a metro bundle: build
+// inputs the native build compiles from react-native itself, outside the autolinked-dependency model
+// and unreachable from the JS graph. A stasis-vetted fixed list, project-relative to the react-native
+// package root; a dir missing in a given version is skipped.
 //   - ReactCommon/yoga: the Yoga layout engine's C++ sources + cmake/CMakeLists.txt.
 //   - sdks/hermes-engine: the hermes-engine podspec dir (podspec + its Ruby helpers + configs).
 //   - scripts: the CocoaPods integration the Podfile drives (react_native_pods.rb, cocoapods/*,
 //     the Xcode build-phase shell scripts).
 export const RN_CORE_INCLUDE_DIRS = ['ReactCommon/yoga', 'sdks/hermes-engine', 'scripts']
 
-// Individual react-native CORE files captured with a metro bundle (project-relative to the
-// react-native package root; a missing one is skipped). Named rather than folded into an include
-// DIR because their directory also holds huge prebuilt binaries we must NOT capture:
-//   - sdks/.hermesversion: the Hermes revision hermes-utils.rb reads at podspec-load time. It
-//     sits directly under sdks/, which also contains sdks/hermesc/* (prebuilt compiler binaries).
+// Individual react-native CORE files captured with a metro bundle (project-relative; a missing one
+// is skipped). Named rather than folded into an include DIR because their directory also holds huge
+// prebuilt binaries we must NOT capture:
+//   - sdks/.hermesversion: the Hermes revision hermes-utils.rb reads at podspec-load time; sits
+//     under sdks/, which also holds sdks/hermesc/* (prebuilt compiler binaries).
 export const RN_CORE_INCLUDE_FILES = ['sdks/.hermesversion']
 
-// Set-equality for parsed resources allowlists (lowercase extension/filename sets).
-// Coordinates a plugin's `resources` option against an active preload's, and the env
-// var against an explicit option in Config.
+// Set-equality for parsed resources allowlists. Coordinates a plugin's `resources` option against
+// an active preload's, and the env var against an explicit option in Config.
 export function extSetsEqual(a, b) {
   if (a.size !== b.size) return false
   for (const ext of a) if (!b.has(ext)) return false
   return true
 }
 
-// Flat project-relative key for the file `rel` inside module dir `dir`, inverse of
-// the bucketing State/Bundle apply. The `rel === ''` branch is reached only by a
-// `directory` capture whose path IS a module root (e.g. `fs.readdirSync` of a
-// package dir, or of the project root): the listing is keyed at the bucket itself,
-// so the flat key is the dir — never `${dir}/`, which a trailing-slash join would
-// wrongly produce and break the round-trip. The workspace root keys at '.' (the
-// '.' bucket's own dir), NOT '': join('.', '') === '.' is what lockfile re-absorb
-// derives, so a '' key would be written but never found again on load. For every
-// ordinary file `rel` is a real basename, so this matches the historical
-// `dir === '.' ? rel : `${dir}/${rel}`` exactly.
+// Flat project-relative key for file `rel` inside module dir `dir`, inverse of the bucketing
+// State/Bundle apply. The `rel === ''` branch is reached only by a `directory` capture whose path
+// IS a module root (e.g. `fs.readdirSync` of a package or the project root): the flat key is the
+// dir -- never `${dir}/`, which a trailing-slash join would wrongly produce, breaking the round-trip.
+// The workspace root keys at '.', NOT '' (join('.', '') === '.' is what lockfile re-absorb derives,
+// so a '' key would be written but never found again on load). Otherwise `rel` is a real basename,
+// matching the historical `dir === '.' ? rel : `${dir}/${rel}`` exactly.
 export function moduleFileKey(dir, rel) {
   if (rel === '') return dir
   return dir === '.' ? rel : `${dir}/${rel}`
 }
 
-// Resolve `baseDir/relPath` through symlinks and confirm the real target stays
-// within `realBase` (the caller-resolved real path of baseDir). Throws on a
-// symlink that escapes the bundle root: a crafted in-tree symlink
-// (`link.sh -> /etc/passwd`, or a symlinked directory) must not pull an
-// external file into a self-contained, attestable bundle. The textual path
-// guards elsewhere don't catch this because they never resolve symlinks.
-// realpathSync surfaces ENOENT for a missing path, which the loaders' disk
+// Resolve `baseDir/relPath` through symlinks and confirm the real target stays within `realBase`
+// (the caller-resolved real path of baseDir). Throws on a symlink that escapes the bundle root: a
+// crafted in-tree symlink (`link.sh -> /etc/passwd`) must not pull an external file into a
+// self-contained, attestable bundle. The textual path guards elsewhere don't catch this -- they
+// never resolve symlinks. realpathSync surfaces ENOENT for a missing path, which loaders' disk
 // walks already handle as "missing".
 export function assertRealPathWithinBase(realBase, baseDir, relPath) {
   const real = realpathSync(join(baseDir, relPath))
@@ -409,27 +383,24 @@ export const objectToMaps = (obj) => new Map(
   Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
 
-// True when a POSIX, project-relative path escapes the root once normalized:
-// a leading `..`, an absolute path, or a mid-path `..` that pops above the
-// root (`a/../../x`). Plain `startsWith('..')` only catches the leading case,
-// so it's not enough for paths that later get resolved against the root.
+// True when a POSIX, project-relative path escapes the root once normalized: a leading `..`, an
+// absolute path, or a mid-path `..` that pops above the root (`a/../../x`). Plain `startsWith('..')`
+// catches only the leading case, so it's not enough for paths later resolved against the root.
 export function posixPathEscapes(path) {
   const normalized = posix.normalize(path)
   return normalized === '..' || normalized.startsWith('../') || posix.isAbsolute(normalized)
 }
 
 // --- Artifact merge helpers -------------------------------------------------
-// Shared by Bundle.merge and Lockfile.merge (`stasis bundle --add`): both grow an
-// artifact already on disk by unioning a freshly built one into it. Bundles and
-// lockfiles carry the same module/import/format shapes -- a bundle stores each
-// file's CONTENT where a lockfile stores its integrity HASH -- but the merge rule is
-// identical: an overlapping entry must match exactly, and a genuine conflict throws
-// rather than letting the newer artifact silently mask what the existing one
-// attested. Keeping the union logic here stops the two `merge` methods from drifting.
+// Shared by Bundle.merge and Lockfile.merge (`stasis bundle --add`): both grow an on-disk artifact
+// by unioning a freshly built one into it. Bundles and lockfiles carry the same
+// module/import/format shapes (a bundle stores each file's CONTENT where a lockfile stores its
+// integrity HASH), but the merge rule is identical: an overlapping entry must match exactly, a
+// genuine conflict throws rather than letting the newer artifact silently mask what the existing
+// one attested. Kept here so the two `merge` methods can't drift.
 
-// Value-equality for one import-edge target: a plain resolved-file string, or a
-// { platform: file } Map (a `--metro` per-platform edge). Different kinds, or any
-// differing platform->file pair, are unequal.
+// Value-equality for one import-edge target: a plain resolved-file string, or a { platform: file }
+// Map (a `--metro` per-platform edge). Different kinds, or any differing platform->file pair, are unequal.
 function importTargetsEqual(a, b) {
   const aMap = a instanceof Map
   if (aMap !== (b instanceof Map)) return false
@@ -441,9 +412,8 @@ function importTargetsEqual(a, b) {
 
 const fmtTarget = (t) => (t instanceof Map ? `{${[...t].map(([p, f]) => `${p}: ${f}`).join(', ')}}` : t)
 
-// Merge two import maps (conditions -> parent -> specifier -> target) into a fresh
-// Map. An edge present on both sides must resolve to the same target; a real redirect
-// conflict throws. `label` tags the error for the calling artifact.
+// Merge two import maps (conditions -> parent -> specifier -> target) into a fresh Map. An edge on
+// both sides must resolve to the same target; a real redirect conflict throws. `label` tags the error.
 export function mergeImportMaps(a, b, label) {
   const out = new Map()
   const absorb = (imports) => {
@@ -488,13 +458,11 @@ export function mergeFormatMaps(a, b, label) {
   return out
 }
 
-// Merge two per-package module maps (dir -> { name, version, ecosystem?, files })
-// into a fresh Map. Overlapping buckets must agree on name/version/ecosystem, and a
-// file present in both must carry the identical value (source bytes for a bundle,
-// integrity hash for a lockfile) -- a real divergence throws rather than letting the
-// newer artifact silently mask what the existing one attested. `label` tags every
-// message. Result `files` objects are null-prototype (like the parsers'), so a
-// `__proto__` file name is a plain own key.
+// Merge two per-package module maps (dir -> { name, version, ecosystem?, files }) into a fresh Map.
+// Overlapping buckets must agree on name/version/ecosystem, and a file in both must carry the
+// identical value (bytes for a bundle, hash for a lockfile) -- a real divergence throws. `label`
+// tags every message. Result `files` objects are null-prototype, so a `__proto__` file name is a
+// plain own key.
 export function mergeModuleMaps(a, b, label) {
   const out = new Map()
   const absorb = (modules) => {

@@ -2,17 +2,11 @@ import { constants as zlibConstants } from 'node:zlib'
 
 import { assert, isBrotliQuality, parseBrotliQuality } from './util.js'
 
-// Brotli's own default is 11 (max), but the encoder is superlinear in input size,
-// so at 11 it dominates write time on a multi-MB bundle for a marginal ratio gain
-// over 9. Stasis therefore defaults to 9 (DEFAULT_BROTLI_QUALITY) when nothing else
-// sets it. The quality is tunable via `quality` (an integer 0..11, typically
-// config.brotliQuality) or the env var -- which must agree when both are set; the
-// output is still a valid .br at any quality.
-//
-// Kept out of `util.js` so that importing the generic helpers there (`sortPaths`,
-// `assertRealPathWithinBase`, …) doesn't transitively load `node:zlib`. Only the
-// code that actually compresses a bundle (`state.js`, `stasis bundle`) reaches
-// for this, and that code already imports zlib directly.
+// Default brotli quality. 11 (brotli's max) is superlinear in input size and
+// dominates write time on a multi-MB bundle for a marginal gain over 9. Tunable
+// via `quality` or the env var (which must agree when both are set). Kept out of
+// util.js so its generic helpers don't transitively pull in node:zlib -- only
+// bundle-compressing code needs this.
 export const DEFAULT_BROTLI_QUALITY = 9
 
 export function brotliOptions(quality) {

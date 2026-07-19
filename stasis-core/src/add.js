@@ -11,16 +11,15 @@ import { assertRealPathWithinBase, classifyFormat, isBrotliQuality, parseResourc
 
 const CONFIG_FILE = 'stasis.config.json'
 
-// The loader format a CODE/source file gets from its path alone, WITHOUT parsing it -- or null when
-// `add` doesn't recognize it as source (the caller then treats it as a resource iff declared in the
-// config `resources` allowlist, else refuses it). Beyond the .js/.ts package-`type` rule (which
-// reads the nearest package.json, so it can't be name-only), it just consults classifyFormat -- the
-// single name->format authority -- so an `add` bundle and a deep/native one agree on every format
-// and can be merged. `content` is passed only so an extensionless `#!/usr/bin/env bash` wrapper is
-// recognized as 'shell'.
+// The loader format a source file gets from its path alone, WITHOUT parsing -- or null when
+// `add` doesn't recognize it as source (caller then treats it as a resource iff declared in the
+// config `resources` allowlist, else refuses it). Beyond the .js/.ts package-`type` rule, it
+// consults classifyFormat -- the single name->format authority -- so `add` and deep/native
+// bundles agree on every format and can be merged. `content` is passed only so an extensionless
+// `#!/usr/bin/env bash` wrapper is recognized as 'shell'.
 //
-// LIMITATION: a `.js`/`.ts` file with no (or an unrecognized) package `type` falls back to commonjs
-// here -- the deep bundler parses for module syntax, but `add` doesn't; use `.mjs`/`.cjs` or a
+// LIMITATION: a `.js`/`.ts` file with no (or unrecognized) package `type` falls back to commonjs
+// here -- the deep bundler parses for module syntax, `add` doesn't; use `.mjs`/`.cjs` or a
 // package.json `type` when the module system matters.
 function sourceFormat(absFile, content) {
   const ext = extname(absFile).toLowerCase()
@@ -60,12 +59,11 @@ function readAddConfig(baseDir) {
   }
   const bundleFile = cfg.bundleFile ?? 'stasis.code.br'
   const resourcesBundleFile = cfg.resourcesBundleFile
-  // When both targets are set they must name distinct on-disk files: the code bundle and the
-  // resources bundle have incompatible shapes (the runtime asserts a resources bundle has no
-  // entries and only resource formats), so aiming both at one path yields a pair the loader
-  // can't consume -- and the second write would clobber the first. Canonicalize (resolve +
-  // realpath) like Config's write-target collision check, so './dist/x.br' vs 'dist/x.br', or
-  // two symlinks to the same inode, are caught -- not just byte-identical strings.
+  // The two split targets must name distinct on-disk files: the code and resources bundles have
+  // incompatible shapes (a resources bundle must have no entries and only resource formats), so
+  // aiming both at one path yields a pair the loader can't consume, and the second write clobbers
+  // the first. Canonicalize (resolve + realpath) like Config's collision check, so './dist/x.br'
+  // vs 'dist/x.br' or two symlinks to one inode are caught, not just byte-identical strings.
   if (resourcesBundleFile &&
     canonicalizePath(resolve(baseDir, bundleFile)) === canonicalizePath(resolve(baseDir, resourcesBundleFile))) {
     throw new Error(`${CONFIG_FILE}: bundleFile and resourcesBundleFile must name distinct paths (both resolve to ${resolve(baseDir, bundleFile)})`)
@@ -74,11 +72,11 @@ function readAddConfig(baseDir) {
 }
 
 // Assemble a Bundle from files already read into `rel -> { content, format }`, bucketed per
-// package.json like the deep bundler (node_modules files into per-package `npm` buckets,
-// everything else into the workspace ".", with a name+version from the nearest package.json).
-// `imports` is empty (nothing is resolved) and every non-resource file is recorded as an
-// entry (each explicitly listed file is its own root). A resources-only set therefore yields a
-// bundle with no entries -- exactly the shape the runtime's resources-bundle split expects.
+// package.json like the deep bundler (node_modules into per-package `npm` buckets, the rest
+// into the workspace ".", with name+version from the nearest package.json). `imports` is empty
+// (nothing is resolved) and every non-resource file is an entry (each listed file is its own
+// root), so a resources-only set yields a bundle with no entries -- the shape the runtime's
+// resources-bundle split expects.
 function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
   const modules = new Map()
   const formats = new Map()
@@ -91,9 +89,9 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     }
     return modules.get(dir)
   }
-  // findPackageMetadata's result depends only on the file's DIRECTORY (it dirnames the path
-  // first, then walks up), so memoize per directory -- sibling files in one directory share
-  // the same package.json walk instead of re-doing the existsSync + read for each.
+  // findPackageMetadata's result depends only on the file's DIRECTORY (it dirnames first, then
+  // walks up), so memoize per directory -- siblings in one directory share the package.json walk
+  // instead of re-doing the existsSync + read each time.
   const metaByDir = new Map()
   const metaFor = (rel) => {
     const dir = dirname(rel)

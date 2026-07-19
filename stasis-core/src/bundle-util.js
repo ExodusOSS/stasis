@@ -3,11 +3,9 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { findPackageJSON } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
-// Helpers the static bundlers share. The deep bundler (@exodus/stasis) and the zero-dep
-// `add` packer (add.js, here in stasis-core) both need to read package.json `type`,
-// find the nearest name+version package.json for a file, normalize CLI entries to
-// project-relative paths, and parse JSON defensively. They live in stasis-core because the
-// dependency only goes one way: `stasis` imports `stasis-core`, never the reverse.
+// Helpers the static bundlers share -- the deep bundler (@exodus/stasis) and the zero-dep
+// `add` packer (add.js) both need them. Here in stasis-core because the dependency only goes
+// one way: `stasis` imports `stasis-core`, never the reverse.
 
 // Module system for a `.js`/`.ts` file, read from the nearest package.json `type`, or null
 // when there is none / it's unrecognized (the caller then falls back to syntax detection, or

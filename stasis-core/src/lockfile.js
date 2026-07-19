@@ -16,14 +16,12 @@ export class Lockfile {
   config
   entries
   modules
-  // Recorded resolutions, mirroring the bundle's `imports` shape:
-  // conditions key -> parent file -> specifier -> resolved file. `null` (not an
-  // empty Map) when the lockfile predates resolution attestation -- consumers
-  // use that to tell "attests no resolutions" apart from "doesn't attest them".
+  // Recorded resolutions, mirroring the bundle's `imports` shape: conditions -> parent
+  // file -> specifier -> resolved file. `null` (not an empty Map) when the lockfile
+  // predates resolution attestation -- distinguishes "attests none" from "doesn't attest".
   imports
-  // Recorded loader formats: project-relative file -> Node format string
-  // (module/commonjs/json/{module,commonjs}-typescript), mirroring the bundle's
-  // `formats` map. `null` when the lockfile predates format attestation, same
+  // Recorded loader formats: project-relative file -> Node format string, mirroring the
+  // bundle's `formats` map. `null` when the lockfile predates format attestation, same
   // "attests none" vs "doesn't attest" distinction as `imports`.
   formats
 
@@ -84,8 +82,8 @@ export class Lockfile {
           const specs = new Map()
           for (const [specifier, target] of Object.entries(specifiers)) {
             // A file string (the common case) or, for a `--metro` multi-platform
-            // lockfile, a { platform: file } map for an edge that resolves
-            // differently per platform. Reject any other shape (fail closed).
+            // lockfile, a { platform: file } map for an edge that resolves per platform.
+            // Reject any other shape (fail closed).
             if (typeof target === 'string') {
               assert(!posixPathEscapes(target))
               specs.set(specifier, target)
@@ -114,15 +112,14 @@ export class Lockfile {
       formats = new Map()
       for (const [file, format] of Object.entries(json.formats)) {
         assert(!posixPathEscapes(file))
-        // KNOWN_FORMATS is stasis-core's full universe of recognized formats.
-        // Rejecting unknowns here -- not at a downstream branch -- means a
-        // tampered or forward-incompatible lockfile fails closed at the schema
-        // boundary, with a message that names the offending value.
+        // KNOWN_FORMATS is stasis-core's full set of recognized formats. Rejecting
+        // unknowns here -- not at a downstream branch -- means a tampered or forward-
+        // incompatible lockfile fails closed at the schema boundary, naming the offender.
         assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
-        // The project root's `directory` listing is keyed '.' -- lockfiles written
-        // before that normalization keyed it '' (see moduleFileKey), which never
-        // matches the '.' the hash absorb (join('.', '')) and lookups use. Normalize
-        // on parse; both keys appearing is a duplicate under the alias -- fail closed.
+        // The root `directory` listing is keyed '.'; older lockfiles keyed it '' (see
+        // moduleFileKey), which never matches the '.' the hash absorb (join('.', '')) and
+        // lookups use. Normalize on parse; both keys appearing is a duplicate under the
+        // alias -- fail closed.
         const key = file === '' ? '.' : file
         assert(!formats.has(key), `duplicate format key '${key}'`)
         formats.set(key, format)
@@ -156,14 +153,11 @@ export class Lockfile {
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 
-  // Merge another Lockfile into this one, returning a NEW Lockfile carrying the union
-  // of both -- the companion to Bundle.merge for `stasis bundle --add --lockfile`. Same
-  // strictness: overlapping module buckets must agree on identity, and a file present
-  // in both must carry the identical integrity hash (a hash divergence means the two
-  // lockfiles attest different bytes for the same path -- fail closed). imports/formats
-  // are nullable (a legacy lockfile predates attesting them): both-null stays null,
-  // both-present merge, and a one-sided null throws rather than silently dropping the
-  // attestation the other side carries.
+  // Merge another Lockfile into this one, returning a NEW Lockfile carrying the union of
+  // both -- the companion to Bundle.merge for `stasis bundle --add --lockfile`. Same
+  // strictness: overlapping module buckets must agree on identity, and a file in both
+  // must carry the identical integrity hash (divergence means different bytes for the same
+  // path -- fail closed). imports/formats merge as nullable facets (see mergeNullable).
   merge(other) {
     assert(this.config.scope === other.config.scope,
       `lockfile merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
@@ -177,9 +171,9 @@ export class Lockfile {
   }
 }
 
-// Merge two nullable lockfile facets (imports/formats): both-null stays null (a legacy
-// lockfile that predates attesting them), both-present merges via `merge`, and a
-// one-sided null throws rather than silently dropping the attestation the other carries.
+// Merge two nullable lockfile facets (imports/formats): both-null stays null (legacy
+// lockfiles predate attesting them), both-present merges via `merge`, and a one-sided
+// null throws rather than silently dropping the attestation the other carries.
 const mergeNullable = (a, b, merge, what) => {
   if (a === null && b === null) return null
   assert(a !== null && b !== null,
