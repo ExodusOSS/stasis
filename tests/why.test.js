@@ -120,7 +120,9 @@ test('collectWhy renders bare chains when a bundle has no reason map', withTmp((
 
 test('collectWhy includes a chain whose head is not imported by src (top of the tree)', withTmp((t, tmp) => {
   // scope=node_modules: no src at all. a -> b -> c, with a as the chain head.
-  // a is recorded only by run, so the chain is attributed to run (head fallback).
+  // run recorded all of a,b,c so its chain runs the full a -> b -> c. webpack
+  // recorded only b,c: the a -> b edge (a's file) isn't webpack's, so webpack's
+  // maximal file-level path is the shorter b -> c.
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c'],
     edges: [['a', 'b'], ['b', 'c']],
@@ -128,7 +130,7 @@ test('collectWhy includes a chain whose head is not imported by src (top of the 
     scope: 'node_modules',
   })
   const why = collectWhy([file], new Set(['c@1.0.0']))
-  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: a -> b -> c'])
+  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: a -> b -> c', 'webpack: b -> c'])
 }))
 
 test('collectWhy falls back to the head\'s own reasons when there is no top-level importer', withTmp((t, tmp) => {
@@ -160,9 +162,44 @@ test('collectWhy shows a single-node chain for a directly-imported dependency', 
     reason: { run: ['e', 'c'], webpack: ['c'] },
   })
   const why = collectWhy([file], new Set(['c@1.0.0']))
-  // c is imported by src file e (recorded by run); webpack recorded c but
-  // did not import it at top level, so the chain is run's.
-  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: c'])
+  // c is imported by src file e (recorded by run) -> `run: c`. webpack recorded
+  // c's own file too, so even though it never imports c through the graph, the
+  // flagged package still surfaces for it as a bare `webpack: c`.
+  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: c', 'webpack: c'])
+}))
+
+test('collectWhy attributes a chain per reason at the file-edge level', withTmp((t, tmp) => {
+  // e -> A -> B -> C -> D. run recorded every file, so its chain is the full
+  // A -> B -> C -> D. metro recorded e,A,C,D but NOT B: the B -> C edge (B's file)
+  // isn't metro's, so `metro: A -> B -> C -> D` must NOT appear. metro's maximal
+  // file-level path is the suffix below the break -> `metro: C -> D`.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D'],
+    edges: [['e', 'A'], ['A', 'B'], ['B', 'C'], ['C', 'D']],
+    reason: {
+      run: ['e', 'A', 'B', 'C', 'D'],
+      metro: ['e', 'A', 'C', 'D'], // B missing -> the B -> C edge isn't metro's
+    },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['D@1.0.0'])), 'D@1.0.0'), [
+    'metro: C -> D',
+    'run: A -> B -> C -> D',
+  ])
+}))
+
+test('collectWhy surfaces a flagged package for a reason that shipped it but never imports it', withTmp((t, tmp) => {
+  // e -> A -> D, all under run. metro recorded only D's own file and never imports
+  // it through the graph -- but D is flagged and metro shipped it, so metro still
+  // appears, as a bare `metro: D` (no import path to trace).
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'D'],
+    edges: [['e', 'A'], ['A', 'D']],
+    reason: { run: ['e', 'A', 'D'], metro: ['D'] },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['D@1.0.0'])), 'D@1.0.0'), [
+    'metro: D',
+    'run: A -> D',
+  ])
 }))
 
 test('collectWhy terminates on cycles and keeps only simple paths', withTmp((t, tmp) => {
@@ -339,8 +376,10 @@ test('collectWhy ignores react-native edges into another package\'s package.json
 // --- terminal packages: never walk past @babel/core / react-native / metro ---
 
 test('collectWhy stops a chain at a terminal package, keeping its reason prefix', withTmp((t, tmp) => {
-  // src -> topdep -> @babel/core -> mid -> victim. The chain stops at @babel/core
-  // (topdep is dropped), and @babel/core -- as the new head -- carries the prefix.
+  // src -> topdep -> @babel/core -> mid -> victim. run recorded the whole chain,
+  // so its path stops at @babel/core (topdep dropped) as the head. metro recorded
+  // only mid,victim -- it never touches @babel/core, but the mid -> victim edge is
+  // metro's, so metro still surfaces via its maximal file-level path `mid -> victim`.
   const file = writeGraphBundle(tmp, {
     deps: ['topdep', '@babel/core', 'mid', 'victim'],
     edges: [['e', 'topdep'], ['topdep', '@babel/core'], ['@babel/core', 'mid'], ['mid', 'victim']],
@@ -350,6 +389,7 @@ test('collectWhy stops a chain at a terminal package, keeping its reason prefix'
     },
   })
   t.assert.deepEqual(linesFor(collectWhy([file], new Set(['victim@1.0.0'])), 'victim@1.0.0'), [
+    'metro: mid -> victim',
     'run: @babel/core -> mid -> victim',
   ])
 }))
