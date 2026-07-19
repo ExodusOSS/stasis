@@ -540,10 +540,10 @@ test('Bundle.parse regroups v0 flat sources by inferred module dir', (t) => {
   t.assert.equal(parsed.sources.get('node_modules/foo/node_modules/bar/i.js'), 'nested')
 })
 
-test('Bundle.parse rejects a v1 full-scope bundle that has code but empty entries', (t) => {
-  // A bundle carrying code in full scope must declare an entry (a resources-only
-  // bundle may have none -- covered separately). Here there's a code file, so empty
-  // entries must be rejected.
+test('Bundle.parse accepts a v1 full-scope code bundle with empty entries (add attestation)', (t) => {
+  // A code bundle with no entries is valid -- `stasis add` attests files without making them
+  // entry points. It's safe because state.assertEntry fails closed on an authoritatively-empty
+  // set (nothing in the bundle runs as an entry), so parse no longer needs to reject it.
   const text = JSON.stringify({
     version: 1,
     config: { scope: 'full' },
@@ -553,7 +553,9 @@ test('Bundle.parse rejects a v1 full-scope bundle that has code but empty entrie
     formats: { 'src/a.js': 'module' },
     imports: {},
   })
-  t.assert.throws(() => Bundle.parse(text), /at least one entry/)
+  const bundle = Bundle.parse(text)
+  t.assert.equal(bundle.entries.size, 0)
+  t.assert.equal(bundle.sources.get('src/a.js'), 'export const x = 1\n')
 })
 
 test('Lockfile.parse rejects a node_modules module missing name', (t) => {

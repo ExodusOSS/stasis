@@ -1978,9 +1978,10 @@ test('Bundle.parse rejects a bundle with an import edge escaping the project roo
   t.assert.notEqual(r.status, 0)
 }))
 
-test('Bundle.parse rejects a v1 full-scope bundle with empty entries', withTmp((t, tmp) => {
-  // A tampered bundle with entries=[] would otherwise let assertEntry skip (it
-  // short-circuits on empty for v0+no-lockfile compat). Reject at parse time.
+test('a v1 full-scope code bundle with empty entries is refused at load (not runnable)', withTmp((t, tmp) => {
+  // A v1 code bundle with entries=[] is a valid attestation (`stasis add`) that parses for
+  // tooling, but is not runnable: the runtime load gate (State#absorbCodeBundle) refuses to serve
+  // a full-scope code bundle that declares no entry, so `--bundle=load` fails closed.
   cpSync(runFixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
@@ -1999,7 +2000,7 @@ test('Bundle.parse rejects a v1 full-scope bundle with empty entries', withTmp((
     { cwd: tmp }
   )
   t.assert.notEqual(load.status, 0)
-  t.assert.match(load.stderr, /at least one entry|ERR_ASSERTION/)
+  t.assert.match(load.stderr, /must declare an entry to run/)
 }))
 
 // ── runtime loader executable-format allowlist ─────────────────────────────────

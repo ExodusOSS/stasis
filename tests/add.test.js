@@ -80,9 +80,10 @@ test('addCommand splits source files to bundleFile and declared resources to res
   const code = decode(join(tmp, 'dist/code.br'))
   const res = decode(join(tmp, 'dist/res.br'))
 
-  // Source files -> the code bundle, each its own entry, path-inferred format, no imports.
+  // Source files -> the code bundle, path-inferred format, no imports. `add` records NO entries
+  // (attested files aren't entry points), unlike the deep `bundle`.
   t.assert.deepEqual(Object.keys(code.modules.get('.').files).toSorted(), ['src/a.js', 'src/b.cjs'])
-  t.assert.deepEqual([...code.entries].toSorted(), ['src/a.js', 'src/b.cjs'])
+  t.assert.equal(code.entries.size, 0, 'add files are attested, never entries')
   t.assert.equal(code.formats.get('src/a.js'), 'module') // package "type": "module"
   t.assert.equal(code.formats.get('src/b.cjs'), 'commonjs')
   t.assert.equal(code.imports.size, 0)
@@ -167,6 +168,25 @@ test('addCommand is additive across runs (merges into each split bundle)', withT
   t.assert.deepEqual(Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(), ['src/icon.svg', 'src/logo.png'])
 }))
 
+test('addCommand preserves an existing bundle’s entries and adds none of its own', withTmp(async (t, tmp) => {
+  seed(tmp, { bundleFile: 'dist/code.br' })
+  // A pre-existing bundle that declares src/a.js as an entry, as a deep `stasis bundle` would.
+  const prior = new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(['src/a.js']),
+    modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'src/a.js': readFileSync(join(tmp, 'src/a.js'), 'utf8') } }]]),
+    formats: new Map([['src/a.js', 'module']]),
+    imports: new Map(),
+  })
+  mkdirSync(join(tmp, 'dist'), { recursive: true })
+  writeFileSync(join(tmp, 'dist/code.br'), brotliCompressSync(prior.serialize()))
+
+  addCommand({ cwd: tmp, entries: ['src/b.cjs'] })
+  const code = decode(join(tmp, 'dist/code.br'))
+  t.assert.deepEqual(Object.keys(code.modules.get('.').files).toSorted(), ['src/a.js', 'src/b.cjs'])
+  t.assert.deepEqual([...code.entries], ['src/a.js'], 'the deep entry is preserved; add adds none')
+}))
+
 test('addCommand expands a directory entry to the files under it (recursive glob)', withTmp(async (t, tmp) => {
   seed(tmp)
   rmSync(join(tmp, 'src', 'data.txt')) // undeclared -- would be refused if swept in
@@ -222,8 +242,8 @@ test('addCommand updates an existing stasis.lock.json (one lockfile covers both 
   t.assert.equal(lock.modules.get('.').files['src/b.cjs'], sha512integrity(readFileSync(join(tmp, 'src/b.cjs'))))
   t.assert.equal(lock.formats.get('src/b.cjs'), 'commonjs')
   t.assert.equal(lock.formats.get('src/icon.svg'), 'resource')
-  // Code files are entries; the resource is not.
-  t.assert.deepEqual([...lock.entries].toSorted(), ['src/a.js', 'src/b.cjs'])
+  // add adds no entries: only the pre-existing src/a.js stays an entry (src/b.cjs is attested, not an entry).
+  t.assert.deepEqual([...lock.entries].toSorted(), ['src/a.js'])
 }))
 
 test('addCommand never creates a lockfile when none is present', withTmp(async (t, tmp) => {
@@ -286,10 +306,10 @@ test('addCommand without a resourcesBundleFile writes resources into bundleFile 
   seed(tmp, { bundleFile: 'dist/code.br', resources: ['svg', 'png'] }) // no resourcesBundleFile
   addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg', 'src/logo.png'] })
   t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'no separate resources bundle in non-split mode')
-  // Code and declared resources coexist in the one bundle; code is an entry, resources are not.
+  // Code and declared resources coexist in the one bundle; add records no entries.
   const bundle = decode(join(tmp, 'dist/code.br'))
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['src/a.js', 'src/icon.svg', 'src/logo.png'])
-  t.assert.deepEqual([...bundle.entries].toSorted(), ['src/a.js'])
+  t.assert.equal(bundle.entries.size, 0, 'add files are attested, never entries')
   t.assert.equal(bundle.formats.get('src/icon.svg'), 'resource')
   t.assert.equal(bundle.formats.get('src/logo.png'), 'resource:base64')
 }))

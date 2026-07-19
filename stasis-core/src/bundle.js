@@ -82,6 +82,18 @@ export class Bundle {
     return format === 'resource' || format === 'resource:base64' || format === 'directory'
   }
 
+  // True if any bundled file is executable/source (non-resource). A full-scope code bundle must
+  // declare an entry to be runnable (the runtime enforces this in State#absorbCodeBundle); a
+  // resources-only bundle legitimately has none.
+  get hasCode() {
+    for (const [dir, { files }] of this.modules) {
+      for (const rel of Object.keys(files)) {
+        if (!Bundle.isResourceFormat(this.formats.get(moduleFileKey(dir, rel)))) return true
+      }
+    }
+    return false
+  }
+
   static parse(text) {
     const json = JSON.parse(text)
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
@@ -122,23 +134,12 @@ export class Bundle {
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
-        // Code in full scope must declare an entry, else a tampered bundle bypasses state.assertEntry (it short-circuits on entries.size 0).
-        let hasCode = false
-        for (const [dir, { files }] of modules) {
-          for (const rel of Object.keys(files)) {
-            // moduleFileKey, not `${dir}/${rel}`: a root `directory` capture keys at rel==='' and a slash-join would miscount it as code.
-            const fp = moduleFileKey(dir, rel)
-            if (!Bundle.isResourceFormat(formats.get(fp))) { hasCode = true; break }
-          }
-          if (hasCode) break
-        }
-        if (hasCode) {
-          assert(Array.isArray(json.entries) && json.entries.length > 0,
-            'bundle carrying code in scope=full must have at least one entry')
-          entries = new Set(json.entries)
-        } else {
-          assert(json.entries === undefined || (Array.isArray(json.entries) && json.entries.length === 0))
-        }
+        // Full-scope entries: an array (possibly empty) or absent. A code bundle with EMPTY
+        // entries is valid -- `stasis add` attests files without making them entry points. That's
+        // safe because state.assertEntry fails closed on an authoritatively-empty entry set
+        // (nothing runs as an entry); it no longer relies on a parse-time non-empty guarantee.
+        assert(json.entries === undefined || Array.isArray(json.entries))
+        entries = new Set(json.entries)
       } else {
         assert(json.entries === undefined)
         assert(json.sources === undefined)
