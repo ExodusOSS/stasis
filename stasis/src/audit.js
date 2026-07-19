@@ -1,3 +1,4 @@
+import { moduleFileKey } from '@exodus/stasis-core/util'
 import { advisories } from './apis/npm/index.js'
 import semver from './apis/npm/semver.cjs'
 import { parseFile } from './parse.js'
@@ -28,9 +29,41 @@ export function collectPackages(files) {
   return out.toSorted((a, b) => a.name.localeCompare(b.name) || semver.compare(a.version, b.version))
 }
 
+// Map each audited node_modules package (`name@version`) to the set of bundle
+// consumers ("reasons") that recorded any of its files. Only bundles carry a
+// `reason` map -- lockfiles (and single-consumer bundles) omit it, contributing
+// nothing. The reason map is { consumer: [project-relative file, ...] }; we
+// resolve each file back to its owning package via the module file listing.
+export function collectReasons(files) {
+  const byPkg = new Map()
+  for (const file of files) {
+    const artifact = parseFile(file)
+    const reason = artifact.reason
+    if (!reason) continue
+    const fileToPkg = new Map()
+    for (const [dir, { name, version, files: modFiles }] of artifact.modules) {
+      if (!dir.includes('node_modules') || !name || !version) continue
+      for (const rel of Object.keys(modFiles)) {
+        fileToPkg.set(moduleFileKey(dir, rel), `${name}@${version}`)
+      }
+    }
+    for (const [consumer, list] of Object.entries(reason)) {
+      if (!Array.isArray(list)) continue
+      for (const f of list) {
+        const key = fileToPkg.get(f)
+        if (key === undefined) continue
+        let set = byPkg.get(key)
+        if (set === undefined) byPkg.set(key, (set = new Set()))
+        set.add(consumer)
+      }
+    }
+  }
+  return byPkg
+}
+
 const SEVERITY_ORDER = { critical: 0, high: 1, moderate: 2, low: 3, info: 4, none: 5 }
 
-export function flattenAdvisories(result, packages = []) {
+export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map()) {
   const installed = new Map()
   for (const { name, version } of packages) {
     if (!installed.has(name)) installed.set(name, [])
@@ -49,6 +82,12 @@ export function flattenAdvisories(result, packages = []) {
       // of the versions we submitted; drop them so the table (and the CLI exit
       // code) reflect only real hits.
       if (installedVersions.length > 0 && affected.length === 0) continue
+      // Union the reasons of every affected version this row covers (the same
+      // versions listed in `installed`), sorted for a stable, `, `-joined cell.
+      const reasons = new Set()
+      for (const v of affected) {
+        for (const r of reasonsByPkg.get(`${pkg}@${v}`) ?? []) reasons.add(r)
+      }
       rows.push({
         package: pkg,
         installed: affected.join(', '),
@@ -56,6 +95,7 @@ export function flattenAdvisories(result, packages = []) {
         severity: adv.severity ?? '',
         title: adv.title ?? '',
         url: adv.url ?? '',
+        reason: [...reasons].toSorted().join(', '),
       })
     }
   }
@@ -94,7 +134,8 @@ export async function audit(files) {
     return { packages, advisories: {}, rows: [] }
   }
   const result = await advisories(packages)
-  const rows = flattenAdvisories(result, packages)
+  const reasons = collectReasons(files)
+  const rows = flattenAdvisories(result, packages, reasons)
   return { packages, advisories: result, rows }
 }
 
@@ -108,5 +149,9 @@ export function printAuditReport({ packages, rows }, { out = process.stdout, err
     err.write('No advisories found\n')
     return
   }
-  out.write(formatTable(rows, ['severity', 'package', 'installed', 'vulnerable', 'title', 'url']) + '\n')
+  const columns = ['severity', 'package', 'installed', 'vulnerable', 'title', 'url']
+  // Surface the reason column only when at least one advisory maps to a bundle
+  // consumer; lockfiles (and single-consumer bundles) carry no reason provenance.
+  if (rows.some((r) => r.reason)) columns.splice(3, 0, 'reason')
+  out.write(formatTable(rows, columns) + '\n')
 }

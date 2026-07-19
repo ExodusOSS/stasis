@@ -7,7 +7,7 @@ import { brotliCompressSync } from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { stripVTControlCharacters } from 'node:util'
 
-import { audit, collectPackages, collectPackagesFromFile, flattenAdvisories, formatTable, printAuditReport } from '../stasis/src/audit.js'
+import { audit, collectPackages, collectPackagesFromFile, collectReasons, flattenAdvisories, formatTable, printAuditReport } from '../stasis/src/audit.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
@@ -40,7 +40,7 @@ const writeLock = (dir, name = 'stasis.lock.json', extra = {}) => {
   return path
 }
 
-const writeBundle = (dir, name = 'snapshot.br') => {
+const writeBundle = (dir, name = 'snapshot.br', extra = {}) => {
   const path = join(dir, name)
   const bundle = {
     version: 1,
@@ -55,6 +55,7 @@ const writeBundle = (dir, name = 'snapshot.br') => {
     },
     formats: { 'node_modules/foo/index.js': 'module' },
     imports: {},
+    ...extra,
   }
   writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(bundle))))
   return path
@@ -182,6 +183,36 @@ test('collectPackages does not collapse different packages at the same version',
   ])
 }))
 
+test('collectReasons maps a bundle reason map to node_modules packages', withTmp((t, tmp) => {
+  const file = writeBundle(tmp, 'r.br', {
+    reason: {
+      run: ['node_modules/foo/index.js'],
+      // src/entry.js is a workspace source (not node_modules) and must be ignored
+      StasisWebpack: ['node_modules/baz/index.js', 'node_modules/foo/index.js', 'src/entry.js'],
+    },
+  })
+  const reasons = collectReasons([file])
+  t.assert.deepEqual([...reasons.get('foo@2.0.0')].toSorted(), ['StasisWebpack', 'run'])
+  t.assert.deepEqual([...reasons.get('baz@0.0.1')].toSorted(), ['StasisWebpack'])
+}))
+
+test('collectReasons returns nothing for a lockfile (no reason map)', withTmp((t, tmp) => {
+  const file = writeLock(tmp)
+  t.assert.equal(collectReasons([file]).size, 0)
+}))
+
+test('collectReasons returns nothing for a bundle without a reason map', withTmp((t, tmp) => {
+  const file = writeBundle(tmp)
+  t.assert.equal(collectReasons([file]).size, 0)
+}))
+
+test('collectReasons unions reasons across multiple files', withTmp((t, tmp) => {
+  const a = writeBundle(tmp, 'a.br', { reason: { run: ['node_modules/foo/index.js'] } })
+  const b = writeBundle(tmp, 'b.br', { reason: { StasisWebpack: ['node_modules/foo/index.js'] } })
+  const reasons = collectReasons([a, b])
+  t.assert.deepEqual([...reasons.get('foo@2.0.0')].toSorted(), ['StasisWebpack', 'run'])
+}))
+
 test('flattenAdvisories sorts by severity then package', (t) => {
   const result = {
     foo: [
@@ -215,6 +246,58 @@ test('flattenAdvisories joins installed versions matching vulnerable_versions', 
   const bar = rows.find((r) => r.package === 'bar')
   t.assert.equal(foo.installed, '1.0.0', 'only the affected installed version of foo is listed')
   t.assert.equal(bar.installed, '2.0.0')
+})
+
+test('flattenAdvisories joins the reasons of the affected versions, sorted', (t) => {
+  const packages = [
+    { name: 'foo', version: '1.0.0' },
+    { name: 'foo', version: '3.0.0' },
+  ]
+  const result = {
+    foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '<2' }],
+  }
+  const reasons = new Map([
+    ['foo@1.0.0', new Set(['run', 'StasisWebpack'])],
+    ['foo@3.0.0', new Set(['StasisMetro'])],
+  ])
+  const rows = flattenAdvisories(result, packages, reasons)
+  // Only 1.0.0 matches `<2`, so only its reasons show (and they're sorted).
+  t.assert.equal(rows.length, 1)
+  t.assert.equal(rows[0].installed, '1.0.0')
+  t.assert.equal(rows[0].reason, 'StasisWebpack, run')
+})
+
+test('flattenAdvisories leaves reason empty when a package has none', (t) => {
+  const packages = [{ name: 'foo', version: '1.0.0' }]
+  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '<2' }] }
+  const rows = flattenAdvisories(result, packages)
+  t.assert.equal(rows[0].reason, '')
+})
+
+test('printAuditReport shows a reason column when a row has reasons', (t) => {
+  const out = []
+  printAuditReport(
+    {
+      packages: [{ name: 'foo', version: '1.0.0' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run, StasisWebpack' }],
+    },
+    { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
+  )
+  const text = stripVTControlCharacters(out.join(''))
+  t.assert.match(text, /│ reason\s+│/u)
+  t.assert.match(text, /run, StasisWebpack/u)
+})
+
+test('printAuditReport omits the reason column when no row has reasons', (t) => {
+  const out = []
+  printAuditReport(
+    {
+      packages: [{ name: 'foo', version: '1.0.0' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: '' }],
+    },
+    { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
+  )
+  t.assert.doesNotMatch(stripVTControlCharacters(out.join('')), /reason/u)
 })
 
 test('printAuditReport hints when nothing was scanned', (t) => {
@@ -325,6 +408,28 @@ test('audit() collects from a brotli bundle and POSTs its node_modules versions'
       t.assert.equal(report.rows.length, 1)
       t.assert.equal(report.rows[0].severity, 'critical')
       t.assert.equal(report.rows[0].installed, '2.0.0')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+))
+
+test('audit() attaches bundle reasons to advisory rows', withFetch(
+  () => new Response(JSON.stringify({
+    foo: [{ id: 1, severity: 'critical', title: 'bug', url: 'https://x', vulnerable_versions: '<3' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const bundle = writeBundle(tmp, 'snapshot.br', {
+        reason: {
+          run: ['node_modules/foo/index.js'],
+          StasisWebpack: ['node_modules/foo/index.js'],
+        },
+      })
+      const report = await audit([bundle])
+      const foo = report.rows.find((r) => r.package === 'foo')
+      t.assert.equal(foo.reason, 'StasisWebpack, run')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
