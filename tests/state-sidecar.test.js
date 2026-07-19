@@ -379,3 +379,38 @@ test('sidecar bundle=frozen with a v1 bundle wires up the frozen-attestation sna
     /File not attested by the frozen bundle: b\.js/
   )
 })
+
+test('sidecar bundle=add preserves a loaded multi-consumer `reason` on reload', (t) => {
+  // Regression: a bundler plugin (StasisMetro/StasisWebpack/...) that writes its OWN bundleFile
+  // runs as a write-mode SIDECAR. The sidecar constructor's inlined bundle-absorb is a twin of
+  // the main path's #absorbCodeBundle -- and, like it once did, it used to ignore the loaded
+  // `reason`, so a bundle=add re-run rebuilt the map from this run's observations alone and
+  // dropped every other consumer's attribution. The sidecar path must seed `reason` too.
+  //
+  // Files unique to this test (the module-level `parent` accumulates hashes/entries across
+  // tests). Round 1 builds the multi-consumer bundle bytes via a writer sidecar on a THROWAWAY
+  // path (its write-path claim is process-wide and never released, so the reload sidecar below
+  // must claim a different path) and writes them to loadPath by hand.
+  for (const [f, body] of [['r1.js', 'export const r1 = 1\n'], ['r2.js', 'export const r2 = 2\n'], ['r3.js', 'export const r3 = 3\n']]) {
+    writeFileSync(join(dir, f), body)
+  }
+  const url = (f) => pathToFileURL(join(dir, f)).toString()
+  const loadPath = join(dir, 'reason-rt-load.br')
+
+  const gen = new State(dir, { parent, lock: 'add', bundle: 'add', bundleFile: join(dir, 'reason-rt-gen.br') })
+  gen.addFile(url('r1.js'), { isEntry: true })                       // run (default)
+  gen.addFile(url('r2.js'), { reason: 'StasisMetro' })               // a plugin bundles it
+  t.assert.deepEqual(JSON.parse(gen.sourceData).reason, { StasisMetro: ['r2.js'], run: ['r1.js'] })
+  writeFileSync(loadPath, brotliCompressSync(gen.sourceData))
+
+  // Reload under bundle=add through a fresh write-mode sidecar and re-observe the plugin's files
+  // (only ever 'StasisMetro' this run) plus a new one -- exactly what a plugin re-run does.
+  const reload = new State(dir, { parent, lock: 'add', bundle: 'add', bundleFile: loadPath })
+  reload.addFile(url('r2.js'), { reason: 'StasisMetro' })            // re-bundled by the plugin
+  reload.addFile(url('r3.js'), { reason: 'StasisMetro' })            // newly bundled this run
+
+  // The loaded 'run' attribution survives even though this run never recorded 'run'; the new
+  // 'StasisMetro' file is unioned onto the loaded one. Nothing is destroyed.
+  t.assert.deepEqual(JSON.parse(reload.sourceData).reason,
+    { StasisMetro: ['r2.js', 'r3.js'], run: ['r1.js'] })
+})
