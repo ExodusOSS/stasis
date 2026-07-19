@@ -289,3 +289,52 @@ test('collectWhy ignores react-native edges into another package\'s package.json
   // ...but a real react-native -> bar dependency still shows.
   t.assert.deepEqual(linesFor(why, 'bar@1.0.0'), ['react-native -> bar'])
 }))
+
+// --- terminal packages: never walk past @babel/core / react-native / metro ---
+
+test('collectWhy stops a chain at a terminal package, keeping its reason prefix', withTmp((t, tmp) => {
+  // src -> topdep -> @babel/core -> mid -> victim. The chain stops at @babel/core
+  // (topdep is dropped), and @babel/core -- as the new head -- carries the prefix.
+  const file = writeGraphBundle(tmp, {
+    deps: ['topdep', '@babel/core', 'mid', 'victim'],
+    edges: [['e', 'topdep'], ['topdep', '@babel/core'], ['@babel/core', 'mid'], ['mid', 'victim']],
+    reason: {
+      run: ['e', 'topdep', '@babel/core', 'mid', 'victim'],
+      metro: ['mid', 'victim'],
+    },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['victim@1.0.0'])), 'victim@1.0.0'), [
+    'run: @babel/core -> mid -> victim',
+  ])
+}))
+
+test('collectWhy treats metro and react-native as terminal too', withTmp((t, tmp) => {
+  const file = writeGraphBundle(tmp, {
+    deps: ['top', 'metro', 'react-native', 'x', 'y'],
+    edges: [['e', 'top'], ['top', 'metro'], ['metro', 'x'], ['e', 'react-native'], ['react-native', 'y']],
+  })
+  const why = collectWhy([file])
+  t.assert.deepEqual(linesFor(why, 'x@1.0.0'), ['metro -> x']) // `top` dropped past metro
+  t.assert.deepEqual(linesFor(why, 'y@1.0.0'), ['react-native -> y'])
+}))
+
+test('collectWhy lists the chains reaching a terminal package when it is the target', withTmp((t, tmp) => {
+  // runEntry -> A -> B -> C -> @babel/core; metroEntry -> E -> F -> G -> @babel/core.
+  // The audited package IS @babel/core, so the walk still goes up and keeps BOTH
+  // reasons -- the terminal stop only applies to terminals ABOVE the target.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'E', 'F', 'G', '@babel/core'],
+    edges: [
+      ['runEntry', 'A'], ['A', 'B'], ['B', 'C'], ['C', '@babel/core'],
+      ['metroEntry', 'E'], ['E', 'F'], ['F', 'G'], ['G', '@babel/core'],
+    ],
+    reason: {
+      run: ['runEntry', 'A', 'B', 'C', '@babel/core'],
+      metro: ['metroEntry', 'E', 'F', 'G', '@babel/core'],
+    },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['@babel/core@1.0.0'])), '@babel/core@1.0.0'), [
+    'metro: E -> F -> G -> @babel/core',
+    'run: A -> B -> C -> @babel/core',
+  ])
+}))
