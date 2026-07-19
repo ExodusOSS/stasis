@@ -175,34 +175,32 @@ function pathsTo(adjRev, isHead, isTerminal, targetDir) {
 }
 
 // Compress one reason bucket's chains (node-name arrays, all ending at the same
-// target). Every chain in the bucket shares a maximal common suffix -- the tail
-// where all paths have funnelled together. That tail is shown in full exactly
-// once, in the shortest chain (which reveals it with the least prefix and sorts
-// first). Every other chain collapses just that shared tail's interior to
-// `... head-of-tail -> ... -> target`, keeping its own prefix -- and the tail's
-// head -- visible, so the collapse only ever hides nodes that ARE shown in the
-// full line. Order is shortest-first, then alphabetical.
+// target). A chain collapses against the LONGEST proper suffix that is itself an
+// independently-recorded chain in the bucket -- rendering `prefix -> suffix-head
+// -> ... -> target` and hiding only that recorded chain's interior (which stays
+// visible in full on its own, shorter line). So a bucket like
+//   C -> B -> A / D -> B -> A / E -> C -> B -> A / F -> C -> B -> A
+// keeps C/D full and collapses E,F to `E -> C -> ... -> A` / `F -> C -> ... -> A`,
+// grounded on the standalone `C -> B -> A` line -- even though the whole bucket
+// only shares `B -> A`. A collapse is applied only when the grounding chain is the
+// UNIQUE route from its head to the target: a head that reaches the target more
+// than one way (a branch above the target) would be ambiguous, so neither route
+// is hidden. Order is shortest-first, then alphabetical, so every grounding chain
+// prints before the chains that reference it.
 function compressChains(chains) {
   const full = (c) => c.join(' -> ')
+  const key = (c) => c.join('\0')
   const uniq = [...new Map(chains.map((c) => [full(c), c])).values()]
+  if (uniq.length <= 1) return uniq.map(full)
   const sorted = uniq.toSorted((a, b) => a.length - b.length || full(a).localeCompare(full(b)))
-  if (sorted.length <= 1) return sorted.map(full)
 
-  // Length of the maximal common suffix shared by every chain.
-  const minLen = Math.min(...sorted.map((c) => c.length))
-  let shared = 0
-  while (
-    shared < minLen &&
-    sorted.every((c) => c[c.length - 1 - shared] === sorted[0][sorted[0].length - 1 - shared])
-  ) {
-    shared += 1
-  }
+  const recorded = new Set(sorted.map(key))
+  // Every chain in a bucket ends at the same target, so a chain is identified for
+  // collapse by its head. A head that tops more than one chain reaches the target
+  // by multiple routes -- collapsing `head -> ... -> target` would be ambiguous.
+  const headCount = new Map()
+  for (const c of sorted) headCount.set(c[0], (headCount.get(c[0]) ?? 0) + 1)
 
-  // Collapse only a shared tail with an interior to hide (head + >= 1 hidden +
-  // target). Otherwise there is nothing to gain -- render every chain in full.
-  if (shared < 3) return sorted.map(full)
-
-  const target = sorted[0][sorted[0].length - 1]
   const out = []
   const seen = new Set()
   const push = (line) => {
@@ -211,13 +209,26 @@ function compressChains(chains) {
       out.push(line)
     }
   }
-  sorted.forEach((c, idx) => {
-    // Shortest chain: shown in full so the shared tail appears once.
-    if (idx === 0) return push(full(c))
-    // Keep everything up to and including the shared tail's head node; hide the
-    // rest of the tail (all shown in the full line above).
-    push(`${c.slice(0, c.length - shared + 1).join(' -> ')} -> ... -> ${target}`)
-  })
+  for (const c of sorted) {
+    const target = c[c.length - 1]
+    let grounding = null
+    // Longest proper suffix (>= 3 nodes: head + >= 1 hidden + target) that is a
+    // recorded chain reached by a single route.
+    for (let len = c.length - 1; len >= 3; len--) {
+      const suffix = c.slice(c.length - len)
+      if (recorded.has(key(suffix)) && headCount.get(suffix[0]) === 1) {
+        grounding = suffix
+        break
+      }
+    }
+    if (grounding === null) {
+      push(full(c))
+    } else {
+      // Keep this chain's prefix down to the grounding chain's head; hide that
+      // chain's interior (shown in full on its own, earlier line).
+      push(`${c.slice(0, c.length - grounding.length + 1).join(' -> ')} -> ... -> ${target}`)
+    }
+  }
   return out
 }
 
