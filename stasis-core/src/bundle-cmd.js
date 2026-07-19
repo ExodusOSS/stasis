@@ -7,24 +7,19 @@ import { Bundle } from './bundle.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath } from './state-util.js'
-import { assertRealPathWithinBase, isBrotliQuality, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { addSourceFormat, assertRealPathWithinBase, isBrotliQuality, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 
-// Extensions whose loader format depends on the extension alone. `.js`/`.ts` (which also need
-// the package `type`) and everything else are handled by sourceFormat.
-const FIXED_FORMATS = new Map([
-  ['.mjs', 'module'], ['.cjs', 'commonjs'], ['.json', 'json'],
-  ['.mts', 'module-typescript'], ['.cts', 'commonjs-typescript'],
-  ['.sol', 'solidity'], ['.php', 'php'], ['.sh', 'shell'], ['.bash', 'shell'], ['.rs', 'rust'],
-])
-
-// The loader format a CODE/source file gets from its path alone, WITHOUT parsing it -- or
-// null for an extension the `add` command does not recognize as source (the caller then treats
-// it as a resource iff it's declared in the config `resources` allowlist, else refuses it). For
-// .js/.cjs/.mjs/.ts/.cts/.mts/.json this matches scan.js's `formatForFile` (so an `add` bundle
-// and a deep one agree on a file's format, and the two can be merged); it adds the
-// analysis-only source languages by extension.
+// The loader format a CODE/source file gets from its path alone, WITHOUT parsing it -- or null
+// for an extension `add` does not recognize as source (the caller then treats it as a resource
+// iff it's declared in the config `resources` allowlist, else refuses it). Beyond the .js/.ts
+// package-`type` rule below (which reads the nearest package.json, so it can't be name-only),
+// classification is delegated to util's addSourceFormat -- the SINGLE name->format authority
+// `add` shares with the Metro native capture (the extension-fixed loader/source formats plus the
+// native build-input vocabulary). For .js/.cjs/.mjs/.ts/.cts/.mts/.json this matches scan.js's
+// `formatForFile`, so an `add` bundle and a deep/native one agree on a file's format and the two
+// can be merged.
 //
 // LIMITATION: a `.js`/`.ts` file in a package with no (or an unrecognized) `type` field falls
 // back to commonjs here. The deep bundler resolves that case by parsing for module syntax;
@@ -32,10 +27,8 @@ const FIXED_FORMATS = new Map([
 // the module system matters.
 function sourceFormat(absFile) {
   const ext = extname(absFile).toLowerCase()
-  const fixed = FIXED_FORMATS.get(ext)
-  if (fixed) return fixed
   if (ext === '.js' || ext === '.ts') return `${packageType(absFile) ?? 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
-  return null
+  return addSourceFormat(absFile) ?? null
 }
 
 // Total file count + non-empty-package count from a bundle's module buckets, in one pass --

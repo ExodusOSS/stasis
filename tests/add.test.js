@@ -79,6 +79,58 @@ test('addCommand splits source files to bundleFile and declared resources to res
   t.assert.equal(res.modules.get('.').files['src/logo.png'], Buffer.from([0x89, 0x50, 0x00, 0x01, 0xff]).toString('base64'))
 }))
 
+test('addCommand classifies Xcode project-bundle inputs the Metro packager excludes (pbxproj/xcworkspacedata)', withTmp(async (t, tmp) => {
+  // The packager skips `.xcodeproj`/`.xcworkspace` as IDE metadata, but a user can attest their
+  // text inputs explicitly with `stasis add` -- project.pbxproj (an old-style plist) as 'pbxproj'
+  // and the workspace descriptor as 'xml'. Both are CODE, so they land in the code bundle.
+  seed(tmp)
+  mkdirSync(join(tmp, 'ios', 'App.xcodeproj', 'project.xcworkspace'), { recursive: true })
+  writeFileSync(join(tmp, 'ios', 'App.xcodeproj', 'project.pbxproj'), '// !$*UTF8*$!\n{ archiveVersion = 1; }\n')
+  writeFileSync(join(tmp, 'ios', 'App.xcodeproj', 'project.xcworkspace', 'contents.xcworkspacedata'), '<Workspace/>\n')
+  addCommand({ cwd: tmp, entries: ['ios/App.xcodeproj/project.pbxproj', 'ios/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata'] })
+
+  const code = decode(join(tmp, 'dist/code.br'))
+  t.assert.equal(code.formats.get('ios/App.xcodeproj/project.pbxproj'), 'pbxproj')
+  t.assert.equal(code.formats.get('ios/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata'), 'xml')
+  t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'both are code -> no resources bundle written')
+}))
+
+test('addCommand classifies the native build-input vocabulary as code (shared with the Metro capture)', withTmp(async (t, tmp) => {
+  // `stasis add` recognizes the same native formats the packager does (via nativeSourceFormat),
+  // so a user can attest a native file by hand and get the right tag -- no `resources` allowlist
+  // needed. Unlike the packager, `add` has no deep-walk/exclusion; it attests what it's handed.
+  seed(tmp)
+  mkdirSync(join(tmp, 'ios'), { recursive: true })
+  mkdirSync(join(tmp, 'android'), { recursive: true })
+  writeFileSync(join(tmp, 'ios', 'RNThing.podspec'), 'Pod::Spec.new {}\n')
+  writeFileSync(join(tmp, 'ios', 'RNThing.swift'), 'import Foundation\n')
+  writeFileSync(join(tmp, 'ios', 'RNThing.mm'), '@implementation X @end\n')
+  writeFileSync(join(tmp, 'ios', 'Podfile'), "pod 'X'\n")
+  writeFileSync(join(tmp, 'android', 'build.gradle'), 'apply plugin: "x"\n')
+  writeFileSync(join(tmp, 'android', 'AndroidManifest.xml'), '<manifest/>\n')
+  writeFileSync(join(tmp, 'gradlew'), '#!/usr/bin/env sh\nexec gradle "$@"\n')
+  writeFileSync(join(tmp, '.env'), 'API_URL=x\n')
+  writeFileSync(join(tmp, 'apple-app-site-association'), '{ "applinks": {} }\n')
+
+  const entries = ['ios/RNThing.podspec', 'ios/RNThing.swift', 'ios/RNThing.mm', 'ios/Podfile',
+    'android/build.gradle', 'android/AndroidManifest.xml', 'gradlew', '.env', 'apple-app-site-association']
+  addCommand({ cwd: tmp, entries })
+
+  const code = decode(join(tmp, 'dist/code.br'))
+  const fmt = (rel) => code.formats.get(rel)
+  t.assert.equal(fmt('ios/RNThing.podspec'), 'podspec')
+  t.assert.equal(fmt('ios/RNThing.swift'), 'swift')
+  t.assert.equal(fmt('ios/RNThing.mm'), 'objcpp')
+  t.assert.equal(fmt('ios/Podfile'), 'podfile')
+  t.assert.equal(fmt('android/build.gradle'), 'gradle')
+  t.assert.equal(fmt('android/AndroidManifest.xml'), 'xml')
+  t.assert.equal(fmt('gradlew'), 'shell')
+  t.assert.equal(fmt('.env'), 'env')
+  t.assert.equal(fmt('apple-app-site-association'), 'json')
+  // All are code -> all entries, none in a resources bundle.
+  t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'native build inputs are code, not resources')
+}))
+
 test('addCommand is additive across runs (merges into each split bundle)', withTmp(async (t, tmp) => {
   seed(tmp)
   addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })
