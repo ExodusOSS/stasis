@@ -54,12 +54,13 @@ function readAddConfig(baseDir) {
   return { bundleFile, resourcesBundleFile, resources, brotliQuality: cfg.brotliQuality }
 }
 
-// Assemble a Bundle, bucketed per package.json. Every non-resource file is its own entry, so a
-// resources-only set yields a bundle with no entries -- the shape the runtime's resources split expects.
+// Assemble a Bundle, bucketed per package.json. Unlike the deep `bundle` (whose entries are the
+// roots it walked from), `add` records NO entries -- the files it attaches are attested, not
+// entry points -- so an add bundle carries code with empty entries (valid; assertEntry fails
+// closed for it) and nothing in it is runnable via `stasis run --bundle=load`.
 function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
   const modules = new Map()
   const formats = new Map()
-  const entries = []
   const ensureBucket = (dir, name, version, ecosystem) => {
     if (!modules.has(dir)) {
       modules.set(dir, ecosystem === undefined
@@ -92,13 +93,13 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
       ensureBucket('.', workspaceName, workspaceVersion).files[rel] = content
     }
     formats.set(rel, format)
-    if (!Bundle.isResourceFormat(format)) entries.push(rel)
   }
 
   // Attribute packed files to the `add` consumer (distinct from the deep bundler's `bundle`).
+  // Empty entries: add files are attested, never entry points.
   return new Bundle({
     config: { scope: 'full' },
-    entries: new Set(entries),
+    entries: new Set(),
     modules,
     formats,
     imports: new Map(),

@@ -441,6 +441,13 @@ export class State {
       `Re-bundle with the current stasis (\`stasis bundle\`) or \`stasis run --bundle=replace\` ` +
       `against a v0-free starting point to upgrade.`)
     assert.equal(bundle.config.scope, this.config.scope)
+    // A full-scope bundle carrying code must declare an entry to be RUN: assertEntry short-circuits
+    // on an empty set, so serving one here would let any bundled file run as the root. An add-only
+    // bundle has no entries by design -- valid to parse (tooling), but refused here. Non-full scope
+    // has no entries at all, so it's exempt.
+    assert.ok(!this.config.full || bundle.entries.size > 0 || !bundle.hasCode,
+      `${sourcesPath}: a full-scope bundle carrying code must declare an entry to run ` +
+      `(an add-only attestation has none; run a bundle built by \`stasis bundle\`/\`stasis run\`)`)
     this.#mergeBundleMetadata(bundle, { lockfileLoaded })
     for (const [file, content] of bundle.sources) {
       if (Bundle.isResourceFormat(bundle.formats.get(file))) this.resources.set(file, content)
@@ -614,8 +621,10 @@ export class State {
   }
 
   assertEntry(url) {
-    // Skipped when no entries info is available (v0 bundle + lock=none/ignore); v1 full-scope
-    // bundles always declare at least one entry.
+    // Skipped when no entries info is available (lock=none/ignore with no bundle, or a fresh
+    // build). A RUNNABLE full-scope code bundle always declares an entry -- #absorbCodeBundle
+    // refuses one that doesn't (an add-only attestation) -- so an empty set here means there is
+    // simply no entry attestation to check against, not a bundle bypassing it.
     if (this.entries.size === 0) return
     const file = this.#canonicalFile(url)
     assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)
