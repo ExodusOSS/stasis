@@ -1264,6 +1264,9 @@ const writeRnFixture = (root) => {
   writeFileSync(join(dep, 'RNThing.podspec'), 'Pod::Spec.new { |s| s.name = "RNThing" }\n')
   writeFileSync(join(dep, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
   writeFileSync(join(dep, 'ios', 'RNThing.mm'), '@implementation RNThing @end\n')
+  writeFileSync(join(dep, 'ios', 'util.c'), 'int rn_util(void) { return 0; }\n')
+  writeFileSync(join(dep, 'ios', 'Podfile'), "pod 'RNThing', :path => '.'\n")
+  writeFileSync(join(dep, 'ios', 'Podfile.lock'), 'PODS:\n  - RNThing (3.1.0)\n')
   writeFileSync(join(dep, 'ios', 'logo.png'), PNG_BYTES) // a binary asset under ios/
   writeFileSync(join(dep, 'ios', 'helper.js'), 'export default 0\n') // CODE under ios/ -> skipped
   writeFileSync(join(dep, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
@@ -1288,7 +1291,7 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(mod, 'the native dep is a bundled module')
   const files = new Set(Object.keys(mod.files))
   // Native build inputs are carried alongside the graph-reached index.js.
-  for (const f of ['index.js', 'RNThing.podspec', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
+  for (const f of ['index.js', 'RNThing.podspec', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
     t.assert.ok(files.has(f), `expected ${f} in the bundle`)
   }
   t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
@@ -1324,6 +1327,9 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'podspec')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.mm'), 'objcpp')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.h'), 'c-header')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/util.c'), 'c')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile'), 'podfile') // matched by basename
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile.lock'), 'podfile-lock')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/android/build.gradle'), 'gradle')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/android/src/main/AndroidManifest.xml'), 'xml')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/logo.png'), 'resource:base64')

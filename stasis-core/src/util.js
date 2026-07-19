@@ -19,8 +19,8 @@ const sep = '/'
 //   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
 //   Native build inputs (analysis-only, not runnable by Node; the Metro native capture
 //     attests them for the CocoaPods/Gradle toolchain, so they carry a source tag rather
-//     than being lumped into 'resource') — java, kotlin, gradle, objcpp, objc, cpp, c-header,
-//     ruby, podspec, template, xml
+//     than being lumped into 'resource') — java, kotlin, gradle, objc, objcpp, c, cpp,
+//     c-header, cpp-header, ruby, podspec, podfile, podfile-lock, template, xml
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
 //     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload), and the
@@ -43,12 +43,16 @@ export const KNOWN_FORMATS = new Set([
   'java',
   'kotlin',
   'gradle',
-  'objcpp',
   'objc',
+  'objcpp',
+  'c',
   'cpp',
   'c-header',
+  'cpp-header',
   'ruby',
   'podspec',
+  'podfile',
+  'podfile-lock',
   'template',
   'xml',
   'resource',
@@ -182,22 +186,35 @@ const NATIVE_CODE_FORMATS = new Map([
   ['java', 'java'], // Java source
   ['kt', 'kotlin'], // Kotlin source
   ['gradle', 'gradle'], // Gradle build script
-  ['mm', 'objcpp'], // Objective-C++ source
   ['m', 'objc'], // Objective-C source
+  ['mm', 'objcpp'], // Objective-C++ source
+  ['c', 'c'], // C source
   ['cpp', 'cpp'], // C++ source
+  ['c++', 'cpp'], // C++ source (alt spelling)
   ['h', 'c-header'], // C/C++/Objective-C header
+  ['hpp', 'cpp-header'], // C++ header
+  ['h++', 'cpp-header'], // C++ header (alt spelling)
   ['rb', 'ruby'], // Ruby (podspec helpers, CocoaPods scripts)
   ['podspec', 'podspec'], // CocoaPods spec
   ['template', 'template'], // build-input template
   ['xml', 'xml'], // e.g. AndroidManifest.xml
 ])
 
+// Native build-input files recognized by exact (lowercased) BASENAME rather than extension:
+// CocoaPods' Podfile (a Ruby DSL with no extension) and its Podfile.lock (whose `.lock`
+// extension is too generic to key on -- yarn.lock/Gemfile.lock are unrelated resources).
+const NATIVE_CODE_FILENAMES = new Map([
+  ['podfile', 'podfile'],
+  ['podfile.lock', 'podfile-lock'],
+])
+
 // The source-language format tag for a native build-input file, or undefined when it
 // isn't one of the recognized native-code kinds (so the caller records it as a resource
-// instead). Keyed by extension; a `.podspec.json` has extension `json` (a code extension
-// handled by the normal loader path) and never resolves to a tag here.
+// instead). Exact basename first (Podfile / Podfile.lock), then extension; a `.podspec.json`
+// has extension `json` (a code extension handled by the normal loader path) and never
+// resolves to a tag here.
 export function nativeCodeFormat(name) {
-  return NATIVE_CODE_FORMATS.get(pathExt(name))
+  return NATIVE_CODE_FILENAMES.get(basename(name).toLowerCase()) ?? NATIVE_CODE_FORMATS.get(pathExt(name))
 }
 
 // Files `pod install` READS while LOADING podspecs, beyond the podspec itself: the Ruby helpers a

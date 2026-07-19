@@ -839,6 +839,13 @@ const writeNativeDep = (tmp, name) => {
   writeFileSync(join(root, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
   writeFileSync(join(root, 'ios', 'RNThing.m'), '#import "RNThing.h"\n@implementation RNThing\n@end\n')
   writeFileSync(join(root, 'ios', 'RNThing.mm'), '#import "RNThing.h"\n@implementation RNThing\n@end\n')
+  writeFileSync(join(root, 'ios', 'util.c'), 'int rn_util(void) { return 0; }\n')
+  writeFileSync(join(root, 'ios', 'util.cpp'), 'int rn_util() { return 0; }\n')
+  writeFileSync(join(root, 'ios', 'legacy.c++'), 'int rn_legacy() { return 0; }\n')
+  writeFileSync(join(root, 'ios', 'util.hpp'), 'int rn_util();\n')
+  writeFileSync(join(root, 'ios', 'legacy.h++'), 'int rn_legacy();\n')
+  writeFileSync(join(root, 'ios', 'Podfile'), "pod 'RNThing', :path => '.'\n")
+  writeFileSync(join(root, 'ios', 'Podfile.lock'), 'PODS:\n  - RNThing (3.1.0)\n')
   writeFileSync(join(root, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
   writeFileSync(join(root, 'android', 'src', 'main', 'AndroidManifest.xml'), '<manifest/>\n')
   writeFileSync(join(root, 'android', 'src', 'main', 'java', 'com', 'Thing.java'), 'package com;\nclass Thing {}\n')
@@ -858,6 +865,8 @@ const writeNativeDep = (tmp, name) => {
 const NATIVE_INPUTS = [
   'react-native-native-lib.podspec',
   'ios/RNThing.h', 'ios/RNThing.m', 'ios/RNThing.mm',
+  'ios/util.c', 'ios/util.cpp', 'ios/legacy.c++', 'ios/util.hpp', 'ios/legacy.h++',
+  'ios/Podfile', 'ios/Podfile.lock',
   'android/build.gradle',
   'android/src/main/AndroidManifest.xml',
   'android/src/main/java/com/Thing.java',
@@ -913,6 +922,13 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.equal(nlfmt('ios/RNThing.mm'), 'objcpp')
   t.assert.equal(nlfmt('ios/RNThing.m'), 'objc')
   t.assert.equal(nlfmt('ios/RNThing.h'), 'c-header')
+  t.assert.equal(nlfmt('ios/util.c'), 'c')
+  t.assert.equal(nlfmt('ios/util.cpp'), 'cpp')
+  t.assert.equal(nlfmt('ios/legacy.c++'), 'cpp') // .c++ alt spelling
+  t.assert.equal(nlfmt('ios/util.hpp'), 'cpp-header')
+  t.assert.equal(nlfmt('ios/legacy.h++'), 'cpp-header') // .h++ alt spelling
+  t.assert.equal(nlfmt('ios/Podfile'), 'podfile') // matched by basename (no extension)
+  t.assert.equal(nlfmt('ios/Podfile.lock'), 'podfile-lock') // basename, not the generic .lock ext
   t.assert.equal(nlfmt('android/src/main/AndroidManifest.xml'), 'xml')
   t.assert.equal(nlfmt('android/BuildConfig.java.template'), 'template')
   t.assert.equal(nlfmt('package.json'), 'json')

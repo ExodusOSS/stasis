@@ -473,9 +473,9 @@ export class StasisMetro {
   // Attest the NATIVE build-input surface of every autolinked native dependency (see the
   // NATIVE MODULES note above the class). Discovery is React Native's own `react-native
   // config`; each native dependency's package root is then walked (NATIVE_WALK_SKIP_DIRS
-  // pruned) and its native sources are attested: build-input source (podspec/gradle/Java/Kotlin/
-  // ObjC/ObjC++/C++/headers/Ruby/template/xml -- nativeCodeFormat) as CODE under a source-language
-  // tag, the remaining assets (Swift, images, fonts, ...) as resources, plus each
+  // pruned) and its native sources are attested: build-input source (Java/Kotlin/Gradle, C/C++/
+  // ObjC sources + headers, Ruby, podspec/Podfile, template/xml -- nativeCodeFormat) as CODE under
+  // a source-language tag, the remaining assets (Swift, images, fonts, ...) as resources, plus each
   // package.json (kept in FULL by prune, so `codegenConfig` and native entry fields survive).
   // Node-runnable JS/TS is deliberately skipped: the code a build actually uses is already in
   // Metro's graph, and a library's UNused JS is neither a native input nor reachable, so
@@ -638,8 +638,8 @@ export class StasisMetro {
       const kind = classifyExtension(full, this.#resources)
       // Skip Node-runnable JS/TS EXCEPT package.json: reachable JS is in the graph, unused JS
       // isn't a native input (see the method note). package.json (format 'json') and native
-      // SOURCE (java/kotlin/gradle/objc/objcpp/cpp/c-header/ruby/podspec/template/xml) ride the
-      // code path below; everything else here (Swift, images, fonts, ...) is an asset resource.
+      // SOURCE (Java/Kotlin/Gradle, C/C++/ObjC + headers, Ruby, podspec/Podfile, template/xml --
+      // nativeCodeFormat) ride the code path below; everything else (Swift, images, ...) is a resource.
       if (kind === 'code' && !isPackageJson) continue
       this.#seen.add(full)
       const source = realReadFileSync(full)

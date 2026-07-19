@@ -908,10 +908,10 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // Scoped to the node_modules packages actually in the bundle (derived from `reached`), so the
   // artifact stays "only what's used"; without these, a native build driven from the bundle --
   // or a `stasis prune` against its lockfile -- would be missing every native module's sources.
-  // Native build-input source (podspec/gradle/Java/Kotlin/ObjC/ObjC++/C++/headers/Ruby/template/
-  // xml) is stored as CODE under a source-language tag; other native assets as a resource
-  // ('resource', or 'resource:base64' for a non-UTF-8 asset like a font/image); the integrity
-  // hashes the raw bytes, matching the JS path.
+  // Native build-input source (Java/Kotlin/Gradle, C/C++/ObjC sources + headers, Ruby, podspec/
+  // Podfile, template/xml) is stored as CODE under a source-language tag; other native assets as a
+  // resource ('resource', or 'resource:base64' for a non-UTF-8 asset like a font/image); the
+  // integrity hashes the raw bytes, matching the JS path.
   if (metro) {
     const pkgDirs = new Set()
     for (const abs of reached) {
@@ -946,9 +946,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           continue
         }
         if (classifyExtension(rel, NO_RESOURCES) === 'code') continue
-        // Native build-input SOURCE (java/kotlin/gradle/objc/objcpp/cpp/c-header/ruby/podspec/
-        // template/xml) is code under a source-language tag; every other native file (Swift,
-        // images, fonts, ...) is an asset resource ('resource', or 'resource:base64' for non-UTF-8).
+        // Native build-input SOURCE (Java/Kotlin/Gradle, C/C++/ObjC + headers, Ruby, podspec/
+        // Podfile, template/xml -- nativeCodeFormat) is code under a source-language tag; every other
+        // native file (Swift, images, fonts, ...) is a resource ('resource'/'resource:base64').
         const nativeFormat = nativeCodeFormat(rel)
         const utf8 = isUtf8(buf)
         if (nativeFormat !== undefined) {
