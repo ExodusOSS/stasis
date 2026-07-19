@@ -350,6 +350,36 @@ test('printAuditReport omits the reason column when no row has reasons', (t) => 
   t.assert.doesNotMatch(stripVTControlCharacters(out.join('')), /reason/u)
 })
 
+test('printAuditReport hides the reason column under --reason without --why', (t) => {
+  const out = []
+  printAuditReport(
+    {
+      reason: 'run',
+      packages: [{ name: 'foo', version: '1.0.0' }],
+      // Every cell would just repeat the filter value ('run'), so the column is noise.
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run' }],
+    },
+    { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
+  )
+  t.assert.doesNotMatch(stripVTControlCharacters(out.join('')), /reason/u)
+})
+
+test('printAuditReport keeps the reason column under --reason WITH --why', (t) => {
+  const out = []
+  printAuditReport(
+    {
+      reason: 'run',
+      why: true,
+      packages: [{ name: 'foo', version: '1.0.0' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run: a -> foo' }],
+    },
+    { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
+  )
+  const text = stripVTControlCharacters(out.join(''))
+  t.assert.match(text, /│ reason/u)
+  t.assert.match(text, /run: a -> foo/u)
+})
+
 test('printAuditReport hints when nothing was scanned', (t) => {
   const lines = []
   const err = { write: (s) => lines.push(s) }
