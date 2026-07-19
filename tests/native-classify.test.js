@@ -52,4 +52,18 @@ test('classifyNativeCapture: excluded files skip; a .bat is win32-conditional', 
   t.assert.deepEqual(classifyNativeCapture('install.bat', WIN), { action: 'resource' })
   // A real native source still classifies as code with its language tag, regardless of platform.
   t.assert.deepEqual(classifyNativeCapture('RNThing.mm', NOT_WIN), { action: 'code', format: 'objcpp' })
+  // A .sh script is 'shell' code from the one shared vocab (like gradlew), not a resource.
+  t.assert.deepEqual(classifyNativeCapture('build-phase.sh', NOT_WIN), { action: 'code', format: 'shell' })
+})
+
+test('classifyNativeCapture: an extensionless shell shebang is shell code (content-based)', (t) => {
+  const bash = Buffer.from('#!/usr/bin/env bash\nexec gradle "$@"\n')
+  t.assert.deepEqual(classifyNativeCapture('run-tool', { win32: false, content: bash }),
+    { action: 'code', format: 'shell' })
+  // No content -> the shebang rule can't fire, so an extensionless non-build-input is a resource.
+  t.assert.deepEqual(classifyNativeCapture('run-tool', NOT_WIN), { action: 'resource' })
+  // An extensionless file whose shebang is NOT a shell interpreter stays a resource.
+  const nodeScript = Buffer.from('#!/usr/bin/env node\nconsole.log(1)\n')
+  t.assert.deepEqual(classifyNativeCapture('run-node', { win32: false, content: nodeScript }),
+    { action: 'resource' })
 })

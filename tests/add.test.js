@@ -8,7 +8,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
-import { addCommand } from '@exodus/stasis-core/bundle-cmd'
+import { addCommand } from '@exodus/stasis-core/add'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const stasisCli = join(here, '..', 'stasis', 'bin', 'stasis.js')
