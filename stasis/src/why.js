@@ -150,35 +150,50 @@ function pathsTo(adjRev, isHead, targetDir) {
 }
 
 // Compress one reason bucket's chains (node-name arrays, all ending at the same
-// target) into rendered lines. A chain that is a proper suffix of a longer one
-// is redundant -- its full form already shows inside that longer chain -- so it
-// collapses to `head -> ... -> target` (only when there is an interior to hide,
-// i.e. length >= 3; a 1- or 2-node chain has nothing to elide and stays whole).
-// Distinct chains can collapse to the same abbreviation, so rendered forms are
-// deduped. Order places highly-reused chains (those that subsume the most
-// others) first so the rest read as references to them, then alphabetically.
+// target). Every chain in the bucket shares a maximal common suffix -- the tail
+// where all paths have funnelled together. That tail is shown in full exactly
+// once, in the shortest chain (which reveals it with the least prefix and sorts
+// first). Every other chain collapses just that shared tail's interior to
+// `... head-of-tail -> ... -> target`, keeping its own prefix -- and the tail's
+// head -- visible, so the collapse only ever hides nodes that ARE shown in the
+// full line. Order is shortest-first, then alphabetical.
 function compressChains(chains) {
-  const chainKey = (c) => c.join('\0')
-  const present = new Set(chains.map(chainKey))
-  // Every proper suffix that occurs across the bucket; a chain is "covered" when
-  // it is itself a proper suffix of some longer chain here.
-  const properSuffixes = new Set()
-  for (const c of chains) for (let i = 1; i < c.length; i++) properSuffixes.add(chainKey(c.slice(i)))
-  const covered = (c) => properSuffixes.has(chainKey(c))
-  // reuse(c) = how many other chains are a proper suffix OF c (c subsumes them).
-  const reuse = (c) => {
-    let n = 0
-    for (let i = 1; i < c.length; i++) if (present.has(chainKey(c.slice(i)))) n += 1
-    return n
+  const full = (c) => c.join(' -> ')
+  const uniq = [...new Map(chains.map((c) => [full(c), c])).values()]
+  const sorted = uniq.toSorted((a, b) => a.length - b.length || full(a).localeCompare(full(b)))
+  if (sorted.length <= 1) return sorted.map(full)
+
+  // Length of the maximal common suffix shared by every chain.
+  const minLen = Math.min(...sorted.map((c) => c.length))
+  let shared = 0
+  while (
+    shared < minLen &&
+    sorted.every((c) => c[c.length - 1 - shared] === sorted[0][sorted[0].length - 1 - shared])
+  ) {
+    shared += 1
   }
-  const render = (c) => (covered(c) && c.length >= 3 ? `${c[0]} -> ... -> ${c[c.length - 1]}` : c.join(' -> '))
-  const best = new Map() // rendered line -> highest reuse score seen for it
-  for (const c of chains) {
-    const line = render(c)
-    const score = reuse(c)
-    if (!best.has(line) || best.get(line) < score) best.set(line, score)
+
+  // Collapse only a shared tail with an interior to hide (head + >= 1 hidden +
+  // target). Otherwise there is nothing to gain -- render every chain in full.
+  if (shared < 3) return sorted.map(full)
+
+  const target = sorted[0][sorted[0].length - 1]
+  const out = []
+  const seen = new Set()
+  const push = (line) => {
+    if (!seen.has(line)) {
+      seen.add(line)
+      out.push(line)
+    }
   }
-  return [...best.keys()].toSorted((a, b) => best.get(b) - best.get(a) || a.localeCompare(b))
+  sorted.forEach((c, idx) => {
+    // Shortest chain: shown in full so the shared tail appears once.
+    if (idx === 0) return push(full(c))
+    // Keep everything up to and including the shared tail's head node; hide the
+    // rest of the tail (all shown in the full line above).
+    push(`${c.slice(0, c.length - shared + 1).join(' -> ')} -> ... -> ${target}`)
+  })
+  return out
 }
 
 // Map each targeted package (`name@version`) to its ordered `--why` lines.
@@ -235,9 +250,10 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
           const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
           const reasons = reasonsForHead(p[0], { srcImporters, dirFiles, fileReasons })
           if (reasonFilter) {
-            // Keep this chain only when the requested consumer accounts for it;
-            // an unattributed (bare) chain can never match a named reason.
-            if (reasons.includes(reasonFilter)) addChain(key, reasonFilter, nodes)
+            // Keep this chain only when the requested consumer accounts for it.
+            // Under --reason the column is already all one consumer, so drop the
+            // prefix (bare bucket) -- an unattributed chain can't match anyway.
+            if (reasons.includes(reasonFilter)) addChain(key, '', nodes)
           } else if (reasons.length === 0) {
             addChain(key, '', nodes)
           } else {

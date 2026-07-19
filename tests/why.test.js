@@ -95,7 +95,8 @@ test('collectWhy with a reason filter keeps only that consumer\'s chains', withT
     },
   })
   const why = collectWhy([file], new Set(['c@1.0.0']), 'run')
-  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: a -> b -> c', 'run: b -> c'])
+  // Under --reason the column is all one consumer, so chains render bare (no prefix).
+  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['a -> b -> c', 'b -> c'])
 }))
 
 test('collectWhy with a reason filter drops bare (unattributed) chains', withTmp((t, tmp) => {
@@ -197,41 +198,66 @@ test('collectWhy returns nothing for an artifact without an imports graph', with
 
 // --- chain dedup / compression --------------------------------------------
 
-test('collectWhy compresses a chain that is a proper suffix of a longer one', withTmp((t, tmp) => {
+test('collectWhy collapses the shared tail, shortest chain shown in full', withTmp((t, tmp) => {
   // src imports a and b; a -> b -> c -> d, and b (imported directly) -> c -> d.
+  // The shared tail `b -> c -> d` shows in full (shortest chain); the longer one
+  // collapses its interior.
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c', 'd'],
     edges: [['e', 'a'], ['e', 'b'], ['a', 'b'], ['b', 'c'], ['c', 'd']],
   })
-  // Full chain first (it subsumes the other); the suffix collapses to `b -> ... -> d`.
   t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
-    'a -> b -> c -> d',
-    'b -> ... -> d',
+    'b -> c -> d',        // shortest -> full, first
+    'a -> b -> ... -> d', // collapse the shared `b -> c -> d` tail
   ])
 }))
 
-test('collectWhy orders highly-reused chains first, then alphabetically', withTmp((t, tmp) => {
-  // a and x both go through b -> c -> d; b is imported directly too.
+test('collectWhy orders shortest-first, then alphabetically', withTmp((t, tmp) => {
+  // a and x both go through b -> c -> d; b is imported directly too (convergence).
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'x', 'b', 'c', 'd'],
     edges: [['e', 'a'], ['e', 'x'], ['e', 'b'], ['a', 'b'], ['x', 'b'], ['b', 'c'], ['c', 'd']],
   })
   t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
-    'a -> b -> c -> d', // reuse=1, alpha before x
-    'x -> b -> c -> d', // reuse=1
-    'b -> ... -> d',    // reuse=0 (the collapsed suffix) comes last
+    'b -> c -> d',        // shortest -> full canonical, first
+    'a -> b -> ... -> d', // len 4, alpha before x
+    'x -> b -> ... -> d',
   ])
 }))
 
-test('collectWhy dedups distinct chains that collapse to the same abbreviation', withTmp((t, tmp) => {
-  // b reaches d two ways (via c and via f); both suffixes collapse to `b -> ... -> d`.
+test('collectWhy does not collapse when paths branch above the target', withTmp((t, tmp) => {
+  // b reaches d via c AND via f, so nothing deeper than d is shared -- no collapse.
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c', 'f', 'd'],
     edges: [['e', 'a'], ['e', 'b'], ['a', 'b'], ['b', 'c'], ['b', 'f'], ['c', 'd'], ['f', 'd']],
   })
-  const lines = collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0')
-  t.assert.deepEqual(lines, ['a -> b -> c -> d', 'a -> b -> f -> d', 'b -> ... -> d'])
-  t.assert.equal(lines.filter((l) => l === 'b -> ... -> d').length, 1)
+  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
+    'b -> c -> d',
+    'b -> f -> d',
+    'a -> b -> c -> d',
+    'a -> b -> f -> d',
+  ])
+}))
+
+test('collectWhy collapses the shared tail once, keeping each chain\'s prefix', withTmp((t, tmp) => {
+  // All chains funnel through E -> D -> C -> B -> A; D is also a direct dep, so the
+  // shared tail is `D -> C -> B -> A`. It shows once (the D chain) and every other
+  // chain collapses just that tail's interior, keeping its prefix down to D.
+  const file = writeGraphBundle(tmp, {
+    deps: ['P', 'Q', 'G', 'H', 'F', 'E', 'D', 'C', 'B', 'A'],
+    edges: [
+      ['e', 'P'], ['e', 'Q'], ['e', 'G'], ['e', 'H'], ['e', 'D'],
+      ['P', 'E'], ['Q', 'E'], ['G', 'F'], ['H', 'F'], ['F', 'E'],
+      ['E', 'D'], ['D', 'C'], ['C', 'B'], ['B', 'A'],
+    ],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+    'D -> C -> B -> A',            // shared tail, shown once, first
+    'P -> E -> D -> ... -> A',     // keep prefix down to the tail head D
+    'Q -> E -> D -> ... -> A',
+    'G -> F -> E -> D -> ... -> A',
+    'H -> F -> E -> D -> ... -> A',
+  ])
 }))
 
 test('collectWhy compresses only within a single reason bucket', withTmp((t, tmp) => {
