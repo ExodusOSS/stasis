@@ -261,10 +261,10 @@ test('flattenAdvisories joins the reasons of the affected versions, sorted', (t)
     ['foo@3.0.0', new Set(['metro'])],
   ])
   const rows = flattenAdvisories(result, packages, reasons)
-  // Only 1.0.0 matches `<2`, so only its reasons show (and they're sorted).
+  // Only 1.0.0 matches `<2`, so only its reasons show, ordered plugins then run.
   t.assert.equal(rows.length, 1)
   t.assert.equal(rows[0].installed, '1.0.0')
-  t.assert.equal(rows[0].reason, 'run, webpack')
+  t.assert.equal(rows[0].reason, 'webpack, run')
 })
 
 test('flattenAdvisories leaves reason empty when a package has none', (t) => {
@@ -279,8 +279,32 @@ test('flattenAdvisories uses the --why paths (newline-joined) as the reason cell
   const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
   const why = new Map([['foo@1.0.0', new Set(['run: a -> foo', 'webpack: b -> foo'])]])
   const rows = flattenAdvisories(result, packages, undefined, why)
-  // The why map wins over the (absent) consumer list, and lines are newline-joined.
-  t.assert.equal(rows[0].reason, 'run: a -> foo\nwebpack: b -> foo')
+  // The why map wins over the (absent) consumer list; consumers order plugins then run.
+  t.assert.equal(rows[0].reason, 'webpack: b -> foo\nrun: a -> foo')
+})
+
+test('flattenAdvisories orders --why consumers plugins -> run -> add', (t) => {
+  const packages = [{ name: 'foo', version: '1.0.0' }]
+  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
+  const why = new Map([['foo@1.0.0', new Set(['add: foo', 'run: foo', 'metro: a -> foo'])]])
+  const rows = flattenAdvisories(result, packages, undefined, why)
+  t.assert.equal(rows[0].reason, 'metro: a -> foo\nrun: foo\nadd: foo')
+})
+
+test('flattenAdvisories groups a consumer\'s --why lines across affected versions', (t) => {
+  const packages = [
+    { name: 'foo', version: '1.0.0' },
+    { name: 'foo', version: '2.0.0' },
+  ]
+  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
+  // Each version contributes a metro and a run line; unioned naively they would
+  // interleave (metro, run, metro). Grouping keeps all metro lines together, then run.
+  const why = new Map([
+    ['foo@1.0.0', new Set(['metro: a -> foo', 'run: foo'])],
+    ['foo@2.0.0', new Set(['metro: b -> foo', 'run: foo'])],
+  ])
+  const rows = flattenAdvisories(result, packages, undefined, why)
+  t.assert.equal(rows[0].reason, 'metro: a -> foo\nmetro: b -> foo\nrun: foo')
 })
 
 test('flattenAdvisories --reason narrows the consumer list and drops unrelated rows', (t) => {
@@ -528,7 +552,7 @@ test('audit() attaches bundle reasons to advisory rows', withFetch(
       })
       const report = await audit([bundle])
       const foo = report.rows.find((r) => r.package === 'foo')
-      t.assert.equal(foo.reason, 'run, webpack')
+      t.assert.equal(foo.reason, 'webpack, run')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
@@ -567,7 +591,7 @@ test('audit(--why) replaces the reason cell with per-consumer import paths', wit
       const report = await audit([path], { why: true })
       t.assert.equal(report.why, true)
       const foo = report.rows.find((r) => r.package === 'foo')
-      t.assert.equal(foo.reason, 'run: dep -> foo\nwebpack: dep -> foo')
+      t.assert.equal(foo.reason, 'webpack: dep -> foo\nrun: dep -> foo')
 
       // --reason narrows the chains to that single consumer.
       // Under --reason the chains render bare (no `run:` prefix -- the whole
