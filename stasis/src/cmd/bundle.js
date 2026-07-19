@@ -11,7 +11,7 @@ import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, nativeCodeFormat, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -908,8 +908,10 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // Scoped to the node_modules packages actually in the bundle (derived from `reached`), so the
   // artifact stays "only what's used"; without these, a native build driven from the bundle --
   // or a `stasis prune` against its lockfile -- would be missing every native module's sources.
-  // Native code is stored as a resource ('resource', or 'resource:base64' for a non-UTF-8 asset
-  // like a checked-in font/image); the integrity hashes the raw bytes, matching the JS path.
+  // Native build-input source (Java/Kotlin/Gradle, C/C++/ObjC sources + headers, Ruby, podspec/
+  // Podfile, template/xml) is stored as CODE under a source-language tag; other native assets as a
+  // resource ('resource', or 'resource:base64' for a non-UTF-8 asset like a font/image); the
+  // integrity hashes the raw bytes, matching the JS path.
   if (metro) {
     const pkgDirs = new Set()
     for (const abs of reached) {
@@ -944,9 +946,19 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           continue
         }
         if (classifyExtension(rel, NO_RESOURCES) === 'code') continue
+        // Native build-input SOURCE (Java/Kotlin/Gradle, C/C++/ObjC + headers, Ruby, podspec/
+        // Podfile, template/xml -- nativeCodeFormat) is code under a source-language tag; every other
+        // native file (Swift, images, fonts, ...) is a resource ('resource'/'resource:base64').
+        const nativeFormat = nativeCodeFormat(rel)
         const utf8 = isUtf8(buf)
-        sources.set(rel, utf8 ? buf.toString('utf8') : buf.toString('base64'))
-        formatsByRel.set(rel, utf8 ? 'resource' : 'resource:base64')
+        if (nativeFormat !== undefined) {
+          if (!utf8) throw new Error(`native source ${rel} is not valid UTF-8`)
+          sources.set(rel, buf.toString('utf8'))
+          formatsByRel.set(rel, nativeFormat)
+        } else {
+          sources.set(rel, utf8 ? buf.toString('utf8') : buf.toString('base64'))
+          formatsByRel.set(rel, utf8 ? 'resource' : 'resource:base64')
+        }
         integrities.set(rel, sha512integrity(buf))
       }
     }
