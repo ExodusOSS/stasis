@@ -473,9 +473,9 @@ export class StasisMetro {
   // Attest the NATIVE build-input surface of every autolinked native dependency (see the
   // NATIVE MODULES note above the class). Discovery is React Native's own `react-native
   // config`; each native dependency's package root is then walked (NATIVE_WALK_SKIP_DIRS
-  // pruned) and its native sources are attested: build-input source (podspec/gradle/Java/
-  // Kotlin/ObjC++/template/xml -- nativeCodeFormat) as CODE under a source-language tag, the
-  // remaining assets (ObjC .m/.h, C++, Swift, images, ...) as resources, plus each
+  // pruned) and its native sources are attested: build-input source (podspec/gradle/Java/Kotlin/
+  // ObjC/ObjC++/C++/headers/Ruby/template/xml -- nativeCodeFormat) as CODE under a source-language
+  // tag, the remaining assets (Swift, images, fonts, ...) as resources, plus each
   // package.json (kept in FULL by prune, so `codegenConfig` and native entry fields survive).
   // Node-runnable JS/TS is deliberately skipped: the code a build actually uses is already in
   // Metro's graph, and a library's UNused JS is neither a native input nor reachable, so
@@ -580,9 +580,9 @@ export class StasisMetro {
   // #captureNativeModules): the podspecs `react-native config` never lists, the Ruby helpers they
   // `require` (hermes-engine.podspec -> hermes-utils.rb), and the package.json they parse -- but
   // NOT core's full native source. Prunes the same build-output/binary subtrees as
-  // #captureNativeTree. package.json (format 'json') and podspecs (format 'podspec') ride the
-  // code path; the Ruby helpers (.rb) are UTF-8 text attested as resources -- all through the
-  // same addFile path as any other capture.
+  // #captureNativeTree. package.json (format 'json'), podspecs (format 'podspec'), and the Ruby
+  // helpers they require (.rb, format 'ruby') all ride the code path through the same addFile
+  // path as any other capture.
   #captureManifestTree(dir) {
     let entries
     try {
@@ -603,7 +603,7 @@ export class StasisMetro {
       const source = realReadFileSync(full)
       assert.ok(isUtf8(source), `StasisMetro: native manifest has non-UTF-8 bytes: ${full}`)
       // package.json is code (addFile infers 'json'); a podspec is code (format 'podspec');
-      // the Ruby helpers a podspec requires (.rb) stay resources.
+      // the Ruby helpers a podspec requires (.rb) are code (format 'ruby').
       const format = nativeCodeFormat(ent.name)
       const asResource = ent.name !== 'package.json' && format === undefined
       this.#state.addFile(pathToFileURL(full).toString(), { source, format, resource: asResource, reason: 'StasisMetro' })
@@ -638,8 +638,8 @@ export class StasisMetro {
       const kind = classifyExtension(full, this.#resources)
       // Skip Node-runnable JS/TS EXCEPT package.json: reachable JS is in the graph, unused JS
       // isn't a native input (see the method note). package.json (format 'json') and native
-      // SOURCE (java/kotlin/gradle/objcpp/podspec/template/xml) ride the code path below;
-      // everything else here (ObjC .m/.h, C++, Swift, images, ...) is an asset resource.
+      // SOURCE (java/kotlin/gradle/objc/objcpp/cpp/c-header/ruby/podspec/template/xml) ride the
+      // code path below; everything else here (Swift, images, fonts, ...) is an asset resource.
       if (kind === 'code' && !isPackageJson) continue
       this.#seen.add(full)
       const source = realReadFileSync(full)

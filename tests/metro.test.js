@@ -903,18 +903,18 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.equal(mod.files['android/src/main/jniLibs/arm64-v8a/librnthing.so'], undefined, 'a jniLibs .so is excluded')
   t.assert.equal(mod.files['libs/apple/Skia.xcframework/ios-arm64/Skia.a'], undefined, 'a lib inside an xcframework is excluded')
   t.assert.equal(mod.files['libs/apple/Skia.xcframework/Info.plist'], undefined, 'the whole *.xcframework bundle dir is skipped, not descended into')
-  // Native build-input source is attested as CODE under a source-language tag; other native
-  // assets (ObjC .m/.h) stay resources; package.json rides the code path as json.
+  // Native build-input source is attested as CODE under a per-language source tag; package.json
+  // rides the code path as json.
   const nlfmt = (rel) => lock.formats[`node_modules/react-native-native-lib/${rel}`]
   t.assert.equal(nlfmt('react-native-native-lib.podspec'), 'podspec')
   t.assert.equal(nlfmt('android/build.gradle'), 'gradle')
   t.assert.equal(nlfmt('android/src/main/java/com/Thing.java'), 'java')
   t.assert.equal(nlfmt('android/src/main/kotlin/com/Thing.kt'), 'kotlin')
   t.assert.equal(nlfmt('ios/RNThing.mm'), 'objcpp')
+  t.assert.equal(nlfmt('ios/RNThing.m'), 'objc')
+  t.assert.equal(nlfmt('ios/RNThing.h'), 'c-header')
   t.assert.equal(nlfmt('android/src/main/AndroidManifest.xml'), 'xml')
   t.assert.equal(nlfmt('android/BuildConfig.java.template'), 'template')
-  t.assert.equal(nlfmt('ios/RNThing.m'), 'resource') // ObjC (not .mm) stays a resource
-  t.assert.equal(nlfmt('ios/RNThing.h'), 'resource') // a C/ObjC header stays a resource
   t.assert.equal(nlfmt('package.json'), 'json')
   // The JS-only dep contributes no native surface at all -- not even walked.
   t.assert.equal(lock.modules['node_modules/js-only-lib'], undefined, 'a JS-only autolinked dep has no native surface')
@@ -930,7 +930,7 @@ test('native modules: config discovers native deps; native sources attested, unu
   // A podspec's required Ruby helper + the package.json podspecs parse are captured too.
   t.assert.ok(core.files['sdks/hermes-engine/hermes-engine.podspec']?.startsWith('sha512-'), 'core hermes podspec captured')
   t.assert.ok(core.files['sdks/hermes-engine/hermes-utils.rb']?.startsWith('sha512-'), 'the Ruby helper a podspec requires is captured')
-  t.assert.equal(lock.formats['node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'], 'resource') // a .rb helper stays a resource
+  t.assert.equal(lock.formats['node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'], 'ruby') // a .rb helper is code
   t.assert.ok(core.files['package.json']?.startsWith('sha512-'), 'core package.json (parsed by podspecs) captured')
   t.assert.equal(lock.formats['node_modules/react-native/package.json'], 'json')
   // Vetted core dirs/files are captured IN FULL: Yoga sources + cmake, the CocoaPods scripts,
@@ -938,6 +938,10 @@ test('native modules: config discovers native deps; native sources attested, unu
   for (const f of ['ReactCommon/yoga/CMakeLists.txt', 'ReactCommon/yoga/yoga/Yoga.cpp', 'ReactCommon/yoga/cmake/yoga.cmake', 'scripts/react_native_pods.rb', 'scripts/react-native-xcode.sh', 'sdks/.hermesversion']) {
     t.assert.ok(core.files[f]?.startsWith('sha512-'), `expected core include ${f} to be captured`)
   }
+  // C++ source and the CocoaPods Ruby script are code; the CMake/txt/shell scaffolding stays a resource.
+  t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/yoga/Yoga.cpp'], 'cpp')
+  t.assert.equal(lock.formats['node_modules/react-native/scripts/react_native_pods.rb'], 'ruby')
+  t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'], 'resource')
   // ...but NOT core's JS, native source outside the include dirs, or prebuilt binaries.
   t.assert.equal(core.files['index.js'], undefined, 'core JS is not captured')
   t.assert.equal(core.files['scripts/build.js'], undefined, 'a code file inside an include dir is still skipped')
@@ -1015,7 +1019,7 @@ test('native modules: a reached but NON-autolinked native module (podspec under 
   t.assert.ok(mod.files['lib/ios/ReactNativePayments.podspec']?.startsWith('sha512-'), 'its podspec (under lib/ios) is captured')
   t.assert.ok(mod.files['lib/ios/ReactNativePayments.m']?.startsWith('sha512-'), 'its native source (under lib/ios) is captured')
   t.assert.equal(lock.formats['node_modules/@exodus/react-native-payments/lib/ios/ReactNativePayments.podspec'], 'podspec')
-  t.assert.equal(lock.formats['node_modules/@exodus/react-native-payments/lib/ios/ReactNativePayments.m'], 'resource') // ObjC stays a resource
+  t.assert.equal(lock.formats['node_modules/@exodus/react-native-payments/lib/ios/ReactNativePayments.m'], 'objc') // ObjC is code
 }))
 
 test('native modules: no react-native CLI installed -> native capture is skipped, capture still succeeds', withTmp((t, tmp) => {

@@ -1306,7 +1306,7 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(core.has('sdks/hermes-engine/hermes-utils.rb'), 'the Ruby helper a podspec requires is discovered')
   t.assert.ok(core.has('package.json'), 'core package.json (parsed by podspecs) is captured')
   t.assert.equal(bundle.formats.get('node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'), 'podspec')
-  t.assert.equal(bundle.formats.get('node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'), 'resource') // a .rb helper stays a resource
+  t.assert.equal(bundle.formats.get('node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'), 'ruby') // a .rb helper is code
   t.assert.equal(bundle.formats.get('node_modules/react-native/package.json'), 'json')
   // Vetted core dirs/files captured in full; core native source outside them + binaries stay out.
   t.assert.ok(core.has('ReactCommon/yoga/yoga/Yoga.cpp'), 'yoga source captured')
@@ -1315,14 +1315,17 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(core.has('sdks/.hermesversion'), '.hermesversion captured')
   t.assert.ok(!core.has('React/RCTBridge.m'), 'core native source outside include dirs stays out')
   t.assert.ok(!core.has('sdks/hermesc/osx-bin/hermesc'), 'prebuilt hermesc binary stays out')
-  // Formats: native build-input source is CODE under a source-language tag; a native asset
-  // (ObjC header) is 'resource'; a binary asset is 'resource:base64'; the graph-reached JS
-  // keeps its code format.
+  // C++ source and the CocoaPods Ruby script are code; the CMake scaffolding stays a resource.
+  t.assert.equal(bundle.formats.get('node_modules/react-native/ReactCommon/yoga/yoga/Yoga.cpp'), 'cpp')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/scripts/react_native_pods.rb'), 'ruby')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'), 'resource')
+  // Formats: native build-input source is CODE under a per-language source tag; a binary asset is
+  // 'resource:base64'; the graph-reached JS keeps its code format.
   t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'podspec')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.mm'), 'objcpp')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.h'), 'c-header')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/android/build.gradle'), 'gradle')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/android/src/main/AndroidManifest.xml'), 'xml')
-  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.h'), 'resource') // a C/ObjC header stays a resource
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/logo.png'), 'resource:base64')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/index.js'), 'commonjs')
   // The base64 payload decodes back to the exact bytes.

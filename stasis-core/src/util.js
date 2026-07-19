@@ -19,7 +19,8 @@ const sep = '/'
 //   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
 //   Native build inputs (analysis-only, not runnable by Node; the Metro native capture
 //     attests them for the CocoaPods/Gradle toolchain, so they carry a source tag rather
-//     than being lumped into 'resource') — java, kotlin, gradle, objcpp, podspec, template, xml
+//     than being lumped into 'resource') — java, kotlin, gradle, objcpp, objc, cpp, c-header,
+//     ruby, podspec, template, xml
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
 //     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload), and the
@@ -43,6 +44,10 @@ export const KNOWN_FORMATS = new Set([
   'kotlin',
   'gradle',
   'objcpp',
+  'objc',
+  'cpp',
+  'c-header',
+  'ruby',
   'podspec',
   'template',
   'xml',
@@ -178,6 +183,10 @@ const NATIVE_CODE_FORMATS = new Map([
   ['kt', 'kotlin'], // Kotlin source
   ['gradle', 'gradle'], // Gradle build script
   ['mm', 'objcpp'], // Objective-C++ source
+  ['m', 'objc'], // Objective-C source
+  ['cpp', 'cpp'], // C++ source
+  ['h', 'c-header'], // C/C++/Objective-C header
+  ['rb', 'ruby'], // Ruby (podspec helpers, CocoaPods scripts)
   ['podspec', 'podspec'], // CocoaPods spec
   ['template', 'template'], // build-input template
   ['xml', 'xml'], // e.g. AndroidManifest.xml
