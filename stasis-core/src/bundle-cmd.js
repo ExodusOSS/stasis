@@ -17,6 +17,9 @@ const FIXED_FORMATS = new Map([
   ['.mjs', 'module'], ['.cjs', 'commonjs'], ['.json', 'json'],
   ['.mts', 'module-typescript'], ['.cts', 'commonjs-typescript'],
   ['.sol', 'solidity'], ['.php', 'php'], ['.sh', 'shell'], ['.bash', 'shell'], ['.rs', 'rust'],
+  // Xcode project-bundle inputs the Metro packager excludes as IDE metadata, but which a user
+  // can attest explicitly with `stasis add`: the project file and workspace descriptor.
+  ['.pbxproj', 'pbxproj'], ['.xcworkspacedata', 'xml'],
 ])
 
 // The loader format a CODE/source file gets from its path alone, WITHOUT parsing it -- or

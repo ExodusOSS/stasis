@@ -21,7 +21,9 @@ const sep = '/'
 //     attests them for the CocoaPods/Gradle toolchain, so they carry a source tag rather
 //     than being lumped into 'resource') — java, kotlin, gradle, objc, objcpp, swift, c, cpp,
 //     c-header, cpp-header, ruby, cmake, podspec, podfile, podfile-lock, template, xml,
-//     env, fastlane (and shell, reused from the source-language tags, e.g. gradlew)
+//     env, fastlane (and shell, reused from the source-language tags, e.g. gradlew). `pbxproj`
+//     is a native build-input format too, but only via `stasis add` -- the packager excludes
+//     the `.xcodeproj`/`.xcworkspace` bundles it lives in as IDE metadata.
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
 //     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload), and the
@@ -60,6 +62,7 @@ export const KNOWN_FORMATS = new Set([
   'xml',
   'env',
   'fastlane',
+  'pbxproj',
   'resource',
   'resource:base64',
   'directory',
@@ -219,8 +222,11 @@ const NATIVE_CODE_FORMATS = new Map([
   ['xcscheme', 'xml'], // Xcode scheme (XML)
   ['storyboard', 'xml'], // Interface Builder storyboard (XML)
   ['entitlements', 'xml'], // Apple entitlements (XML plist)
-  ['pbxproj', 'xml'], // Xcode project file (an old-style plist; tagged xml by request)
   ['env', 'env'], // dotenv config
+  // NB: project.pbxproj / *.xcworkspacedata are NOT here -- they live inside `.xcodeproj`/
+  // `.xcworkspace` bundle dirs, which the Metro native capture excludes as IDE metadata
+  // (isNativeArtifact). They're classifiable via `stasis add` (see bundle-cmd's FIXED_FORMATS),
+  // not auto-deep-added from node_modules by the packager.
 ])
 
 // Native build-input files recognized by exact (lowercased) BASENAME rather than extension:
@@ -234,6 +240,7 @@ const NATIVE_CODE_FILENAMES = new Map([
   ['gradlew', 'shell'], // the Gradle wrapper (a POSIX shell script, no extension)
   ['appfile', 'fastlane'], // Fastlane config (Ruby DSL, no extension)
   ['fastfile', 'fastlane'], // Fastlane config (Ruby DSL, no extension)
+  ['apple-app-site-association', 'json'], // Associated Domains manifest (JSON, no extension)
 ])
 
 // Files a native package ships that are NOT build inputs -- docs, editor/lint/CI/tooling config,

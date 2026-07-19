@@ -79,6 +79,22 @@ test('addCommand splits source files to bundleFile and declared resources to res
   t.assert.equal(res.modules.get('.').files['src/logo.png'], Buffer.from([0x89, 0x50, 0x00, 0x01, 0xff]).toString('base64'))
 }))
 
+test('addCommand classifies Xcode project-bundle inputs the Metro packager excludes (pbxproj/xcworkspacedata)', withTmp(async (t, tmp) => {
+  // The packager skips `.xcodeproj`/`.xcworkspace` as IDE metadata, but a user can attest their
+  // text inputs explicitly with `stasis add` -- project.pbxproj (an old-style plist) as 'pbxproj'
+  // and the workspace descriptor as 'xml'. Both are CODE, so they land in the code bundle.
+  seed(tmp)
+  mkdirSync(join(tmp, 'ios', 'App.xcodeproj', 'project.xcworkspace'), { recursive: true })
+  writeFileSync(join(tmp, 'ios', 'App.xcodeproj', 'project.pbxproj'), '// !$*UTF8*$!\n{ archiveVersion = 1; }\n')
+  writeFileSync(join(tmp, 'ios', 'App.xcodeproj', 'project.xcworkspace', 'contents.xcworkspacedata'), '<Workspace/>\n')
+  addCommand({ cwd: tmp, entries: ['ios/App.xcodeproj/project.pbxproj', 'ios/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata'] })
+
+  const code = decode(join(tmp, 'dist/code.br'))
+  t.assert.equal(code.formats.get('ios/App.xcodeproj/project.pbxproj'), 'pbxproj')
+  t.assert.equal(code.formats.get('ios/App.xcodeproj/project.xcworkspace/contents.xcworkspacedata'), 'xml')
+  t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'both are code -> no resources bundle written')
+}))
+
 test('addCommand is additive across runs (merges into each split bundle)', withTmp(async (t, tmp) => {
   seed(tmp)
   addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })
