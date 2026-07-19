@@ -318,6 +318,21 @@ test('collectWhy collapses against a standalone sub-family tail, not just the bu
   ])
 }))
 
+test('collectWhy collapses a shared tail that is not itself a standalone line', withTmp((t, tmp) => {
+  // D -> C -> B -> A and E -> C -> B -> A both funnel through C -> B -> A, but C is
+  // not a head so `C -> B -> A` is never its own line. The tail is still unique
+  // (nothing branches at C), so it shows once in full (the D chain) and the E chain
+  // collapses at C -> `E -> C -> ... -> A`.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'E'],
+    edges: [['e', 'D'], ['e', 'E'], ['D', 'C'], ['E', 'C'], ['C', 'B'], ['B', 'A']],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+    'D -> C -> B -> A',
+    'E -> C -> ... -> A',
+  ])
+}))
+
 test('collectWhy compresses only within a single reason bucket', withTmp((t, tmp) => {
   // run imports a (-> b -> c -> d); webpack imports b (-> c -> d) directly.
   // b -> c -> d must NOT collapse: nothing longer sits in the webpack bucket.

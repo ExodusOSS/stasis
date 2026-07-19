@@ -183,32 +183,39 @@ function pathsTo(adjRev, isHead, isTerminal, targetDir) {
 }
 
 // Compress one reason bucket's chains (node-name arrays, all ending at the same
-// target). A chain collapses against the LONGEST proper suffix that is itself an
-// independently-recorded chain in the bucket -- rendering `prefix -> suffix-head
-// -> ... -> target` and hiding only that recorded chain's interior (which stays
-// visible in full on its own, shorter line). So a bucket like
+// target). A node has a UNIQUE DESCENT when every chain passing through it
+// continues to the target the same way -- i.e. nothing branches there. Such a tail
+// can be shown once, in full, on the shortest chain that reveals it, and every
+// LONGER chain that also passes through the node collapses there to
+// `prefix -> node -> ... -> target`, hiding the tail's interior (recoverable from
+// the full line). A node where routes to the target branch has no unique descent
+// and is never a collapse point, so distinct branches stay expanded. So
 //   C -> B -> A / D -> B -> A / E -> C -> B -> A / F -> C -> B -> A
-// keeps C/D full and collapses E,F to `E -> C -> ... -> A` / `F -> C -> ... -> A`,
-// grounded on the standalone `C -> B -> A` line -- even though the whole bucket
-// only shares `B -> A`. A collapse is applied only when the grounding chain is the
-// UNIQUE route from its head to the target: a head that reaches the target more
-// than one way (a branch above the target) would be ambiguous, so neither route
-// is hidden. Order is shortest-first, then alphabetical, so every grounding chain
-// prints before the chains that reference it.
+// keeps C,D full and collapses E,F at C (`E -> C -> ... -> A`), and a plain shared
+// tail like D -> C -> B -> A / E -> C -> B -> A keeps the first full and collapses
+// the rest at C -- whether or not the tail is a standalone line. Order is
+// shortest-first then alphabetical, so a tail is always printed in full before the
+// chains that collapse onto it.
 function compressChains(chains) {
   const full = (c) => c.join(' -> ')
-  const key = (c) => c.join('\0')
   const uniq = [...new Map(chains.map((c) => [full(c), c])).values()]
   if (uniq.length <= 1) return uniq.map(full)
   const sorted = uniq.toSorted((a, b) => a.length - b.length || full(a).localeCompare(full(b)))
+  const target = sorted[0][sorted[0].length - 1]
 
-  const recorded = new Set(sorted.map(key))
-  // Every chain in a bucket ends at the same target, so a chain is identified for
-  // collapse by its head. A head that tops more than one chain reaches the target
-  // by multiple routes -- collapsing `head -> ... -> target` would be ambiguous.
-  const headCount = new Map()
-  for (const c of sorted) headCount.set(c[0], (headCount.get(c[0]) ?? 0) + 1)
+  // node -> its descent (sub-path to target) as a key, or false if it branches
+  // (two chains leave it toward the target differently -> not a collapse point).
+  const descent = new Map()
+  for (const c of sorted) {
+    for (let i = 0; i < c.length; i++) {
+      const d = c.slice(i).join('\0')
+      const prev = descent.get(c[i])
+      if (prev === undefined) descent.set(c[i], d)
+      else if (prev !== d) descent.set(c[i], false)
+    }
+  }
 
+  const revealed = new Set() // nodes whose full descent has already been printed
   const out = []
   const seen = new Set()
   const push = (line) => {
@@ -218,23 +225,21 @@ function compressChains(chains) {
     }
   }
   for (const c of sorted) {
-    const target = c[c.length - 1]
-    let grounding = null
-    // Longest proper suffix (>= 3 nodes: head + >= 1 hidden + target) that is a
-    // recorded chain reached by a single route.
-    for (let len = c.length - 1; len >= 3; len--) {
-      const suffix = c.slice(c.length - len)
-      if (recorded.has(key(suffix)) && headCount.get(suffix[0]) === 1) {
-        grounding = suffix
+    // Collapse at the earliest node (closest to the head, so the most is hidden)
+    // that is already revealed, has a unique descent, and hides >= 1 node
+    // (descent length c.length - i >= 3: node + >= 1 hidden + target).
+    let at = -1
+    for (let i = 1; i < c.length; i++) {
+      if (revealed.has(c[i]) && descent.get(c[i]) !== false && c.length - i >= 3) {
+        at = i
         break
       }
     }
-    if (grounding === null) {
+    if (at === -1) {
       push(full(c))
+      for (const n of c) revealed.add(n) // this full line reveals its whole descent
     } else {
-      // Keep this chain's prefix down to the grounding chain's head; hide that
-      // chain's interior (shown in full on its own, earlier line).
-      push(`${c.slice(0, c.length - grounding.length + 1).join(' -> ')} -> ... -> ${target}`)
+      push(`${c.slice(0, at + 1).join(' -> ')} -> ... -> ${target}`)
     }
   }
   return out
