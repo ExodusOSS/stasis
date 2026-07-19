@@ -26,6 +26,12 @@ import { parseFile } from './parse.js'
 // is surfaced as a marker line rather than silently dropped.
 const PATH_CAP = 2000
 
+// Packages a chain never walks PAST: everything imports these build/runtime hubs,
+// so continuing up from them just adds noise. When a chain reaches one it stops
+// there, and the hub becomes the chain's head (`@babel/core -> a -> b -> c`),
+// still prefixed with its own reason.
+const TERMINAL_PACKAGES = new Set(['@babel/core', 'react-native', 'metro'])
+
 // Index one parsed artifact: map every project-relative file to its owning module
 // dir, record each dir's package identity + whether it's a node_modules dep, and
 // keep each dir's file list (for the head's-own-reason fallback).
@@ -131,9 +137,10 @@ function reasonsForHead(head, { srcImporters, dirFiles, fileReasons }) {
 }
 
 // Every simple dep-only path that ends at `targetDir`, walking predecessors
-// backward and emitting a path each time its head is a HEAD node (`isHead`).
-// Returns dirs head-first; `truncated` flags the cap.
-function pathsTo(adjRev, isHead, targetDir) {
+// backward and emitting a path each time its head is a HEAD node (`isHead`) or a
+// terminal package (`isTerminal`). A terminal node also stops the walk -- the
+// chain never goes past it. Returns dirs head-first; `truncated` flags the cap.
+function pathsTo(adjRev, isHead, isTerminal, targetDir) {
   const results = []
   let truncated = false
   const walk = (node, suffix, inPath) => {
@@ -141,7 +148,9 @@ function pathsTo(adjRev, isHead, targetDir) {
       truncated = true
       return
     }
-    if (isHead(node)) results.push(suffix)
+    const terminal = isTerminal(node)
+    if (isHead(node) || terminal) results.push(suffix)
+    if (terminal) return // don't walk past @babel/core / react-native / metro
     for (const pred of adjRev.get(node) ?? []) {
       if (inPath.has(pred)) continue // no repeated module -> break cycles
       inPath.add(pred)
@@ -217,6 +226,8 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
     // A head tops a chain: a src file imports it directly, or nothing in
     // node_modules imports it (no dep predecessor).
     const isHead = (node) => srcImporters.has(node) || !adjRev.has(node)
+    // Terminal packages end a chain regardless of what imports them.
+    const isTerminal = (node) => TERMINAL_PACKAGES.has(dirInfo.get(node)?.name)
 
     // Group target dirs by `name@version` (a package can appear at several dirs,
     // e.g. nested node_modules); paths from every matching dir are unioned.
@@ -233,7 +244,7 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
 
     for (const [key, dirs] of dirsByKey) {
       for (const targetDir of dirs) {
-        const { results, truncated } = pathsTo(adjRev, isHead, targetDir)
+        const { results, truncated } = pathsTo(adjRev, isHead, isTerminal, targetDir)
         if (truncated) truncatedKeys.add(key)
         for (const p of results) {
           const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
