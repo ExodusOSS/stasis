@@ -123,11 +123,11 @@ test('Bundle.merge unions the informational reason provenance per consumer', (t)
     entries: ['src/b.js'],
     modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/b.js': 'B' } }]],
     formats: [['src/b.js', 'module']],
-    reason: { run: ['src/b.js'], StasisWebpack: ['src/b.js'] },
+    reason: { run: ['src/b.js'], webpack: ['src/b.js'] },
   })
   const merged = a.merge(b)
   t.assert.deepEqual(merged.reason.run, ['src/a.js', 'src/b.js'])
-  t.assert.deepEqual(merged.reason.StasisWebpack, ['src/b.js'])
+  t.assert.deepEqual(merged.reason.webpack, ['src/b.js'])
 })
 
 test('Bundle.merge throws on a scope mismatch', (t) => {

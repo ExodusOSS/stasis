@@ -237,7 +237,7 @@ export class StasisMetro {
       if (!resource) {
         assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${modPath}`)
       }
-      this.#state.addFile(pathToFileURL(modPath).toString(), { source, resource, reason: 'StasisMetro' })
+      this.#state.addFile(pathToFileURL(modPath).toString(), { source, resource, reason: 'metro' })
     }
   }
 
@@ -287,7 +287,7 @@ export class StasisMetro {
       return
     }
     this.#seen.add(full)
-    this.#state.addFile(pathToFileURL(full).toString(), { source, resource: true, reason: 'StasisMetro' })
+    this.#state.addFile(pathToFileURL(full).toString(), { source, resource: true, reason: 'metro' })
   }
 
   // node_modules roots the graph reached that also ship native code (podspec or ios/android dir):
@@ -350,7 +350,7 @@ export class StasisMetro {
       assert.ok(isUtf8(source), `StasisMetro: native manifest has non-UTF-8 bytes: ${full}`)
       // isNativeManifest admits only code (package.json/JSON podspecs, Ruby podspecs, .rb helpers).
       const { format } = classifyNativeCapture(ent.name)
-      this.#state.addFile(pathToFileURL(full).toString(), { source, format, reason: 'StasisMetro' })
+      this.#state.addFile(pathToFileURL(full).toString(), { source, format, reason: 'metro' })
     }
   }
 
@@ -385,7 +385,7 @@ export class StasisMetro {
       if (!asResource) {
         assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
       }
-      this.#state.addFile(pathToFileURL(full).toString(), { source, format, resource: asResource, reason: 'StasisMetro' })
+      this.#state.addFile(pathToFileURL(full).toString(), { source, format, resource: asResource, reason: 'metro' })
     }
   }
 
@@ -426,7 +426,7 @@ export class StasisMetro {
       if (kind === 'code') {
         assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${modPath}`)
       }
-      this.#state.addFile(url, { source, isEntry: entries.has(modPath), resource: kind === 'resource', reason: 'StasisMetro' })
+      this.#state.addFile(url, { source, isEntry: entries.has(modPath), resource: kind === 'resource', reason: 'metro' })
     }
   }
 }

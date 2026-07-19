@@ -2427,7 +2427,7 @@ test('bundleCommand --add unions the `bundle` attribution across builds', withTm
 
 test('bundleCommand --add preserves other consumers when growing a captured bundle', withTmp(async (t, tmp) => {
   // Seed an existing bundle that looks like a multi-consumer runtime/plugin capture
-  // (it carries a `reason` naming `run` and `StasisWebpack`). A static `--add` must
+  // (it carries a `reason` naming `run` and `webpack`). A static `--add` must
   // keep those and attribute only the newly added file to `bundle`.
   const outPath = join(tmp, 'out.stasis.code.br')
   const seed = new Bundle({
@@ -2439,7 +2439,7 @@ test('bundleCommand --add preserves other consumers when growing a captured bund
     } }]]),
     formats: new Map([['src/A.sol', 'solidity'], ['src/Shared.sol', 'solidity']]),
     imports: new Map([['solidity', new Map([['src/A.sol', new Map([['./Shared.sol', 'src/Shared.sol']])]])]]),
-    reason: { run: ['src/A.sol'], StasisWebpack: ['src/Shared.sol'] },
+    reason: { run: ['src/A.sol'], webpack: ['src/Shared.sol'] },
   })
   writeFileSync(outPath, brotliCompressSync(seed.serialize()))
 
@@ -2448,7 +2448,7 @@ test('bundleCommand --add preserves other consumers when growing a captured bund
   // Original consumers survive; the added file (B.sol) is attributed to `bundle`.
   // (Shared.sol was re-bundled by the static build too, so `bundle` names it as well.)
   t.assert.deepEqual(merged.reason.run, ['src/A.sol'])
-  t.assert.deepEqual(merged.reason.StasisWebpack, ['src/Shared.sol'])
+  t.assert.deepEqual(merged.reason.webpack, ['src/Shared.sol'])
   t.assert.deepEqual(merged.reason.bundle, ['src/B.sol', 'src/Shared.sol'])
 }))
 

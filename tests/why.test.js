@@ -61,7 +61,7 @@ const writeGraphBundle = (dir, { deps, edges, reason, scope = 'full' }, name = '
 const linesFor = (why, key) => [...(why.get(key) ?? [])].toSorted((a, b) => a.localeCompare(b))
 
 test('collectWhy prefixes each chain with its head\'s top-level importer reasons', withTmp((t, tmp) => {
-  // runEntry (reason run) imports a,b; wpEntry (reason StasisWebpack) imports b,x.
+  // runEntry (reason run) imports a,b; wpEntry (reason webpack) imports b,x.
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c', 'x'],
     edges: [
@@ -70,15 +70,15 @@ test('collectWhy prefixes each chain with its head\'s top-level importer reasons
     ],
     reason: {
       run: ['runEntry', 'a', 'b', 'c'],
-      StasisWebpack: ['wpEntry', 'b', 'x', 'c'],
+      webpack: ['wpEntry', 'b', 'x', 'c'],
     },
   })
   const why = collectWhy([file], new Set(['c@1.0.0']))
   t.assert.deepEqual(linesFor(why, 'c@1.0.0'), [
     'run: a -> b -> c', // a is imported only by runEntry
     'run: b -> c',      // b is imported by both entries -> two lines
-    'StasisWebpack: b -> c',
-    'StasisWebpack: x -> c', // x imported only by wpEntry
+    'webpack: b -> c',
+    'webpack: x -> c', // x imported only by wpEntry
   ])
 }))
 
@@ -97,7 +97,7 @@ test('collectWhy includes a chain whose head is not imported by src (top of the 
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c'],
     edges: [['a', 'b'], ['b', 'c']],
-    reason: { run: ['a', 'b', 'c'], StasisWebpack: ['b', 'c'] },
+    reason: { run: ['a', 'b', 'c'], webpack: ['b', 'c'] },
     scope: 'node_modules',
   })
   const why = collectWhy([file], new Set(['c@1.0.0']))
@@ -109,11 +109,11 @@ test('collectWhy falls back to the head\'s own reasons when there is no top-leve
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c'],
     edges: [['a', 'b'], ['b', 'c']],
-    reason: { run: ['a', 'b', 'c'], StasisWebpack: ['a', 'b', 'c'] },
+    reason: { run: ['a', 'b', 'c'], webpack: ['a', 'b', 'c'] },
     scope: 'node_modules',
   })
   const why = collectWhy([file], new Set(['c@1.0.0']))
-  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: a -> b -> c', 'StasisWebpack: a -> b -> c'])
+  t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: a -> b -> c', 'webpack: a -> b -> c'])
 }))
 
 test('collectWhy renders bare chains for a node_modules bundle with no reason map', withTmp((t, tmp) => {
@@ -130,10 +130,10 @@ test('collectWhy shows a single-node chain for a directly-imported dependency', 
   const file = writeGraphBundle(tmp, {
     deps: ['c'],
     edges: [['e', 'c']],
-    reason: { run: ['e', 'c'], StasisWebpack: ['c'] },
+    reason: { run: ['e', 'c'], webpack: ['c'] },
   })
   const why = collectWhy([file], new Set(['c@1.0.0']))
-  // c is imported by src file e (recorded by run); StasisWebpack recorded c but
+  // c is imported by src file e (recorded by run); webpack recorded c but
   // did not import it at top level, so the chain is run's.
   t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['run: c'])
 }))

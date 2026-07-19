@@ -188,12 +188,12 @@ test('collectReasons maps a bundle reason map to node_modules packages', withTmp
     reason: {
       run: ['node_modules/foo/index.js'],
       // src/entry.js is a workspace source (not node_modules) and must be ignored
-      StasisWebpack: ['node_modules/baz/index.js', 'node_modules/foo/index.js', 'src/entry.js'],
+      webpack: ['node_modules/baz/index.js', 'node_modules/foo/index.js', 'src/entry.js'],
     },
   })
   const reasons = collectReasons([file])
-  t.assert.deepEqual([...reasons.get('foo@2.0.0')].toSorted(), ['StasisWebpack', 'run'])
-  t.assert.deepEqual([...reasons.get('baz@0.0.1')].toSorted(), ['StasisWebpack'])
+  t.assert.deepEqual([...reasons.get('foo@2.0.0')].toSorted(), ['run', 'webpack'])
+  t.assert.deepEqual([...reasons.get('baz@0.0.1')].toSorted(), ['webpack'])
 }))
 
 test('collectReasons returns nothing for a lockfile (no reason map)', withTmp((t, tmp) => {
@@ -208,9 +208,9 @@ test('collectReasons returns nothing for a bundle without a reason map', withTmp
 
 test('collectReasons unions reasons across multiple files', withTmp((t, tmp) => {
   const a = writeBundle(tmp, 'a.br', { reason: { run: ['node_modules/foo/index.js'] } })
-  const b = writeBundle(tmp, 'b.br', { reason: { StasisWebpack: ['node_modules/foo/index.js'] } })
+  const b = writeBundle(tmp, 'b.br', { reason: { webpack: ['node_modules/foo/index.js'] } })
   const reasons = collectReasons([a, b])
-  t.assert.deepEqual([...reasons.get('foo@2.0.0')].toSorted(), ['StasisWebpack', 'run'])
+  t.assert.deepEqual([...reasons.get('foo@2.0.0')].toSorted(), ['run', 'webpack'])
 }))
 
 test('flattenAdvisories sorts by severity then package', (t) => {
@@ -257,14 +257,14 @@ test('flattenAdvisories joins the reasons of the affected versions, sorted', (t)
     foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '<2' }],
   }
   const reasons = new Map([
-    ['foo@1.0.0', new Set(['run', 'StasisWebpack'])],
-    ['foo@3.0.0', new Set(['StasisMetro'])],
+    ['foo@1.0.0', new Set(['run', 'webpack'])],
+    ['foo@3.0.0', new Set(['metro'])],
   ])
   const rows = flattenAdvisories(result, packages, reasons)
   // Only 1.0.0 matches `<2`, so only its reasons show (and they're sorted).
   t.assert.equal(rows.length, 1)
   t.assert.equal(rows[0].installed, '1.0.0')
-  t.assert.equal(rows[0].reason, 'StasisWebpack, run')
+  t.assert.equal(rows[0].reason, 'run, webpack')
 })
 
 test('flattenAdvisories leaves reason empty when a package has none', (t) => {
@@ -277,10 +277,10 @@ test('flattenAdvisories leaves reason empty when a package has none', (t) => {
 test('flattenAdvisories uses the --why paths (newline-joined) as the reason cell', (t) => {
   const packages = [{ name: 'foo', version: '1.0.0' }]
   const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
-  const why = new Map([['foo@1.0.0', new Set(['run: a -> foo', 'StasisWebpack: b -> foo'])]])
+  const why = new Map([['foo@1.0.0', new Set(['run: a -> foo', 'webpack: b -> foo'])]])
   const rows = flattenAdvisories(result, packages, undefined, why)
   // The why map wins over the (absent) consumer list, and lines are newline-joined.
-  t.assert.equal(rows[0].reason, 'run: a -> foo\nStasisWebpack: b -> foo')
+  t.assert.equal(rows[0].reason, 'run: a -> foo\nwebpack: b -> foo')
 })
 
 test('formatTable renders a multiline cell across physical rows', (t) => {
@@ -311,13 +311,13 @@ test('printAuditReport shows a reason column when a row has reasons', (t) => {
   printAuditReport(
     {
       packages: [{ name: 'foo', version: '1.0.0' }],
-      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run, StasisWebpack' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run, webpack' }],
     },
     { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
   )
   const text = stripVTControlCharacters(out.join(''))
   t.assert.match(text, /│ reason\s+│/u)
-  t.assert.match(text, /run, StasisWebpack/u)
+  t.assert.match(text, /run, webpack/u)
 })
 
 test('printAuditReport omits the reason column when no row has reasons', (t) => {
@@ -468,12 +468,12 @@ test('audit() attaches bundle reasons to advisory rows', withFetch(
       const bundle = writeBundle(tmp, 'snapshot.br', {
         reason: {
           run: ['node_modules/foo/index.js'],
-          StasisWebpack: ['node_modules/foo/index.js'],
+          webpack: ['node_modules/foo/index.js'],
         },
       })
       const report = await audit([bundle])
       const foo = report.rows.find((r) => r.package === 'foo')
-      t.assert.equal(foo.reason, 'StasisWebpack, run')
+      t.assert.equal(foo.reason, 'run, webpack')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
@@ -506,13 +506,13 @@ test('audit(--why) replaces the reason cell with per-consumer import paths', wit
         },
         reason: {
           run: ['src/entry.js', 'node_modules/dep/index.js', 'node_modules/foo/index.js'],
-          StasisWebpack: ['src/entry.js', 'node_modules/dep/index.js', 'node_modules/foo/index.js'],
+          webpack: ['src/entry.js', 'node_modules/dep/index.js', 'node_modules/foo/index.js'],
         },
       }))))
       const report = await audit([path], { why: true })
       t.assert.equal(report.why, true)
       const foo = report.rows.find((r) => r.package === 'foo')
-      t.assert.equal(foo.reason, 'run: dep -> foo\nStasisWebpack: dep -> foo')
+      t.assert.equal(foo.reason, 'run: dep -> foo\nwebpack: dep -> foo')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }

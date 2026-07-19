@@ -14,7 +14,7 @@ import { parseFile } from './parse.js'
 // when `b` is itself imported by src.
 //
 // The reason PREFIX names, per chain, the top-level importers of its head: the
-// consumers (`run`, `StasisWebpack`, ...) that recorded the src files importing
+// consumers (`run`, `webpack`, ...) that recorded the src files importing
 // the head module -- `run: a -> b -> c`. Two consumers importing the same head
 // yield two lines. When the head is not imported from top-level at all (e.g. a
 // `scope=node_modules` bundle has no src), the head's OWN file reasons are used

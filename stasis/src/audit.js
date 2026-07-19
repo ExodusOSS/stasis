@@ -72,7 +72,7 @@ function reasonCell(pkg, affected, reasonsByPkg, whyByPkg) {
     for (const p of source.get(`${pkg}@${v}`) ?? []) parts.add(p)
   }
   // --why: `consumer: path` lines, one per row, ordered so a consumer's chains
-  // group together (localeCompare puts e.g. `run` before `StasisWebpack`).
+  // group together (localeCompare puts e.g. `run` before `webpack`).
   // Otherwise: the `, `-joined consumer set, in the original stable order.
   if (whyByPkg) return [...parts].toSorted((a, b) => a.localeCompare(b)).join('\n')
   return [...parts].toSorted().join(', ')
