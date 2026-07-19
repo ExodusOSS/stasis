@@ -4,12 +4,14 @@ import { basename, dirname, extname, join, relative, resolve } from 'node:path'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from './bundle.js'
+import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
-import { canonicalizePath } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, isBrotliQuality, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { canonicalizePath, sha512integrity } from './state-util.js'
+import { assertRealPathWithinBase, classifyFormat, isBrotliQuality, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
+const LOCK_FILE = 'stasis.lock.json'
 
 // The loader format a source file gets from its path alone, WITHOUT parsing -- or null when
 // `add` doesn't recognize it as source (caller then treats it as a resource iff declared in the
@@ -152,6 +154,37 @@ function addToBundleFile(baseDir, targetPath, bundle, brotliQuality) {
   return { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom }
 }
 
+// Build the companion Lockfile for the files `add` packed: mirror the assembled bundle, swapping
+// each file's content for its integrity (hashed from the raw on-disk bytes in `integrities`, so a
+// `stasis run --lock=frozen` reading from disk matches). Shares the bundle's modules/entries/
+// imports/formats shapes -- `add` resolves nothing, so imports is empty.
+function bundleToLockfile(bundle, integrities) {
+  const modules = new Map()
+  for (const [dir, m] of bundle.modules) {
+    const files = Object.create(null)
+    for (const rel of Object.keys(m.files)) files[rel] = integrities.get(moduleFileKey(dir, rel))
+    modules.set(dir, { name: m.name, version: m.version, ...(m.ecosystem === undefined ? {} : { ecosystem: m.ecosystem }), files })
+  }
+  return new Lockfile({ config: bundle.config, entries: bundle.entries, modules, imports: bundle.imports, formats: bundle.formats })
+}
+
+// Merge the companion lockfile into the project's stasis.lock.json (already present) and rewrite
+// it, so the lockfile keeps attesting exactly what the bundles carry. Strict like the bundle
+// merge -- a file whose bytes differ from what the lockfile already attests throws.
+function updateLockfile(lockPath, lockAdd) {
+  let existing
+  try {
+    existing = Lockfile.parse(readFileSync(lockPath, 'utf8'))
+  } catch (cause) {
+    throw new Error(`add: failed to read the existing ${LOCK_FILE}`, { cause })
+  }
+  const before = tally(existing).files
+  const merged = existing.merge(lockAdd)
+  writeFileSync(lockPath, merged.serialize())
+  const total = tally(merged).files
+  return { total, added: total - before }
+}
+
 // Expand any directory in `rels` into the files under it (recursively, via Node's built-in
 // fs.globSync), so `add src/` attests every file in src/ without listing them. Plain files pass
 // through unchanged; a path that doesn't exist is kept as-is so the per-file existsSync check
@@ -189,8 +222,10 @@ function expandDirectories(baseDir, rels) {
 // configured the two kinds split into `bundleFile` and `resourcesBundleFile` (a pair that share
 // ONE lockfile at run time); without one, everything lands in `bundleFile` (non-split). Each
 // target is assembled in memory and written exactly ONCE (one brotli pass), merging into an
-// existing bundle if present. No dependency scan/loaders/resolver, so this lives in stasis-core;
-// add writes no lockfile of its own. `logLabel` prefixes the one-line stderr summary.
+// existing bundle if present. No dependency scan/loaders/resolver, so this lives in stasis-core.
+// When the project's stasis.lock.json already exists, add updates it too -- attesting the same
+// files' integrities -- so a frozen run stays consistent; it never creates a lockfile.
+// `logLabel` prefixes the one-line stderr summary.
 export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-core' } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('add: at least one file is required')
@@ -202,6 +237,12 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   const rootPkg = readJson(join(baseDir, 'package.json')) ?? {}
   const workspaceName = rootPkg.name ?? 'workspace'
   const workspaceVersion = rootPkg.version ?? '0.0.0'
+
+  // Update the project lockfile only if one is already present (add never creates one). When it
+  // is, hash each packed file's raw bytes so the companion lockfile entries match a frozen run.
+  const lockPath = join(baseDir, LOCK_FILE)
+  const hasLock = existsSync(lockPath)
+  const integrities = new Map()
 
   // Expand directory entries to their files, then de-duplicate while keeping first-seen order
   // (the same file listed twice, or reached via both a name and its parent dir, is one file).
@@ -216,6 +257,7 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     // symlink whose target escapes the project root (matches the deep bundler / loaders).
     assertRealPathWithinBase(realBase, baseDir, rel)
     const buf = readFileSync(abs)
+    if (hasLock) integrities.set(rel, sha512integrity(buf))
     const format = sourceFormat(abs, buf)
     if (format !== null) {
       // Stored source is a UTF-8 string, so the bytes must BE UTF-8 or the stored text would
@@ -249,5 +291,15 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     const kind = codeFiles.size > 0 && resourceFiles.size > 0 ? 'file' : resourceFiles.size > 0 ? 'resource' : 'source'
     writeTarget(bundleFile, all, kind)
   }
+
+  // A present lockfile attests both split targets from one file, so merge in every packed file's
+  // integrity (code + resources together), mirroring the deep bundler's companion lockfile.
+  if (hasLock) {
+    const allFiles = new Map([...codeFiles, ...resourceFiles])
+    const lockAdd = bundleToLockfile(assembleBundle(baseDir, allFiles, workspaceName, workspaceVersion), integrities)
+    const r = updateLockfile(lockPath, lockAdd)
+    summary.push(`+${r.added} (${r.total} total) -> ${LOCK_FILE}`)
+  }
+
   console.warn(`[${logLabel}] add: ${summary.join('; ')}`)
 }

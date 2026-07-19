@@ -8,6 +8,8 @@ import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
+import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { addCommand } from '@exodus/stasis-core/add'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -53,6 +55,21 @@ const seed = (tmp, config = CONFIG) => {
 }
 
 const decode = (path) => Bundle.parse(brotliDecompressSync(readFileSync(path)).toString('utf8'))
+
+// Write a modern (imports+formats attesting) stasis.lock.json attesting the given workspace files
+// -- `files` is a list of [rel, format]. Integrities are hashed from disk so `add` can merge in.
+const writeLock = (tmp, files) => {
+  const bucket = { name: 'app', version: '1.0.0', files: Object.create(null) }
+  const formats = new Map()
+  const entries = new Set()
+  for (const [rel, fmt] of files) {
+    bucket.files[rel] = sha512integrity(readFileSync(join(tmp, rel)))
+    formats.set(rel, fmt)
+    if (fmt !== 'resource' && fmt !== 'resource:base64') entries.add(rel)
+  }
+  const lock = new Lockfile({ config: { scope: 'full' }, entries, modules: new Map([['.', bucket]]), imports: new Map(), formats })
+  writeFileSync(join(tmp, 'stasis.lock.json'), lock.serialize())
+}
 
 // --- addCommand: classification + split -------------------------------------
 
@@ -189,6 +206,37 @@ test('addCommand only writes the bundle for the kind of files given', withTmp(as
   addCommand({ cwd: tmp, entries: ['src/a.js'] }) // code only
   t.assert.ok(existsSync(join(tmp, 'dist/code.br')))
   t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'no resources bundle when no resources were added')
+}))
+
+// --- addCommand: lockfile update --------------------------------------------
+
+test('addCommand updates an existing stasis.lock.json (one lockfile covers both split targets)', withTmp(async (t, tmp) => {
+  seed(tmp)
+  // Present lockfile already attesting src/a.js; add merges the new files' integrities in.
+  writeLock(tmp, [['src/a.js', 'module']])
+  addCommand({ cwd: tmp, entries: ['src/b.cjs', 'src/icon.svg'] })
+
+  const lock = Lockfile.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf8'))
+  t.assert.deepEqual(Object.keys(lock.modules.get('.').files).toSorted(), ['src/a.js', 'src/b.cjs', 'src/icon.svg'])
+  // Integrity is hashed from the raw bytes (so a frozen run reading disk matches).
+  t.assert.equal(lock.modules.get('.').files['src/b.cjs'], sha512integrity(readFileSync(join(tmp, 'src/b.cjs'))))
+  t.assert.equal(lock.formats.get('src/b.cjs'), 'commonjs')
+  t.assert.equal(lock.formats.get('src/icon.svg'), 'resource')
+  // Code files are entries; the resource is not.
+  t.assert.deepEqual([...lock.entries].toSorted(), ['src/a.js', 'src/b.cjs'])
+}))
+
+test('addCommand never creates a lockfile when none is present', withTmp(async (t, tmp) => {
+  seed(tmp)
+  addCommand({ cwd: tmp, entries: ['src/a.js'] })
+  t.assert.ok(!existsSync(join(tmp, 'stasis.lock.json')), 'no lockfile is created')
+}))
+
+test('addCommand refuses to update a lockfile when the same path attests different bytes', withTmp(async (t, tmp) => {
+  seed(tmp)
+  writeLock(tmp, [['src/a.js', 'module']])
+  writeFileSync(join(tmp, 'src', 'a.js'), 'export const a = 999\n') // bytes now differ from the lockfile
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/a.js'] }), /content mismatch|integrity/i)
 }))
 
 // --- addCommand: config + classification errors -----------------------------
