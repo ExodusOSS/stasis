@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, isStatFormat, moduleFileKey, objectToMaps, pathExt, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Destructure off the namespace, not `import { ... } from 'node:fs'`: the const
@@ -38,25 +38,12 @@ function readPackageJSON(pkgAbsolute) {
 // in one process would be unsound.
 const VERSION = corePackage.version
 
-// Set `format` for `file`, applying the weak-stat-record priority rule shared by the
-// live map writers (addFsStat, addImport) and the lockfile merge (#mergedFormats): a
-// payload-free 'stat:*' record YIELDS to a real format and never displaces one. Both
-// directions arise in one capture: an import may reveal the real format of a path first
-// only stat'd, and -- the reverse -- a stat may land on a path addImport already
-// format-attested at resolve time with no byte record for addFsStat's skip to key off
-// (stasis-core's own preload-cached modules are exactly that shape). Everything else
-// keeps noupsert's conflict-is-fatal stance: two divergent REAL formats, or a stat kind
-// flip (stat:file vs stat:directory).
+// Set `format` for `file` via the shared reconcileFormat rule (util.js): a weak 'stat:*' record
+// yields to a real format of the same kind and never displaces one; two real formats, a stat kind
+// flip, or a stat-vs-real kind mismatch are fatal. #mergedFormats applies the same rule.
 function upsertFormat(map, file, format) {
-  const existing = map.get(file)
-  if (existing !== undefined && existing !== format) {
-    if (isStatFormat(existing) && !isStatFormat(format)) {
-      map.set(file, format)
-      return
-    }
-    if (isStatFormat(format) && !isStatFormat(existing)) return
-  }
-  noupsert(map, file, format)
+  const currentFormat = map.get(file)
+  map.set(file, currentFormat === undefined ? format : reconcileFormat(format, currentFormat, file))
 }
 
 // TODO: stricter format validation
