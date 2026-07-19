@@ -81,6 +81,10 @@ function moduleGraph(edges, fileToDir, dirInfo) {
     const pd = fileToDir.get(pf)
     const td = fileToDir.get(tf)
     if (pd === undefined || td === undefined || pd === td) continue
+    // `react-native` reads sibling packages' `package.json` manifests for metadata
+    // (Haste/asset resolution), not as real dependencies -- don't let those edges
+    // pull unrelated packages into the --why graph.
+    if (dirInfo.get(pd).name === 'react-native' && tf.endsWith('/package.json')) continue
     if (!dirInfo.get(td).dep) continue
     if (dirInfo.get(pd).dep) {
       let set = adjRev.get(td)
