@@ -28,22 +28,18 @@ function usage(prefix = '') {
  stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
- (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
-  --add merges into an existing bundle instead of replacing it (not with --output=-);
-  --brotli-quality=0..11 tunes bundle compression for any entry language, default 9)
+ (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
+  existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9)
  stasis add path/to/(file|dir) ...
- (adds the listed files -- a directory expands to the files under it -- to the project's bundle(s)
-  with no dependency resolution; requires a stasis.config.json but its fields are optional:
-  bundleFile defaults to stasis.code.br, a resourcesBundleFile splits declared resources out (else
-  they go into bundleFile), the resources allowlist defaults to none; undeclared non-source files
-  are refused)
+ (adds the listed files to the project's bundle(s) with no dependency resolution;
+  a directory expands to its files. Requires a stasis.config.json (all fields optional).)
  stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
  stasis audit path/to/file ...
  stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
- (stasis sbom streams to stdout by default; --output=- is explicit stdout)
+ (streams to stdout by default; --output=- is explicit stdout)
 `.trim())
   process.exit(1)
 }
