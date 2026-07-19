@@ -125,13 +125,6 @@ function invertReason(reason) {
 // src files importing `head` (its top-level importers). When `head` has no
 // top-level importer (not imported from src), fall back to the consumers that
 // recorded `head`'s own files. Empty when the artifact has no reason map.
-//
-// A TERMINAL head (@babel/core / react-native / metro) is special: it's a sink
-// that consumers reach through their OWN dep graphs, not only from src. Crediting
-// just its src importers would drop the reasons of consumers that pull it in
-// transitively (e.g. `run` reaching it via a -> b -> @babel/core while `metro`
-// imports it from src) -- so also credit its own recorded files, which every
-// consumer that bundles it contributes to. Otherwise those reasons are lost.
 function reasonsForHead(head, { srcImporters, dirFiles, fileReasons }, terminal = false) {
   if (fileReasons === null) return []
   const importers = srcImporters.get(head)
@@ -144,6 +137,36 @@ function reasonsForHead(head, { srcImporters, dirFiles, fileReasons }, terminal 
   // Non-terminal heads use src importers alone (that's their provenance); when
   // there are none, or the head is terminal, credit its own files too.
   if (terminal || !hasImporters) credit(dirFiles.get(head) ?? [])
+  return [...consumers]
+}
+
+// The consumers that reach a TERMINAL head (@babel/core / react-native / metro).
+// A terminal is shown bare / as a chain head -- the imports ABOVE it are noise and
+// hidden -- but its provenance must still name every consumer whose graph pulls it
+// in. Its own recorded files are unreliable here: a hoisted dep is recorded once
+// (under a single consumer), so a consumer reaching it transitively (`metro` via
+// c -> d -> @babel/core) would be lost. Derive the reasons from what IMPORTS it
+// instead: climb above it and union the head-reasons of every chain reaching it,
+// stopping at heads and at other terminals. The terminal's own direct provenance
+// (a consumer that src-imports it, or that recorded its files) is the base.
+function reasonsForTerminalHead(node, adjRev, isHead, isTerminal, reasonCtx) {
+  if (reasonCtx.fileReasons === null) return []
+  const consumers = new Set()
+  const seen = new Set([node])
+  for (const r of reasonsForHead(node, reasonCtx, true)) consumers.add(r)
+  const walk = (n) => {
+    for (const pred of adjRev.get(n) ?? []) {
+      if (seen.has(pred)) continue // no repeated module -> break cycles
+      seen.add(pred)
+      if (isTerminal(pred)) {
+        for (const r of reasonsForHead(pred, reasonCtx, true)) consumers.add(r)
+      } else {
+        if (isHead(pred)) for (const r of reasonsForHead(pred, reasonCtx)) consumers.add(r)
+        walk(pred)
+      }
+    }
+  }
+  walk(node)
   return [...consumers]
 }
 
@@ -283,13 +306,18 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
     }
     if (dirsByKey.size === 0) continue
 
+    const reasonCtx = { srcImporters, dirFiles, fileReasons }
     for (const [key, dirs] of dirsByKey) {
       for (const targetDir of dirs) {
         const { results, truncated } = pathsTo(adjRev, isHead, isTerminal, targetDir)
         if (truncated) truncatedKeys.add(key)
         for (const p of results) {
           const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
-          const reasons = reasonsForHead(p[0], { srcImporters, dirFiles, fileReasons }, isTerminal(p[0]))
+          // A terminal head hides its importers, so derive its reasons by climbing
+          // above it (reasonsForTerminalHead); a normal head uses its own.
+          const reasons = isTerminal(p[0])
+            ? reasonsForTerminalHead(p[0], adjRev, isHead, isTerminal, reasonCtx)
+            : reasonsForHead(p[0], reasonCtx)
           if (reasonFilter) {
             // Keep this chain only when the requested consumer accounts for it.
             // Under --reason the column is already all one consumer, so drop the
