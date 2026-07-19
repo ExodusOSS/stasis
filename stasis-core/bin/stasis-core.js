@@ -22,9 +22,11 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
- stasis-core bundle --shallow [--add] [--output=(path|-)] [--brotli-quality=0..11] path/to/file ...
- (--shallow packs exactly the listed files, with no dependency resolution or graph walk;
-  writes to stasis.code.br by default, --output=- streams to stdout, --add merges into an existing bundle)
+ stasis-core bundle-add path/to/file ...
+ (adds the listed files to the project's split bundles -- no dependency resolution or graph walk.
+  Requires a stasis.config.json declaring bundleFile (code target), resourcesBundleFile (resource
+  target), and the resources allowlist; each source file is added to bundleFile, each declared
+  resource to resourcesBundleFile, and anything else is refused.)
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)
@@ -130,48 +132,18 @@ if (command === '-v' || command === '--version') {
   const { prune } = await import('../src/prune.js')
   const { removed, validated, minimized } = prune({ root })
   console.warn(`[stasis-core] prune: validated ${validated.length} file(s), removed ${removed.length} file(s), minimized ${minimized.length} package.json file(s)`)
-} else if (command === 'bundle') {
-  const flags = []
-  const valueFlags = new Set(['--output', '--brotli-quality', '-o'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
-  const options = {
-    output: { type: 'string', short: 'o' },
-    'brotli-quality': { type: 'string' },
-    shallow: { type: 'boolean' },
-    add: { type: 'boolean' },
-  }
-  let values
+} else if (command === 'bundle-add') {
+  // bundle-add just packs the explicitly listed files (no scanner/loaders/resolver), reading
+  // stasis.config.json for the split targets + resource allowlist -- so it lives in the zero-dep
+  // core. It takes no flags; everything comes from the config.
+  if (argv.length === 0) usage('Nothing to add: no file given')
+  if (argv.some((a) => a.startsWith('-'))) usage('Error: bundle-add takes no options; its targets and resource allowlist come from stasis.config.json')
+  const { bundleAddCommand } = await import('../src/bundle-cmd.js')
   try {
-    ({ values } = parseArgs({ args: flags, options }))
+    bundleAddCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis-core' })
   } catch (cause) {
     usage(`Error: ${cause.message}`)
   }
-  // stasis-core has no scanner/loaders, so it can ONLY pack the files it is given
-  // verbatim -- deep, dependency-resolving bundling lives in the full `stasis` CLI.
-  // Require --shallow so the shallow-only behavior is explicit at the call site.
-  if (!values.shallow) usage('Error: stasis-core bundle only supports --shallow (deep bundling lives in the `stasis` CLI)')
-  if (argv.length === 0) usage('Nothing to bundle: no file given')
-  const add = Boolean(values.add)
-  if (add && values.output === '-') usage('Error: --add cannot be combined with --output=-')
-  let brotliQuality
-  if (values['brotli-quality'] !== undefined) {
-    try {
-      brotliQuality = parseBrotliQuality('--brotli-quality', values['brotli-quality'])
-    } catch (cause) {
-      usage(`Error: ${cause.message}`)
-    }
-  }
-  const { shallowBundleCommand } = await import('../src/bundle-cmd.js')
-  shallowBundleCommand({
-    cwd: process.cwd(),
-    entries: argv,
-    output: values.output,
-    add,
-    brotliQuality,
-    logLabel: 'stasis-core',
-  })
 } else {
   usage()
 }
