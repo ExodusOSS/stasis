@@ -138,21 +138,33 @@ function reasonsForHead(head, { srcImporters, dirFiles, fileReasons }) {
 
 // Every simple dep-only path that ends at `targetDir`, walking predecessors
 // backward and emitting a path each time its head is a HEAD node (`isHead`) or a
-// terminal package (`isTerminal`). A terminal node also stops the walk -- the
-// chain never goes past it. Returns dirs head-first; `truncated` flags the cap.
+// terminal package (`isTerminal`). A terminal *predecessor* ends the chain -- the
+// walk never goes past @babel/core / react-native / metro. The terminal check is
+// applied only to predecessors, never to `targetDir` itself: when the target is
+// terminal we must still climb above it, or every chain reaching it (and its
+// reasons) would be lost. Returns dirs head-first; `truncated` flags the cap.
 function pathsTo(adjRev, isHead, isTerminal, targetDir) {
   const results = []
   let truncated = false
+  const push = (suffix) => {
+    if (results.length >= PATH_CAP) {
+      truncated = true
+      return
+    }
+    results.push(suffix)
+  }
   const walk = (node, suffix, inPath) => {
     if (results.length >= PATH_CAP) {
       truncated = true
       return
     }
-    const terminal = isTerminal(node)
-    if (isHead(node) || terminal) results.push(suffix)
-    if (terminal) return // don't walk past @babel/core / react-native / metro
+    if (isHead(node)) push(suffix)
     for (const pred of adjRev.get(node) ?? []) {
       if (inPath.has(pred)) continue // no repeated module -> break cycles
+      if (isTerminal(pred)) {
+        push([pred, ...suffix]) // terminal head; don't walk past it
+        continue
+      }
       inPath.add(pred)
       walk(pred, [pred, ...suffix], inPath)
       inPath.delete(pred)
