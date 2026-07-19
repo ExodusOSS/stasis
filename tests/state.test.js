@@ -749,3 +749,38 @@ test('bundle `reason`: run does not claim a file it only fs-reads AFTER a plugin
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('bundle=add carries a loaded multi-consumer `reason` forward instead of dropping it', (t) => {
+  // Regression: `stasis-core run --bundle=add` absorbs the on-disk bundle, then re-emits it.
+  // The absorb path copies sources/formats/imports but used to ignore the loaded `reason`, so
+  // #bundleReason rebuilt the map from THIS run's observations alone (all 'run'), collapsed to a
+  // single consumer, and emitted `undefined` -- silently destroying every other consumer's
+  // attribution the bundle carried. The loaded provenance must survive, unioned with this run.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-reason-add-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    for (const f of ['a.js', 'b.js', 'c.js']) writeFileSync(join(dir, f), `export const x = '${f}'\n`)
+    const url = (f) => pathToFileURL(join(dir, f)).toString()
+    const src = (f) => Buffer.from(`export const x = '${f}'\n`)
+
+    // Seed an on-disk bundle fed by two consumers: the loader ('run') + a plugin ('StasisWebpack').
+    const seed = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
+    seed.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true }) // run (default)
+    seed.addFile(url('b.js'), { source: src('b.js'), format: 'module', reason: 'StasisWebpack' })
+    t.assert.deepEqual(JSON.parse(seed.sourceData).reason, { StasisWebpack: ['b.js'], run: ['a.js'] })
+    writeFileSync(join(dir, 'stasis.code.br'), brotliCompressSync(seed.sourceData))
+
+    // Re-run under bundle=add: absorb the bundle, then observe files the way a real run does --
+    // this process only ever records 'run', with no plugin attached.
+    const rerun = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
+    rerun.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true }) // re-import the entry
+    rerun.addFile(url('c.js'), { source: src('c.js'), format: 'module' })                // a NEW run dependency
+
+    // StasisWebpack's attribution survives even though this run never recorded it, and the new
+    // 'run' file is unioned onto the loaded 'run' entry -- no consumer is lost.
+    t.assert.deepEqual(JSON.parse(rerun.sourceData).reason,
+      { StasisWebpack: ['b.js'], run: ['a.js', 'c.js'] })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

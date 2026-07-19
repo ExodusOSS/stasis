@@ -601,6 +601,9 @@ export class State {
     }
     this.formats = bundle.formats
     this.imports = bundle.imports
+    // Carry the loaded bundle's `reason` attribution forward so bundle=add round-trips it
+    // (see #seedReasonFromBundle) rather than dropping every consumer but this run's 'run'.
+    this.#seedReasonFromBundle(bundle)
     if (this.config.frozenBundle) {
       // Snapshot the attested sets before addFile/addImport mutate the live maps. imports is
       // deep-cloned (this.imports shares bundle.imports's nested Maps, which addImport
@@ -737,6 +740,10 @@ export class State {
         `format conflict for ${file}: bundleFile declares '${existing}', resourcesBundleFile declares '${format}'`)
       this.formats.set(file, format)
     }
+    // Carry this half's `reason` attribution forward too (the resources bundle's reason is
+    // restricted to resource files by #bundleReason's inBundle filter, so it stays disjoint
+    // from the code half's -- see #seedReasonFromBundle).
+    this.#seedReasonFromBundle(bundle)
     if (this.config.frozenBundle) {
       // Extend the frozen snapshot. bundleFile's path may not have populated these
       // (resources-only deployments are legal), so initialize lazily; #bundleSources may
@@ -1804,6 +1811,22 @@ export class State {
     let set = this.#reasonFiles.get(reason)
     if (set === undefined) this.#reasonFiles.set(reason, set = new Set())
     set.add(file)
+  }
+
+  // Seed the informational `reason` provenance from an absorbed on-disk bundle so it survives
+  // a bundle=add re-run: without this, #bundleReason would rebuild the map from THIS run's
+  // observations alone (all 'run'), collapse to a single consumer, and emit `undefined` --
+  // silently dropping every other consumer's attribution the loaded bundle carried. The seeded
+  // entries are unioned with this run's #recordReason calls, then re-emitted by #bundleReason.
+  // Write-mode only: load/frozen never re-emit the bundle, so their absorbed reason would be
+  // dead state (and replace never reaches an absorb), so this fires exactly for bundle=add --
+  // the loads-then-rewrites mode. A file no longer in the emitted bundle is filtered out by
+  // #bundleReason's inBundle check, so a stale attribution can't resurrect a dropped file.
+  #seedReasonFromBundle(bundle) {
+    if (!this.config.writeBundle || bundle.reason === undefined) return
+    for (const [consumer, files] of Object.entries(bundle.reason)) {
+      for (const file of files) this.#recordReason(consumer, file)
+    }
   }
 
   // Build the bundle's informational `reason` map, restricted to `bundledFiles`: { consumer:
