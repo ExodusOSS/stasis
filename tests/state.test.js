@@ -687,7 +687,7 @@ test('addFile still verifies a caller-provided source against disk (integrity ch
 
 test('bundle records a `reason` map only when more than one consumer contributes', (t) => {
   // When a single bundle is fed by more than one consumer -- e.g. the loader (`run`) plus a plugin
-  // (StasisMetro/StasisWebpack/...) sharing the same bundleFile -- the bundle gets an informational
+  // (metro/webpack/...) sharing the same bundleFile -- the bundle gets an informational
   // `reason` map of consumer -> the files it recorded. A single-consumer bundle omits it entirely.
   const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-reason-'))
   try {
@@ -701,17 +701,17 @@ test('bundle records a `reason` map only when more than one consumer contributes
     solo.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true })
     t.assert.equal(JSON.parse(solo.sourceData).reason, undefined, 'a single-consumer bundle omits reason')
 
-    // Two consumers sharing one bundle: the loader ('run') + a plugin ('StasisMetro').
+    // Two consumers sharing one bundle: the loader ('run') + a plugin ('metro').
     const shared = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
     shared.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true })        // run (default)
-    shared.addFile(url('b.js'), { source: src('b.js'), format: 'module', reason: 'StasisMetro' })
-    shared.addFile(url('c.js'), { source: src('c.js'), format: 'module', reason: 'StasisMetro' })
-    const expected = { run: ['a.js'], StasisMetro: ['b.js', 'c.js'] }
+    shared.addFile(url('b.js'), { source: src('b.js'), format: 'module', reason: 'metro' })
+    shared.addFile(url('c.js'), { source: src('c.js'), format: 'module', reason: 'metro' })
+    const expected = { run: ['a.js'], metro: ['b.js', 'c.js'] }
     t.assert.deepEqual(JSON.parse(shared.sourceData).reason, expected,
       'reason maps each consumer to the files it recorded (whichever are used)')
     // Consumer keys are SORTED for reproducible output, not in record order (here 'run' is recorded
-    // first but sorts after 'StasisMetro') -- every other bundle map is sorted, so this must be too.
-    t.assert.deepEqual(Object.keys(JSON.parse(shared.sourceData).reason), ['StasisMetro', 'run'])
+    // first but sorts after 'metro') -- every other bundle map is sorted, so this must be too.
+    t.assert.deepEqual(Object.keys(JSON.parse(shared.sourceData).reason), ['metro', 'run'])
     // Informational, preserved across a Bundle.parse round-trip.
     t.assert.deepEqual(Bundle.parse(shared.sourceData).reason, expected)
   } finally {
@@ -734,17 +734,17 @@ test('bundle `reason`: run does not claim a file it only fs-reads AFTER a plugin
     const s = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
     s.addFile(url('entry.js'), { source: src('entry.js'), format: 'module', isEntry: true })         // run IMPORTS (module)
     s.addFsFile(url('early.js'), src('early.js'))                                                      // run fs-reads BEFORE any plugin
-    s.addFile(url('early.js'), { source: src('early.js'), format: 'module', reason: 'StasisWebpack' }) // ...and a plugin bundles it
+    s.addFile(url('early.js'), { source: src('early.js'), format: 'module', reason: 'webpack' }) // ...and a plugin bundles it
 
     s.markPluginAttached()                                                                             // a plugin instance is created
     s.addFsFile(url('app.js'), src('app.js'))                                                          // run fs-reads AFTER (babel transform)
-    s.addFile(url('app.js'), { source: src('app.js'), format: 'module', reason: 'StasisWebpack' })     // ...and the plugin bundles it
+    s.addFile(url('app.js'), { source: src('app.js'), format: 'module', reason: 'webpack' })     // ...and the plugin bundles it
 
     const reason = JSON.parse(s.sourceData).reason
     // app.js is dropped from run (fs-only, post-plugin, bundled); early.js stays (fs-read BEFORE the
     // plugin); entry.js stays (a genuine run import). The plugin keeps everything it bundled.
     t.assert.deepEqual(reason.run, ['early.js', 'entry.js'])
-    t.assert.deepEqual(reason.StasisWebpack, ['app.js', 'early.js'])
+    t.assert.deepEqual(reason.webpack, ['app.js', 'early.js'])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -763,11 +763,11 @@ test('bundle=add carries a loaded multi-consumer `reason` forward instead of dro
     const url = (f) => pathToFileURL(join(dir, f)).toString()
     const src = (f) => Buffer.from(`export const x = '${f}'\n`)
 
-    // Seed an on-disk bundle fed by two consumers: the loader ('run') + a plugin ('StasisWebpack').
+    // Seed an on-disk bundle fed by two consumers: the loader ('run') + a plugin ('webpack').
     const seed = new State(dir, { scope: 'full', lock: 'none', bundle: 'add' })
     seed.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true }) // run (default)
-    seed.addFile(url('b.js'), { source: src('b.js'), format: 'module', reason: 'StasisWebpack' })
-    t.assert.deepEqual(JSON.parse(seed.sourceData).reason, { StasisWebpack: ['b.js'], run: ['a.js'] })
+    seed.addFile(url('b.js'), { source: src('b.js'), format: 'module', reason: 'webpack' })
+    t.assert.deepEqual(JSON.parse(seed.sourceData).reason, { webpack: ['b.js'], run: ['a.js'] })
     writeFileSync(join(dir, 'stasis.code.br'), brotliCompressSync(seed.sourceData))
 
     // Re-run under bundle=add: absorb the bundle, then observe files the way a real run does --
@@ -776,10 +776,10 @@ test('bundle=add carries a loaded multi-consumer `reason` forward instead of dro
     rerun.addFile(url('a.js'), { source: src('a.js'), format: 'module', isEntry: true }) // re-import the entry
     rerun.addFile(url('c.js'), { source: src('c.js'), format: 'module' })                // a NEW run dependency
 
-    // StasisWebpack's attribution survives even though this run never recorded it, and the new
+    // webpack's attribution survives even though this run never recorded it, and the new
     // 'run' file is unioned onto the loaded 'run' entry -- no consumer is lost.
     t.assert.deepEqual(JSON.parse(rerun.sourceData).reason,
-      { StasisWebpack: ['b.js'], run: ['a.js', 'c.js'] })
+      { webpack: ['b.js'], run: ['a.js', 'c.js'] })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

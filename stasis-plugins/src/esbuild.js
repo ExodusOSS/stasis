@@ -176,7 +176,7 @@ export class StasisEsbuild {
         // contents/loader: emission is esbuild's job via the build's own `loader` config.
         if (!this.#seen.has(path)) {
           this.#seen.add(path)
-          this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, resource: true, reason: 'StasisEsbuild' })
+          this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, resource: true, reason: 'esbuild' })
         }
         return undefined
       }
@@ -186,7 +186,7 @@ export class StasisEsbuild {
 
       if (!this.#seen.has(path)) {
         this.#seen.add(path)
-        this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, reason: 'StasisEsbuild' })
+        this.#state.addFile(pathToFileURL(path).toString(), { source, isEntry: pluginData?.isEntry, reason: 'esbuild' })
       }
 
       return { contents: source, loader: this.#loaderFor(path) }
