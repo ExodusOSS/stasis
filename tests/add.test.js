@@ -8,7 +8,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
-import { bundleAddCommand } from '@exodus/stasis-core/bundle-cmd'
+import { addCommand } from '@exodus/stasis-core/bundle-cmd'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const stasisCli = join(here, '..', 'stasis', 'bin', 'stasis.js')
@@ -27,7 +27,7 @@ const runCli = (cli, args, opts = {}) => {
 }
 
 const withTmp = (fn) => async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'stasis-bundle-add-'))
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-add-'))
   try {
     return await fn(t, dir)
   } finally {
@@ -54,11 +54,11 @@ const seed = (tmp, config = CONFIG) => {
 
 const decode = (path) => Bundle.parse(brotliDecompressSync(readFileSync(path)).toString('utf8'))
 
-// --- bundleAddCommand: classification + split -------------------------------
+// --- addCommand: classification + split -------------------------------------
 
-test('bundleAddCommand splits source files to bundleFile and declared resources to resourcesBundleFile', withTmp(async (t, tmp) => {
+test('addCommand splits source files to bundleFile and declared resources to resourcesBundleFile', withTmp(async (t, tmp) => {
   seed(tmp)
-  bundleAddCommand({ cwd: tmp, entries: ['src/a.js', 'src/b.cjs', 'src/icon.svg', 'src/logo.png'] })
+  addCommand({ cwd: tmp, entries: ['src/a.js', 'src/b.cjs', 'src/icon.svg', 'src/logo.png'] })
 
   const code = decode(join(tmp, 'dist/code.br'))
   const res = decode(join(tmp, 'dist/res.br'))
@@ -79,17 +79,17 @@ test('bundleAddCommand splits source files to bundleFile and declared resources 
   t.assert.equal(res.modules.get('.').files['src/logo.png'], Buffer.from([0x89, 0x50, 0x00, 0x01, 0xff]).toString('base64'))
 }))
 
-test('bundleAddCommand is additive across runs (merges into each split bundle)', withTmp(async (t, tmp) => {
+test('addCommand is additive across runs (merges into each split bundle)', withTmp(async (t, tmp) => {
   seed(tmp)
-  bundleAddCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })
-  bundleAddCommand({ cwd: tmp, entries: ['src/b.cjs', 'src/logo.png'] })
+  addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })
+  addCommand({ cwd: tmp, entries: ['src/b.cjs', 'src/logo.png'] })
   t.assert.deepEqual(Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(), ['src/a.js', 'src/b.cjs'])
   t.assert.deepEqual(Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(), ['src/icon.svg', 'src/logo.png'])
 }))
 
-test('bundleAddCommand buckets a node_modules file into its own npm package bucket', withTmp(async (t, tmp) => {
+test('addCommand buckets a node_modules file into its own npm package bucket', withTmp(async (t, tmp) => {
   seed(tmp)
-  bundleAddCommand({ cwd: tmp, entries: ['src/a.js', 'node_modules/dep/index.js'] })
+  addCommand({ cwd: tmp, entries: ['src/a.js', 'node_modules/dep/index.js'] })
   const code = decode(join(tmp, 'dist/code.br'))
   t.assert.deepEqual([...code.modules.keys()].toSorted(), ['.', 'node_modules/dep'])
   const dep = code.modules.get('node_modules/dep')
@@ -98,82 +98,89 @@ test('bundleAddCommand buckets a node_modules file into its own npm package buck
   t.assert.equal(dep.ecosystem, 'npm')
 }))
 
-test('bundleAddCommand only writes the bundle for the kind of files given', withTmp(async (t, tmp) => {
+test('addCommand only writes the bundle for the kind of files given', withTmp(async (t, tmp) => {
   seed(tmp)
-  bundleAddCommand({ cwd: tmp, entries: ['src/a.js'] }) // code only
+  addCommand({ cwd: tmp, entries: ['src/a.js'] }) // code only
   t.assert.ok(existsSync(join(tmp, 'dist/code.br')))
   t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'no resources bundle when no resources were added')
 }))
 
-// --- bundleAddCommand: config + classification errors -----------------------
+// --- addCommand: config + classification errors -----------------------------
 
-test('bundleAddCommand requires a stasis.config.json', withTmp(async (t, tmp) => {
+test('addCommand requires a stasis.config.json', withTmp(async (t, tmp) => {
   seed(tmp, null) // no config
-  t.assert.throws(() => bundleAddCommand({ cwd: tmp, entries: ['src/a.js'] }), /requires a stasis\.config\.json/)
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/a.js'] }), /requires a stasis\.config\.json/)
 }))
 
-test('bundleAddCommand refuses a file that is neither source nor a declared resource', withTmp(async (t, tmp) => {
+test('addCommand refuses a file that is neither source nor a declared resource', withTmp(async (t, tmp) => {
   seed(tmp)
   t.assert.throws(
-    () => bundleAddCommand({ cwd: tmp, entries: ['src/data.txt'] }),
+    () => addCommand({ cwd: tmp, entries: ['src/data.txt'] }),
     /src\/data\.txt is neither a recognized source file nor a declared resource/,
   )
 }))
 
-test('bundleAddCommand requires resourcesBundleFile to add a resource, bundleFile to add source', withTmp(async (t, tmp) => {
-  seed(tmp, { bundleFile: 'dist/code.br', resources: ['svg'] }) // no resourcesBundleFile
-  t.assert.throws(() => bundleAddCommand({ cwd: tmp, entries: ['src/icon.svg'] }), /must set "resourcesBundleFile"/)
-
-  seed(tmp, { resourcesBundleFile: 'dist/res.br', resources: ['svg'] }) // no bundleFile
-  t.assert.throws(() => bundleAddCommand({ cwd: tmp, entries: ['src/a.js'] }), /must set "bundleFile"/)
+test('addCommand rejects a config whose two split targets resolve to the same file', withTmp(async (t, tmp) => {
+  // Distinct as strings ('./dist/x.br' vs 'dist/x.br') but the same canonical path -- the
+  // code and resources bundles have incompatible shapes, so one file can't be both.
+  seed(tmp, { bundleFile: 'dist/x.br', resourcesBundleFile: './dist/x.br', resources: ['svg'] })
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/a.js'] }), /must name distinct paths/)
 }))
 
-test('bundleAddCommand rejects a missing file, an escaping path, and a symlink escaping the root', withTmp(async (t, tmp) => {
+test('addCommand requires resourcesBundleFile to add a resource, bundleFile to add source', withTmp(async (t, tmp) => {
+  seed(tmp, { bundleFile: 'dist/code.br', resources: ['svg'] }) // no resourcesBundleFile
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/icon.svg'] }), /must set "resourcesBundleFile"/)
+
+  seed(tmp, { resourcesBundleFile: 'dist/res.br', resources: ['svg'] }) // no bundleFile
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/a.js'] }), /must set "bundleFile"/)
+}))
+
+test('addCommand rejects a missing file, an escaping path, and a symlink escaping the root', withTmp(async (t, tmp) => {
   seed(tmp)
-  t.assert.throws(() => bundleAddCommand({ cwd: tmp, entries: [] }), /at least one file/)
-  t.assert.throws(() => bundleAddCommand({ cwd: tmp, entries: ['src/nope.js'] }), /file not found: src\/nope\.js/)
-  t.assert.throws(() => bundleAddCommand({ cwd: tmp, entries: ['../outside.js'] }), /Entry escapes baseDir/)
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: [] }), /at least one file/)
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/nope.js'] }), /file not found: src\/nope\.js/)
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['../outside.js'] }), /Entry escapes baseDir/)
 
   const outside = mkdtempSync(join(tmpdir(), 'stasis-outside-'))
   try {
     writeFileSync(join(outside, 'secret.js'), 'export const s = 1\n')
     symlinkSync(join(outside, 'secret.js'), join(tmp, 'link.js'))
-    t.assert.throws(() => bundleAddCommand({ cwd: tmp, entries: ['link.js'] }), /symlink escaping bundle root/)
+    t.assert.throws(() => addCommand({ cwd: tmp, entries: ['link.js'] }), /symlink escaping bundle root/)
   } finally {
     rmSync(outside, { recursive: true, force: true })
   }
 }))
 
-// --- CLI: stasis-core bundle-add --------------------------------------------
+// --- CLI: stasis-core add ---------------------------------------------------
 
-test('CLI (stasis-core): bundle-add splits into the configured bundles', withTmp(async (t, tmp) => {
+test('CLI (stasis-core): add splits into the configured bundles', withTmp(async (t, tmp) => {
   seed(tmp)
-  const r = runCli(coreCli, ['bundle-add', 'src/a.js', 'src/icon.svg'], { cwd: tmp })
+  const r = runCli(coreCli, ['add', 'src/a.js', 'src/icon.svg'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.match(r.stderr, /\[stasis-core\] bundle-add: \+1 source \(1 total\) -> dist\/code\.br; \+1 resource \(1 total\) -> dist\/res\.br/)
+  t.assert.match(r.stderr, /\[stasis-core\] add: \+1 source \(1 total\) -> dist\/code\.br; \+1 resource \(1 total\) -> dist\/res\.br/)
   t.assert.ok(existsSync(join(tmp, 'dist/code.br')) && existsSync(join(tmp, 'dist/res.br')))
 }))
 
-test('CLI (stasis-core): bundle-add with no file, an option, or no config errors', withTmp(async (t, tmp) => {
+test('CLI (stasis-core): add with no file, an option, or no config errors', withTmp(async (t, tmp) => {
   seed(tmp)
-  t.assert.equal(runCli(coreCli, ['bundle-add'], { cwd: tmp }).status, 1)
-  const opt = runCli(coreCli, ['bundle-add', '--output=x', 'src/a.js'], { cwd: tmp })
+  t.assert.equal(runCli(coreCli, ['add'], { cwd: tmp }).status, 1)
+  const opt = runCli(coreCli, ['add', '--output=x', 'src/a.js'], { cwd: tmp })
   t.assert.equal(opt.status, 1)
-  t.assert.match(opt.stderr, /bundle-add takes no options/)
+  t.assert.match(opt.stderr, /add takes no options/)
 
   rmSync(join(tmp, 'stasis.config.json'))
-  const noCfg = runCli(coreCli, ['bundle-add', 'src/a.js'], { cwd: tmp })
+  const noCfg = runCli(coreCli, ['add', 'src/a.js'], { cwd: tmp })
   t.assert.equal(noCfg.status, 1)
   t.assert.match(noCfg.stderr, /requires a stasis\.config\.json/)
 }))
 
-// --- CLI: stasis bundle-add -------------------------------------------------
+// --- CLI: stasis add --------------------------------------------------------
 
-test('CLI (stasis): bundle-add delegates to the same core implementation', withTmp(async (t, tmp) => {
+test('CLI (stasis): add delegates to the same core implementation', withTmp(async (t, tmp) => {
   seed(tmp)
-  const r = runCli(stasisCli, ['bundle-add', 'src/b.cjs', 'src/logo.png'], { cwd: tmp })
+  const r = runCli(stasisCli, ['add', 'src/b.cjs', 'src/logo.png'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.match(r.stderr, /\[stasis\] bundle-add:/)
+  t.assert.match(r.stderr, /\[stasis\] add:/)
   t.assert.equal(decode(join(tmp, 'dist/code.br')).formats.get('src/b.cjs'), 'commonjs')
   t.assert.equal(decode(join(tmp, 'dist/res.br')).formats.get('src/logo.png'), 'resource:base64')
 }))

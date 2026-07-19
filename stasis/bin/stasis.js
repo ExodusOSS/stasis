@@ -31,7 +31,7 @@ function usage(prefix = '') {
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
   --add merges into an existing bundle instead of replacing it (not with --output=-);
   --brotli-quality=0..11 tunes bundle compression for any entry language, default 9)
- stasis bundle-add path/to/file ...
+ stasis add path/to/file ...
  (adds the listed files to the project's split bundles with no dependency resolution -- requires a
   stasis.config.json declaring bundleFile (code), resourcesBundleFile (resources), and the resources
   allowlist; source files go to bundleFile, declared resources to resourcesBundleFile, else refused)
@@ -306,18 +306,16 @@ if (command === '-v' || command === '--version') {
     brotliQuality,
     add,
   })
-} else if (command === 'bundle-add') {
-  // bundle-add packs the explicitly listed files (no scanner/loaders/resolver), reading
+} else if (command === 'add') {
+  // add packs the explicitly listed files (no scanner/loaders/resolver), reading
   // stasis.config.json for the split targets + resource allowlist -- so it shares the zero-dep
   // core implementation. It takes no flags; everything comes from the config.
   if (argv.length === 0) usage('Nothing to add: no file given')
-  if (argv.some((a) => a.startsWith('-'))) usage('Error: bundle-add takes no options; its targets and resource allowlist come from stasis.config.json')
-  const { bundleAddCommand } = await import('@exodus/stasis-core/bundle-cmd')
-  try {
-    bundleAddCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis' })
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  if (argv.some((a) => a.startsWith('-'))) usage('Error: add takes no options; its targets and resource allowlist come from stasis.config.json')
+  const { addCommand } = await import('@exodus/stasis-core/bundle-cmd')
+  // Let addCommand's runtime errors propagate as-is (see `stasis-core add`), like the deep
+  // bundleCommand above -- dumping the full usage block or swallowing the stack buries the cause.
+  addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis' })
 } else if (command === 'build') {
   const flags = []
   const valueFlags = new Set(['--output', '-o', '--format', '--platform', '--define', '--external', '--loader'])

@@ -54,7 +54,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --bundle=add --fs=sync app.js` | build a bundle that also captures sync `fs.readFileSync`/`readdirSync` reads |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis bundle --add src/worker.js` | merge more entries (and their import graph) into an existing `stasis.code.br` instead of replacing it |
-| `stasis bundle-add a.js icon.svg` | add the listed files to the project's split bundles (config-driven), with no dependency resolution |
+| `stasis add a.js icon.svg` | add the listed files to the project's bundles (config-driven), with no dependency resolution |
 | `stasis bundle --conditions=react-native,browser app.js` | statically bundle, asserting extra `exports`/`imports` resolution conditions |
 | `stasis bundle --mainFields=react-native,browser,main app.js` | statically bundle, honoring legacy package `mainFields` (incl. browser-field object redirection) |
 | `stasis bundle --metro --platforms=ios,android app.js` | statically bundle the way Metro resolves: RN conditions + mainFields + `.ios`/`.android`/`.native` suffixes, all platforms at once, plus each bundled native dependency's `ios/`/`android/` sources + podspec |
@@ -70,7 +70,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 
 ## Runtime
 
-The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run`, `prune`, and `bundle-add` (which adds explicitly listed files to a project's split bundles, config-driven, with no scanner/loaders) commands only; the bundler plugins live in [`@exodus/stasis-plugins`](../stasis-plugins).
+The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run`, `prune`, and `add` commands only; the bundler plugins live in [`@exodus/stasis-plugins`](../stasis-plugins).
 
 ## License
 

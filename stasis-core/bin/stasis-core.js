@@ -22,7 +22,7 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
- stasis-core bundle-add path/to/file ...
+ stasis-core add path/to/file ...
  (adds the listed files to the project's split bundles -- no dependency resolution or graph walk.
   Requires a stasis.config.json declaring bundleFile (code target), resourcesBundleFile (resource
   target), and the resources allowlist; each source file is added to bundleFile, each declared
@@ -132,18 +132,17 @@ if (command === '-v' || command === '--version') {
   const { prune } = await import('../src/prune.js')
   const { removed, validated, minimized } = prune({ root })
   console.warn(`[stasis-core] prune: validated ${validated.length} file(s), removed ${removed.length} file(s), minimized ${minimized.length} package.json file(s)`)
-} else if (command === 'bundle-add') {
-  // bundle-add just packs the explicitly listed files (no scanner/loaders/resolver), reading
+} else if (command === 'add') {
+  // add just packs the explicitly listed files (no scanner/loaders/resolver), reading
   // stasis.config.json for the split targets + resource allowlist -- so it lives in the zero-dep
   // core. It takes no flags; everything comes from the config.
   if (argv.length === 0) usage('Nothing to add: no file given')
-  if (argv.some((a) => a.startsWith('-'))) usage('Error: bundle-add takes no options; its targets and resource allowlist come from stasis.config.json')
-  const { bundleAddCommand } = await import('../src/bundle-cmd.js')
-  try {
-    bundleAddCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis-core' })
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  if (argv.some((a) => a.startsWith('-'))) usage('Error: add takes no options; its targets and resource allowlist come from stasis.config.json')
+  const { addCommand } = await import('../src/bundle-cmd.js')
+  // Let addCommand's runtime errors (missing/invalid config, an unclassifiable file, a merge
+  // conflict) propagate as-is, like prune below: they're specific, actionable messages, so
+  // dumping the whole usage block over them -- or swallowing the stack -- only buries the cause.
+  addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis-core' })
 } else {
   usage()
 }
