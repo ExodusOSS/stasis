@@ -1267,6 +1267,8 @@ const writeRnFixture = (root) => {
   writeFileSync(join(dep, 'ios', 'RNThing.mm'), '@implementation RNThing @end\n')
   writeFileSync(join(dep, 'ios', 'RNThing.swift'), 'import Foundation\nclass RNThing {}\n')
   writeFileSync(join(dep, 'ios', 'RNThing-Info.plist'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
+  writeFileSync(join(dep, 'ios', 'Main.storyboard'), '<?xml version="1.0"?>\n<document/>\n')
+  writeFileSync(join(dep, 'ios', 'config.env'), 'API_URL=https://example.com\n')
   writeFileSync(join(dep, 'ios', 'util.c'), 'int rn_util(void) { return 0; }\n')
   writeFileSync(join(dep, 'ios', 'Podfile'), "pod 'RNThing', :path => '.'\n")
   writeFileSync(join(dep, 'ios', 'Podfile.lock'), 'PODS:\n  - RNThing (3.1.0)\n')
@@ -1303,7 +1305,7 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(mod, 'the native dep is a bundled module')
   const files = new Set(Object.keys(mod.files))
   // Native build inputs are carried alongside the graph-reached index.js.
-  for (const f of ['index.js', 'RNThing.podspec', 'Extra.podspec.json', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/RNThing.swift', 'ios/RNThing-Info.plist', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
+  for (const f of ['index.js', 'RNThing.podspec', 'Extra.podspec.json', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/RNThing.swift', 'ios/RNThing-Info.plist', 'ios/Main.storyboard', 'ios/config.env', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
     t.assert.ok(files.has(f), `expected ${f} in the bundle`)
   }
   t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
@@ -1347,6 +1349,8 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.swift'), 'swift')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.h'), 'c-header')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing-Info.plist'), 'xml') // Apple plist is XML
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Main.storyboard'), 'xml')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/config.env'), 'env')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/util.c'), 'c')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile'), 'podfile') // matched by basename
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile.lock'), 'podfile-lock')

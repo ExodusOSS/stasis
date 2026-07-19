@@ -828,6 +828,8 @@ const writeNativeDep = (tmp, name) => {
   mkdirSync(join(root, 'android', 'build'), { recursive: true })
   mkdirSync(join(root, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a'), { recursive: true })
   mkdirSync(join(root, 'src'), { recursive: true })
+  mkdirSync(join(root, 'ios', 'RNThing.xcodeproj'), { recursive: true })
+  mkdirSync(join(root, 'fastlane'), { recursive: true })
   mkdirSync(join(root, 'example', 'ios'), { recursive: true })
   // A skia-style prebuilt/installed `libs/`: an Apple binary bundle (dir) + a static lib.
   mkdirSync(join(root, 'libs', 'apple', 'Skia.xcframework', 'ios-arm64'), { recursive: true })
@@ -855,7 +857,13 @@ const writeNativeDep = (tmp, name) => {
   writeFileSync(join(root, 'ios', 'RNThing-Info.plist'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
   writeFileSync(join(root, 'ios', 'PrivacyInfo.xcprivacy'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
   writeFileSync(join(root, 'ios', 'RNThing.xcscheme'), '<?xml version="1.0"?>\n<Scheme/>\n')
+  writeFileSync(join(root, 'ios', 'Main.storyboard'), '<?xml version="1.0"?>\n<document/>\n')
+  writeFileSync(join(root, 'ios', 'RNThing.entitlements'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
+  writeFileSync(join(root, 'ios', 'RNThing.xcodeproj', 'project.pbxproj'), '// !$*UTF8*$!\n{ archiveVersion = 1; }\n')
   writeFileSync(join(root, 'gradlew'), '#!/usr/bin/env sh\nexec gradle "$@"\n') // the Gradle wrapper (shell)
+  writeFileSync(join(root, '.env'), 'API_URL=https://example.com\n') // dotenv -> env
+  writeFileSync(join(root, 'fastlane', 'Appfile'), "app_identifier('com.example.rnthing')\n")
+  writeFileSync(join(root, 'fastlane', 'Fastfile'), 'lane :test do\nend\n')
   writeFileSync(join(root, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
   writeFileSync(join(root, 'android', 'settings.gradle.kts'), 'rootProject.name = "rnthing"\n')
   writeFileSync(join(root, 'android', 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.13)\n')
@@ -902,6 +910,8 @@ const NATIVE_INPUTS = [
   'ios/util.hpp', 'ios/util.hh', 'ios/util.hxx', 'ios/legacy.h++',
   'ios/Podfile', 'ios/Podfile.lock',
   'ios/RNThing-Info.plist', 'ios/PrivacyInfo.xcprivacy', 'ios/RNThing.xcscheme', 'gradlew',
+  'ios/Main.storyboard', 'ios/RNThing.entitlements', 'ios/RNThing.xcodeproj/project.pbxproj',
+  '.env', 'fastlane/Appfile', 'fastlane/Fastfile',
   'android/build.gradle', 'android/settings.gradle.kts', 'android/CMakeLists.txt',
   'android/src/main/AndroidManifest.xml',
   'android/src/main/java/com/Thing.java',
@@ -986,6 +996,12 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.equal(nlfmt('ios/RNThing-Info.plist'), 'xml')
   t.assert.equal(nlfmt('ios/PrivacyInfo.xcprivacy'), 'xml')
   t.assert.equal(nlfmt('ios/RNThing.xcscheme'), 'xml')
+  t.assert.equal(nlfmt('ios/Main.storyboard'), 'xml')
+  t.assert.equal(nlfmt('ios/RNThing.entitlements'), 'xml')
+  t.assert.equal(nlfmt('ios/RNThing.xcodeproj/project.pbxproj'), 'xml') // old-style plist, tagged xml
+  t.assert.equal(nlfmt('.env'), 'env')
+  t.assert.equal(nlfmt('fastlane/Appfile'), 'fastlane') // matched by basename
+  t.assert.equal(nlfmt('fastlane/Fastfile'), 'fastlane') // matched by basename
   t.assert.equal(nlfmt('android/src/main/AndroidManifest.xml'), 'xml')
   t.assert.equal(nlfmt('android/BuildConfig.java.template'), 'template')
   t.assert.equal(nlfmt('package.json'), 'json')

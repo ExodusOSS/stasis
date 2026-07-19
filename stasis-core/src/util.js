@@ -20,7 +20,8 @@ const sep = '/'
 //   Native build inputs (analysis-only, not runnable by Node; the Metro native capture
 //     attests them for the CocoaPods/Gradle toolchain, so they carry a source tag rather
 //     than being lumped into 'resource') — java, kotlin, gradle, objc, objcpp, swift, c, cpp,
-//     c-header, cpp-header, ruby, cmake, podspec, podfile, podfile-lock, template, xml
+//     c-header, cpp-header, ruby, cmake, podspec, podfile, podfile-lock, template, xml,
+//     env, fastlane (and shell, reused from the source-language tags, e.g. gradlew)
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
 //     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload), and the
@@ -57,6 +58,8 @@ export const KNOWN_FORMATS = new Set([
   'podfile-lock',
   'template',
   'xml',
+  'env',
+  'fastlane',
   'resource',
   'resource:base64',
   'directory',
@@ -214,6 +217,10 @@ const NATIVE_CODE_FORMATS = new Map([
   ['plist', 'xml'], // Apple property list (XML)
   ['xcprivacy', 'xml'], // Apple privacy manifest (XML plist)
   ['xcscheme', 'xml'], // Xcode scheme (XML)
+  ['storyboard', 'xml'], // Interface Builder storyboard (XML)
+  ['entitlements', 'xml'], // Apple entitlements (XML plist)
+  ['pbxproj', 'xml'], // Xcode project file (an old-style plist; tagged xml by request)
+  ['env', 'env'], // dotenv config
 ])
 
 // Native build-input files recognized by exact (lowercased) BASENAME rather than extension:
@@ -225,6 +232,8 @@ const NATIVE_CODE_FILENAMES = new Map([
   ['podfile.lock', 'podfile-lock'],
   ['cmakelists.txt', 'cmake'],
   ['gradlew', 'shell'], // the Gradle wrapper (a POSIX shell script, no extension)
+  ['appfile', 'fastlane'], // Fastlane config (Ruby DSL, no extension)
+  ['fastfile', 'fastlane'], // Fastlane config (Ruby DSL, no extension)
 ])
 
 // Files a native package ships that are NOT build inputs -- docs, editor/lint/CI/tooling config,

@@ -143,7 +143,8 @@ into the lockfile/bundle `config` block (`debug`, `childProcess`, `fs` and
   `json`, `module-typescript`, `commonjs-typescript`), a source-language tag
   (`solidity`, `php`, `shell`, `rust`), or a native build-input tag
   (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `swift`, `c`, `cpp`, `c-header`,
-  `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`, `podfile-lock`, `template`, `xml` —
+  `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`, `podfile-lock`, `template`, `xml`,
+  `env`, `fastlane` —
   attested by the Metro native capture for the CocoaPods/Gradle toolchain, not runnable by
   Node). Resource files use `resource` (content is
   raw UTF-8) or `resource:base64` (content is binary, base64-encoded) — this is
@@ -222,7 +223,7 @@ reporting failures) still persists what it cleanly captured.
   `json`), a source-language tag (`solidity`, `php`, `bash`, `rust`), or a
   native build-input tag (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `swift`, `c`,
   `cpp`, `c-header`, `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`, `podfile-lock`,
-  `template`, `xml` — the Metro native capture's build-input surface).
+  `template`, `xml`, `env`, `fastlane` — the Metro native capture's build-input surface).
   Resource files use `resource` (raw UTF-8 payload) or `resource:base64`
   (base64 payload) — the per-file tag that both marks a file as a resource
   and says how to decode its bundle bytes. A `directory` tag (a `stasis run
