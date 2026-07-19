@@ -260,6 +260,26 @@ test('collectWhy collapses the shared tail once, keeping each chain\'s prefix', 
   ])
 }))
 
+test('collectWhy collapses against a standalone sub-family tail, not just the bucket-wide suffix', withTmp((t, tmp) => {
+  // C -> B -> A / D -> B -> A / E -> C -> B -> A / F -> C -> B -> A. The whole
+  // bucket only shares `B -> A` (too short to collapse), but `C -> B -> A` is its
+  // own line and is the tail of the E and F chains -- so those collapse against it
+  // (`E -> C -> ... -> A`), while C and D stay full.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'E', 'F'],
+    edges: [
+      ['e', 'C'], ['e', 'D'], ['e', 'E'], ['e', 'F'],
+      ['C', 'B'], ['D', 'B'], ['E', 'C'], ['F', 'C'], ['B', 'A'],
+    ],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+    'C -> B -> A',
+    'D -> B -> A',
+    'E -> C -> ... -> A',
+    'F -> C -> ... -> A',
+  ])
+}))
+
 test('collectWhy compresses only within a single reason bucket', withTmp((t, tmp) => {
   // run imports a (-> b -> c -> d); webpack imports b (-> c -> d) directly.
   // b -> c -> d must NOT collapse: nothing longer sits in the webpack bucket.
