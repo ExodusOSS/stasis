@@ -61,6 +61,27 @@ export const CODE_EXTENSIONS = new Set([...NODE_EXT_FORMATS.keys(), ...JS_UNRESO
 // drop and #mergedFormats' upgrade rule.
 export const isStatFormat = (format) => STAT_FORMATS.has(format)
 
+// Kind a format attests: 'directory' for a real readdir listing or a stat:directory record,
+// 'file' for a stat:file record and every real *file* format. Gates reconcileFormat so a stat
+// record only reconciles with a real format of the SAME kind.
+const formatKind = (format) => (format === 'directory' || format === 'stat:directory' ? 'directory' : 'file')
+
+// Reconcile a newly-seen `format` for a path against its `currentFormat`, returning the winner or
+// throwing on conflict (`name` identifies the path). A weak 'stat:*' record yields to a real format
+// of the SAME kind and never displaces one -- stat:file <-> a real file format, stat:directory <->
+// a real 'directory' listing. Two real formats, a stat kind flip (stat:file vs stat:directory), or
+// a stat vs a real format of the OTHER kind are conflicts. Shared by state.js (upsertFormat /
+// #mergedFormats) and the artifact merges (mergeFormatMaps -> Bundle/Lockfile.merge).
+export function reconcileFormat(format, currentFormat, name) {
+  if (format === currentFormat) return format
+  const stat = isStatFormat(format)
+  const currentStat = isStatFormat(currentFormat)
+  if (stat !== currentStat && formatKind(format) === formatKind(currentFormat)) {
+    return stat ? currentFormat : format // the real format wins; the weak stat record yields
+  }
+  throw new Error(`format conflict for '${name}' ('${currentFormat}' vs '${format}')`)
+}
+
 // Lowercased, dot-less extension of a path, or '' if none.
 export function pathExt(filePath) {
   const m = /\.([^./\\]+)$/.exec(filePath)
@@ -445,11 +466,17 @@ export function mergeFormatMaps(a, b, label) {
   const out = new Map()
   const absorb = (formats) => {
     for (const [file, format] of formats) {
-      const existing = out.get(file)
-      if (existing !== undefined) {
-        assert(existing === format, `${label}: format conflict for '${file}' ('${existing}' vs '${format}')`)
-      } else {
+      const currentFormat = out.get(file)
+      if (currentFormat === undefined) {
         out.set(file, format)
+        continue
+      }
+      // reconcileFormat lets a real format supersede a weak 'stat:*' record (and vice versa),
+      // and throws on a genuine conflict; tag it with the merge label for context.
+      try {
+        out.set(file, reconcileFormat(format, currentFormat, file))
+      } catch (cause) {
+        throw new Error(`${label}: ${cause.message}`, { cause })
       }
     }
   }

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
-import { brotliDecompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { addCommand } from '@exodus/stasis-core/add'
@@ -185,6 +185,19 @@ test('addCommand only writes the bundle for the kind of files given', withTmp(as
 test('addCommand requires a stasis.config.json', withTmp(async (t, tmp) => {
   seed(tmp, null) // no config
   t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src/a.js'] }), /requires a stasis\.config\.json/)
+}))
+
+test('addCommand overrides a payload-free stat:file record already in the target bundle', withTmp(async (t, tmp) => {
+  seed(tmp, { bundleFile: 'dist/code.br' })
+  // Simulate a prior `stasis run --fs` capture: the target bundle attests src/a.js as a
+  // bytes-free stat:file record. Adding the real file must upgrade it, not conflict.
+  const prior = new Bundle({ config: { scope: 'full' }, formats: new Map([['src/a.js', 'stat:file']]) })
+  mkdirSync(join(tmp, 'dist'), { recursive: true })
+  writeFileSync(join(tmp, 'dist/code.br'), brotliCompressSync(prior.serialize()))
+  addCommand({ cwd: tmp, entries: ['src/a.js'] })
+  const code = decode(join(tmp, 'dist/code.br'))
+  t.assert.equal(code.formats.get('src/a.js'), 'module', 'the real format supersedes the stat record')
+  t.assert.equal(code.modules.get('.').files['src/a.js'], 'export const a = 1\n')
 }))
 
 test('addCommand refuses a file that is neither source nor a declared resource', withTmp(async (t, tmp) => {

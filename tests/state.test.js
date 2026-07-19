@@ -160,9 +160,9 @@ test('divergent stat kinds and divergent real formats still conflict', (t) => {
   const parentURL = pathToFileURL(fileAbs2).toString()
   const childURL = pathToFileURL(fileAbs).toString()
   s.addFsStat(childURL, 'file')
-  t.assert.throws(() => s.addFsStat(childURL, 'directory'), /Conflict/) // kind flip stays fatal
+  t.assert.throws(() => s.addFsStat(childURL, 'directory'), /format conflict/) // kind flip stays fatal
   s.addImport(parentURL, './foo.js', childURL, { format: 'module' })
-  t.assert.throws(() => s.addImport(parentURL, './foo.js', childURL, { format: 'commonjs' }), /Conflict/)
+  t.assert.throws(() => s.addImport(parentURL, './foo.js', childURL, { format: 'commonjs' }), /format conflict/)
 })
 
 // CJS `require(require.resolve('./foo.js'))` (e.g. webpack's loader-runner doing

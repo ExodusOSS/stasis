@@ -193,6 +193,50 @@ test('Bundle.merge throws when the same file has a different format', (t) => {
   t.assert.throws(() => a.merge(b), /format conflict for 'src\/a\.js'/)
 })
 
+// --- payload-free stat records reconcile against real formats (reconcileFormat) -------------
+
+test('Bundle.merge lets a real format supersede a payload-free stat:file (either order)', (t) => {
+  const statOnly = jsBundle({ formats: [['src/a.js', 'stat:file']] }) // a --fs stat record, no bytes
+  const real = jsBundle({
+    entries: ['src/a.js'],
+    modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/a.js': 'A' } }]],
+    formats: [['src/a.js', 'module']],
+  })
+  // The weak stat record yields to the real format whichever side it merges from.
+  t.assert.equal(real.merge(statOnly).formats.get('src/a.js'), 'module', 'incoming stat yields')
+  t.assert.equal(statOnly.merge(real).formats.get('src/a.js'), 'module', 'real overrides the stat record')
+})
+
+test('Bundle.merge lets a real directory listing supersede a stat:directory (either order)', (t) => {
+  const statDir = jsBundle({ formats: [['src/d', 'stat:directory']] })
+  const realDir = jsBundle({ formats: [['src/d', 'directory']] })
+  t.assert.equal(statDir.merge(realDir).formats.get('src/d'), 'directory')
+  t.assert.equal(realDir.merge(statDir).formats.get('src/d'), 'directory')
+})
+
+test('Bundle.merge keeps a stat record vs a real format of the OTHER kind fatal', (t) => {
+  // stat:file (a file) vs a real 'directory' listing -- a genuine kind conflict, not an upgrade.
+  const statFile = jsBundle({ formats: [['src/x', 'stat:file']] })
+  const realDir = jsBundle({ formats: [['src/x', 'directory']] })
+  t.assert.throws(() => statFile.merge(realDir), /format conflict for 'src\/x'/)
+  t.assert.throws(() => realDir.merge(statFile), /format conflict for 'src\/x'/)
+
+  // stat:directory (a directory) vs a real file format.
+  const statDir = jsBundle({ formats: [['src/y', 'stat:directory']] })
+  const realFile = jsBundle({
+    entries: ['src/y'],
+    modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/y': 'Y' } }]],
+    formats: [['src/y', 'module']],
+  })
+  t.assert.throws(() => statDir.merge(realFile), /format conflict for 'src\/y'/)
+})
+
+test('Bundle.merge keeps a stat:file vs stat:directory kind flip fatal', (t) => {
+  const a = jsBundle({ formats: [['src/z', 'stat:file']] })
+  const b = jsBundle({ formats: [['src/z', 'stat:directory']] })
+  t.assert.throws(() => a.merge(b), /format conflict for 'src\/z'/)
+})
+
 test('Bundle.merge throws when an edge resolves to a different target', (t) => {
   const a = jsBundle({
     entries: ['src/a.js'],
