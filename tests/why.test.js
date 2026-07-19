@@ -250,3 +250,42 @@ test('collectWhy compresses only within a single reason bucket', withTmp((t, tmp
     'webpack: b -> c -> d',
   ])
 }))
+
+// --- react-native -> other-package /package.json edges are not dependencies ---
+
+const writeRnBundle = (dir) => {
+  const path = join(dir, 'stasis.code.br')
+  const bundle = {
+    version: 1,
+    config: { scope: 'full' },
+    formats: {},
+    entries: ['src/entry.js'],
+    sources: { '.': { name: 'top', version: '1.0.0', files: { 'src/entry.js': '// e\n' } } },
+    modules: {
+      'node_modules/react-native': { name: 'react-native', version: '1.0.0', files: { 'index.js': '// rn\n' } },
+      'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': '// foo\n', 'package.json': '{}' } },
+      'node_modules/bar': { name: 'bar', version: '1.0.0', files: { 'index.js': '// bar\n' } },
+    },
+    imports: {
+      '*': {
+        'src/entry.js': { 'react-native': 'node_modules/react-native/index.js' },
+        'node_modules/react-native/index.js': {
+          './foo.json': 'node_modules/foo/package.json', // metadata read, NOT a dependency
+          bar: 'node_modules/bar/index.js', // a real dependency
+        },
+      },
+    },
+  }
+  writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(bundle))))
+  return path
+}
+
+test('collectWhy ignores react-native edges into another package\'s package.json', withTmp((t, tmp) => {
+  const file = writeRnBundle(tmp)
+  const why = collectWhy([file])
+  // The react-native -> foo/package.json edge is dropped, so foo is not
+  // attributed to react-native (it shows as an orphan head instead)...
+  t.assert.deepEqual(linesFor(why, 'foo@1.0.0'), ['foo'])
+  // ...but a real react-native -> bar dependency still shows.
+  t.assert.deepEqual(linesFor(why, 'bar@1.0.0'), ['react-native -> bar'])
+}))
