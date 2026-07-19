@@ -1262,8 +1262,10 @@ const writeRnFixture = (root) => {
   writeFileSync(join(dep, 'package.json'), JSON.stringify({ name: 'rn-native', version: '3.1.0', main: 'index.js' }))
   writeFileSync(join(dep, 'index.js'), "module.exports = 'rn-native'\n") // reached by the graph
   writeFileSync(join(dep, 'RNThing.podspec'), 'Pod::Spec.new { |s| s.name = "RNThing" }\n')
+  writeFileSync(join(dep, 'Extra.podspec.json'), JSON.stringify({ name: 'Extra', version: '1.0.0' })) // JSON podspec -> json
   writeFileSync(join(dep, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
   writeFileSync(join(dep, 'ios', 'RNThing.mm'), '@implementation RNThing @end\n')
+  writeFileSync(join(dep, 'ios', 'RNThing.swift'), 'import Foundation\nclass RNThing {}\n')
   writeFileSync(join(dep, 'ios', 'util.c'), 'int rn_util(void) { return 0; }\n')
   writeFileSync(join(dep, 'ios', 'Podfile'), "pod 'RNThing', :path => '.'\n")
   writeFileSync(join(dep, 'ios', 'Podfile.lock'), 'PODS:\n  - RNThing (3.1.0)\n')
@@ -1291,7 +1293,7 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(mod, 'the native dep is a bundled module')
   const files = new Set(Object.keys(mod.files))
   // Native build inputs are carried alongside the graph-reached index.js.
-  for (const f of ['index.js', 'RNThing.podspec', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
+  for (const f of ['index.js', 'RNThing.podspec', 'Extra.podspec.json', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/RNThing.swift', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
     t.assert.ok(files.has(f), `expected ${f} in the bundle`)
   }
   t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
@@ -1318,14 +1320,16 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(core.has('sdks/.hermesversion'), '.hermesversion captured')
   t.assert.ok(!core.has('React/RCTBridge.m'), 'core native source outside include dirs stays out')
   t.assert.ok(!core.has('sdks/hermesc/osx-bin/hermesc'), 'prebuilt hermesc binary stays out')
-  // C++ source and the CocoaPods Ruby script are code; the CMake scaffolding stays a resource.
+  // C++ source, the CocoaPods Ruby script, and CMake files are code.
   t.assert.equal(bundle.formats.get('node_modules/react-native/ReactCommon/yoga/yoga/Yoga.cpp'), 'cpp')
   t.assert.equal(bundle.formats.get('node_modules/react-native/scripts/react_native_pods.rb'), 'ruby')
-  t.assert.equal(bundle.formats.get('node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'), 'resource')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'), 'cmake') // matched by basename
   // Formats: native build-input source is CODE under a per-language source tag; a binary asset is
   // 'resource:base64'; the graph-reached JS keeps its code format.
   t.assert.equal(bundle.formats.get('node_modules/rn-native/RNThing.podspec'), 'podspec')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/Extra.podspec.json'), 'json') // JSON podspec is json code
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.mm'), 'objcpp')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.swift'), 'swift')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.h'), 'c-header')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/util.c'), 'c')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile'), 'podfile') // matched by basename

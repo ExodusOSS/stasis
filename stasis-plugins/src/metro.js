@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, nativeCodeFormat, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, classifyNativeCapture, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -474,8 +474,8 @@ export class StasisMetro {
   // NATIVE MODULES note above the class). Discovery is React Native's own `react-native
   // config`; each native dependency's package root is then walked (NATIVE_WALK_SKIP_DIRS
   // pruned) and its native sources are attested: build-input source (Java/Kotlin/Gradle, C/C++/
-  // ObjC sources + headers, Ruby, podspec/Podfile, template/xml -- nativeCodeFormat) as CODE under
-  // a source-language tag, the remaining assets (Swift, images, fonts, ...) as resources, plus each
+  // ObjC/Swift sources + headers, Ruby/CMake, podspec/Podfile, template/xml -- classifyNativeCapture)
+  // as CODE under a source-language tag, the remaining assets (images, fonts, ...) as resources, plus each
   // package.json (kept in FULL by prune, so `codegenConfig` and native entry fields survive).
   // Node-runnable JS/TS is deliberately skipped: the code a build actually uses is already in
   // Metro's graph, and a library's UNused JS is neither a native input nor reachable, so
@@ -602,11 +602,10 @@ export class StasisMetro {
       this.#seen.add(full)
       const source = realReadFileSync(full)
       assert.ok(isUtf8(source), `StasisMetro: native manifest has non-UTF-8 bytes: ${full}`)
-      // package.json is code (addFile infers 'json'); a podspec is code (format 'podspec');
-      // the Ruby helpers a podspec requires (.rb) are code (format 'ruby').
-      const format = nativeCodeFormat(ent.name)
-      const asResource = ent.name !== 'package.json' && format === undefined
-      this.#state.addFile(pathToFileURL(full).toString(), { source, format, resource: asResource, reason: 'StasisMetro' })
+      // isNativeManifest only admits code: package.json + JSON podspecs ('json'), Ruby podspecs
+      // ('podspec'), .rb helpers ('ruby') -- all ride the code path via classifyNativeCapture.
+      const { format } = classifyNativeCapture(ent.name)
+      this.#state.addFile(pathToFileURL(full).toString(), { source, format, reason: 'StasisMetro' })
     }
   }
 
@@ -634,20 +633,14 @@ export class StasisMetro {
       // etc.) are build output, not source, and non-deterministic -- never captured.
       if (isNativeArtifact(ent.name)) continue
       if (this.#seen.has(full)) continue // already captured as a graph module or auto-include
-      const isPackageJson = ent.name === 'package.json'
-      const kind = classifyExtension(full, this.#resources)
-      // Skip Node-runnable JS/TS EXCEPT package.json: reachable JS is in the graph, unused JS
-      // isn't a native input (see the method note). package.json (format 'json') and native
-      // SOURCE (Java/Kotlin/Gradle, C/C++/ObjC + headers, Ruby, podspec/Podfile, template/xml --
-      // nativeCodeFormat) ride the code path below; everything else (Swift, images, ...) is a resource.
-      if (kind === 'code' && !isPackageJson) continue
+      const { action, format } = classifyNativeCapture(ent.name)
+      // Node-runnable JS/TS is captured via Metro's module graph, not here (reachable JS is in
+      // the graph; unused JS is neither a native input nor reachable). package.json + native
+      // SOURCE ride the code path (format set); everything else is an asset resource.
+      if (action === 'skip') continue
       this.#seen.add(full)
       const source = realReadFileSync(full)
-      // Native source carries a source-language format tag; a resource's format is derived
-      // from its bytes. package.json (kind 'code') has nativeCodeFormat undefined and lets
-      // addFile infer 'json'.
-      const format = nativeCodeFormat(ent.name)
-      const asResource = kind !== 'code' && format === undefined
+      const asResource = action === 'resource'
       if (!asResource) {
         assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
       }

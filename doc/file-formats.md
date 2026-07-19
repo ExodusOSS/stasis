@@ -142,10 +142,10 @@ into the lockfile/bundle `config` block (`debug`, `childProcess`, `fs` and
   `formats` map. Code files use a Node loader format (`module`, `commonjs`,
   `json`, `module-typescript`, `commonjs-typescript`), a source-language tag
   (`solidity`, `php`, `bash`, `rust`), or a native build-input tag
-  (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `c`, `cpp`, `c-header`, `cpp-header`,
-  `ruby`, `podspec`, `podfile`, `podfile-lock`, `template`, `xml` — attested by the Metro
-  native capture for the CocoaPods/Gradle toolchain, not runnable by Node). Resource files
-  use `resource` (content is
+  (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `swift`, `c`, `cpp`, `c-header`,
+  `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`, `podfile-lock`, `template`, `xml` —
+  attested by the Metro native capture for the CocoaPods/Gradle toolchain, not runnable by
+  Node). Resource files use `resource` (content is
   raw UTF-8) or `resource:base64` (content is binary, base64-encoded) — this is
   what distinguishes a resource from code per file, and tells a reader how to
   decode the bundle payload. Filesystem captures (`stasis run --fs=sync`) add
@@ -220,9 +220,9 @@ reporting failures) still persists what it cleanly captured.
 - `formats`: project-relative path → format. Code files use a Node loader
   format (`module`, `commonjs`, `module-typescript`, `commonjs-typescript`,
   `json`), a source-language tag (`solidity`, `php`, `bash`, `rust`), or a
-  native build-input tag (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `c`, `cpp`,
-  `c-header`, `cpp-header`, `ruby`, `podspec`, `podfile`, `podfile-lock`, `template`,
-  `xml` — the Metro native capture's build-input surface).
+  native build-input tag (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `swift`, `c`,
+  `cpp`, `c-header`, `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`, `podfile-lock`,
+  `template`, `xml` — the Metro native capture's build-input surface).
   Resource files use `resource` (raw UTF-8 payload) or `resource:base64`
   (base64 payload) — the per-file tag that both marks a file as a resource
   and says how to decode its bundle bytes. A `directory` tag (a `stasis run

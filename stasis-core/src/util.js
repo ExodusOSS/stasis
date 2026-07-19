@@ -19,8 +19,8 @@ const sep = '/'
 //   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
 //   Native build inputs (analysis-only, not runnable by Node; the Metro native capture
 //     attests them for the CocoaPods/Gradle toolchain, so they carry a source tag rather
-//     than being lumped into 'resource') — java, kotlin, gradle, objc, objcpp, c, cpp,
-//     c-header, cpp-header, ruby, podspec, podfile, podfile-lock, template, xml
+//     than being lumped into 'resource') — java, kotlin, gradle, objc, objcpp, swift, c, cpp,
+//     c-header, cpp-header, ruby, cmake, podspec, podfile, podfile-lock, template, xml
 //   Resources (asset payloads) — resource (raw UTF-8), resource:base64 (binary)
 //   Filesystem captures (`stasis run --fs`) — directory (a JSON-serialized,
 //     sorted `fs.readdirSync` listing; a resource-like raw-UTF-8 payload), and the
@@ -45,11 +45,13 @@ export const KNOWN_FORMATS = new Set([
   'gradle',
   'objc',
   'objcpp',
+  'swift',
   'c',
   'cpp',
   'c-header',
   'cpp-header',
   'ruby',
+  'cmake',
   'podspec',
   'podfile',
   'podfile-lock',
@@ -185,36 +187,59 @@ export function isPodspec(name) {
 const NATIVE_CODE_FORMATS = new Map([
   ['java', 'java'], // Java source
   ['kt', 'kotlin'], // Kotlin source
+  ['kts', 'kotlin'], // Kotlin build script (build.gradle.kts / settings.gradle.kts)
   ['gradle', 'gradle'], // Gradle build script
   ['m', 'objc'], // Objective-C source
   ['mm', 'objcpp'], // Objective-C++ source
+  ['swift', 'swift'], // Swift source
   ['c', 'c'], // C source
+  ['cc', 'cpp'], // C++ source (alt spelling)
+  ['cxx', 'cpp'], // C++ source (alt spelling)
   ['cpp', 'cpp'], // C++ source
   ['c++', 'cpp'], // C++ source (alt spelling)
   ['h', 'c-header'], // C/C++/Objective-C header
+  ['hh', 'cpp-header'], // C++ header (alt spelling)
+  ['hxx', 'cpp-header'], // C++ header (alt spelling)
   ['hpp', 'cpp-header'], // C++ header
   ['h++', 'cpp-header'], // C++ header (alt spelling)
   ['rb', 'ruby'], // Ruby (podspec helpers, CocoaPods scripts)
-  ['podspec', 'podspec'], // CocoaPods spec
+  ['cmake', 'cmake'], // CMake build script
+  ['podspec', 'podspec'], // CocoaPods spec (Ruby DSL)
   ['template', 'template'], // build-input template
   ['xml', 'xml'], // e.g. AndroidManifest.xml
 ])
 
 // Native build-input files recognized by exact (lowercased) BASENAME rather than extension:
 // CocoaPods' Podfile (a Ruby DSL with no extension) and its Podfile.lock (whose `.lock`
-// extension is too generic to key on -- yarn.lock/Gemfile.lock are unrelated resources).
+// extension is too generic to key on -- yarn.lock/Gemfile.lock are unrelated resources), and
+// CMakeLists.txt (a `.txt` extension is likewise too generic).
 const NATIVE_CODE_FILENAMES = new Map([
   ['podfile', 'podfile'],
   ['podfile.lock', 'podfile-lock'],
+  ['cmakelists.txt', 'cmake'],
 ])
 
-// The source-language format tag for a native build-input file, or undefined when it
-// isn't one of the recognized native-code kinds (so the caller records it as a resource
-// instead). Exact basename first (Podfile / Podfile.lock), then extension; a `.podspec.json`
-// has extension `json` (a code extension handled by the normal loader path) and never
-// resolves to a tag here.
-export function nativeCodeFormat(name) {
-  return NATIVE_CODE_FILENAMES.get(basename(name).toLowerCase()) ?? NATIVE_CODE_FORMATS.get(pathExt(name))
+// The SINGLE decision for how the Metro native capture -- the StasisMetro plugin AND
+// `stasis bundle --metro` -- records one build-input file `name`, so the capture sites can't
+// drift. Returns `{ action, format }`:
+//   - action 'code' + a format tag: a native build input that rides the CODE bundle.
+//     package.json and JSON podspecs (`*.podspec.json`) are code 'json' (a Node loader
+//     format); Ruby podspecs, Podfile(.lock), CMakeLists.txt, and the per-language native
+//     source carry their own source tag.
+//   - action 'skip': Node-runnable JS/TS captured via Metro's module graph, not here
+//     (reachable JS is in the graph; unused JS is neither a native input nor reachable).
+//   - action 'resource': any other file -- an asset payload (State derives 'resource' vs
+//     'resource:base64' from the bytes).
+// A code-classified file is source, so it must be UTF-8; callers assert that (State.addFile
+// does too). `name` may be a bare basename or a path.
+export function classifyNativeCapture(name) {
+  const base = basename(name).toLowerCase()
+  // package.json and JSON podspecs are JSON build inputs -> Node 'json' loader format.
+  if (base === 'package.json' || base.endsWith('.podspec.json')) return { action: 'code', format: 'json' }
+  const format = NATIVE_CODE_FILENAMES.get(base) ?? NATIVE_CODE_FORMATS.get(pathExt(name))
+  if (format !== undefined) return { action: 'code', format }
+  if (CODE_EXTENSIONS.has(pathExt(name))) return { action: 'skip' }
+  return { action: 'resource' }
 }
 
 // Files `pod install` READS while LOADING podspecs, beyond the podspec itself: the Ruby helpers a

@@ -34,7 +34,7 @@ const NODEJS_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript
 const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'bash', 'rust'])
 // Native build-input source the Metro capture attests for the CocoaPods/Gradle toolchain
 // (prune keeps them, frozen verifies them) -- code, but never executable by Node.
-const NATIVE_SOURCE_FORMATS = new Set(['java', 'kotlin', 'gradle', 'objc', 'objcpp', 'c', 'cpp', 'c-header', 'cpp-header', 'ruby', 'podspec', 'podfile', 'podfile-lock', 'template', 'xml'])
+const NATIVE_SOURCE_FORMATS = new Set(['java', 'kotlin', 'gradle', 'objc', 'objcpp', 'swift', 'c', 'cpp', 'c-header', 'cpp-header', 'ruby', 'cmake', 'podspec', 'podfile', 'podfile-lock', 'template', 'xml'])
 const RESOURCE_FORMATS = new Set(['resource', 'resource:base64'])
 const STAT_FORMATS = new Set(['stat:file', 'stat:directory'])
 // The executable CommonJS formats (plain CJS + TS-CJS). Named like the sets above so

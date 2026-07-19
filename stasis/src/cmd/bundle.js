@@ -11,7 +11,7 @@ import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyExtension, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, nativeCodeFormat, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -736,9 +736,6 @@ const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 // build-intermediates dir), plus nested deps and VCS metadata -- never source. Prebuilt binary
 // artifacts (installed pods, .a/.so/.xcframework) are excluded separately, via isNativeArtifact.
 const NATIVE_SKIP_DIRS = new Set(['build', '.gradle', '.cxx', 'Pods', 'DerivedData', 'node_modules', '.git'])
-// The empty resources allowlist for classifyExtension: native code classifies as non-code on
-// its extension alone, so no allowlist is needed to tell a native source from a JS module.
-const NO_RESOURCES = new Set()
 
 // Recursively collect every file under a native-source dir (ios/ or android/), skipping
 // build output (NATIVE_SKIP_DIRS) and symlinks (cycle/escape hazard). Absolute paths, into `out`.
@@ -908,10 +905,10 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // Scoped to the node_modules packages actually in the bundle (derived from `reached`), so the
   // artifact stays "only what's used"; without these, a native build driven from the bundle --
   // or a `stasis prune` against its lockfile -- would be missing every native module's sources.
-  // Native build-input source (Java/Kotlin/Gradle, C/C++/ObjC sources + headers, Ruby, podspec/
-  // Podfile, template/xml) is stored as CODE under a source-language tag; other native assets as a
-  // resource ('resource', or 'resource:base64' for a non-UTF-8 asset like a font/image); the
-  // integrity hashes the raw bytes, matching the JS path.
+  // Native build-input source (Java/Kotlin/Gradle, C/C++/ObjC/Swift sources + headers, Ruby/CMake,
+  // podspec/Podfile, template/xml -- classifyNativeCapture) is stored as CODE under a source-language
+  // tag; other native assets as a resource ('resource', or 'resource:base64' for a non-UTF-8 asset
+  // like a font/image); the integrity hashes the raw bytes, matching the JS path.
   if (metro) {
     const pkgDirs = new Set()
     for (const abs of reached) {
@@ -934,27 +931,19 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
         const rel = toRel(abs)
         if (sources.has(rel)) continue // already carried as a graph module
         assertRealPathWithinBase(realBase, baseDir, rel)
+        // Single classifier shared with the StasisMetro plugin (classifyNativeCapture):
+        //   - 'skip': a JS module the graph already carries (or unused JS) -- not a native input.
+        //   - 'code': package.json / JSON podspecs ('json'), Ruby podspecs / Podfile / native
+        //     source (its source tag). prune keeps a file-listed package.json in full.
+        //   - 'resource': any other asset ('resource', or 'resource:base64' for non-UTF-8 bytes).
+        const { action, format } = classifyNativeCapture(rel)
+        if (action === 'skip') continue
         const buf = readFileSync(abs)
-        // A native package's package.json (podspecs parse it for the version) rides the code path
-        // as json; prune keeps a file-listed package.json in full. Any OTHER code file under
-        // ios/android is a JS module -- the graph carries the ones a build uses; skip it.
-        if (rel.endsWith('/package.json')) {
-          if (!isUtf8(buf)) throw new Error(`native package.json is not valid UTF-8: ${rel}`)
-          sources.set(rel, buf.toString('utf8'))
-          formatsByRel.set(rel, 'json')
-          integrities.set(rel, sha512integrity(buf))
-          continue
-        }
-        if (classifyExtension(rel, NO_RESOURCES) === 'code') continue
-        // Native build-input SOURCE (Java/Kotlin/Gradle, C/C++/ObjC + headers, Ruby, podspec/
-        // Podfile, template/xml -- nativeCodeFormat) is code under a source-language tag; every other
-        // native file (Swift, images, fonts, ...) is a resource ('resource'/'resource:base64').
-        const nativeFormat = nativeCodeFormat(rel)
         const utf8 = isUtf8(buf)
-        if (nativeFormat !== undefined) {
-          if (!utf8) throw new Error(`native source ${rel} is not valid UTF-8`)
+        if (action === 'code') {
+          if (!utf8) throw new Error(`native source is not valid UTF-8: ${rel}`)
           sources.set(rel, buf.toString('utf8'))
-          formatsByRel.set(rel, nativeFormat)
+          formatsByRel.set(rel, format)
         } else {
           sources.set(rel, utf8 ? buf.toString('utf8') : buf.toString('base64'))
           formatsByRel.set(rel, utf8 ? 'resource' : 'resource:base64')
