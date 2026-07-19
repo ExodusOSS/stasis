@@ -32,10 +32,7 @@ const JS_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const BASH_EXTS = new Set(['.sh', '.bash'])
 const RUST_EXTS = new Set(['.rs'])
 
-// Fallback package identity for the workspace bucket when no package.json
-// with a name+version can be found by walking up from any of the bundled
-// files. Bundle.parse requires every workspace/module bucket to have
-// both fields, so we have to attest something.
+// Fallback identity for the workspace bucket; Bundle.parse requires every bucket to attest name+version.
 const SOLIDITY_WORKSPACE_NAME = 'solidity-bundle'
 const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
@@ -51,11 +48,8 @@ const PHP_WORKSPACE_NAME = 'php-bundle'
 const PHP_WORKSPACE_VERSION = '0.0.0'
 const PHP_FORMAT = 'php'
 
-// Deepest directory that is a parent of every file in `paths`, expressed
-// relative to `cwd`. `paths` may be POSIX-relative-to-cwd; entries that
-// escape cwd (e.g. `../deps/X.sol` via remapping) push the result above
-// cwd, in which case the returned path starts with `..`. Returns "." when
-// the outermost directory IS cwd itself.
+// Deepest common parent dir of `paths`, relative to `cwd`; starts with `..` when entries
+// escape cwd (e.g. via remapping), or "." when it is cwd itself.
 export function outermostDir(paths, cwd) {
   if (paths.length === 0) return '.'
   const cwdAbs = posix.resolve(cwd.replaceAll(/\\/gu, '/'))
@@ -72,27 +66,21 @@ export function outermostDir(paths, cwd) {
   return rel === '' ? '.' : rel
 }
 
-// Split a Soldeer dependency dir name (`<name>-<version>`) into its parts, e.g.
-// `@openzeppelin-contracts-5.0.2` -> { name: '@openzeppelin-contracts',
-// version: '5.0.2' }. Soldeer encodes the version into the directory name, so
-// that's the authoritative identity for a Soldeer package. Falls back to
-// version 0.0.0 when the dir doesn't end in a semver (every bucket must attest
-// a version).
+// Split a Soldeer dep dir `<name>-<version>` (its authoritative identity); falls back to
+// version 0.0.0 when it doesn't end in a semver (every bucket must attest a version).
 function parseSoldeerDir(seg) {
   const m = /^(.+)-(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)$/u.exec(seg)
   return m ? { name: m[1], version: m[2] } : { name: seg, version: '0.0.0' }
 }
 
-// Extract `owner/repo` from a github.com remote (https, ssh, or scp-style),
-// dropping a trailing `.git`. Returns null for non-github hosts.
+// Extract `owner/repo` from a github.com remote (https/ssh/scp); null for non-github hosts.
 function githubSlug(url) {
   const m = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/iu.exec(url)
   return m ? `${m[1]}/${m[2]}` : null
 }
 
-// Parse `.gitmodules` into Map<submodulePath, { name, branch }>, keeping only
-// github.com submodules (the ones we can attribute as `github`). `.gitmodules`
-// is git-config INI: `[submodule "<n>"]` sections with `path`/`url`/`branch`.
+// Parse `.gitmodules` (git-config INI) into Map<submodulePath, { name, branch }>,
+// github.com submodules only.
 function parseGithubSubmodules(baseDir) {
   const byPath = new Map()
   const text = readFileSyncOrNull(join(baseDir, '.gitmodules'))
@@ -130,13 +118,9 @@ function readFileSyncOrNull(file) {
   }
 }
 
-// Classify a bundled Solidity file into its dependency bucket. Solidity installs
-// deps three ways, each its own ecosystem: npm (`node_modules`, left to the
-// shared bucketizer), Soldeer (`dependencies/<name>-<version>/` → `soldeer`),
-// and `forge install` git submodules (`lib/<dir>/`, when `.gitmodules` records a
-// github.com URL → `github`, per SBOM/Package-URL `pkg:github/owner/repo`).
-// Returns { bucketDir, name, version, ecosystem } for a Soldeer/github dep, or
-// null to defer to the package.json/node_modules/workspace logic.
+// Classify a Solidity file's dep bucket: Soldeer (`dependencies/<name>-<version>/`) or a
+// github submodule (`lib/`, via `.gitmodules`), else null to defer to the node_modules/
+// workspace logic.
 function makeSolidityClassifier(baseDir) {
   const submodules = parseGithubSubmodules(baseDir)
   return (path) => {
@@ -157,9 +141,7 @@ function makeSolidityClassifier(baseDir) {
   }
 }
 
-// Minimal Cargo.toml reader: pull `name`/`version` from the `[package]` table.
-// A full TOML parse isn't warranted — those two string keys are all we need to
-// identify a vendored crate. Returns null when there's no readable package name.
+// Minimal Cargo.toml reader: name/version from the `[package]` table; null when no name.
 function parseCargoToml(file) {
   const text = readFileSyncOrNull(file)
   if (!text) return null
@@ -167,7 +149,7 @@ function parseCargoToml(file) {
   let body = text
   if (at !== -1) {
     const rest = text.slice(at)
-    const next = rest.slice(1).search(/^\[/mu) // start of the table after [package]
+    const next = rest.slice(1).search(/^\[/mu)
     body = next === -1 ? rest : rest.slice(0, next + 1)
   }
   const name = /^\s*name\s*=\s*"([^"]+)"/mu.exec(body)?.[1]
@@ -175,10 +157,8 @@ function parseCargoToml(file) {
   return name ? { name, version: version ?? '0.0.0' } : null
 }
 
-// Classify a bundled Rust file. `cargo vendor` copies external crates in-tree
-// under `vendor/<dir>/`; each is its own crate with a Cargo.toml, so bucket it
-// under `vendor/<dir>` and tag it `cargo` (Package-URL `pkg:cargo/<name>`). The
-// workspace's own code and path/workspace members defer to the workspace logic.
+// Classify a Rust file: `cargo vendor` crates under `vendor/<dir>/` (tagged `cargo`), else
+// null to defer to the workspace logic.
 function makeRustClassifier(baseDir) {
   return (path) => {
     if (!path.startsWith('vendor/')) return null
@@ -190,44 +170,13 @@ function makeRustClassifier(baseDir) {
   }
 }
 
-// Assemble a scope=full code Bundle from a collected source set and its
-// resolution graph. Shared by every non-JS bundler (Solidity/Bash/Rust): the
-// language-specific work (collecting files, resolving the graph, deciding what
-// counts as "missing") happens in the caller; here every file is bucketized
-// the same way, tagged `format`, and the whole resolution graph is keyed under
-// a single `conditionKey`.
-//
-// Files are partitioned into per-package buckets by the nearest package.json
-// with name+version: node_modules files into `node_modules/<pkg>` buckets,
-// workspace files into their package dir, and anything with no discoverable
-// package.json into the "." bucket with the given placeholder identity (the
-// Bundle layout requires every bucket to attest a name+version). A file under
-// node_modules whose nearest package.json is the workspace root is rejected —
-// that hides a misconfigured dependency rather than silently mislabeling it.
-//
-// Unlike the wildcard "*" JS bundles use, these formats don't vary by Node
-// resolution condition, so every edge lands under the one `conditionKey`.
-//
-// Dependency buckets (those under node_modules) are tagged `ecosystem: 'npm'`:
-// node_modules is npm's install layout, so that's where the package came from,
-// regardless of the bundle's language — a Solidity or Bash import resolved out
-// of node_modules is an npm package all the same. This mirrors State's own
-// node_modules tagging (see stasis-core state.js) and lets consumers tell deps
-// apart from the workspace's own packages; the workspace/`.` bucket carries no
-// ecosystem. (PHP's Composer `vendor/` deps are tagged `composer` separately, by
-// the PHP bucketizer.)
-//
-// `classifyDep(path)` is an optional language-specific hook: when it returns a
-// { bucketDir, name, version, ecosystem } record the file is placed there
-// directly, which is how non-node_modules ecosystems are attributed (e.g.
-// Solidity's Soldeer `dependencies/` and github submodules). Returning null (or
-// omitting the hook) defers to the node_modules/package.json/workspace logic.
-// `format` tags every file uniformly (the single-language non-JS callers); pass
-// `formats` (a Map<path, format>) instead to tag per file, as the JS resolver path
-// does (a graph mixes module / commonjs / *-typescript / json). `resolutions`
-// values may be a target string (a flat edge) or a Map<platform, target> (a `--metro`
-// edge that resolves differently per platform) -- both round-trip through the bundle's
-// recursive serializer untouched.
+// Assemble a full-scope code Bundle shared by the non-JS bundlers. Files are bucketed by
+// nearest package.json (node_modules -> `npm`-tagged bucket, workspace -> its dir, none ->
+// "." with the placeholder identity); a node_modules file whose nearest package.json is the
+// workspace root is rejected, not mislabeled. `classifyDep(path)` optionally places a file
+// directly (non-node_modules ecosystems like Soldeer/github); null defers. `format` tags
+// every file, or pass `formats` (Map<path,format>) to tag per file. `resolutions` values are
+// a flat target string or a Map<platform,target>; both round-trip untouched.
 function assembleCodeBundle({
   baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep,
 }) {
@@ -270,9 +219,7 @@ function assembleCodeBundle({
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([[conditionKey, importsForKey]])
 
-  // Every statically built bundle attributes its files to the `bundle` consumer in the
-  // informational reason map (the static builders don't go through State's per-file
-  // consumer tagging), so `stasis bundle` names itself as their source.
+  // Attribute files to the `bundle` consumer (static builders skip State's per-file tagging).
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(entries),
@@ -282,10 +229,8 @@ function assembleCodeBundle({
   }).withReason('bundle')
 }
 
-// Build a stasis Bundle (in-memory) from a list of entry .sol files and
-// an optional mapping file. The mapping file (foundry.toml or
-// remappings.txt) is parsed for remappings but NOT included in the
-// bundle's sources. Returns the constructed `Bundle`.
+// Build an in-memory Bundle from entry .sol files; `mappingFile` (foundry.toml/remappings.txt)
+// is parsed for remappings but not bundled.
 export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappingFile } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildSolidityBundle: at least one entry .sol file is required')
@@ -301,10 +246,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const sources = await collectSolidityFilesFromDisk(baseDir, normalized, remappings)
   const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir })
 
-  // Bundles must be self-contained. Refuse to write one when an entry
-  // can't be loaded from disk, or when any in-bundle file has an import
-  // we couldn't resolve — otherwise downstream consumers would silently
-  // operate on a partial set of sources.
+  // Bundles must be self-contained: fail on a missing entry or unresolved import.
   const issues = []
   for (const entry of normalized) {
     if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
@@ -329,19 +271,9 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   })
 }
 
-// Build a stasis Bundle (in-memory) from a list of entry .sh/.bash files by
-// walking the source/exec graph and reading every reachable script from disk.
-// Mirrors buildSolidityBundle's bucketizing, with a bash-specific policy:
-//   - a .sh/.bash reference whose path lands INSIDE the bundle root
-//     (`source ./lib.sh`, `dir/x.sh`) but resolves to no bundled script is
-//     fatal — a self-contained bundle can't carry a dangling local source —
-//     as is a missing entry.
-//   - everything else is best-effort and dropped: PATH commands (`grep`,
-//     `node`), dynamic `$VAR` paths, extensionless sources, absolute system
-//     paths (`source /etc/profile.d/x.sh`), and `../` paths that escape the
-//     root — none can live in the bundle.
-//   - imports live under a dedicated "shell" condition key (like "solidity"),
-//     not the JS-bundle wildcard "*".
+// Build an in-memory Bundle from entry .sh/.bash files by walking the source/exec graph.
+// A local `source` inside the bundle root that resolves to no bundled script is fatal;
+// external refs (PATH commands, `$VAR`, absolute, `../`-escaping) are dropped.
 export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildBashBundle: at least one entry .sh/.bash file is required')
@@ -356,11 +288,7 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   const sources = await collectBashFilesFromDisk(baseDir, normalized)
   const { resolutions, missing } = buildBashTree(sources)
 
-  // Bundles must be self-contained: every entry must load, and every .sh/.bash
-  // reference pointing inside the bundle root must resolve to a bundled script.
-  // External/best-effort references (commands, $VAR paths, extensionless,
-  // absolute, or `../`-escaping sources) are left out by buildBashTree and
-  // never reach `missing`.
+  // Self-contained: fail on a missing entry or unresolved in-root script (external refs never reach `missing`).
   const issues = []
   for (const entry of normalized) {
     if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
@@ -384,14 +312,9 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   })
 }
 
-// Build a stasis Bundle (in-memory) from a list of entry .rs files by walking
-// `mod` declarations from each crate root and reading every reachable module
-// from disk. The bundle must be self-contained: an unresolvable `mod foo;`
-// (no backing file) is fatal, as is a missing entry. `use crate::` edges are
-// recorded in the import graph but stay best-effort — they never widen the
-// file set, and their resolution is approximate (item-vs-module, re-exports),
-// so they aren't gated; external crates and std are ignored outright. Imports
-// live under a dedicated "rust" condition key.
+// Build an in-memory Bundle from entry .rs files by walking `mod` declarations. An
+// unresolvable `mod` is fatal; `use crate::` edges are recorded best-effort (never widen
+// the file set, not gated).
 export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildRustBundle: at least one entry .rs file is required')
@@ -430,25 +353,10 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   })
 }
 
-// Build a stasis Bundle (in-memory) from a list of entry .php files by
-// statically scanning their `require`/`include` graph -- and, when the project
-// uses Composer, the class-autoload graph too -- reading every reachable file
-// from disk. No PHP is ever executed. Mirrors buildSolidityBundle: files are
-// bucketed per package.json, tagged with the `php` format, and edges are keyed
-// under a dedicated "php" condition bucket.
-//
-// Composer autoloading is followed automatically when a composer.json (or
-// generated vendor/composer/autoload_*.php map) is present: PSR-4/PSR-0/
-// classmap/files config is read and the classes each file references (`use`
-// imports, `new`/`extends`/`implements`, type hints, …) are resolved to their
-// files the way Composer's ClassLoader would. That resolution is best-effort
-// (unresolvable references are typically built-in or extension classes), so it
-// never blocks the bundle; explicit `require`/`include` of a literal path is
-// still strict.
-//
-// Refuses to write when an entry can't be loaded or any explicit include is
-// unresolved -- a bundle with holes would silently operate on a partial set of
-// sources.
+// Build an in-memory Bundle from entry .php files by statically scanning the
+// require/include graph (and Composer's class-autoload graph when present); no PHP is
+// executed. Autoload resolution is best-effort; explicit require/include of a literal path
+// is strict, and a missing entry or unresolved explicit include is fatal.
 export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildPhpBundle: at least one entry .php file is required')
@@ -461,9 +369,8 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   const normalized = normalizeEntries(entries, cwd)
   const autoload = loadComposerAutoload(baseDir)
 
-  // Laravel auto-discovers vendor/app service providers (via composer metadata
-  // and bootstrap/providers.php) rather than referencing them statically; seed
-  // them as extra roots so the config/route/view files they pull in get bundled.
+  // Laravel auto-discovers service providers rather than referencing them statically; seed
+  // them as extra roots so their config/route/view files get bundled.
   const providerRoots = loadLaravelProviderFiles(baseDir, autoload)
 
   const sources = await collectPhpFilesFromDisk(baseDir, [...normalized, ...providerRoots], { autoload })
@@ -480,21 +387,18 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
     throw new Error(`PHP bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  // Group per Composer package (vendor/<pkg> buckets with name+version from
-  // composer.json / installed.json), not the node_modules-based bucketizer.
+  // Group per Composer package (vendor/<pkg>), not the node_modules bucketizer.
   const modules = bucketizePhpSources(baseDir, sources, PHP_WORKSPACE_NAME, PHP_WORKSPACE_VERSION)
 
   const formats = new Map()
   for (const path of sources.keys()) formats.set(path, PHP_FORMAT)
 
-  // PHP includes don't depend on Node conditions; key them under a dedicated
-  // "php" bucket rather than the wildcard "*" used for JS code bundles.
+  // PHP includes don't vary by Node condition; key edges under "php", not the JS wildcard "*".
   const importsForKey = new Map()
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([['php', importsForKey]])
 
-  // Attribute to the `bundle` consumer like the other static builders (see
-  // assembleCodeBundle); PHP builds its own Bundle rather than going through it.
+  // Attribute to the `bundle` consumer, like the other static builders.
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(normalized),
@@ -504,16 +408,12 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   }).withReason('bundle')
 }
 
-// Classify a scanner's unresolved edges + parse errors into `fatal` (the bundle
-// would be broken, or silently divergent from plain node, at load) vs tolerated
-// (a miss runtime code can catch). The rationale for each rule lives at the call
-// site in buildJsBundle; this is the shared computation so the plain and the
-// resolver-driven (`--mainFields`) JS paths gate identically.
+// Classify scanner unresolved edges + parse errors into fatal (broken/divergent at load)
+// vs tolerated (a catchable runtime miss). Shared so the plain and --mainFields JS paths
+// gate identically.
 function analyzeScanner(scanner) {
-  // Static reachability: files reached from an entry through static ESM
-  // `import`/`export ... from` edges load eagerly, before any user code runs, so
-  // a failure there is uncatchable; below a require()/dynamic-import() boundary it
-  // surfaces as a catchable miss and only warns.
+  // Static ESM import/export-from edges load eagerly before user code, so a failure there is
+  // uncatchable (fatal); misses below a require()/dynamic-import() boundary are catchable (warn).
   const staticKinds = new Set(['import', 'export-from'])
   const staticReachable = new Set(scanner.entries)
   const walk = [...scanner.entries]
@@ -529,14 +429,13 @@ function analyzeScanner(scanner) {
   const fatal = scanner.unresolved
     .filter((u) => fatalUnresolved(u))
     .map((u) => `unresolved ${u.kind} ${u.spec} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
-  // Parse failures whose edges are genuinely unknown: a module-family file in the
-  // eagerly-linked set, or any file the parser couldn't process at all.
+  // Fatal parse: an eagerly-linked module-family file, or any file the parser couldn't process.
   const fatalParse = (p) => staticReachable.has(p.url) && (p.format?.startsWith('module') === true || !p.recovered)
   for (const p of scanner.parseErrors) {
     if (fatalParse(p)) fatal.push(`parse error in ${fileURLToPath(p.url)}: ${p.message}`)
   }
-  // Edges resolving to a file a source bundle can't carry (extensionless, .node,
-  // .wasm): scan records the edge but never queues the child, so load would die.
+  // Edge resolving to a file a source bundle can't carry (.node/.wasm/extensionless): scan
+  // records it but never queues the child, so load would die.
   for (const [, byParent] of scanner.imports) {
     for (const [parentURL, specMap] of byParent) {
       for (const [spec, childURL] of specMap) {
@@ -551,8 +450,7 @@ function analyzeScanner(scanner) {
   return { fatal, tolerated, toleratedParse }
 }
 
-// Throw on any fatal scan issue (the bundle can't be written); warn on tolerated
-// ones. `label`, when set, tags the scan pass in the message.
+// Throw on fatal scan issues; warn on tolerated ones. `label` tags the scan pass.
 function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '' } = {}) {
   const where = label ? ` (${label})` : ''
   if (fatal.length > 0) {
@@ -578,39 +476,11 @@ function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '' } =
   }
 }
 
-// Build a stasis Bundle (in-memory) from a list of entry .js/.cjs/.mjs (or
-// .ts/.cts/.mts) files by statically scanning the require/import graph and
-// reading reachable file contents from disk -- no user code is ever loaded or
-// executed. TypeScript files behave exactly like JS ones: sources are stored
-// verbatim with Node's type-stripping formats recorded, and Node strips the
-// types at load time. The bundle shape matches what @exodus/stasis-core/hooks
-// records at runtime, so the result loads via `stasis run --bundle=load`
-// interchangeably with a runtime-produced one.
-//
-// Refuses to write when the bundle is guaranteed broken (or silently divergent
-// from plain node) at load time: an unresolved static ESM `import`/`export ...
-// from` edge reachable from an entry through static edges alone (link-time,
-// uncatchable), a module file that can't be parsed (its static edges are
-// unknown), or an edge resolving to a file a source bundle can't carry
-// (extensionless, .node, .wasm). Failures that runtime code can catch --
-// unresolved require()/dynamic import() edges, including entire subtrees
-// behind such a boundary -- only warn (see below).
-//
-// Scope comes from the project's stasis.config.json (or `EXODUS_STASIS_SCOPE`);
-// pass `scope` explicitly to override.
-//
-// `conditions` are extra `exports`/`imports` resolution conditions, merged on top
-// of the format-derived base set Node always asserts (`node`, `import`/`require`,
-// `module-sync`, `node-addons`). They change which branch of a package's
-// conditional `exports` the static scan follows -- and therefore which file lands
-// in the bundle -- exactly as if Node resolved with those conditions active. Empty
-// (the default) reproduces plain Node resolution.
-//
-// NOTE: conditions are only one input to module resolution. On their own they do
-// NOT honour legacy package `mainFields` (`react-native`/`browser`/`main`) or
-// platform-specific file suffixes (`.ios`/`.android`/`.native`), neither of which
-// the `exports` field expresses; `--mainFields` (see buildResolvedJsBundle) adds
-// the former.
+// Build a JS/TS Bundle (in-memory) by statically scanning the require/import graph; no
+// user code is executed, and TS is stored verbatim (Node strips types at load). Scope comes
+// from stasis.config.json / `EXODUS_STASIS_SCOPE` unless `scope` overrides. `conditions` are
+// extra `exports`/`imports` conditions; on their own they don't honour legacy mainFields or
+// platform suffixes (see `--mainFields` / buildResolvedJsBundle).
 export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [] } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
@@ -622,47 +492,26 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
 
-  // Normalize conditions the way the CLI already does (trim, drop empties), so the
-  // programmatic API (`buildBundle({ conditions })`) tolerates the same sloppy input.
-  // A '' or whitespace-only condition never matches an `exports` key, so dropping it
-  // is a no-op for clean input -- this just stops a bogus token reaching the resolver.
+  // Normalize conditions (trim, drop empties) so a sloppy programmatic caller can't push a
+  // bogus token into the resolver.
   const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
 
   const scanner = scan(absEntries, { conditions: scanConditions })
 
-  // Fail closed exactly where the bundle is GUARANTEED broken (or silently
-  // divergent from plain node) at load time; warn where runtime code can catch
-  // the miss the same way it would without a bundle. Static ESM edges load
-  // eagerly (uncatchable) so unresolved ones / unknown parse holes there are
-  // fatal; require()/dynamic-import() misses surface at the callsite and only
-  // warn -- the optional-dependency pattern (`try { require(x) } catch {}`) keeps
-  // bundling, because the runtime loader never records those edges either and
-  // state.getImport throws the same catchable MODULE_NOT_FOUND at load. Edges
-  // resolving to a file a source bundle can't carry are always fatal. (See
-  // analyzeScanner for the precise rules.)
+  // Fail closed where the bundle is guaranteed broken at load; warn on catchable misses (see analyzeScanner).
   reportScanIssues(analyzeScanner(scanner))
 
-  // Use a non-preload State to materialise the bundle: addFile bucketizes by
-  // package.json + records hashes/sources/formats, and addImport replays the
-  // per-edge import map. State.s `serialize` then emits the same v1 layout
-  // the runtime loader writes — see @exodus/stasis-core/hooks for the matching pair.
-  //
-  // bundle=replace skips reading any pre-existing stasis.code.br on disk;
-  // bundle=add would merge it, leaking stale formats/imports entries for
-  // files the new bundle doesn't carry. lock=ignore tolerates a pre-existing
-  // stasis.lock.json without loading or validating it (the bundle path
-  // doesn't consume one), and refusing to coexist with one (lock=none) would
-  // make `stasis bundle` brittle in any project that's also using `stasis run`.
+  // Materialise via a non-preload State: addFile bucketizes + records sources/formats,
+  // addImport replays the edge map; serialize emits the runtime loader's v1 layout.
+  // bundle:'replace' skips reading any on-disk stasis.code.br (bundle:'add' would leak stale
+  // entries); lock:'ignore' tolerates a pre-existing lockfile without consuming it.
   const state = new State(baseDir, { bundle: 'replace', lock: 'ignore', ...(scope ? { scope } : {}) })
   for (const [url, info] of scanner.files) {
     const isEntry = scanner.entries.has(url)
     state.addFile(url, { format: info.format, isEntry })
   }
-  // Static bundles can't anticipate the full condition set Node will pass to
-  // its resolve hook at load time (Node adds runtime conditions like
-  // 'module-sync', 'node-addons' that aren't accept-list conditions). Store
-  // every edge under the wildcard '*' key; State.getImport falls back to it
-  // when the runtime-condition lookup misses.
+  // Store every edge under the wildcard '*' key: static bundles can't anticipate Node's
+  // runtime conditions, and getImport falls back to '*' when a condition lookup misses.
   for (const [, byParent] of scanner.imports) {
     for (const [parentURL, specs] of byParent) {
       for (const [spec, childURL] of specs) {
@@ -673,54 +522,41 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   return state
 }
 
-// Source extensions probed when a resolved entry/redirect target names no extension.
-// Limited to what a source bundle can actually carry (scan's RESOLVABLE_EXTS), so the
-// resolver never resolves a file the bundle would then reject. `--mainFields` lets a
-// caller pick its own fields, `--metro` presets the React Native fields, and
-// `--conditions` adds its own extra exports conditions.
+// Extensions probed when a resolved target names none. Limited to what a source bundle can
+// carry (scan's RESOLVABLE_EXTS) so the resolver never resolves a file the bundle would reject.
 const SOURCE_EXTS = ['js', 'json', 'ts']
-// React Native preset mainFields asserted by `--metro` (which sets these plus the
-// react-native/browser conditions and platform suffixes, so the user supplies neither
-// --mainFields nor --conditions alongside it).
+// React Native preset mainFields for `--metro` (which also sets the RN conditions + platform suffixes).
 const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
-// Synthetic, project-relative path for the empty module a browser/react-native
-// `false` redirect resolves to. Carried in the bundle as a real (empty) CJS file
-// so the edge points at attestable bytes rather than a sentinel.
+// Synthetic path for the empty module a browser/react-native `false` redirect resolves to,
+// carried as a real empty CJS file so the edge points at attestable bytes.
 const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 
-// Build-output subtrees skipped when collecting a native module's ios/android sources:
-// regenerated by Xcode/Gradle/the NDK/CocoaPods (.cxx is the Android Gradle plugin's C++
-// build-intermediates dir), plus nested deps and VCS metadata -- never source. Prebuilt binary
-// artifacts (installed pods, .a/.so/.xcframework) are excluded separately, via isNativeArtifact.
+// Build-output subtrees skipped when collecting native ios/android sources (regenerated, never
+// source); binary artifacts are excluded separately via isNativeArtifact.
 const NATIVE_SKIP_DIRS = new Set(['build', '.gradle', '.cxx', 'Pods', 'DerivedData', 'node_modules', '.git'])
 
-// Recursively collect every file under a native-source dir (ios/ or android/), skipping
-// build output (NATIVE_SKIP_DIRS) and symlinks (cycle/escape hazard). Absolute paths, into `out`.
+// Recursively collect files under a native ios/android dir, skipping build output and symlinks
+// (cycle/escape hazard). Absolute paths into `out`.
 function walkNativeDir(dirAbs, out) {
   let entries
   try {
     entries = readdirSync(dirAbs, { withFileTypes: true })
   } catch {
-    return // absent -- this package ships nothing for this platform
+    return // absent -- nothing for this platform
   }
   for (const ent of entries) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      // Skip build output and Apple binary bundles (*.framework/*.xcframework).
       if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) walkNativeDir(full, out)
     } else if (ent.isFile() && !isNativeArtifact(ent.name)) {
-      // Prebuilt/installed binaries (.a/.so/.xcframework, installed pods) are output, not source.
       out.push(full)
     }
   }
 }
 
-// Recursively collect podspec-LOAD manifests (podspecs, the Ruby helpers they `require`, and the
-// package.json they parse -- isNativeManifest) anywhere under `dirAbs`, pruning the same build-
-// output/binary subtrees as walkNativeDir. React Native's own podspecs live in scattered subdirs
-// (third-party-podspecs/, Libraries/*/, sdks/hermes-engine/) that `react-native config` never
-// enumerates -- it reports only reactNativePath -- so a root-only scan misses them.
+// Recursively collect podspec-load manifests (isNativeManifest) under `dirAbs`. RN's own
+// podspecs live in scattered subdirs a root-only scan would miss, so recurse fully.
 function collectNativeManifests(dirAbs, out, atRoot = false) {
   let entries
   try {
@@ -732,7 +568,6 @@ function collectNativeManifests(dirAbs, out, atRoot = false) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      // Skip build output/binary bundles and a toplevel off-platform dir (windows/ off Windows).
       const skipDir = NATIVE_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
       if (!skipDir) collectNativeManifests(full, out)
     } else if (ent.isFile() && isNativeManifest(ent.name)) {
@@ -741,13 +576,9 @@ function collectNativeManifests(dirAbs, out, atRoot = false) {
   }
 }
 
-// The native SOURCE files a bundled React Native dependency contributes to the app's native
-// build: its podspecs (+ the Ruby helpers/package.json they load) anywhere in the package, and
-// the non-artifact files under ios/ and android/. These are what CocoaPods/Xcode and Gradle
-// consume; no JS module graph reaches them. Prebuilt/installed binaries (.a/.so/.xcframework,
-// installed pods) are excluded -- generated output, not source. The collected manifests are kept
-// ONLY when the package is actually native (ships a podspec or an ios/android dir) -- otherwise a
-// JS-only dependency's package.json would be pulled in. Returns deduped absolute paths.
+// Native source files a bundled RN dep contributes to the app's native build (podspecs +
+// ios/android sources). Manifests are kept only when the package is actually native (podspec
+// or ios/android dir), else a JS-only dep's package.json would be pulled in. Deduped absolute paths.
 function nativeModuleFiles(pkgAbs) {
   const manifests = []
   collectNativeManifests(pkgAbs, manifests, true)
@@ -760,17 +591,9 @@ function nativeModuleFiles(pkgAbs) {
   return [...new Set(out)]
 }
 
-// Build a JS/TS Bundle (and companion Lockfile) through the legacy-field resolver
-// (src/resolve-fields.js) rather than Node's resolver -- the `--mainFields` and
-// `--metro` paths. The graph is scanned once PER platform (just `[null]` in
-// `--mainFields` mode, where there are no platform suffixes); the file set is the union
-// across platforms, and each `(parent, specifier)` edge is recorded FLAT (a single
-// target) when every platform that has it agrees, and UNFLATTENED to a
-// `{ platform: target }` map only where platforms genuinely diverge. A single platform
-// therefore never unflattens; platform keys are exactly the supplied platforms (no
-// wildcard). A browser/react-native `false` redirect resolves to a synthetic empty
-// module carried in the bundle. Returns { bundle, lockfile } (the lockfile attests the
-// same files + the same -- possibly per-platform -- edges, by integrity).
+// Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
+// `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
+// have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
 async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
@@ -784,21 +607,17 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     return rel
   }
 
-  // Normalize conditions like buildJsBundle does, so a sloppy programmatic caller
-  // (stray '' / whitespace) can't push a bogus token into the resolver.
+  // Normalize conditions (drop stray ''/whitespace) so a sloppy caller can't push a bogus token into the resolver.
   const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
 
   const formatsByRel = new Map()
-  // parentRel -> specifier -> Map<platformKey, targetRel>. Collapsed into flat /
-  // platform-map edges after every platform has been scanned.
+  // parentRel -> specifier -> Map<platformKey, targetRel>; collapsed after all platforms scanned.
   const edges = new Map()
-  const reached = new Set() // absolute paths of every real file reached on any platform
+  const reached = new Set() // absolute paths reached on any platform
   let usesEmpty = false
 
   for (const platform of platforms) {
-    // `--metro` asserts the React Native preset's conditions (react-native, plus
-    // browser for the web platform); `--mainFields` (platform === null) carries the
-    // user's own `--conditions`. scan layers these on the format-derived base.
+    // --metro asserts the RN conditions (+ browser on web); --mainFields (platform null) carries the user's --conditions.
     const extras = metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : scanConditions
     const resolver = createFieldResolver({
       mainFields,
@@ -829,19 +648,15 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     }
   }
 
-  // Read every reached file's bytes once: content for the bundle, integrity for the
-  // lockfile (hash the raw bytes so it matches `stasis run --lock=frozen`). The stored
-  // source is UTF-8 text, so the bytes must BE valid UTF-8 -- otherwise toString('utf8')
-  // would lossily diverge from the hashed bytes.
+  // Read each reached file once: bytes for the bundle, integrity for the lockfile. Source is
+  // stored as UTF-8 text, so non-UTF-8 bytes would diverge from the hashed bytes -- reject them.
   const sources = new Map()
   const integrities = new Map()
   const realBase = realpathSync(baseDir)
   for (const abs of reached) {
     const rel = toRel(abs)
-    // A bundle must carry only in-tree, attestable bytes. The field resolver returns the
-    // lexical path it probed, so an in-tree-named symlink whose real target escapes the
-    // project root would slip past toRel's textual check -- realpath it and fail closed,
-    // the same way the State-based JS path and the non-JS loaders do.
+    // Security: the field resolver returns the lexical path, so an in-tree-named symlink
+    // escaping the root would slip past toRel's textual check -- realpath and fail closed.
     assertRealPathWithinBase(realBase, baseDir, rel)
     const buf = readFileSync(abs)
     if (!isUtf8(buf)) throw new Error(`JS bundle source is not valid UTF-8: ${rel}`)
@@ -849,8 +664,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     integrities.set(rel, sha512integrity(buf))
   }
   if (usesEmpty) {
-    // The empty module is synthetic; refuse to shadow a real reached file that
-    // happens to sit at the reserved path rather than silently clobber it.
+    // Refuse to shadow a real reached file sitting at the reserved empty-module path.
     if (formatsByRel.has(EMPTY_MODULE_PATH)) {
       throw new Error(`Bundle needs the reserved empty-module path ${EMPTY_MODULE_PATH}, but the project has a real file there`)
     }
@@ -859,15 +673,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     integrities.set(EMPTY_MODULE_PATH, sha512integrity(Buffer.alloc(0)))
   }
 
-  // `--metro` also carries each BUNDLED dependency's native build-input surface -- the ios/
-  // android sources and podspec(s) CocoaPods/Xcode and Gradle consume but no JS graph reaches.
-  // Scoped to the node_modules packages actually in the bundle (derived from `reached`), so the
-  // artifact stays "only what's used"; without these, a native build driven from the bundle --
-  // or a `stasis prune` against its lockfile -- would be missing every native module's sources.
-  // Native build-input source (Java/Kotlin/Gradle, C/C++/ObjC/Swift sources + headers, Ruby/CMake,
-  // podspec/Podfile, template/xml -- classifyNativeCapture) is stored as CODE under a source-language
-  // tag; other native assets as a resource ('resource', or 'resource:base64' for a non-UTF-8 asset
-  // like a font/image); the integrity hashes the raw bytes, matching the JS path.
+  // --metro also carries each bundled dependency's native build-input surface (ios/android
+  // sources + podspecs), scoped to the node_modules packages actually in the bundle. Native
+  // source is stored as code under a language tag; other assets as 'resource'/'resource:base64'.
   if (metro) {
     const pkgDirs = new Set()
     for (const abs of reached) {
@@ -877,8 +685,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     for (const pkgDir of [...pkgDirs].toSorted()) {
       const pkgAbs = join(baseDir, pkgDir)
       const files = nativeModuleFiles(pkgAbs)
-      // React Native CORE also contributes vetted native dirs/files the build compiles or reads
-      // (Yoga, the hermes-engine podspec dir, the CocoaPods scripts, .hermesversion).
+      // React Native core also contributes vetted native dirs/files (Yoga, hermes-engine podspec, CocoaPods scripts).
       if (pkgDir.slice(pkgDir.lastIndexOf('node_modules/') + 'node_modules/'.length) === 'react-native') {
         for (const sub of RN_CORE_INCLUDE_DIRS) walkNativeDir(join(pkgAbs, sub), files)
         for (const file of RN_CORE_INCLUDE_FILES) {
@@ -888,13 +695,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       }
       for (const abs of files) {
         const rel = toRel(abs)
-        if (sources.has(rel)) continue // already carried as a graph module
+        if (sources.has(rel)) continue
         assertRealPathWithinBase(realBase, baseDir, rel)
-        // Single classifier shared with the StasisMetro plugin (classifyNativeCapture):
-        //   - 'skip': a JS module the graph already carries (or unused JS) -- not a native input.
-        //   - 'code': package.json / JSON podspecs ('json'), Ruby podspecs / Podfile / native
-        //     source (its source tag). prune keeps a file-listed package.json in full.
-        //   - 'resource': any other asset ('resource', or 'resource:base64' for non-UTF-8 bytes).
+        // classifyNativeCapture (shared with the StasisMetro plugin) returns action skip/code/resource with a format tag.
         const { action, format } = classifyNativeCapture(rel)
         if (action === 'skip') continue
         const buf = readFileSync(abs)
@@ -912,8 +715,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     }
   }
 
-  // Collapse each edge: one distinct target across the platforms that have it -> flat
-  // string; otherwise a Map<platform, target> (platform keys only, sorted).
+  // Collapse each edge: one distinct target across platforms -> flat string; else a sorted Map<platform, target>.
   const resolutions = new Map()
   for (const [parent, bySpec] of edges) {
     const specMap = new Map()
@@ -940,9 +742,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     conditionKey: '*',
   })
 
-  // The companion lockfile mirrors the bundle exactly, swapping file content for
-  // its integrity. modules/imports/formats/entries are shared shapes, so a frozen
-  // lockfile attests the same resolution graph the bundle carries.
+  // The companion lockfile mirrors the bundle, swapping file content for its integrity.
   const lockModules = new Map()
   for (const [dir, m] of bundle.modules) {
     const files = Object.create(null)
@@ -960,9 +760,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   return { bundle, lockfile }
 }
 
-// Classify entries into the single bundle language they all share and check
-// option applicability. Shared by buildBundle and bundleCommand; `name`
-// prefixes error messages with the caller.
+// Classify entries into their single shared language and check option applicability; `name` prefixes errors.
 function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
@@ -985,9 +783,7 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (lockfile !== undefined && kind !== 'js') {
     throw new Error(`${name}: --lockfile is only valid for JS bundles`)
   }
-  // Conditions only steer Node's `exports`/`imports` resolution, which the other
-  // languages' resolvers don't consult -- reject them rather than accept a flag
-  // that would silently do nothing.
+  // Reject --conditions for non-JS: their resolvers don't consult exports/imports conditions, so it would silently do nothing.
   if (Array.isArray(conditions) && conditions.length > 0 && kind !== 'js') {
     throw new Error(`${name}: --conditions is only valid for JS bundles`)
   }
@@ -998,9 +794,8 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if ((metro || (Array.isArray(platforms) && platforms.length > 0)) && kind !== 'js') {
     throw new Error(`${name}: --metro is only valid for JS bundles`)
   }
-  // `--metro` is a preset for conditions + mainFields + platform suffixes, so it can't
-  // be combined with explicit --conditions/--mainFields (they'd conflict), and it needs
-  // --platforms to know which suffixes to resolve. `--platforms` is meaningless without it.
+  // --metro presets conditions + mainFields + platform suffixes, so it can't combine with
+  // explicit --conditions/--mainFields and requires --platforms; --platforms is meaningless without it.
   if (metro) {
     if (Array.isArray(conditions) && conditions.length > 0) {
       throw new Error(`${name}: --conditions can't be combined with --metro (it sets its own conditions)`)
@@ -1011,9 +806,8 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
     if (!Array.isArray(platforms) || platforms.length === 0) {
       throw new Error(`${name}: --metro requires --platforms (e.g. --platforms=ios,android)`)
     }
-    // A platform name becomes a bundle/lockfile edge key (Bundle/Lockfile parse reject
-    // a '/'); '*' is the reserved private placeholder. Reject both so the writer can
-    // never emit an edge map the readers refuse -- a divergent-edge, data-dependent break.
+    // A platform name becomes an edge key: reject '/' (Bundle/Lockfile parse refuse it) and
+    // the reserved '*' placeholder, so the writer never emits a map the readers reject.
     for (const p of platforms) {
       if (typeof p !== 'string' || p.length === 0 || p === '*' || p.includes('/')) {
         throw new Error(`${name}: invalid platform '${p}' (a platform name can't be empty, contain '/', or be '*')`)
@@ -1022,35 +816,16 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   } else if (Array.isArray(platforms) && platforms.length > 0) {
     throw new Error(`${name}: --platforms is only valid with --metro`)
   }
-  // The field resolver always emits a full-scope bundle (no node_modules-only mode), so
-  // --scope alongside --mainFields/--metro would be silently ignored -- reject it.
+  // The field resolver always emits full-scope, so --scope with --mainFields/--metro would be silently ignored -- reject it.
   if (scope !== undefined && (mainFields !== undefined || metro)) {
     throw new Error(`${name}: --scope is not supported with --mainFields or --metro`)
   }
   return kind
 }
 
-// Programmatic equivalent of `stasis bundle`: build and return an in-memory
-// Bundle from a list of entry files, without writing anything to disk
-// (serialize with bundle.serialize() to get the JSON that `stasis bundle`
-// brotli-compresses into stasis.code.br). Every file is attributed to the `bundle`
-// consumer in the informational `reason` map, the same way the CLI records it.
-//
-// Dispatch by extension matches the CLI: all entries must be one language —
-// .sol (Solidity), .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static
-// scan), .sh/.bash (Bash), or .rs (Rust); mixing fails fast. `mappingFile` is
-// the optional Solidity remappings file (foundry.toml or remappings.txt) and
-// is only valid for .sol entries; `scope` overrides the configured bundle
-// scope and is only valid for JS/TS entries; `conditions` are extra `exports`
-// resolution conditions (e.g. `['react-native']`) and are JS/TS-only too.
-//
-// `mainFields` (an array of legacy package fields, e.g. `['react-native','browser','main']`)
-// selects the legacy-field resolver -- see buildResolvedJsBundle. It resolves
-// non-`exports` packages via those fields, including the browser-field object
-// redirection, and composes with `conditions`. `metro: true` is instead a preset that
-// sets its OWN React Native fields + conditions + platform suffixes (so it is not
-// combined with `mainFields`/`conditions`) and requires `platforms` (e.g.
-// `['ios','android']`); the edge graph is then per-platform. JS/TS-only.
+// Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
+// writing to disk. Files are attributed to the `bundle` consumer. Option applicability
+// (--mapping/.sol, --scope|--conditions|--mainFields|--metro/JS) is enforced by classifyEntries.
 export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro } = {}) {
   const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
@@ -1069,69 +844,25 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
     return bundle
   }
   const state = await buildJsBundle({ cwd, entries, scope, conditions })
-  // state.sourceBundle carries no reason (a single-consumer static build), so stamp the
-  // `bundle` consumer here, matching assembleCodeBundle's non-JS path.
+  // Stamp the `bundle` consumer (the static build carries none).
   return state.sourceBundle.withReason('bundle')
 }
 
-// Where `stasis bundle` writes when no --output is given: stasis.code.br, the
-// same name `stasis run --bundle=load` discovers by default, so the two commands
-// round-trip with no flags. A file (not stdout) is the common case; pass
-// --output=- to stream the raw brotli bytes to stdout.
+// Default output: stasis.code.br, the same name `stasis run --bundle=load` discovers, so the two round-trip with no flags.
 const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 
-// Run the bundle CLI command end-to-end. Always produces a brotli-compressed
-// stasis bundle (matching the on-disk format of `stasis.code.br`). Writes to
-// `output` when given, to stasis.code.br in `cwd` by default, or to stdout
-// when `output` is `-`. Prints a one-line `[stasis] Bundled <n> files in <p>
-// packages from <dir> to <dest>` summary to stderr so it doesn't interleave
-// with binary output written to stdout.
-//
-// Dispatch by extension: all entries must be one language — .sol (Solidity),
-// .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static scan), .sh/.bash
-// (Bash, via source/exec graph walk), or .rs (Rust, via mod-declaration walk).
-// Mixing fails fast; --mapping is .sol only, --scope/--lockfile/--conditions are
-// JS/TS only.
-//
-// `conditions` are extra Node `exports`/`imports` resolution conditions to assert
-// during the static scan (e.g. `['react-native']` or `['browser']`). They only
-// affect `exports`/`imports` condition matching -- not legacy mainFields -- so on
-// their own they don't honour a package's legacy entry fields. See buildJsBundle.
-//
-// For JS bundles, an optional `lockfile` path writes a stasis.lock.json that
-// attests every file in the bundle. The static scan walks both branches of
-// conditional requires (e.g. debug/src/index.js' `if (browser) require('./browser')
-// else require('./node')`), so the runtime lockfile from `stasis run --lock=add`
-// won't attest the unused branch -- if the user wants `lock=frozen` against a
-// statically-built bundle, they need this companion lockfile.
-//
-// With `--conditions`, that companion lockfile attests the conditions-SELECTED
-// resolution graph. A plain `stasis run --lock=frozen` doesn't replay `--conditions`,
-// so it resolves different files on disk and fails closed (correctly -- the lockfile
-// genuinely attests a different graph). Pair such a lockfile with `--bundle=load`, or
-// replay the same `--conditions` at run time, so the attested and observed graphs agree.
-// `brotliQuality` (integer 0..11, optional; unset = brotli's default 11) tunes the
-// output compression, forwarded to brotliOptions().
-//
-// `add` merges the freshly built bundle INTO the one already at `output` (or
-// stasis.code.br) instead of replacing it: the file set, entries, import graph, and
-// formats are unioned (see Bundle.merge). When the target doesn't exist yet this is a
-// plain write, so `stasis bundle --add` bootstraps on the first run and accretes on
-// every run after. The merge is strict -- a file whose bytes/identity/format/
-// resolution differ from what the existing bundle attests throws. `--add` can't target
-// stdout (there is nothing to merge into), and when a `lockfile` is written too it is
-// unioned into any existing one on disk so it keeps attesting the whole merged graph.
-//
-// Every file this command bundles is attributed to the `bundle` consumer in the
-// bundle's informational `reason` map. On `--add` that attribution is unioned with the
-// existing bundle's, so a bundle grown from a runtime/plugin capture keeps naming those
-// consumers alongside `bundle` for the statically added files.
+// Run `stasis bundle`: build a brotli-compressed bundle and write it to `output`
+// (stasis.code.br by default, `-` for stdout; the summary goes to stderr so it never
+// interleaves with binary stdout). An optional JS `lockfile` attests every bundled file;
+// with `--conditions` it attests the conditions-selected graph, so a plain
+// `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
+// `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
+// already on disk (strict; a conflicting file throws) and can't target stdout.
 export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality, add = false } = {}) {
   const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
-  // --add reads the artifact already at `target` back and unions the new build into
-  // it; a stdout stream is write-only, so there is nothing to merge into there.
+  // --add has nothing to merge into on stdout (write-only).
   if (add && target === '-') {
     throw new Error('bundleCommand: --add cannot be combined with --output=- (nothing to merge into on stdout)')
   }
@@ -1139,10 +870,8 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   let bundle
   let lockData
   if (kind === 'js' && (metro || mainFields !== undefined)) {
-    // The legacy-field resolver path builds the Bundle (and the matching Lockfile)
-    // directly -- it carries per-platform edges and a synthetic empty module (for a
-    // browser/react-native `false` redirect) that State's disk-reading addFile can't
-    // represent.
+    // The legacy-field resolver builds Bundle + Lockfile directly (per-platform edges + a
+    // synthetic empty module State's addFile can't represent).
     const built = await buildResolvedJsBundle({
       cwd,
       entries,
@@ -1154,24 +883,18 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     bundle = built.bundle
     if (lockfile) lockData = built.lockfile.serialize()
   } else if (kind === 'js' && lockfile) {
-    // The companion lockfile attests file hashes, which only State carries —
-    // a Bundle holds sources, not digests — so this path keeps the State.
+    // Keep the State: only it carries the file hashes the companion lockfile needs (a Bundle holds sources, not digests).
     const state = await buildJsBundle({ cwd, entries, scope, conditions })
-    // Stamp the `bundle` consumer, like buildBundle's plain-JS path (this branch
-    // bypasses buildBundle to keep the State for its lockfile digests).
+    // Stamp the `bundle` consumer (this branch bypasses buildBundle to keep the State).
     bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
     bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions })
   }
 
-  // --add: grow the artifact already on disk rather than replacing it. Merging a
-  // freshly built bundle into the existing one unions their files/entries/imports/
-  // formats; a conflict (same path, different bytes/format/resolution) throws. When
-  // nothing is on disk yet this branch is skipped and the write below is a fresh one.
+  // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.
   const outAbs = target === '-' ? undefined : resolve(cwd, target)
-  // Count of files the pre-existing bundle carried; stays undefined when no merge
-  // happened (fresh write), which the summary line below uses as the merged sentinel.
+  // Files the pre-existing bundle carried; undefined when no merge happened (the summary's merged sentinel).
   let mergedFrom
   if (add && existsSync(outAbs)) {
     let existing
@@ -1182,12 +905,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     }
     mergedFrom = existing.sources.size
     bundle = existing.merge(bundle)
-    // Keep the companion lockfile consistent with the merged bundle. When one exists on
-    // disk, union it so it attests the whole merged graph. When it DOESN'T, the fresh
-    // lockData attests only the newly added files -- not the pre-existing bundle's -- so
-    // a --lock=frozen --bundle=load pair would fail closed. The hashes for the old files
-    // live only in that missing lockfile, so we can't reconstruct a complete one here;
-    // refuse rather than write an under-attesting lockfile.
+    // Keep the companion lockfile consistent with the merged bundle: union an existing one.
+    // With none on disk we can't attest the pre-existing bundle's files (their hashes live
+    // only in that missing lockfile), so refuse rather than write an under-attesting lockfile.
     if (lockData && lockfile) {
       const lockAbs = resolve(cwd, lockfile)
       if (!existsSync(lockAbs)) {
@@ -1208,8 +928,6 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   const modules = bundle.modules
 
   const data = brotliCompressSync(serialized, brotliOptions(brotliQuality))
-  // Default to writing stasis.code.br in cwd; `-` is the conventional opt-in
-  // for streaming the raw brotli bytes to stdout (e.g. to pipe somewhere else).
   if (target === '-') {
     process.stdout.write(data)
   } else {
@@ -1223,13 +941,10 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   }
   const fromDir = outermostDir(files, resolve(cwd))
   const dest = target === '-' ? '<stdout>' : target
-  // Count packages: every non-empty bucket, with the project's own source (the
-  // "." workspace bucket) counting as one package alongside each dependency.
+  // Count packages: every non-empty bucket (the "." workspace bucket counts as one).
   const packages = [...modules.values()].filter((m) => Object.keys(m.files).length > 0).length
   const pkgLabel = `${packages} package${packages === 1 ? '' : 's'}`
-  // When we merged into an existing bundle, report how many files were newly added
-  // alongside the merged totals; a fresh write (including --add with nothing on disk)
-  // keeps the plain "Bundled N files" line.
+  // On a merge, report newly-added files alongside the totals; a fresh write keeps the plain line.
   if (mergedFrom !== undefined) {
     const added = files.length - mergedFrom
     console.warn(`[stasis] Added ${added} file${added === 1 ? '' : 's'} (${files.length} total in ${pkgLabel}) from ${fromDir} to ${dest}`)

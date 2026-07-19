@@ -6,34 +6,22 @@ import assert from 'node:assert/strict'
 import { packageType } from '@exodus/stasis-core/bundle-util'
 import { classifyFormat } from '@exodus/stasis-core/util'
 
-// Static require/import graph walker. Reads source files and parses them; never
-// loads or executes any user code. Resolves specifiers through Node's own
-// resolver (`createRequire(parent).resolve(spec, { conditions: Set })`), which
-// reads package.json manifests and applies `exports` conditions but never runs
-// the target module. Dynamic specifiers (`require(name)`, `import('./'+x)`)
-// are recorded as unresolved -- a fundamental limit of static analysis for
-// CJS, not a tooling shortcoming. Files that fail to parse are recorded in
-// `parseErrors` (and flagged with `parseError` in `files`): for script (CJS)
-// files oxc's recovered AST still yields the edges (Node's module wrapper
-// accepts code oxc rejects, e.g. top-level `return`), while module files keep
-// no edges -- a missed static edge is a hole consumers can't enumerate.
+// Static require/import graph walker: parses source, never loads or executes user code.
+// Dynamic specifiers (`require(name)`, `import('./'+x)`) are recorded as unresolved.
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
 
-// oxc-parser is a regular dependency, required lazily so non-JS bundlers (which
-// never reach getParser()) don't load the native parser.
+// Required lazily so non-JS bundlers don't load the native oxc parser.
 let _parser
 function getParser() {
   _parser ??= createRequire(import.meta.url)('oxc-parser')
   return _parser
 }
 
-// Format per Node's own rules, via classifyFormat -- the ONE name->format authority, shared with
-// the runtime capture so a static and a runtime bundle agree. It fixes the extension-determined
-// Node formats and returns null for the JS-family whose module system isn't fixed by extension
-// (.js/.ts): that comes from the nearest package.json `type`, and a null `type` means "detect from
-// syntax" (signaled up as null). scan only reaches JS/TS files, so no native format comes back here.
+// classifyFormat is the shared name->format authority (static and runtime bundles must agree); it
+// returns null for the .js/.ts family whose module system comes from package.json `type` (null =
+// detect from syntax, signaled up as null).
 function formatForFile(file) {
   const format = classifyFormat(file)
   if (format != null) return format
@@ -51,9 +39,7 @@ function literalSpec(node) {
   return null
 }
 
-// Walk the AST for require() and dynamic import() calls. ESM static imports and
-// re-exports are picked up separately from oxc-parser's `module.staticImports` /
-// `module.staticExports` -- much cheaper than walking the whole tree for them.
+// Walks require()/import() calls only; ESM static imports/re-exports come from oxc module records.
 function findCallSpecifiers(ast, push) {
   const visit = (node) => {
     if (!node || typeof node !== 'object') return
@@ -75,11 +61,8 @@ function findCallSpecifiers(ast, push) {
       if (spec != null) push({ kind: 'dynamic-import', spec })
       else push({ kind: 'dynamic-import', dynamic: true })
     } else if (node.type === 'TSImportEqualsDeclaration') {
-      // `import lib = require('./dep.cts')`: TS-only CJS import form. Node's
-      // type stripping refuses to run it (non-erasable syntax), but the
-      // dependency edge is real — record it like a require() so the bundle
-      // stays self-contained for transform-types users and external analysis.
-      // Qualified-name references (`import A = B.C`) carry no file edge.
+      // `import lib = require('./dep.cts')`: TS-only CJS import; record the real edge.
+      // Qualified-name form (`import A = B.C`) carries no file edge.
       if (node.moduleReference?.type === 'TSExternalModuleReference') {
         const spec = literalSpec(node.moduleReference.expression)
         if (spec != null) push({ kind: 'require', spec })
@@ -106,19 +89,9 @@ export class Scan {
   parseErrors = []
   entries = new Set()
 
-  // `conditions` is *additive* on top of the format-derived base set: ESM parents
-  // get ['node', 'import'] and CJS parents get ['node', 'require'], with any
-  // user-supplied conditions (e.g. 'browser', 'development') merged in. This
-  // matches what the runtime loader records when Node reports conditions for an
-  // edge -- different edges in the same scan can end up under different keys.
-  //
-  // `resolve` optionally replaces Node's own resolver with a custom one (the
-  // legacy-field resolver in resolve-fields.js drives `stasis bundle --mainFields`).
-  // It is called `(parentFile, specifier, conditions)` and returns
-  // `{ url } | { empty: true } | { builtin: true } | null` -- `empty` marks a
-  // browser/react-native `false` redirect (an empty-module stub the caller
-  // materialises), the rest mirror Node resolution. When set, it also handles
-  // builtins, so the built-in `isBuiltin` short-circuit is skipped.
+  // `conditions` is additive on top of the format-derived base set. `resolve` optionally
+  // replaces Node's resolver (resolve-fields.js): returns `{ url } | { empty } | { builtin } | null`
+  // (`empty` = a browser/react-native `false` redirect) and owns builtin handling when set.
   constructor({ conditions = [], resolve = null } = {}) {
     this.extraConditions = [...conditions]
     this.customResolve = resolve
@@ -141,13 +114,8 @@ export class Scan {
     return this
   }
 
-  // Match the runtime resolver's full condition set. Node 22 passes
-  // `['node', import|require, 'module-sync', 'node-addons']` to the resolve
-  // hook; if we omit any of these, a package whose `exports` map gates on the
-  // runtime-only conditions (e.g. `"module-sync": "./a.js", "import": "./b.js"`)
-  // resolves to a different file under static scan than under plain Node.
-  // Confirmed by reproducer with module-sync: plain node hits sync.js, static
-  // bundle loads with async.js -- silently runs different code.
+  // Must match the runtime resolver's full condition set (Node 22: node, import|require,
+  // module-sync, node-addons); omitting any resolves `exports`-gated packages to a different file.
   #conditionsFor(format) {
     const base = ['module', 'module-typescript'].includes(format)
       ? ['node', 'import', 'module-sync', 'node-addons']
@@ -155,10 +123,8 @@ export class Scan {
     return new Set([...base, ...this.extraConditions])
   }
 
-  // `recovered: false` means the parser crashed on this file and nothing was
-  // salvaged -- its edges are entirely unknown. `recovered: true` means oxc
-  // returned, but we discarded its partial module records (module-family
-  // formats only; see #scanFile).
+  // `recovered`: false = parser crashed, nothing salvaged; true = oxc returned but we
+  // discarded its partial module records (module-family only; see #scanFile).
   #recordParseError(url, format, message, recovered) {
     this.files.set(url, { format, edges: [], parseError: message })
     this.parseErrors.push({ url, format, message, recovered })
@@ -176,14 +142,12 @@ export class Scan {
       return
     }
 
-    // declared === null: typeless package, where Node decides .js/.ts by
-    // module-syntax detection — that needs the parse, so resolve it below.
+    // declared === null: typeless package; Node decides .js/.ts by syntax, resolved after parse.
     const declared = formatForFile(file)
     const src = readFileSync(file, 'utf8')
 
-    // Resolve the parser outside the per-file try below: a missing oxc-parser is
-    // an environment error, not a property of this file, so it must not be
-    // swallowed into a silent zero-edge leaf.
+    // Resolve the parser outside the try: a missing oxc-parser is an env error, not this
+    // file's — it must not be swallowed into a silent zero-edge leaf.
     const parser = getParser()
     let parsed
     try {
@@ -196,28 +160,18 @@ export class Scan {
       return
     }
 
-    // Match Node's module-syntax detection for typeless packages: ESM syntax
-    // (import/export/import.meta) selects the module variant. Recording the
-    // commonjs variant here would make `--bundle=load` feed the source to the
-    // wrong translator, which throws instead of reparsing as ESM the way
-    // Node's on-disk loader does.
+    // Match Node's syntax detection for typeless packages: ESM syntax picks the module variant
+    // (mislabeling as commonjs makes `--bundle=load` feed the wrong translator).
     let format = declared
       ?? `${parsed.module.hasModuleSyntax ? 'module' : 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
 
-    // oxc-parser recovers from syntax errors instead of throwing: it reports
-    // them in `parsed.errors` and returns whatever AST/module records it could
-    // salvage. (Warning/advice-severity diagnostics don't imply a broken parse
-    // and are not errors.)
+    // oxc recovers from syntax errors (reports them in parsed.errors) rather than throwing;
+    // Warning/Advice severities aren't real parse errors.
     const nonWarning = (p) => (p.errors ?? []).filter((e) => e.severity !== 'Warning' && e.severity !== 'Advice')
     let errors = nonWarning(parsed)
 
-    // Node's detector also counts top-level await as module syntax, which
-    // oxc's hasModuleSyntax does not flag: a typeless file whose ESM-ness
-    // rests on TLA alone parses here as a broken script while plain node runs
-    // it as a clean module. Mirror Node's parse-as-CJS-retry-as-ESM: when the
-    // detected-commonjs parse has errors but a module parse is clean, the
-    // module parse wins. Genuine CJS salvage cases (e.g. a top-level `return`
-    // guard) error under BOTH source types and stay on the script path.
+    // oxc's hasModuleSyntax misses top-level await, so a TLA-only ESM file parses here as a
+    // broken script; mirror Node by retrying as module and preferring a clean module parse.
     if (errors.length > 0 && declared === null && !format.startsWith('module')) {
       try {
         const asModule = parser.parseSync(file, src, { sourceType: 'module' })
@@ -232,25 +186,18 @@ export class Scan {
     let parseError
     if (errors.length > 0) {
       parseError = errors.map((e) => e.message).join('; ')
-      // A partially-parsed module file may be missing static link-time edges
-      // -- holes we can't enumerate -- so don't pretend we know its imports.
+      // A partially-parsed module file may be missing link-time edges we can't enumerate.
       if (format.startsWith('module')) {
         this.#recordParseError(url, format, parseError, true)
         return
       }
-      // Script (CJS) files: Node's module wrapper accepts code oxc rejects
-      // (e.g. a top-level `return` guard), and oxc's recovered AST keeps the
-      // require()/import() calls -- salvage the edges, record the error, and
-      // let callers decide how loud to be.
+      // Script (CJS) files: oxc's recovered AST still yields the require()/import() edges — salvage them.
       this.parseErrors.push({ url, format, message: parseError, recovered: true })
     }
 
     const specs = []
-    // ESM static imports + re-exports come from oxc's pre-extracted module info.
-    // Type-only edges (`import type ... from`, `export type ... from`) are
-    // erased before runtime and never loaded by Node; skip them so the bundle
-    // matches Node's actual load graph. A mixed `import { type A, B }` still
-    // loads, and bare side-effect imports have no entries — both are kept.
+    // Type-only edges (`import type`, `export type`) are erased before runtime — skip them so the
+    // bundle matches Node's load graph. Mixed (`{ type A, B }`) and bare side-effect imports are kept.
     if (parsed.module?.staticImports) {
       for (const imp of parsed.module.staticImports) {
         if (imp.entries.length > 0 && imp.entries.every((e) => e.isType)) continue
@@ -264,7 +211,6 @@ export class Scan {
         }
       }
     }
-    // require() and dynamic import() come from the AST.
     findCallSpecifiers(parsed.program, (s) => specs.push(s))
 
     const conditions = this.#conditionsFor(format)
@@ -279,10 +225,8 @@ export class Scan {
         this.unresolved.push({ parentURL: url, kind: s.kind, reason: 'dynamic' })
         continue
       }
-      // Custom (legacy-field) resolver: it owns builtin handling and adds the
-      // `empty` outcome (a browser/react-native `false` redirect). An empty edge
-      // is recorded but neither queued (an empty module has no edges) nor counted
-      // as unresolved (it resolved -- to nothing).
+      // Custom (legacy-field) resolver owns builtin handling and the `empty` outcome (browser/RN
+      // `false` redirect): an empty edge is recorded but neither queued nor counted as unresolved.
       if (this.customResolve) {
         const r = this.customResolve(file, s.spec, conditions)
         if (r?.builtin) {

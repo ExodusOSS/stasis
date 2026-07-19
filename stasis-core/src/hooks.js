@@ -16,20 +16,15 @@ import {
   STAT_FORMATS,
 } from './util.js'
 
-// Snapshot off the namespace so `--fs` (which patches fs.readFileSync then
-// syncBuiltinESMExports()s for user code) can't redirect the reads the CJS-source
-// capture and shard readers below rely on. Same rationale as state.js / state-util.js.
+// Snapshot off the namespace so `--fs` can't redirect stasis's own capture/shard reads.
 const { mkdtempSync, opendirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } = fs
 
 // Warning: only covers code imports, not file reads
 
-// Format-category trust partition, imported from util.js under the loader's historical local
-// names. NODEJS_FORMATS (util's NODE_FORMATS) is the trust boundary: a bundle-served file whose
-// attested format is outside it is refused at load (and earlier at resolve) -- everything else
-// fails closed. The other sets only shape the per-kind message below.
+// NODEJS_FORMATS (util's NODE_FORMATS) is the trust boundary: a served file whose attested format
+// is outside it is refused at load (and earlier at resolve); everything else fails closed.
 
-// Executable CommonJS formats (plain CJS + TS-CJS). Kept local -- a sub-partition of
-// NODEJS_FORMATS the require-repair below keys off.
+// Executable CommonJS formats (plain CJS + TS-CJS) the require-repair below keys off.
 const CJS_FORMATS = new Set(['commonjs', 'commonjs-typescript'])
 
 function refuseNonNodeFormat(format, url) {
@@ -65,7 +60,6 @@ function refuseNonNodeFormat(format, url) {
       `not the file's content. Capture a run that reads or imports it to bundle its bytes.`
     )
   }
-  // Unknown format string: usually a tampered or forward-incompatible bundle.
   throw new Error(
     `[stasis] cannot execute '${url}': attested format '${format}' is not a Node loader ` +
     `format. The bundle may be tampered, produced by a newer stasis, or built for a ` +
@@ -73,11 +67,8 @@ function refuseNonNodeFormat(format, url) {
   )
 }
 
-// node:59666 workaround (see the load hook). Single-line prelude injected into served
-// CommonJS source that restores the `require.cache`/`require.extensions` the ESM->CJS
-// translator's re-invented require omits, pointing them at node:module's real
-// `Module._cache`/`Module._extensions` so a bundle-served module's require matches a
-// disk-loaded one. Guarded (typeof/try) so an odd-shaped require or frozen builtins no-ops.
+// node:59666 workaround (see load hook): prelude restoring require.cache/require.extensions the
+// ESM->CJS translator's re-invented require omits, from node:module. Guarded so it no-ops on failure.
 const CJS_REQUIRE_REPAIR =
   "try{if(typeof require==='function'&&!require.cache){" +
   "const __stasis_m=require('node:module');" +
@@ -85,21 +76,14 @@ const CJS_REQUIRE_REPAIR =
   'require.cache=__stasis_m.Module._cache;' +
   'if(!require.extensions)require.extensions=__stasis_m.Module._extensions;}}}catch{}'
 
-// Sticky scanners for the pieces of a Directive Prologue: a run of whitespace and
-// line/block comments, a single string literal, and the horizontal space + SAME-LINE block
-// comments that may trail a directive. Sticky (`y`) + lastIndex walks the prologue in place
-// rather than re-slicing the source each step.
+// Sticky scanners for a Directive Prologue: whitespace+comments, a string literal, trailing
+// same-line space+block-comments. Sticky+lastIndex walks the prologue in place.
 const WS_COMMENTS = /(?:\s|\/\/[^\n]*|\/\*[\s\S]*?\*\/)*/uy
 const STRING_LITERAL = /(['"])(?:[^\\]|\\.)*?\1/uy
-// A block comment CONTAINING a line terminator counts as one for ASI, so the trailing run
-// stops there (handled as a line boundary below); this matches only single-line block
-// comments (body has no line terminators).
+// Matches only single-line block comments: a newline-spanning one counts as a line boundary for ASI.
 const TRAILING_SAME_LINE = /(?:[ \t]|\/\*(?:[^*\n\r\u2028\u2029]|\*(?!\/))*\*\/)*/uy
-// Tokens that CONTINUE an expression across a line break. If the first token after the
-// break following a candidate directive string is one of these, the string heads a
-// multi-line expression (`'a,b'\n.split(...)`, `'x'\ninstanceof Y`) not a directive (ASI
-// inserts no semicolon before them), so it must NOT be skipped. Punctuators match by first
-// char; the keyword operators need `\b` so `in`/`instanceof` don't swallow `index`/`instances`.
+// Tokens that continue an expression across a line break: a directive string followed by one of
+// these heads a multi-line expression, not a directive, so must NOT be skipped (ASI gotcha).
 const EXPR_CONTINUATION = new Set(['.', '[', '(', '`', '+', '-', '*', '/', '%', ',', '?', ':', '=', '<', '>', '&', '|', '^'])
 const KEYWORD_CONTINUATION = /(?:instanceof|in)\b/uy
 function skipSticky(re, source, i) {
@@ -107,9 +91,7 @@ function skipSticky(re, source, i) {
   re.exec(source)
   return re.lastIndex
 }
-// At a line boundary at `pos` (line terminator or newline-spanning block comment), does the
-// next significant token begin a NEW statement -- so the preceding string is a complete
-// directive -- rather than continue the expression?
+// At a line boundary, does the next token begin a new statement (directive complete) vs continue the expression?
 function newStatementAfterBreak(source, pos) {
   const afterBreak = skipSticky(WS_COMMENTS, source, pos)
   if (afterBreak >= source.length) return true
@@ -118,21 +100,9 @@ function newStatementAfterBreak(source, pos) {
   return !KEYWORD_CONTINUATION.test(source)
 }
 
-// Prepend CJS_REQUIRE_REPAIR to a served CommonJS module's source WITHOUT shifting line
-// numbers (the prelude adds no line break) or perturbing the Directive Prologue -- so a
-// `'use strict'` keeps strict mode. The prelude is a `try{...}` statement: inserting it
-// ahead of a directive would demote that directive to an expression (sloppy mode), so we
-// insert AFTER the prologue (shebang, whitespace, comments, string-literal directives). A
-// leading ';' makes the insertion self-terminating so it can't fuse `'use strict'try{` into
-// a SyntaxError.
-//
-// A leading string is a directive only when a real statement boundary follows: `;`, `}`, a
-// line comment, EOF, or a LINE boundary (line terminator or block comment containing one)
-// whose next token doesn't continue the expression. So a module opening with a string
-// EXPRESSION (`'x'.toUpperCase()`, `'a' + b`, `'a,b'\n.split()`, `'x'\ninstanceof Y`) is
-// left intact rather than split mid-expression (SyntaxError or wrong bytes), while a real
-// directive followed by a banner comment still keeps strict mode. Distinguishing the two is
-// the ASI problem, so this is a small scan not one regex.
+// Insert CJS_REQUIRE_REPAIR AFTER the Directive Prologue (not before) with a leading ';', so a
+// `'use strict'` stays strict and a leading string EXPRESSION isn't split mid-expression. The
+// directive-vs-expression distinction is the ASI problem, hence a scan not one regex.
 function repairCjsRequire(source) {
   if (typeof source !== 'string') return source
   let i = 0
@@ -143,83 +113,55 @@ function repairCjsRequire(source) {
   for (;;) {
     const afterWs = skipSticky(WS_COMMENTS, source, i)
     STRING_LITERAL.lastIndex = afterWs
-    if (STRING_LITERAL.exec(source) === null) break // next token isn't a string: end of prologue
+    if (STRING_LITERAL.exec(source) === null) break
     const afterStr = STRING_LITERAL.lastIndex
     const afterTrail = skipSticky(TRAILING_SAME_LINE, source, afterStr)
     const c = source[afterTrail]
     let isDirective
     if (c === undefined || c === ';' || c === '}') isDirective = true
-    else if (c === '/' && source[afterTrail + 1] === '/') isDirective = true // trailing line comment
-    // A `/*` here is a newline-spanning block comment (single-line ones consumed above);
-    // like a bare line break it terminates the directive when a new statement follows.
+    else if (c === '/' && source[afterTrail + 1] === '/') isDirective = true
+    // A `/*` here is a newline-spanning block comment: like a line break it can end the directive.
     else if (c === '/' && source[afterTrail + 1] === '*') isDirective = newStatementAfterBreak(source, afterTrail)
     else if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') isDirective = newStatementAfterBreak(source, afterTrail)
-    else isDirective = false // same-line continuation (`.`, `+`, `,`, ...): a string expression
+    else isDirective = false
     if (!isDirective) break
-    i = afterStr // past the directive; loop for stacked directives
+    i = afterStr
   }
   return `${source.slice(0, i)};${CJS_REQUIRE_REPAIR}${source.slice(i)}`
 }
 
 let state
-// The shard dir + per-build ed25519 keypair THIS process created (root only). The PRIVATE key
-// is exported to descendants (each capturing child signs its shard with it); the PUBLIC key
-// (createdShardPub) verifies every shard's signature, and its base64url form (createdShardPubId)
-// prefixes each shard's filename. Tracked so the root merges from / removes ONLY a dir it minted,
-// and accepts ONLY shards validly signed under its own keypair -- never an inherited/attacker dir
-// or a foreign-signed file.
+// Shard dir + per-build ed25519 keypair this root minted: root merges/removes ONLY a dir it minted
+// and accepts ONLY shards signed under its own keypair. Private key -> children; public verifies.
 let createdShardDir
 let createdShardPub
 let createdShardPubId
-// True once the ROOT has written its artifacts at least once (save() re-fires across
-// beforeExit/exit; see its comment). Consulted by the load hook's fail-loud assert: a module
-// whose BYTES first load after a write may miss the final artifact, so it crashes the capture
-// rather than ship unattested. Late resolution EDGES of already-loaded modules are what the
-// re-flush exists to pick up.
+// True once the root has written artifacts; the load hook asserts on it so a module whose bytes
+// first load after a write crashes rather than ship unattested.
 let saved = false
-// Serialized shard text a child last wrote, so the exit firing skips an identical
-// re-write instead of dropping a second (equal) shard file for the root to merge.
+// Serialized shard text a child last wrote, so the exit firing skips an identical re-write.
 let lastShardWritten
-// Set when stasis's own capture/verification rejects something (see the hooks around
-// addFile/addImport below). Distinct from "the run exited non-zero": a clean capture is
-// allowed to exit non-zero for its own reasons and still be persisted.
+// Set when stasis's own capture/verification rejects something; distinct from a non-zero exit.
+// When set, nothing is written (a rejected capture must never persist).
 let aborted = false
-// >0 while Node's default loader (nextLoad) reads a module's source -- which for CommonJS
-// goes through the public fs.readFileSync the --fs hook patches. The module is already
-// captured as code via addFile, so the --fs hook skips reads taken while this is set: it
-// records the program's OWN fs reads, not Node's module loading.
+// >0 while Node's loader reads a module's source; the --fs hook skips reads taken then (the module
+// is captured as code, not as a program fs read).
 let loadingModule = 0
-// True until the first non-builtin load hook fires; flips to false there. Replaces the
-// legacy `!state` entry-detection heuristic, which broke once initState could be triggered
-// eagerly by plugins.js via ensureStateForLoader (state set before the entry's load).
+// True until the first non-builtin load hook fires (entry detection); replaced the `!state`
+// heuristic, which broke once plugins.js could init state before the entry's load.
 let entryUnseen = true
 
-// Child-process handling, WITHOUT intercepting child_process or adding a flag.
-// EXODUS_STASIS_PID records the ROOT stasis process's pid -- the first stasis in the tree
-// (CLI launch or a direct `node --import`). Unset there, so the root claims the slot with its
-// own pid and may write. A child running this loader -- fork() inherits our `--import` via
-// process.execArgv, a manual `spawn(node, ['--import', ...])` does so explicitly -- inherits
-// EXODUS_STASIS_PID but runs under a different pid. On that mismatch we suppress the
-// bundle/lockfile write for ANY child (the root owns the artifact; a second writer would race
-// it). We additionally relax the entry-point check for a FORKED child (mismatch AND an IPC
-// channel, which only fork() creates): its main module is a fork target, not a declared CLI
-// entry, whereas a `node --import` child names its own entry. getFile() still fails closed on
-// anything unattested. (A nested `stasis run` inherits the pid, so it's a child too and won't
-// write; run stasis at a single level.) Resolved once, before any user code runs.
+// EXODUS_STASIS_PID = the root stasis's pid; a child inherits it but runs under a different pid,
+// so on mismatch we suppress the bundle/lockfile write (root owns the artifact; a 2nd writer races).
+// A forked child (mismatch + IPC channel) also relaxes the entry-point check; getFile() still fails closed.
 const OWN_PID = String(process.pid)
 if (!process.env.EXODUS_STASIS_PID) process.env.EXODUS_STASIS_PID = OWN_PID
 const isChildProcess = process.env.EXODUS_STASIS_PID !== OWN_PID
 const forkedChild = isChildProcess && process.channel !== undefined
 
-// Resolve once at module-load: stasis-core's own package root. Passed to State as
-// `preloadRoot` so state.write()'s backfill statically captures stasis-core's internal edges
-// -- the (state.js -> config.js)-shape relative imports Node loaded BEFORE install()
-// registered our hooks, which the live resolve hook never observed.
-//
-// findPackageJSON is wrapped because bundlers that ship this file don't always have it wired
-// up (a metro bundle replaces node:module with a shim lacking the API). Returning undefined
-// makes the State constructor's `if (preloadRoot !== undefined)` skip cleanly; the backfill
-// is best-effort and degrades gracefully when unset.
+// stasis-core's own package root, passed to State as `preloadRoot` so write()'s backfill captures
+// stasis-core's internal edges Node loaded before our hooks registered. Wrapped because a bundler's
+// node:module shim may lack findPackageJSON; undefined makes State skip the (best-effort) backfill.
 const PRELOAD_ROOT = (() => {
   try {
     return dirname(findPackageJSON(import.meta.url))
@@ -228,40 +170,12 @@ const PRELOAD_ROOT = (() => {
   }
 })()
 
-// --- Child-process capture forwarding (shards) --------------------------------------
-// A forked child (e.g. a Metro transform worker) runs this loader and captures into its OWN
-// State -- including files ONLY it loads, like babel.config.js and the preset/plugins the
-// transformer requires per file. But a child must never write the real lockfile/bundle (the
-// root owns it; two writers race -- see save()). So each capturing child writes a per-pid
-// SHARD -- its shardSnapshot(), a lockfile-shaped record -- into a shared dir the ROOT creates
-// and exports as EXODUS_STASIS_SHARD_DIR (inherited by every descendant). Just before writing,
-// the root merges every shard back into its State (re-reading each file's bytes from disk), so
-// child-only observations are still attested. Best-effort throughout: a missing/partial shard
-// or unreadable dir is skipped, never fatal.
-//
-// OPT-IN: gated behind --child-process (config.childProcess). The shard dir is a
-// process-coordination channel, not normal capture, so it exists only when a user explicitly
-// enables cross-process capture (e.g. for Metro). A default run never creates it.
-//
-// TRUST (defense in depth against shard-channel injection):
-//   - the channel only exists under the --child-process opt-in;
-//   - the dir is minted in the OS tmpdir via mkdtemp (mode 0700, owner-only), so a different-uid
-//     process can't read it; but trust rests on the signature gate, not the dir being secret
-//     (its path travels to children in env);
-//   - the root ALWAYS mints its own dir + per-build ed25519 keypair, overwriting any inherited/
-//     attacker-set EXODUS_STASIS_SHARD_DIR/_KEY, and merges from / removes ONLY that dir. Only
-//     the PRIVATE key reaches descendants; each child SIGNS its shard, and the root verifies every
-//     shard against its own PUBLIC key. The filename carries the public key only to pre-filter --
-//     trust comes from the signature, so an unsigned or foreign-signed file is rejected even under
-//     the right prefix;
-//   - shards carry NO bytes (mergeShard re-reads + re-hashes each file from disk), so a shard can
-//     never inject forged CONTENT; it can only over-attest a file already on disk.
-//   So a peer who can read the owner-only dir but NOT this process's env cannot forge a shard. The
-//   residual: the private key rides in env, so ANY code the build itself runs -- a postinstall
-//   script, codegen, a transitive dep -- inherits it and can mint a valid shard; and mergeShard
-//   replays a shard's resolution edges via addImport without re-deriving them, so a key-holder can
-//   forge edges/formats too. All within the build's own trust domain (that code already runs with
-//   the build's privileges) -- the line this opt-in deliberately draws.
+// Child-process capture forwarding (shards), opt-in via --child-process (config.childProcess): a
+// capturing child (e.g. a Metro worker) writes a signed per-pid shard into a root-minted dir; the
+// root merges them before writing. Trust rests on the ed25519 signature (root verifies each shard
+// against its own public key), not the dir being secret; shards carry NO bytes (re-read from disk),
+// so a shard can over-attest an on-disk file but never inject forged content -- all within the
+// build's own trust domain (code the build runs already holds the build's privileges).
 
 function shardForwardingEnabled() {
   return Boolean(state) && state.config.childProcess && (state.config.writeLockfile || state.config.writeBundle)
@@ -273,45 +187,32 @@ function writeChildShard() {
   const keyB64 = process.env.EXODUS_STASIS_SHARD_KEY
   if (!dir || !keyB64) return
   try {
-    // Sign the snapshot with the env-passed private key so the root can authenticate it. We sign
-    // the exact bytes and store them verbatim beside the signature in an envelope ({ shard,
-    // signature }) -- signing the string directly (not a re-stringified parse) makes verification
-    // independent of JSON key ordering and robust against a future top-level `signature` key. The
-    // PUBLIC key (base64url) names the file <pub>-<pid>-<rand>.json: the prefix lets the root
-    // pre-filter to its own build; pid + random avoid collisions even if the OS recycles a worker's
-    // pid. Write to a dot-prefixed temp then rename so the merge filter never reads a half-written
-    // shard.
+    // Sign the exact snapshot bytes, stored verbatim in a { shard, signature } envelope (signing the
+    // string, not a re-stringify, makes verify independent of JSON key order). Write to a temp then
+    // rename so the merge filter never reads a half-written shard.
     const shard = state.shardSnapshot() // serialized lockfile string
-    // save() re-fires on exit after the beforeExit flush (see save's comment). An unchanged
-    // snapshot means nothing new to forward -- skip the duplicate rather than make the root
-    // merge the same content twice.
+    // Unchanged snapshot: nothing new to forward, skip the duplicate.
     if (shard === lastShardWritten) return
     const privateKey = createPrivateKey({ key: Buffer.from(keyB64, 'base64'), format: 'der', type: 'pkcs8' })
     const pubId = createPublicKey(privateKey).export({ format: 'jwk' }).x
     const signature = sign(null, Buffer.from(shard), privateKey).toString('base64url')
-    const unique = `${OWN_PID}-${randomBytes(6).toString('hex')}` // pid + random: no collision even on pid reuse
+    const unique = `${OWN_PID}-${randomBytes(6).toString('hex')}`
     const tmpPath = join(dir, `.${pubId}-${unique}.tmp`)
     writeFileSync(tmpPath, JSON.stringify({ shard, signature }))
     renameSync(tmpPath, join(dir, `${pubId}-${unique}.json`))
     lastShardWritten = shard
   } catch {
-    // A child that can't snapshot/sign/write just doesn't contribute; the root still persists
-    // its own capture, and a later frozen run fails closed on anything genuinely missing.
+    // Best-effort: a child that can't snapshot/sign/write just doesn't contribute.
   }
 }
 
-// Defense-in-depth bounds on a merge: cap the count + per-shard size so a hostile/runaway set
-// of shards can't OOM the root. Generous -- a real toolchain shard is a small lockfile.
+// Cap shard count + size so a hostile/runaway set can't OOM the root.
 const MAX_SHARDS = 4096
 const MAX_SHARD_BYTES = 64 * 1024 * 1024
 
-// Merge the shards THIS root's children wrote into `dir`. Pre-filter to filenames carrying our
-// public key, then AUTHENTICATE each: the file is an { shard, signature } envelope; verify the
-// exact bytes against our own PUBLIC key (createdShardPub, never a key derived from the filename)
-// and merge only those. So an unsigned, foreign-signed, or post-signing-tampered file is ignored
-// even under our prefix. The caller (save) rm's `dir` in a finally. We iterate with opendir (not
-// readdirSync) so the listing streams rather than materializing -- MEMORY stays bounded for a dir
-// stuffed with entries -- and stop after MAX_SHARDS matches.
+// Merge this root's children's shards from `dir`: authenticate each { shard, signature } envelope
+// against our own PUBLIC key (never one derived from the filename) and merge only those. opendir
+// streams the listing so memory stays bounded; stop after MAX_SHARDS.
 function mergeChildShards(dir) {
   let handle
   try { handle = opendirSync(dir) } catch { return }
@@ -325,13 +226,13 @@ function mergeChildShards(dir) {
       if (++count > MAX_SHARDS) break
       const path = join(dir, name)
       try {
-        if (statSync(path).size > MAX_SHARD_BYTES) continue // skip an over-large shard
+        if (statSync(path).size > MAX_SHARD_BYTES) continue
         const { shard, signature } = JSON.parse(readFileSync(path, 'utf-8'))
-        if (typeof shard !== 'string' || typeof signature !== 'string') continue // unsigned/malformed: reject
+        if (typeof shard !== 'string' || typeof signature !== 'string') continue
         if (!verify(null, Buffer.from(shard), createdShardPub, Buffer.from(signature, 'base64url'))) continue
-        state.mergeShard(shard) // the exact bytes we just verified
+        state.mergeShard(shard)
       } catch {
-        // A malformed/partial shard (a child SIGKILLed mid-write) is skipped; the rest merge.
+        // A malformed/partial shard is skipped; the rest merge.
       }
     }
   } finally {
@@ -339,30 +240,19 @@ function mergeChildShards(dir) {
   }
 }
 
-// `--fs` (EXODUS_STASIS_FS = 'sync' | 'async', or "fs" in stasis.config.json): monkey-patch the
-// fs readers -- readFileSync/readdirSync + lstatSync/statSync and the existence/realpath probes,
-// plus under 'async' their async (callback + fs.promises) counterparts -- to capture them into the
-// bundle (bundle=add|replace) or serve them from it (bundle=load). Driven off the resolved Config
-// (state.config.fs), not the raw env var, so the mode can also come from stasis.config.json (read
-// only once State is constructed). Called from initState AFTER the lib's own fs snapshots (fs.js /
-// state.js / state-util.js) and registerHooks, so the patch never redirects stasis's own reads,
-// and only when opted in. `state` is read lazily; installFsHooks is idempotent. A capture conflict
-// (a file read twice with diverging bytes) taints the run like an addFile/addImport rejection, so
-// nothing inconsistent is written.
+// Install the --fs reader patches from the resolved Config (state.config.fs, so the mode may come
+// from stasis.config.json). Called from initState AFTER stasis's own fs snapshots, so the patch
+// never redirects stasis's own reads. Idempotent; state read lazily.
 function installFsHooksFromConfig() {
   const fsMode = state.config.fs
   if (!fsMode) return
   installFsHooks({
-    // 'async' adds the async readers; 'sync' (the only other valid value) is sync-only.
     async: fsMode === 'async',
     getState: () => state,
-    // True while Node's default loader reads a module's source: the --fs hook skips those
-    // so it captures the program's explicit reads, not module loading (see loadingModule).
+    // True while Node's loader reads module source: the --fs hook skips those (see loadingModule).
     isLoadingModule: () => loadingModule > 0,
-    // A capture conflict (a file read twice mid-run with diverging bytes) taints the run
-    // like an addFile/addImport rejection -- nothing is written. Warn on the first taint so
-    // the discard isn't silent (the reads still succeed, so the run otherwise exits 0 with
-    // no bundle/lockfile and no clue).
+    // A capture conflict taints the run -- nothing is written. Warn on the first taint so the
+    // silent discard (reads still succeed, run exits 0 with no artifact) has a clue.
     markAborted: (err) => {
       if (!aborted) console.warn(`[stasis] --fs: capture aborted, no bundle/lockfile will be written -- ${err?.message ?? err}`)
       aborted = true
@@ -373,25 +263,15 @@ function installFsHooksFromConfig() {
 function initState(root) {
   state = new State(root, { preload: true, preloadRoot: PRELOAD_ROOT })
 
-  // Install the --fs reader patches now that Config is resolved (it carries the fs mode,
-  // possibly from stasis.config.json). Before any child can fork and before user code runs.
+  // Install the --fs reader patches now Config is resolved, before any fork and user code.
   installFsHooksFromConfig()
 
-  // Root + opt-in: create the shard dir forked children report into, BEFORE any child can fork.
-  // Mint it in the OS tmpdir via mkdtemp (mode 0700, owner-only) -- NOT under the project/write
-  // tree, where it would pollute an `--fs` readdir and, on a SIGKILL that skips our cleanup,
-  // litter the repo (a later `--fs` run could re-capture it); tmpdir also lets the OS reap it if
-  // we're hard-killed. The path isn't secret (it travels to children in env); forgery is stopped
-  // by the signature, and 0700 keeps a different-uid peer from reading the dir. ALWAYS mint our
-  // own dir + per-build ed25519 keypair, overwriting any inherited/attacker-set
-  // EXODUS_STASIS_SHARD_DIR/_KEY, so the root only merges from -- and rm's -- a dir it created,
-  // and only shards it can authenticate. The PRIVATE key is exported for descendants to sign with;
-  // the root keeps the PUBLIC key to verify. Removed on every exit path (see `save`). Only the root
-  // mints; a non-opt-in or non-capturing run creates nothing, so children no-op. NB: under
-  // os.tmpdir(), capture integrity assumes a trustworthy TMPDIR -- an attacker-controlled (or
-  // non-sticky shared) TMPDIR reopens the classic tmpdir symlink race; that's outside the threat
-  // model (we defend a dir READER, not a TMPDIR controller), and /tmp's sticky bit defeats it
-  // normally.
+  // Root + opt-in only: mint the shard dir (children report into it) before any child can fork.
+  // In the OS tmpdir via mkdtemp mode 0700 -- not under the write tree (would pollute --fs/litter
+  // the repo) and OS-reapable on SIGKILL. ALWAYS mint our own dir + ed25519 keypair, overwriting any
+  // inherited/attacker-set env, so the root merges/rm's only a dir it made and only shards it can
+  // verify. Private key -> descendants; public kept to verify. (Trusts a sane TMPDIR: an
+  // attacker-controlled TMPDIR's symlink race is out of scope; /tmp's sticky bit defeats it.)
   if (!isChildProcess && shardForwardingEnabled()) {
     try {
       const { publicKey, privateKey } = generateKeyPairSync('ed25519')
@@ -399,17 +279,12 @@ function initState(root) {
       createdShardPub = publicKey
       createdShardPubId = publicKey.export({ format: 'jwk' }).x // base64url(raw public key)
       process.env.EXODUS_STASIS_SHARD_DIR = createdShardDir
-      // Only the private key travels to children, so the dir holds only public-keyed signed shards
-      // and reading it (without this env) can't forge one. Both vars ride process.env, so EVERY
-      // transitive descendant inherits them -- a child that itself forks/spawns (or re-invokes a
-      // stasis bin) propagates the channel onward, and those grandchildren contribute too. Do NOT
+      // Both vars ride process.env so every transitive descendant inherits the channel. Do NOT
       // scrub them downstream: that would sever capture for subtrees the build legitimately spawns.
       process.env.EXODUS_STASIS_SHARD_KEY = privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64')
     } catch {
-      // Shard reporting is best-effort; capture works without it. If we threw BEFORE overwriting
-      // the env, an inherited (possibly attacker-set) dir/key is still there -- clear both so
-      // descendants don't fall back to a channel we never minted or validated. If mkdtemp already
-      // created the dir before a later step threw, remove it too.
+      // Best-effort. Clear any inherited (possibly attacker-set) dir/key so descendants don't fall
+      // back to a channel we never minted, and remove a dir mkdtemp made before a later step threw.
       if (createdShardDir) { try { rmSync(createdShardDir, { recursive: true, force: true }) } catch { /* best-effort */ } }
       createdShardDir = undefined
       createdShardPub = undefined
@@ -418,66 +293,34 @@ function initState(root) {
       delete process.env.EXODUS_STASIS_SHARD_KEY
     }
   } else if (!isChildProcess) {
-    // Non-capturing root (--lock=frozen, or --child-process off): we never mint or merge a shard
-    // dir, so shed any inherited (possibly attacker-set) EXODUS_STASIS_SHARD_DIR/_KEY. Its
-    // descendants can't capture either (they inherit our non-writing config), so this severs no
-    // legitimate channel -- just drops dead weight.
+    // Non-capturing root: shed any inherited (possibly attacker-set) shard env -- we never mint or
+    // merge a dir, and our descendants can't capture either, so this severs no legitimate channel.
     delete process.env.EXODUS_STASIS_SHARD_DIR
     delete process.env.EXODUS_STASIS_SHARD_KEY
   }
 
-  // Persist the lockfile/bundle on exit UNLESS a stasis verification rejected something.
-  // We deliberately do NOT gate on the exit code: a clean capture that exits non-zero for its
-  // own reasons (a server's SIGINT shutdown exiting 130, any script returning non-zero) must
-  // still persist. The narrower hazard: addFile records a file's hash *before* a later check --
-  // the frozen byte/format/resolution check, or a lock=add conflict -- can reject it, and
-  // writing anyway would bake the rejected drift in for a later lock=frozen run to accept. So we
-  // skip the write only when `aborted` is set, which the hooks set whenever addFile/addImport
-  // throws -- catching a rejection even if user code swallows it and exits 0.
-  //
-  // An abort NOT from addFile/addImport -- an uncaught module-not-found from Node's resolver, or a
-  // user error after a partial-but-clean capture -- does not taint, so files captured so far ARE
-  // written: their hashes are accurate and a later lock=frozen run fails closed on anything
-  // missing. Unhandled signals (SIGINT/SIGTERM with no handler) bypass exit hooks entirely;
-  // servers own that, we don't touch it -- except a capturing CHILD under the
-  // EXODUS_STASIS_SHARD_SIGNAL_FLUSH opt-in (see the handler below).
-  //
-  // save() runs on EVERY beforeExit/exit firing rather than latching after the first. Registered
-  // at initState (before user code), so they fire FIRST on each event and a require() from a LATER
-  // handler resolves AFTER our write. CLIs commonly log a summary at exit via a lazy require (Babel
-  // interop: @react-native-community/cli-tools' logger require()s chalk on first call): the bytes
-  // are usually attested via other importers, so a one-shot save drops only that resolution EDGE,
-  // surfacing at bundle=load as MODULE_NOT_FOUND for a package the bundle carries. Re-running is
-  // cheap -- write() skips unchanged artifacts and the child shard path keeps its own compare --
-  // so the exit firing re-flushes what beforeExit missed. Requires from a user 'exit' handler AFTER
-  // ours are the residual gap: 'exit' is the last stop, nothing later can flush.
+  // Persist on exit UNLESS `aborted` (an addFile/addImport rejection) -- deliberately NOT gated on
+  // exit code, so a clean capture exiting non-zero still persists; writing an aborted one would bake
+  // rejected drift in for a later frozen run. save() runs on EVERY beforeExit/exit firing (not
+  // latched): a late lazy require() resolves after an earlier flush, so re-flushing picks up the
+  // resolution edge beforeExit missed; write() skips unchanged artifacts so re-running is cheap.
   const save = () => {
-    // A child (pid mismatch, fork or not) must never write the real artifact -- the root owns it
-    // and a second writer would race. Instead it forwards its capture via a shard the root merges
-    // below. writeChildShard no-ops unless the channel is on AND a dir was inherited: a child of a
-    // non---child-process run (no dir) contributes nothing; one under --child-process inherits the
-    // dir+key and does.
+    // A child never writes the real artifact (root owns it; a 2nd writer races); it forwards a
+    // shard instead. writeChildShard no-ops unless the channel is on and a dir was inherited.
     if (isChildProcess) {
-      // An aborted child forwards nothing -- the same fail-stance the root takes when `aborted`.
-      // The root re-reads every shard so a partial one couldn't taint it, but there's no value in
-      // shipping a rejected capture.
+      // An aborted child forwards nothing (no value shipping a rejected capture).
       if (!aborted) writeChildShard()
       return
     }
     try {
-      // A rejection (aborted) must NOT write -- it would bake the drift in for a later frozen run
-      // to accept (see above). Shard dir is still torn down in the finally.
+      // Aborted must NOT write (would bake drift in for a later frozen run); dir torn down in finally.
       if (aborted) return
-      // Root: fold in every child's shard before writing, so child-only files/edges (a Metro
-      // worker's babel.config.js + preset/plugins) are attested too. Only when we minted a dir;
-      // on a re-flush after the dir was removed, the merge no-ops (opendir fails).
+      // Fold in every child's shard before writing, so child-only files/edges are attested too.
       if (createdShardDir) mergeChildShards(createdShardDir)
       state.write()
       saved = true
     } finally {
-      // Always remove the shard dir we minted -- clean exit, abort, or a throwing write. This is
-      // the single owner of that cleanup (mergeChildShards no longer self-removes). A SIGKILL
-      // bypasses exit hooks, but the dir is in the OS tmpdir, so the OS reaps it.
+      // Always remove the shard dir we minted (sole owner of this cleanup); SIGKILL leaves it for the OS.
       if (createdShardDir) {
         try { rmSync(createdShardDir, { recursive: true, force: true }) } catch { /* best-effort */ }
       }
@@ -487,41 +330,12 @@ function initState(root) {
   process.on('beforeExit', save)
   process.on('exit', save)
 
-  // config.shardSignalFlush (EXODUS_STASIS_SHARD_SIGNAL_FLUSH, opt-in; StasisMetro sets it for
-  // its build's children -- see the plugin's constructor): flush the shard when a capturing child
-  // is ended BY SIGNAL. Metro's transform workers are routinely killed that way -- jest-worker's
-  // end() sends END, waits 500ms for the loop to drain, then forceExit()s (SIGTERM, SIGKILL 500ms
-  // later) -- so a worker whose loop doesn't drain in time dies by SIGTERM, bypassing beforeExit/
-  // exit. Everything ONLY that worker observed (its fork-target entry jest-worker/processChild.js;
-  // babel.config.js + the preset/plugin graph loaded per transform) then vanishes from the capture,
-  // surfacing later at bundle=load as "file not attested in bundle". The handler runs the same
-  // save() the exit hooks run (child: forward the shard unless aborted) and re-delivers the signal;
-  // semantics are preserved:
-  //   - the `once` listener is already removed when the handler runs, so with no user listener left
-  //     the OS default disposition is restored and the re-kill terminates BY that signal (parent
-  //     still sees code=null, signal=SIGTERM); the finally makes re-delivery unconditional even if
-  //     a future save() grows a throw path (today it can't on the child branch);
-  //   - when user code owns process lifetime we only flush, NOT re-kill. "User code" is detected
-  //     two ways, because a `once` listener that ran EARLIER in this emit has removed itself and is
-  //     invisible to a post-emit listenerCount: listeners present at REGISTRATION time (a --require
-  //     preload's shutdown hook, always before this initState-time registration) are remembered in
-  //     `userOwnedSigterm`, and later-added listeners are still attached at handler time. A user
-  //     handler that exits normally re-flushes via the exit hooks (lastShardWritten dedups); if a
-  //     SECOND signal kills it, capture after this one-shot flush is lost -- accepted residual,
-  //     fail-closed at verify. Conservative by design: when in doubt don't re-kill -- worst case is
-  //     jest-worker's own SIGKILL 500ms later;
-  //   - signal listeners don't ref the event loop, so a cleanly-draining worker still exits (and
-  //     writes) as before.
-  // NOT a global default: a signal listener changes a process's default-kill disposition, the
-  // user's domain in arbitrary children -- the Metro plugin opts in its KNOWN tool workers, where
-  // flush-then-redeliver is right. Gated to a CHILD (the root's signal behavior stays untouched)
-  // with shard forwarding on; a never-minted channel just makes the flush a no-op via
-  // writeChildShard's guard. SIGTERM only -- what jest-worker's forceExit sends. Best-effort
-  // residuals, all fail-closed at a later frozen/load run: the flush must fit forceExit's 500ms
-  // SIGTERM->SIGKILL window; SIGKILL and other signals (group SIGINT/SIGHUP, a killSignal override)
-  // aren't covered; and a child that is itself EVALUATING metro.config.js snapshots its Config
-  // before the plugin sets the flag, so only its DESCENDANTS are covered -- see the plugin's KNOWN
-  // LIMITATIONS bullet.
+  // config.shardSignalFlush (opt-in, set by StasisMetro): flush the shard when a capturing CHILD is
+  // ended by SIGTERM (jest-worker's forceExit kills Metro workers that way, bypassing beforeExit/
+  // exit and losing their capture), then re-deliver the signal. If user code owns SIGTERM we only
+  // flush, never re-kill -- detected via `userOwnedSigterm` (registration-time listeners, since a
+  // `once` that ran earlier is invisible to listenerCount) plus still-attached later listeners.
+  // Best-effort, fail-closed at verify: must fit forceExit's 500ms window; SIGKILL/other signals uncovered.
   if (isChildProcess && shardForwardingEnabled() && state.config.shardSignalFlush) {
     const userOwnedSigterm = process.listenerCount('SIGTERM') > 0
     process.once('SIGTERM', () => {
@@ -546,46 +360,26 @@ function load(url, context, nextLoad) {
   }
 
   if (state && state.config.loadBundle) {
-    // node_modules scope bundles only node_modules deps; everything else -- app/workspace
-    // sources, including a workspace package symlinked into node_modules (its real path isn't
-    // under node_modules, so inNodeModules() is false) -- is read from disk. Gate on the
-    // canonical classification, not a raw '/node_modules/' substring: else such a symlink URL
-    // would route to state.getFile and crash on a source deliberately omitted from the bundle.
+    // node_modules scope serves only node_modules deps; app/workspace sources (incl. a workspace
+    // pkg symlinked into node_modules) read from disk. Gate on inNodeModules(), not a raw substring.
     if (!state.config.full && !state.inNodeModules(url)) {
       return nextLoad(url, context)
     }
     const { source, format } = state.getFile(url)
-    // context.format may be null when the resolve chain didn't set it (node_modules scope,
-    // where non-nm parents go through nextResolve and Node's default doesn't populate it).
-    // Only cross-check when the chain provided one. The `formats` map is attested against the
-    // lockfile at State construction (#mergeBundleMetadata), so a tampered bundle can't flip
-    // module<->commonjs (or a .js to module-typescript, making Node strip `f<string>('x')`-shaped
-    // syntax) for a hash-valid file. Without a lockfile the bundle is self-authoritative for
-    // formats as for bytes (see getFile's hash carve-out).
+    // Cross-check format only when the resolve chain set it. The formats map is attested against the
+    // lockfile at construction, so a tampered bundle can't flip module<->commonjs for a hash-valid file.
     if (context.format != null) assert.equal(format, context.format)
-    // Trust gate: only serve a file whose attested format Node can execute. Resource assets,
-    // source-language bundles (solidity/php/bash/rust), and any unknown string a tampered or
-    // forward-incompatible bundle smuggles through fail closed here with a contextual message,
-    // not an opaque assertion. *-typescript formats are allowed: Node's translators strip the
-    // types after this hook returns.
+    // Trust gate: only serve a file whose attested format Node can execute; everything else fails closed.
     if (!NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
-    // node:59666 workaround. When a load hook supplies `source` for a CommonJS module, Node's
-    // ESM->CJS translator (loadCJSModule) hands it a re-invented require() that sets only
-    // `.resolve`/`.main`, omitting `.cache`/`.extensions` -- unlike a disk-loaded CJS module's
-    // require (makeRequireFunction, all four). Packages reading those (import-fresh, anything
-    // walking require.cache/extensions) then throw or misbehave, but only under bundle=load (the
-    // only mode serving CJS via a source override). Repair the two properties from node:module
-    // before user code runs. Confined to executable CJS formats; ESM has no require, resources
-    // aren't executed.
+    // node:59666 workaround: a load-hook-supplied CJS source gets a re-invented require() missing
+    // .cache/.extensions; repair them before user code runs. CJS formats only (ESM has no require).
     if (CJS_FORMATS.has(format)) {
       return { source: repairCjsRequire(source), format, shortCircuit: true }
     }
     return { source, format, shortCircuit: true }
   }
 
-  // nextLoad runs Node's default loader, which reads a CJS module's source through
-  // the public fs.readFileSync the --fs hook patches. Mark the window so that hook
-  // doesn't re-capture the module as a filesystem read (it's recorded as code below).
+  // Mark the window so the --fs hook doesn't re-capture Node's module-source read as a program read.
   loadingModule++
   let result
   try {
@@ -600,9 +394,7 @@ function load(url, context, nextLoad) {
   // Node's CJS loader may return source=null and read from disk itself; capture it for the bundle
   if (source == null && format === 'commonjs') source = readFileSync(fileURLToPath(url))
 
-  // Entry detection: the FIRST non-builtin load through this hook is the entry. `entryUnseen`
-  // flips to false here (see its declaration for why it replaced the `!state` heuristic). The
-  // flag is module-local, not on State: it's strictly a hook-firing-order signal.
+  // Entry detection: the first non-builtin load is the entry (see entryUnseen's declaration).
   const isEntry = entryUnseen
   entryUnseen = false
   if (!state) {
@@ -612,9 +404,8 @@ function load(url, context, nextLoad) {
   }
 
   assert.equal(saved, false)
-  // A throw from addFile (frozen byte/format mismatch, unattested file, lock=add conflict, ...)
-  // means stasis rejected this capture. Flag it so save() persists nothing, even if user code
-  // swallows the rejection and exits cleanly.
+  // A throw from addFile means stasis rejected this capture: flag it so save() persists nothing,
+  // even if user code swallows the rejection.
   try {
     state.addFile(url, { source, format, isEntry })
   } catch (err) {
@@ -633,50 +424,39 @@ function resolve(specifier, context, nextResolve) {
   }
 
   if (context.importAttributes !== undefined) {
-    const expectedAttrs = Object.create(null) // Saving is not supported yet, so we ensure expected ones
+    const expectedAttrs = Object.create(null) // saving not supported yet; enforce expected attrs
     if (extname(specifier) === '.json' && context.importAttributes?.type) expectedAttrs.type = 'json'
     assert.deepStrictEqual(context.importAttributes, expectedAttrs)
   }
 
   const { parentURL, conditions, importAttributes } = context
 
-  // In full-scope load mode, the entry point is served from the bundle without touching
-  // disk, so state must be initialised before nextResolve runs. node_modules scope reads
-  // non-nm sources (including the entry) from disk, so state is initialised later in load().
+  // Full-scope load serves the entry from the bundle, so state must exist before nextResolve;
+  // node_modules scope reads the entry from disk and inits state later in load().
   if (!state && !parentURL && process.env.EXODUS_STASIS_BUNDLE === 'load'
       && process.env.EXODUS_STASIS_SCOPE !== 'node_modules') {
     initState(process.cwd())
   }
 
   if (state && state.config.loadBundle) {
-    // node_modules scope defers resolution of non-nm parents to Node: relative imports between
-    // non-nm sources resolve to local files, bare specifiers via the on-disk node_modules layout
-    // -- but load() still serves the resulting node_modules target from the bundle, so package
-    // contents need not be on disk. A workspace source linked into node_modules is a non-nm parent
-    // (canonical path outside node_modules), so it's deferred too -- hence inNodeModules() rather
-    // than a raw '/node_modules/' substring.
+    // node_modules scope defers non-nm parents to Node's resolver (load() still serves the resulting
+    // nm target from the bundle). Gate on inNodeModules(), not a raw substring, to cover symlinks.
     if (!state.config.full && !(parentURL && state.inNodeModules(parentURL))) {
       return nextResolve(specifier)
     }
-    // Bare specifier with a parent is the regular ESM import: look up the recorded import map.
-    // Otherwise it's a pre-resolved file URL (CLI entries and ESM->CJS translator require()
-    // targets both arrive that way) or a bare entry specifier we anchor to cwd -- either way skip
-    // nextResolve so the entry file needn't exist on disk.
+    // Bare specifier with a parent: look up the recorded import map. Otherwise it's a pre-resolved
+    // file URL or a bare entry anchored to cwd -- skip nextResolve so the entry needn't be on disk.
     if (parentURL && !specifier.startsWith('file:')) {
       const { url, format } = state.getImport(parentURL, specifier, { conditions, importAttributes })
-      // Refuse a non-executable target at resolve time too -- the same tampered/asset cases load()
-      // catches, but earlier and with the parent's URL in the stack trace. The load gate stays the
-      // load-bearing one (a sibling resolver could bypass this branch); this is just a friendlier
-      // failure point.
+      // Refuse a non-executable target at resolve time too (friendlier error); the load gate stays load-bearing.
       if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
       return { url, format, importAttributes: undefined, shortCircuit: true }
     }
     const url = specifier.startsWith('file:')
       ? specifier
       : pathToFileURL(resolvePath(process.cwd(), specifier)).toString()
-    // A forked child's main module is whatever the parent passed to fork(), not a declared
-    // CLI entry, so it need not be in the bundle's entries list -- getFile() below still
-    // rejects anything the bundle doesn't attest. The root run stays strict.
+    // A forked child's main module isn't a declared CLI entry, so skip assertEntry (getFile still
+    // rejects anything unattested); the root run stays strict.
     if (!parentURL && state.config.full && !forkedChild) state.assertEntry(url)
     const format = state.getFormat(url)
     if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
@@ -688,8 +468,7 @@ function resolve(specifier, context, nextResolve) {
 
   assert.equal(res.importAttributes, undefined) // unsupported yet
   if (parentURL) assert.ok(state)
-  // As in load(): a rejected resolution (frozen redirect mismatch, conflict, ...) must keep
-  // the captured state from being written, swallowed or not.
+  // As in load(): a rejected resolution must keep the captured state from being written.
   if (state) {
     try {
       state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
@@ -703,49 +482,33 @@ function resolve(specifier, context, nextResolve) {
 
 let installed = false
 
-// True iff install() has run. Exported so plugins.js can detect "we're running under the stasis
-// loader" before the lazy initState fires -- a bundler plugin constructed during webpack's
-// config-parse can run AHEAD of the first load hook, leaving State.preload null. resolvePluginState
-// reads this to force-init State from cwd so the plugin inherits the loader's config rather than
-// erroring on the default lock mode.
+// True iff install() has run. Exported so plugins.js can detect "under the stasis loader" before
+// the lazy initState fires (a plugin can be constructed ahead of the first load hook).
 export function isLoaderInstalled() {
   return installed
 }
 
-// Force-initialize state from process.cwd() if not already done. Used by plugins.js's
-// resolvePluginState so State.preload is available when the plugin constructor runs ahead of the
-// load hook. A later first-load then detects "state already set" and skips its own initState, but
-// still marks isEntry via entryUnseen.
+// Force-init state from cwd if not already done, for plugins.js when a plugin constructor runs
+// ahead of the load hook. A later first-load sees state set and skips its own initState.
 export function ensureStateForLoader() {
   if (state) return
   initState(process.cwd())
 }
 
-// Register Node's module hooks. Kept separate from the --import entry points (loader.js; the
-// @exodus/stasis package's loader and --mock loader) so a host can evaluate this lib --
-// snapshotting node:fs/path/etc. for stasis's own use -- and compose extra setup (e.g. --mock
-// side-effect denials) via static import order BEFORE the hooks register, with no env-var
-// coordination. Idempotent.
+// Register Node's module hooks. Separate from the --import entry points so a host can evaluate this
+// lib and compose extra setup via static import order before the hooks register. Idempotent.
 export function install() {
   if (installed) return
   installed = true
   registerHooks({ load, resolve })
   patchCjsResolution()
-  // NB: the `--fs` reader patches are NOT installed here. Their mode can come from
-  // stasis.config.json (read only once State is constructed), so installation is deferred to
-  // initState() (see installFsHooksFromConfig), still before any user code. install() only
-  // registers the module hooks the fs patch composes on top of.
+  // The --fs reader patches are deferred to initState (their mode may come from stasis.config.json).
 }
 
-// registerHooks intercepts the ESM loader and Node's native CommonJS loader, but NOT the require()
-// the ESM->CJS translator (node:internal/modules/esm/translators) builds for a CJS module: that
-// require resolves through Module._resolveFilename against disk before any hook runs. So a CJS
-// module we serve from the bundle (`import chalk from 'chalk'`, chalk being CommonJS) has its
-// nested require()s resolved on disk -- and once node_modules is pruned, `require('escape-string-
-// regexp')` throws MODULE_NOT_FOUND before our hooks can serve it, i.e. the bundle isn't
-// self-contained for a CJS graph. Shim _resolveFilename in load mode to resolve such a target from
-// the bundle's import map and return its (possibly disk-absent) path; load() then serves the bytes.
-// For an unrecorded edge, or outside load mode, fall back to native resolution.
+// registerHooks doesn't intercept the require() the ESM->CJS translator builds for a CJS module
+// (it resolves through Module._resolveFilename against disk). Shim _resolveFilename in load mode to
+// resolve such targets from the bundle's import map so a pruned CJS graph stays self-contained;
+// fall back to native for unrecorded edges or outside load mode.
 function patchCjsResolution() {
   const original = Module._resolveFilename
   Module._resolveFilename = function (request, parent, ...rest) {
@@ -753,33 +516,19 @@ function patchCjsResolution() {
     if (loadMode && typeof request === 'string' && !isBuiltin(request)) {
       if (typeof parent?.filename === 'string') {
         const parentURL = pathToFileURL(parent.filename).toString()
-        // Same scope gate the resolve hook applies (see above): node_modules scope serves only
-        // dependency parents from the bundle; workspace/app code is left to native resolution.
-        // Without this the shim would take over CJS resolution for app files too.
+        // Same scope gate as the resolve hook: nm scope serves only dependency parents from the bundle.
         if (state.config.full || state.inNodeModules(parentURL)) {
           const resolved = state.resolveBundled(parentURL, request)
           if (resolved !== undefined) return resolved
         }
       } else if (isAbsolute(request)) {
-        // NO parent, request already absolute: Node's ESM<->CJS interop re-enters the
-        // monkey-patchable CJS loader with the RESOLVED filename, no parent, and registerHooks
-        // hooks SKIPPED -- translators.js evaluates an import-linked CJS module via
-        // wrapModuleLoad(filename, undefined|null, isMain, kShouldSkipModuleHooks) (the
-        // 'commonjs-sync' translator, reached whenever a require() pulls an ESM graph that imports
-        // a CJS dep; also createCJSNoSourceModuleWrap), and resolveForCJSWithHooks bypasses the
-        // resolve hook -- so this shim is the ONLY interception point. An absolute path can only
-        // arrive from a prior successful resolution (ours or Node's), so when the bundle attests
-        // that exact FILE under the same scope gate the resolution is the identity (returned
-        // path.resolve()d, matching native's normalized cache-key contract). Falling through to
-        // native would stat a file the bundle carries but pruned disk may lack -- MODULE_NOT_FOUND
-        // on a servable path. hasFsFileContent (byte content, not getFsStat's kind) keeps a
-        // --fs-captured directory LISTING or payload-free 'stat:*' record -- whose bytes the bundle
-        // can't serve -- from hijacking native resolution. Widens parentless reachability to any
-        // attested in-scope file when disk lacks the path, bounded by attestation and the load
-        // hook's gates (getFile + NODEJS_FORMATS). Node >=24.18 forwards pre-resolved context,
-        // masking the common case; on 24.14-24.17 (our floor) every commonjs-sync eval re-resolves
-        // here, and the no-parent shape survives on >=24.18 too (deferred-resolution branch and
-        // createCJSNoSourceModuleWrap).
+        // NO parent, absolute request: Node's ESM<->CJS interop re-enters the CJS loader with the
+        // resolved filename and hooks SKIPPED, so this shim is the only interception point. An
+        // absolute path comes from a prior resolution, so when the bundle attests that exact file
+        // (same scope gate) return the identity path -- else native would stat a pruned-disk file
+        // and MODULE_NOT_FOUND on a servable path. hasFsFileContent (not a dir/stat record) keeps a
+        // listing or payload-free stat from hijacking resolution. Node floor 24.14-24.17 re-resolves
+        // here every commonjs-sync eval; the no-parent shape survives on >=24.18 too.
         const url = pathToFileURL(request).toString()
         if ((state.config.full || state.inNodeModules(url)) && state.hasFsFileContent(url)) {
           return resolvePath(request)
@@ -787,10 +536,8 @@ function patchCjsResolution() {
       }
     }
     const resolved = original.call(this, request, parent, ...rest)
-    // Capture: require.resolve() (and, on some Node versions, CJS require()s)
-    // resolve through native Module._resolveFilename WITHOUT firing the resolve
-    // hook, so addImport never sees them. Observe the resolution here; write()'s
-    // backfill records the ones the hook missed (deduped, in-bundle targets only).
+    // Capture: require.resolve() / some CJS require()s resolve without firing the resolve hook.
+    // Observe the resolution here; write()'s backfill records the ones the hook missed.
     if (state && !loadMode && typeof request === 'string'
         && !isBuiltin(request) && typeof parent?.filename === 'string') {
       state.observeResolution(pathToFileURL(parent.filename).toString(), request, pathToFileURL(resolved).toString())
@@ -798,14 +545,9 @@ function patchCjsResolution() {
     return resolved
   }
 
-  // Capture: Module._load's fast path (relativeResolveCache, keyed by parent DIRECTORY + request)
-  // returns an already-loaded module WITHOUT calling _resolveFilename -- so a SECOND sibling's
-  // require() of a target the first already loaded never reaches the observe shim, and the edge is
-  // recorded only under the first importer (under-recording). _load runs for EVERY require()
-  // including cache hits, so force the resolution here to observe the true per-importer edge;
-  // _resolveFilename is cached so this is cheap, and a resolution error is left for the original
-  // _load to raise. We call the PROPERTY `Module._resolveFilename` (our shim), not a captured ref,
-  // so it routes through observeResolution.
+  // Capture: Module._load's fast path can return a cached module without calling _resolveFilename,
+  // so a second sibling's require() of the same target would go unrecorded. Force the resolution
+  // here (cached, so cheap) via the _resolveFilename PROPERTY (our shim) to observe the true edge.
   const originalLoad = Module._load
   Module._load = function (request, parent, ...rest) {
     if (state && !state.config.loadBundle && typeof request === 'string'

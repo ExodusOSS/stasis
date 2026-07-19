@@ -6,15 +6,10 @@ import { Bundle } from '@exodus/stasis-core/bundle'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { moduleFileKey } from '@exodus/stasis-core/util'
 
-// Reconstruct an in-memory Bundle from a lockfile by reading every file it attests
-// from disk and verifying each against the lockfile's SRI digest -- the exact inverse
-// of `extract`'s lockfileFromBundle. A changed or tampered file fails closed here (the
-// digest won't match), so building from a lockfile is as trustworthy as a
-// `stasis run --lock=frozen` replay: the build only ever sees bytes the lockfile
-// vouches for. `root` is the project root the lockfile's paths are relative to.
-//
-// Directory captures (`stasis run --fs` readdir listings, format 'directory') are
-// skipped: they key a listing at a directory's own path, not a file esbuild could load.
+// Reconstruct an in-memory Bundle from a lockfile, reading every attested file from disk and
+// verifying each against the lockfile's SRI digest -- fail closed on mismatch, so this is as
+// trustworthy as a `stasis run --lock=frozen` replay. `root` is what the lockfile's paths are
+// relative to. Directory captures (format 'directory') are skipped -- not files esbuild can load.
 export function bundleFromLockfile(lockfile, { root }) {
   if (!lockfile.imports) throw new Error('stasis: lockfile has no recorded import graph')
   const formats = lockfile.formats ?? new Map()
@@ -32,18 +27,14 @@ export function bundleFromLockfile(lockfile, { root }) {
       } catch (cause) {
         throw new Error(`stasis: file attested by the lockfile is missing on disk: ${file}`, { cause })
       }
-      // The lockfile digests raw on-disk bytes; verify against them before trusting
-      // the file. (Code and 'resource' files hash identically whether viewed as a
-      // string or bytes, since Node hashes a string as its UTF-8 bytes.)
+      // The lockfile digests raw on-disk bytes; verify before trusting the file.
       const actual = sha512integrity(bytes)
       if (actual !== integrity) {
         throw new Error(`stasis: ${file} does not match the lockfile (expected ${integrity}, got ${actual})`)
       }
-      // Store content the way a Bundle does: 'resource:base64' as base64 text,
-      // everything else (code, 'resource') as a raw UTF-8 string. A non-base64 entry is
-      // digested AND served as UTF-8 text, so a non-UTF-8 byte would transcode lossily
-      // (U+FFFD), diverging the served content from the verified bytes -- mirror the
-      // capture side's isUtf8 guard and fail closed instead.
+      // Store content as a Bundle does: 'resource:base64' as base64, everything else as a UTF-8 string.
+      // A non-UTF-8 byte in a non-base64 entry would transcode lossily (U+FFFD), diverging served
+      // content from the verified bytes -- mirror the capture side's isUtf8 guard and fail closed.
       if (format === 'resource:base64') {
         out[rel] = bytes.toString('base64')
       } else {

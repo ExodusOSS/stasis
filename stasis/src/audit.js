@@ -4,9 +4,8 @@ import semver from './apis/npm/semver.cjs'
 import { parseFile } from './parse.js'
 import { collectWhy } from './why.js'
 
-// Only audit installed dependencies; workspace/first-party packages live under
-// non-`node_modules` keys in .modules (Lockfile/Bundle merge sources in) and
-// shouldn't be sent to the public registry — they leak names and produce noise.
+// Only audit installed dependencies; first-party packages live under non-`node_modules` keys and
+// must not be sent to the public registry (leaks names, adds noise).
 export function collectPackagesFromFile(file) {
   const out = []
   for (const [dir, { name, version }] of parseFile(file).modules) {
@@ -30,11 +29,9 @@ export function collectPackages(files) {
   return out.toSorted((a, b) => a.name.localeCompare(b.name) || semver.compare(a.version, b.version))
 }
 
-// Map each audited node_modules package (`name@version`) to the set of bundle
-// consumers ("reasons") that recorded any of its files. Only bundles carry a
-// `reason` map -- lockfiles (and single-consumer bundles) omit it, contributing
-// nothing. The reason map is { consumer: [project-relative file, ...] }; we
-// resolve each file back to its owning package via the module file listing.
+// Map each audited node_modules package (`name@version`) to the bundle consumers ("reasons") that
+// recorded its files. Only bundles carry a reason map ({ consumer: [file, ...] }); lockfiles omit
+// it. Each file is resolved back to its owning package via the module file listing.
 export function collectReasons(files) {
   const byPkg = new Map()
   for (const file of files) {
@@ -96,9 +93,8 @@ export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(
       const affected = range
         ? installedVersions.filter((v) => semver.satisfies(v, range))
         : installedVersions
-      // npm occasionally returns advisories whose vulnerable range matches none
-      // of the versions we submitted; drop them so the table (and the CLI exit
-      // code) reflect only real hits.
+      // npm sometimes returns advisories whose range matches none of the versions we submitted; drop
+      // them so the table and exit code reflect only real hits.
       if (installedVersions.length > 0 && affected.length === 0) continue
       rows.push({
         package: pkg,
@@ -121,8 +117,7 @@ export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(
   return rows
 }
 
-// Line breaks in npm advisory titles would otherwise break the box layout.
-// Covers LF, bare CR (and CRLF), and U+2028 / U+2029 line/paragraph separators.
+// Strip line breaks (LF/CR/CRLF, U+2028/U+2029) from advisory titles so they can't break the box layout.
 const cell = (v) => String(v ?? '').replace(/[\r\n\u2028\u2029]+/gu, ' ')
 
 // Split a value into the physical lines a cell occupies. Non-multiline columns
@@ -197,9 +192,7 @@ export function printAuditReport({ packages, rows, why = false }, { out = proces
     return
   }
   const columns = ['severity', 'package', 'installed', 'vulnerable', 'title', 'url']
-  // Surface the reason column only when at least one advisory has provenance:
-  // the bundle consumers that recorded it, or (with --why) the import paths that
-  // reach it. Lockfiles / single-consumer bundles without either leave it off.
+  // Surface the reason column only when some advisory has provenance -- bundle consumers, or (with --why) import paths.
   if (rows.some((r) => r.reason)) columns.splice(3, 0, 'reason')
   // Under --why the reason cell is a list of `consumer: path` lines; let it span
   // multiple physical rows instead of collapsing to one.

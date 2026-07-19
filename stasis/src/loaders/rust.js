@@ -1,17 +1,7 @@
-// Rust loader: produces a `{ sources, resolutions, missing }` triple from a
-// crate's source files, mirroring the Solidity/Bash loaders' interface. The
+// Rust loader: `{ sources, resolutions, missing }` from a crate's files. The
 // reachable set is discovered by following `mod foo;` declarations (the only
-// thing that pulls a new file into a crate); `use crate::path` statements
-// don't add files, they just reference already-declared modules, so they're
-// resolved against the module tree for the import graph but never widen the walk.
-//
-// `use crate::` resolution is best-effort (external crates, macro paths, and
-// item-vs-module ambiguity are simply dropped). An unconditional `mod foo;`
-// with no backing file is a genuine hole (a compile error in a real crate) and
-// is reported in `missing` so the bundle builder can reject it; a cfg-gated
-// `mod` (e.g. `#[cfg(test)] mod tests;`) may be compiled out and is tolerated.
-// Comments are stripped before extraction so a commented-out `mod`/`use` is
-// neither followed nor flagged.
+// thing that pulls a new file in); `use crate::` edges resolve against the
+// module tree for the import graph but never widen the walk.
 
 import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -19,48 +9,33 @@ import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path
 
 import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
 
-// `mod foo;` / `pub mod foo;` / `pub(crate) mod foo;` — external module
-// declarations only. Inline `mod foo { ... }` is intentionally NOT matched.
-// Applied per (trimmed) line, so it stays anchored at the line start.
+// External `mod foo;` declarations only; inline `mod foo { ... }` is intentionally not matched.
 const MOD_DECL_RE = /^(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/u
 
-// `crate::path::to::item` references (in `use` or expression position).
 const USE_CRATE_RE = /\bcrate(?:::\w+)+/gu
 
-// `cargo vendor` copies external crates in-tree under this directory; their
-// sources are pulled into the bundle and tagged `cargo` (see cmd/bundle.js).
+// `cargo vendor` copies external crates in-tree under this dir.
 const VENDOR_DIR = 'vendor'
 
-// `extern crate foo;` and the leading segment of any `foo::path` use/expr path.
-// The leading segment of a path that ISN'T crate/self/super or a std-family
-// root is a candidate external crate name; resolveVendoredCrate keeps only the
-// ones that actually exist under vendor/. The lead must start lowercase to skip
-// `Type::assoc` associated-item paths (crate names are snake_case by convention).
+// `extern crate foo;` and the leading segment of any `foo::path`. The lead must
+// start lowercase (`[a-z_]`) to skip `Type::assoc` associated-item paths.
 const EXTERN_CRATE_RE = /^(?:pub\s+)?extern\s+crate\s+(\w+)\s*;/u
 const PATH_LEAD_RE = /\b([a-z_]\w*)(?:::\w+)+/gu
 const NON_CRATE_LEADS = new Set(['crate', 'self', 'super', 'std', 'core', 'alloc'])
 
-// A `#[cfg(...)]` / `#[cfg_attr(...)]` attribute gates the next item on a build
-// configuration that may be off (e.g. `#[cfg(test)]`).
+// `#[cfg(...)]`/`#[cfg_attr(...)]` gates the next item on a config that may be off.
 const CFG_ATTR_RE = /^#\[\s*cfg(?:_attr)?\b/u
 
-// Strip `//` line comments and `/* */` block comments so a commented-out
-// `mod`/`use` isn't mistaken for a real one — a commented `mod foo;` with no
-// backing file would otherwise be reported as a fatal "missing module".
-// Newlines inside block comments are preserved so the per-line matching below
-// stays aligned. Not string-literal aware (a `//` or `/* */` inside a string
-// can't masquerade as a line-anchored `mod` decl, so it doesn't matter for
-// extraction), and nested block comments aren't handled — both are acceptable
-// for best-effort extraction and match the Solidity loader's fidelity.
+// Strip comments so a commented-out `mod`/`use` isn't taken for a real one (a
+// commented `mod foo;` with no file would be a false "missing module").
+// Newlines in block comments are preserved to keep the per-line matching aligned.
 function stripRustComments(content) {
   const noBlock = content.replace(/\/\*[\s\S]*?\*\//gu, (m) => m.replace(/[^\n]/gu, ' '))
   return noBlock.replace(/\/\/[^\n]*/gu, '')
 }
 
-// Extract external `mod <name>;` declarations as { name, conditional } records.
-// `conditional` is true when a `#[cfg(...)]` attribute gates the declaration:
-// such a module may be compiled out (e.g. `#[cfg(test)] mod tests;`), so the
-// bundle builder treats its absence as tolerable rather than fatal.
+// Extract external `mod <name>;` as { name, conditional } records; `conditional`
+// (a `#[cfg(...)]`-gated decl) may be compiled out, so its absence is tolerable.
 export function extractModDecls(content) {
   const decls = []
   let cfgPending = false
@@ -84,10 +59,8 @@ export function extractCrateUses(content) {
   return [...stripRustComments(content).matchAll(USE_CRATE_RE)].map((m) => m[0])
 }
 
-// Candidate external-crate names referenced by a file: `extern crate <name>;`
-// plus the leading segment of every `<name>::...` path (minus crate/self/super
-// and the std family). Best-effort and deliberately over-inclusive — a lead
-// that doesn't name a real vendored crate is dropped by resolveVendoredCrate.
+// Candidate external-crate names (best-effort, over-inclusive — bad leads are
+// dropped later by resolveVendoredCrate).
 export function extractExternalCrates(content) {
   const stripped = stripRustComments(content)
   const names = new Set()
@@ -101,12 +74,8 @@ export function extractExternalCrates(content) {
   return [...names]
 }
 
-// Resolve an external crate name to its vendored crate-root file
-// (`vendor/<dir>/src/lib.rs`), or null when no such crate is vendored. A Rust
-// `use` name is the crate's lib name (underscores); the on-disk vendor dir uses
-// the package name, which may hyphenate — so try the name as-is and with
-// underscores swapped for hyphens. Existence is checked against `knownSources`
-// (tree mode) or the filesystem under `baseDir` (walk mode).
+// Resolve a crate name to its vendored root (`vendor/<dir>/src/lib.rs`), or null.
+// `use` names underscore but the vendor dir may hyphenate, so try both spellings.
 export function resolveVendoredCrate(crateName, { knownSources, baseDir, vendorDir = VENDOR_DIR } = {}) {
   const dirs = crateName.includes('_') ? [crateName, crateName.replaceAll('_', '-')] : [crateName]
   for (const dir of dirs) {
@@ -122,9 +91,8 @@ export function resolveVendoredCrate(crateName, { knownSources, baseDir, vendorD
   return null
 }
 
-// The directory where this file's submodules live, per Rust's path rules:
-//   - crate roots (main.rs/lib.rs) and mod.rs hold submodules as siblings
-//   - any other foo.rs holds them under a foo/ subdirectory
+// Directory holding this file's submodules, per Rust's path rules: siblings for
+// crate roots (main.rs/lib.rs) and mod.rs, else under a `<stem>/` subdir.
 export function getModuleDir(filePath) {
   const lastSlash = filePath.lastIndexOf('/')
   const dir = lastSlash === -1 ? '' : filePath.slice(0, lastSlash)
@@ -134,10 +102,7 @@ export function getModuleDir(filePath) {
   return dir ? `${dir}/${stem}` : stem
 }
 
-// Resolve a `mod <name>;` declaration to the baseDir-relative file that
-// defines it, trying `<dir>/<name>.rs` then `<dir>/<name>/mod.rs`. Existence
-// is checked against `knownSources` (tree mode) or the filesystem under
-// `baseDir` (walk mode); returns null when neither finds a file.
+// Resolve `mod <name>;` to its file, trying `<dir>/<name>.rs` then `<dir>/<name>/mod.rs`.
 export function resolveModPath(modName, fromFile, { knownSources, baseDir } = {}) {
   const modDir = getModuleDir(fromFile)
   const base = modDir ? `${modDir}/${modName}` : modName
@@ -154,22 +119,14 @@ export function resolveModPath(modName, fromFile, { knownSources, baseDir } = {}
   return null
 }
 
-// Build a `module path -> file` map (e.g. "crate::foo::bar" -> "src/foo/bar.rs")
-// by walking `mod` edges out from every crate root (main.rs / lib.rs). The walk
-// is iterative (a deep `mod` chain would overflow a recursive descent) and
-// depth-bounded: a `seen` set stops mod cycles, and MAX_MODULE_DEPTH caps a
-// pathologically deep chain — both the descent and the O(depth²) growth of the
-// joined module-path strings. Real crates nest a handful deep; the cap only
-// ever trims best-effort `use crate::` resolution for absurd input (file
-// collection happens in collectRustFilesFromDisk, which is unaffected).
+// Cap on `mod`-chain depth when building the module tree: with the `seen` set it
+// bounds cycles and the O(depth²) growth of joined module-path strings on absurd input.
 const MAX_MODULE_DEPTH = 1000
 
 export function buildModuleTree(sources, resolutions, { vendorDir = null } = {}) {
   const tree = new Map()
   for (const filePath of sources.keys()) {
-    // A vendored crate is its own crate, not part of the project crate rooted
-    // at `crate::` — skip its root so its tree doesn't collide on the `crate`
-    // key (its internal `crate::` edges are left best-effort/unresolved).
+    // Skip vendored crate roots: they're separate crates and would collide on the `crate` key.
     if (vendorDir && filePath.startsWith(`${vendorDir}/`)) continue
     const name = filePath.includes('/') ? filePath.slice(filePath.lastIndexOf('/') + 1) : filePath
     if (name !== 'main.rs' && name !== 'lib.rs') continue
@@ -191,9 +148,8 @@ export function buildModuleTree(sources, resolutions, { vendorDir = null } = {})
   return tree
 }
 
-// Resolve a `crate::a::b::Item` path to the file of the deepest module along
-// it (the trailing item names aren't modules), e.g. `crate::foo::Bar` ->
-// the file for `crate::foo`. Returns null when no prefix names a module.
+// Resolve `crate::a::b::Item` to the deepest module prefix that names a file
+// (trailing item names aren't modules); null when none does.
 export function resolveUsePath(usePath, moduleTree) {
   const parts = usePath.split('::')
   for (let i = parts.length; i >= 1; i--) {
@@ -203,12 +159,9 @@ export function resolveUsePath(usePath, moduleTree) {
   return null
 }
 
-// Build the { sources, resolutions, missing } triple from a Map of
-// already-loaded Rust sources. Two-phase: resolve `mod` edges (which also
-// defines the module tree), then resolve `crate::` references against it.
-// An unconditional `mod foo;` with no file is recorded in `missing` (the
-// bundle builder treats it as fatal); a cfg-gated `mod`, unresolved `crate::`
-// references, and self/duplicate references are omitted.
+// Build the triple from already-loaded sources. Two-phase: resolve `mod` edges
+// (defining the module tree), then `crate::` refs against it. Unconditional
+// `mod` with no file → `missing` (fatal); cfg-gated/unresolved/self refs omitted.
 export function buildRustTree(sources) {
   const resolutions = new Map()
   const missing = []
@@ -222,17 +175,15 @@ export function buildRustTree(sources) {
         console.warn(`[loader.rust] Missing module: ${name} from ${path}`)
         missing.push({ spec: `mod ${name}`, from: path })
       }
-      // conditional && unresolved: a cfg-gated module that may be compiled out
-      // (e.g. #[cfg(test)] mod tests;) — tolerated, not a fatal hole.
+      // conditional && unresolved: cfg-gated module, may be compiled out — tolerated.
     }
     resolutions.set(path, specMap)
   }
 
   const moduleTree = buildModuleTree(sources, resolutions, { vendorDir: VENDOR_DIR })
   for (const [path, content] of sources) {
-    // Vendored crates keep their (file-relative) `mod` edges from above, but
-    // their `crate::`/external `use` edges are dropped rather than mis-resolved
-    // against the project crate's module tree.
+    // Vendored crates keep their `mod` edges but skip `crate::`/`use` resolution
+    // (their edges would mis-resolve against the project crate's tree).
     if (path.startsWith(`${VENDOR_DIR}/`)) continue
     const specMap = resolutions.get(path)
     for (const usePath of extractCrateUses(content)) {
@@ -241,8 +192,6 @@ export function buildRustTree(sources) {
         specMap.set(usePath, resolved)
       }
     }
-    // A `use <crate>::…` of a vendored crate becomes a `use <crate>` edge to
-    // that crate's root, recording the cross-crate dependency in the graph.
     for (const crate of extractExternalCrates(content)) {
       const lib = resolveVendoredCrate(crate, { knownSources: sources })
       const spec = `use ${crate}`
@@ -252,9 +201,8 @@ export function buildRustTree(sources) {
   return { sources, resolutions, missing }
 }
 
-// Walk the filesystem from `entries`, following `mod` declarations and reading
-// each reachable file once. A `mod` whose file is missing on disk warns and is
-// skipped; the walk continues. Files in a wave are read in parallel.
+// Walk from `entries` following `mod` decls, reading each reachable file once;
+// a missing file warns and is skipped without aborting the walk.
 export async function collectRustFilesFromDisk(baseDir, entries) {
   const sources = new Map()
   const realBase = realpathSync(baseDir)
@@ -272,8 +220,7 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
             console.warn(`[loader.rust] Missing file: ${relPath}`)
             return null
           }
-          // resolveModPath gates candidates with isFile so a directory is
-          // normally never queued; guard EISDIR anyway (symmetry with bash).
+          // resolveModPath gates on isFile so a dir is normally never queued; guard EISDIR anyway.
           if (err.code === 'EISDIR') {
             console.warn(`[loader.rust] Skipping directory reference: ${relPath}`)
             return null
@@ -291,8 +238,7 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
         const resolved = resolveModPath(name, relPath, { baseDir })
         if (resolved && !sources.has(resolved)) next.push(resolved)
       }
-      // Follow `use <crate>::…` into a vendored crate's root; its own `mod`
-      // edges (read on the next wave) then pull in the rest of the crate.
+      // Follow `use <crate>::…` to the vendored root; its `mod` edges pull in the rest next wave.
       for (const crate of extractExternalCrates(content)) {
         const lib = resolveVendoredCrate(crate, { baseDir })
         if (lib && !sources.has(lib)) next.push(lib)
@@ -315,10 +261,8 @@ function assertWithinBase(baseDir, candidate, label) {
   }
 }
 
-// High-level: takes a `.rs.txt` listing whose lines are crate entry points
-// (typically src/main.rs or src/lib.rs), resolved relative to the listing.
-// Walks `mod` declarations from there, then resolves `crate::` references.
-// Returns { sources, resolutions, missing }.
+// High-level entry: reads a `.rs.txt` listing of crate entry points (relative to
+// the listing), then walks `mod`/`crate::` from there.
 export async function loadRust(rsTxtFile) {
   const baseDir = dirname(resolve(rsTxtFile))
   const listing = await readFile(rsTxtFile, 'utf8')

@@ -1,8 +1,7 @@
 # `stasis prune`
 
 `stasis prune` (also exported as `@exodus/stasis/prune`) constrains an
-installed `node_modules` tree to the files recorded in
-`stasis.lock.json`.
+installed `node_modules` tree to the files recorded in `stasis.lock.json`.
 
 ```json
 // package.json
@@ -12,24 +11,22 @@ installed `node_modules` tree to the files recorded in
 `prune` walks `node_modules`, keeps and verifies (sha512) every file listed in
 the lockfile, rewrites recognised modules' `package.json` down to a minimal
 field set (below), prunes everything else (including `package.json` files under
-directories the lockfile doesn't list), and fails if a lockfile-listed file is
-missing on disk. Planning and disk mutation are separated: any error aborts
-before a single `unlink` or rewrite runs.
+unlisted directories), and fails if a lockfile-listed file is missing on disk.
+Planning and disk mutation are separated: any error aborts before a single
+`unlink` or rewrite runs.
 
 ## `package.json` rewriting
 
-`package.json` contents aren't recorded in the lockfile, yet they're
-load-bearing for resolution — unattested content `prune` can't trust verbatim.
-So it overwrites each one with only the fields needed to resolve and load the
-package, dropping everything else (`scripts`, `dependencies`, `engines`,
-`config`, …) as unneeded — and, for `scripts`, as attack surface:
+`package.json` contents aren't recorded in the lockfile, so `prune` overwrites
+each one with only the fields needed to resolve and load the package, dropping
+everything else (`scripts`, `dependencies`, `engines`, `config`, …):
 
 | Field | Handling |
 | --- | --- |
-| `name`, `version` | Taken from the **lockfile**, not disk — the attested source of the package's identity. |
+| `name`, `version` | Taken from the **lockfile**, not disk — the attested identity. |
 | `license` | Copied only if an ASCII string shorter than 64 bytes. |
 | `type` | Copied only if exactly `"module"` or `"commonjs"`. |
-| `main`, `module`, `jsnext:main`, `jsnext`, `source`, `browser`, `react-native`, `bin`, `sideEffects`, `exports`, `imports` | Copied, but filtered so every file referenced is one the lockfile records for that module — a rewritten manifest never points resolution at a path `prune` is about to delete. See below. |
+| `main`, `module`, `jsnext:main`, `jsnext`, `source`, `browser`, `react-native`, `bin`, `sideEffects`, `exports`, `imports` | Copied, but filtered so every file referenced is one the lockfile records for that module. See below. |
 
 Filtering rules for that last group:
 
@@ -49,57 +46,47 @@ Filtering rules for that last group:
 Two cases are kept as-is rather than minimised:
 
 - A `package.json` that **is** in the lockfile's file list — imported directly
-  (e.g. `require('pkg/package.json')`), so its bytes are attested — is
-  hash-verified and kept in full.
+  (e.g. `require('pkg/package.json')`) — is hash-verified and kept in full.
 - A **nested** `package.json` (e.g. a `dist/cjs/package.json` of
   `{"type":"commonjs"}` that flips the module system for a subtree) carries no
   package identity, so it's reduced to the fields that govern resolution *within*
   the subtree — `type`, the directory entry points
   `main`/`module`/`browser`/`react-native`, and `exports`/`imports` — filtered
-  (relative to the nested dir) to present files. Dropping them, as a naive prune
-  would (their dir isn't a recorded module), would silently revert that subtree's
-  `.js` files to the package root's module system and break `require('pkg/subdir')`
-  and `#imports` resolution within it.
+  (relative to the nested dir) to present files. Dropping it would silently revert
+  that subtree to the package root's module system and break `require('pkg/subdir')`.
 
-Rewriting is idempotent: re-running `prune` produces byte-identical
-`package.json` files. Each is rewritten by **replacing** the file (write a new
-file, then rename over it), never in place: a pnpm-installed `package.json` is
-typically a hardlink into pnpm's store, so an in-place write would mutate the
-shared inode. The rename creates a fresh inode and leaves the store copy
-untouched.
+Rewriting is idempotent (byte-identical on re-run). Each `package.json` is
+rewritten by **replacing** the file (write new, rename over it), never in place:
+a pnpm-installed one is typically a hardlink into pnpm's store, so an in-place
+write would mutate the shared inode; the rename creates a fresh inode instead.
 
 ## Symlinks
 
 `prune` leaves a symlink in place only when its real target stays **inside
-`node_modules`** — prune's entire attestation perimeter (it walks and hashes
-`node_modules`, nothing else). pnpm's public `node_modules/<pkg>` entries link
-into `node_modules/.pnpm/...`, whose real files `prune` walks and attests
-directly, so the link itself needs no validation; unreferenced store files are
-pruned like any other untracked file, and a pre-existing dangling link is left
-as-is. A symlink whose target **escapes** `node_modules` — even to a workspace
-package elsewhere under the bundle root — is refused: leaving it would make
-unattested content reachable from the pruned tree. `prune` aborts during
-planning, before touching disk.
+`node_modules`** — prune's attestation perimeter. pnpm's public
+`node_modules/<pkg>` entries link into `node_modules/.pnpm/...`, whose real files
+`prune` walks and attests directly; unreferenced store files are pruned like any
+other untracked file, and a pre-existing dangling link is left as-is. A symlink
+whose target **escapes** `node_modules` — even to a workspace package elsewhere
+under the bundle root — is refused (`prune` aborts during planning, before
+touching disk).
 
 ## pnpm workspaces
 
-When run in a pnpm workspace root — detected by a `pnpm-workspace.yaml` —
-`prune` adjusts:
+When run in a pnpm workspace root (detected by a `pnpm-workspace.yaml`), `prune` adjusts:
 
 - It covers **every** package's `node_modules` (each workspace package's, plus
   the root's), discovered by walking the workspace (never descending into a
   `node_modules`, a dotdir, or outside the root).
 - The symlink containment boundary widens from `node_modules` to the **whole
   workspace**. A workspace dependency that links to a sibling package's source
-  directory — outside any `node_modules` but inside the workspace — is left in
-  place, its target **not** content-validated (workspace sources are
-  first-party, not attested deps). A link whose target escapes the workspace root
-  is still refused.
+  directory (outside any `node_modules` but inside the workspace) is left in
+  place, its target **not** content-validated (workspace sources are first-party).
+  A link whose target escapes the workspace root is still refused.
 - It still only ever deletes files **inside a `node_modules`** — workspace source
-  files are never touched — and never accesses anything outside the workspace
-  root.
+  files are never touched — and never accesses anything outside the workspace root.
 
 `prune` also rejects up front if pnpm's `enableGlobalVirtualStore` is turned on
-(checked via the `npm_config_enable_global_virtual_store` env var pnpm exports):
-`node_modules` is then dominated by symlinks into a shared store, making the
-lockfile-vs-disk comparison meaningless.
+(checked via `npm_config_enable_global_virtual_store`): `node_modules` is then
+dominated by symlinks into a shared store, making the lockfile-vs-disk comparison
+meaningless.

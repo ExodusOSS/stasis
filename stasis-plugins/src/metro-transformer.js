@@ -5,56 +5,19 @@ import { pathToFileURL } from 'node:url'
 
 import { State } from '@exodus/stasis-core/state'
 
-// Companion to the StasisMetro serializer plugin: the LOAD half of stasis for Metro.
-//
-// WHY A TRANSFORMER (the asymmetry that makes this possible):
-//   Capture must MERGE every worker's observations into one lockfile/bundle, so it
-//   runs in the main process (the serializer -- see metro.js). Load is the opposite:
-//   it only ever READS an immutable bundle, and every worker reads the SAME bytes, so
-//   there is nothing to synchronize between them. That makes the per-worker transformer
-//   the natural seam for load -- each worker independently serves attested bytes, no IPC.
-//
-// HOW IT WIRES IN (metro.config.js) -- wire it PERMANENTLY, alongside the serializer half:
-//   module.exports = {
-//     transformerPath: require.resolve('@exodus/stasis/metro-transformer'),  // top-level, a sibling of `transformer`
-//   }
-//   // run with EXODUS_STASIS_BUNDLE=load (+ EXODUS_STASIS_BUNDLE_FILE / LOCK / SCOPE),
-//   // OR a stasis.config.json with "bundle":"load". Outside load mode this transformer is
-//   // a transparent pass-through (see getLoadState), and under load the StasisMetro
-//   // serializer is one too -- one committed metro.config.js carries both halves, the
-//   // mode picks the active one (the config is itself attested at capture, so a load
-//   // run must execute it unedited).
-//
-//   Metro calls `transformerPath`'s `transform(config, projectRoot, filename, data,
-//   options)` in each worker with `data` = the file's on-disk bytes (a Buffer) and
-//   `filename` project-relative. We wrap the user's real transformer (default
-//   `metro-transform-worker`, override via EXODUS_STASIS_METRO_BASE_TRANSFORMER) and,
-//   in load mode, replace `data` with the bundle's attested bytes before delegating --
-//   so the transform consumes bundle bytes, hash-verified, fail-closed.
-//
-// WHAT THIS DOES AND DOESN'T GUARANTEE:
-//   - The bytes that get TRANSFORMED are the bundle's, verified by State.getFile
-//     (against the lockfile when one is loaded; against the bundle's own bytes under
-//     lock=none). A tampered on-disk source is therefore ignored for the build output
-//     and, under a lockfile, rejected outright. An in-scope file the bundle doesn't
-//     carry throws -- never a silent disk fallback. Out-of-scope files pass their disk
-//     bytes through untouched (mirrors webpack/esbuild load scope handling).
-//   - KNOWN LIMITATION: this does NOT let Metro build with the sources fully absent
-//     from disk. Metro reads each file from disk in the worker (and hashes it in the
-//     main process for its transform cache) BEFORE this transformer runs, and resolves
-//     package.json via its own fs in the main process. Serving those reads from the
-//     bundle would need fs interception across the main + worker processes (stasis
-//     --mock territory), which is larger than this seam. So today's guarantee is
-//     "build the bundle's attested bytes, fail closed on disk drift," not "build from
-//     a bundle with no source tree." This mirrors the documented node_modules-crossing
-//     gap in the webpack load path.
+// Companion to the StasisMetro serializer: the LOAD half of stasis for Metro. Load only READS an
+// immutable bundle and every worker reads the same bytes (no IPC), so a per-worker transformer is
+// the natural seam. Wire it permanently in metro.config.js (transformerPath); outside load mode it
+// is a transparent pass-through, and under load the serializer is too -- the mode picks the active
+// half. In load mode, wrap the user's real transformer and replace Metro's on-disk `data` with the
+// bundle's hash-verified bytes (fail-closed; out-of-scope files pass their disk bytes through).
+// KNOWN LIMITATION: does NOT build with sources absent from disk -- Metro reads + hashes each file
+// before this runs, so the guarantee is "build attested bytes, fail closed on disk drift."
 
 const require = createRequire(import.meta.url)
 
-// The real transformer we wrap. Default matches Metro's default; an app with a custom
-// transformer (e.g. a TS/Babel preset) points this at theirs so we sit transparently
-// in front of it. Resolved + required lazily (per worker process) so a non-load build
-// pays nothing and we don't require Metro internals at import time.
+// The real transformer we wrap (default matches Metro's; override for a custom TS/Babel preset).
+// Required lazily per worker so a non-load build pays nothing.
 const BASE_TRANSFORMER = process.env.EXODUS_STASIS_METRO_BASE_TRANSFORMER || 'metro-transform-worker'
 
 let base
@@ -63,10 +26,8 @@ function getBase() {
   return base
 }
 
-// Per-worker load State, built once. We construct a normal State (it reads the same
-// EXODUS_STASIS_* env + stasis.config.json the rest of stasis does) and only act when
-// it resolves to load mode; any other mode -> null -> this transformer is a transparent
-// pass-through, so wiring it permanently in metro.config.js is safe.
+// Per-worker load State, built once from the usual env + stasis.config.json. Non-load mode -> null
+// -> transparent pass-through, so wiring it permanently is safe.
 let stateInited = false
 let loadState = null
 function getLoadState() {
@@ -78,10 +39,8 @@ function getLoadState() {
   return loadState
 }
 
-// True iff `absolute` is a path the bundle is supposed to cover under load mode.
-// `state.relative` throws for paths outside the project root, which we treat as
-// out-of-scope (system files, scratch dirs) and defer to disk. Mirrors the webpack
-// plugin's load-mode inScope.
+// True iff `absolute` is in scope for load mode. state.relative throws outside the project root
+// (out-of-scope: system files, scratch) -> defer to disk. Mirrors the webpack plugin's inScope.
 function inScope(state, absolute) {
   try {
     state.relative(absolute)
@@ -95,14 +54,11 @@ function inScope(state, absolute) {
 export function transform(config, projectRoot, filename, data, options) {
   const state = getLoadState()
   if (state) {
-    // `filename` is project-relative in Metro's transformer contract; resolve against
-    // projectRoot (resolvePath ignores projectRoot when filename is already absolute).
+    // `filename` is project-relative in Metro's contract; resolve against projectRoot.
     const absolute = resolvePath(projectRoot, filename)
     if (inScope(state, absolute)) {
-      // getFile re-verifies the hash against the lockfile on every read and throws on a
-      // file the bundle doesn't carry -- so an in-scope path the bundle is missing
-      // surfaces here as a hard build error, not a silent disk fallback. Code sources
-      // come back as strings; resources as Buffers (already decoded from base64).
+      // getFile re-verifies the hash and throws on a file the bundle doesn't carry (fail-closed,
+      // no disk fallback). Code sources come back as strings; resources as Buffers.
       const { source } = state.getFile(pathToFileURL(absolute).toString())
       data = Buffer.isBuffer(source) ? source : Buffer.from(source)
     }
@@ -111,14 +67,9 @@ export function transform(config, projectRoot, filename, data, options) {
 }
 
 export function getCacheKey(config) {
-  // Fold the wrapped transformer's own cache key in (so changing the base transformer
-  // still invalidates), then add a stasis-load discriminator: load-mode transforms can
-  // produce different bytes than a disk build for the same file (and Metro hashes the
-  // on-disk bytes into its cache key BEFORE we substitute, so when disk == bundle the
-  // content hash alone wouldn't tell a load result apart from a plain build), so their
-  // cached results must not cross-pollinate. Derive the marker from the resolved load
-  // State -- the SAME source of truth as transform() -- not the env var, so load activated
-  // via stasis.config.json is keyed correctly too; the bundle path keys it to the bundle.
+  // Fold in the base transformer's cache key, then add a stasis-load discriminator so load results
+  // (which can differ from a disk build even when disk == bundle) don't cross-pollinate the cache.
+  // Derive the marker from the resolved load State (not the env) so config.json activation keys too.
   const baseKey = typeof getBase().getCacheKey === 'function' ? getBase().getCacheKey(config) : ''
   const state = getLoadState()
   const marker = state ? `load:${state.config.bundleFile || 'default'}` : 'off'
