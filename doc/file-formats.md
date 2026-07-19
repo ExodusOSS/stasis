@@ -141,7 +141,7 @@ into the lockfile/bundle `config` block (`debug`, `childProcess`, `fs` and
 - `formats` records each file's format in the same shape as the bundle's
   `formats` map. Code files use a Node loader format (`module`, `commonjs`,
   `json`, `module-typescript`, `commonjs-typescript`), a source-language tag
-  (`solidity`, `php`, `bash`, `rust`), or a native build-input tag
+  (`solidity`, `php`, `shell`, `rust`), or a native build-input tag
   (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `swift`, `c`, `cpp`, `c-header`,
   `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`, `podfile-lock`, `template`, `xml` —
   attested by the Metro native capture for the CocoaPods/Gradle toolchain, not runnable by
@@ -235,7 +235,7 @@ reporting failures) still persists what it cleanly captured.
 - `imports`: conditions → parent file → specifier → resolved
   project-relative path. The conditions key is either `"*"`, a
   comma-joined list (e.g. `"node, import"`), or — for source-language
-  bundles — the language tag (`solidity`/`php`/`bash`/`rust`).
+  bundles — the language tag (`solidity`/`php`/`shell`/`rust`).
 - When a `stasis.lock.json` is loaded alongside, the bundle's `entries`,
   module/source dirs, `name`/`version`, and per-module file lists must
   match. Each loaded source is hash-verified against the lockfile.
@@ -278,7 +278,7 @@ invocation):
 | `.js` `.cjs` `.mjs` `.ts` `.cts` `.mts` | JavaScript / TypeScript | static require/import scan | Node format / `"*"` + conditions |
 | `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
 | `.php` | PHP | literal `require`/`include` paths + Composer-autoloaded class references (PSR-4/PSR-0/classmap/files) | `php` |
-| `.sh` `.bash` | Bash | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:`, `# shellcheck source=` | `bash` |
+| `.sh` `.bash` | Shell | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:`, `# shellcheck source=` | `shell` |
 | `.rs` | Rust | `mod` declarations (+ `use crate::` edges) | `rust` |
 
 These four are **`scope = full`, produce-only artifacts** written in the same

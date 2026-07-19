@@ -41,7 +41,7 @@ const SOLIDITY_WORKSPACE_VERSION = '0.0.0'
 const SOLIDITY_FORMAT = 'solidity'
 const BASH_WORKSPACE_NAME = 'bash-bundle'
 const BASH_WORKSPACE_VERSION = '0.0.0'
-const BASH_FORMAT = 'bash'
+const SHELL_FORMAT = 'shell'
 
 const RUST_WORKSPACE_NAME = 'rust-bundle'
 const RUST_WORKSPACE_VERSION = '0.0.0'
@@ -340,7 +340,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 //     `node`), dynamic `$VAR` paths, extensionless sources, absolute system
 //     paths (`source /etc/profile.d/x.sh`), and `../` paths that escape the
 //     root — none can live in the bundle.
-//   - imports live under a dedicated "bash" condition key (like "solidity"),
+//   - imports live under a dedicated "shell" condition key (like "solidity"),
 //     not the JS-bundle wildcard "*".
 export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
@@ -379,8 +379,8 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
     resolutions,
     workspaceName: BASH_WORKSPACE_NAME,
     workspaceVersion: BASH_WORKSPACE_VERSION,
-    format: BASH_FORMAT,
-    conditionKey: 'bash',
+    format: SHELL_FORMAT,
+    conditionKey: SHELL_FORMAT,
   })
 }
 

@@ -1266,6 +1266,7 @@ const writeRnFixture = (root) => {
   writeFileSync(join(dep, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
   writeFileSync(join(dep, 'ios', 'RNThing.mm'), '@implementation RNThing @end\n')
   writeFileSync(join(dep, 'ios', 'RNThing.swift'), 'import Foundation\nclass RNThing {}\n')
+  writeFileSync(join(dep, 'ios', 'RNThing-Info.plist'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
   writeFileSync(join(dep, 'ios', 'util.c'), 'int rn_util(void) { return 0; }\n')
   writeFileSync(join(dep, 'ios', 'Podfile'), "pod 'RNThing', :path => '.'\n")
   writeFileSync(join(dep, 'ios', 'Podfile.lock'), 'PODS:\n  - RNThing (3.1.0)\n')
@@ -1293,7 +1294,7 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(mod, 'the native dep is a bundled module')
   const files = new Set(Object.keys(mod.files))
   // Native build inputs are carried alongside the graph-reached index.js.
-  for (const f of ['index.js', 'RNThing.podspec', 'Extra.podspec.json', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/RNThing.swift', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
+  for (const f of ['index.js', 'RNThing.podspec', 'Extra.podspec.json', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/RNThing.swift', 'ios/RNThing-Info.plist', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
     t.assert.ok(files.has(f), `expected ${f} in the bundle`)
   }
   t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
@@ -1331,6 +1332,7 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.mm'), 'objcpp')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.swift'), 'swift')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.h'), 'c-header')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing-Info.plist'), 'xml') // Apple plist is XML
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/util.c'), 'c')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile'), 'podfile') // matched by basename
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile.lock'), 'podfile-lock')
@@ -1798,13 +1800,13 @@ test('buildBashBundle produces a Bundle with sources, formats, imports, entries'
   t.assert.deepEqual(Object.keys(workspace.files).toSorted(), ['lib.sh', 'main.sh'])
   t.assert.equal(workspace.files['main.sh'], readFileSync(join(cwd, 'main.sh'), 'utf8'))
 
-  // Every loaded file gets a 'bash' format tag.
-  t.assert.equal(bundle.formats.get('main.sh'), 'bash')
-  t.assert.equal(bundle.formats.get('lib.sh'), 'bash')
+  // Every loaded file gets a 'shell' format tag.
+  t.assert.equal(bundle.formats.get('main.sh'), 'shell')
+  t.assert.equal(bundle.formats.get('lib.sh'), 'shell')
 
-  // Imports live under the "bash" condition key.
-  t.assert.deepEqual([...bundle.imports.keys()], ['bash'])
-  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('./lib.sh'), 'lib.sh')
+  // Imports live under the "shell" condition key.
+  t.assert.deepEqual([...bundle.imports.keys()], ['shell'])
+  t.assert.equal(bundle.imports.get('shell').get('main.sh').get('./lib.sh'), 'lib.sh')
 })
 
 test('buildBashBundle takes the workspace bucket name/version from package.json', async (t) => {
@@ -1817,8 +1819,8 @@ test('buildBashBundle takes the workspace bucket name/version from package.json'
 test('buildBashBundle follows a multi-level source chain', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'nested'), entries: ['main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['a.sh', 'b.sh', 'main.sh'])
-  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('./a.sh'), 'a.sh')
-  t.assert.equal(bundle.imports.get('bash').get('a.sh').get('./b.sh'), 'b.sh')
+  t.assert.equal(bundle.imports.get('shell').get('main.sh').get('./a.sh'), 'a.sh')
+  t.assert.equal(bundle.imports.get('shell').get('a.sh').get('./b.sh'), 'b.sh')
 })
 
 test('buildBashBundle deduplicates a file sourced by multiple entries', async (t) => {
@@ -1830,7 +1832,7 @@ test('buildBashBundle deduplicates a file sourced by multiple entries', async (t
 test('buildBashBundle resolves bash/sh exec references', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'exec'), entries: ['main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['helper.sh', 'main.sh', 'worker.sh'])
-  const edges = bundle.imports.get('bash').get('main.sh')
+  const edges = bundle.imports.get('shell').get('main.sh')
   t.assert.equal(edges.get('./worker.sh'), 'worker.sh')
   t.assert.equal(edges.get('helper.sh'), 'helper.sh')
 })
@@ -1838,13 +1840,13 @@ test('buildBashBundle resolves bash/sh exec references', async (t) => {
 test('buildBashBundle resolves direct ./script.sh invocations', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'direct'), entries: ['main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['main.sh', 'worker.sh'])
-  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('./worker.sh'), 'worker.sh')
+  t.assert.equal(bundle.imports.get('shell').get('main.sh').get('./worker.sh'), 'worker.sh')
 })
 
 test('buildBashBundle resolves `# Depends on:` comment hints', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'comment'), entries: ['main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['helper.sh', 'main.sh'])
-  t.assert.equal(bundle.imports.get('bash').get('main.sh').get('helper.sh'), 'helper.sh')
+  t.assert.equal(bundle.imports.get('shell').get('main.sh').get('helper.sh'), 'helper.sh')
 })
 
 test('buildBashBundle resolves a `${VAR}` source via its `# shellcheck source=` directive', async (t) => {
@@ -1852,13 +1854,13 @@ test('buildBashBundle resolves a `${VAR}` source via its `# shellcheck source=` 
   // `# shellcheck source=../lib/config.sh` directive pins the real location.
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'shellcheck'), entries: ['bin/main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['bin/main.sh', 'lib/config.sh'])
-  t.assert.equal(bundle.imports.get('bash').get('bin/main.sh').get('../lib/config.sh'), 'lib/config.sh')
+  t.assert.equal(bundle.imports.get('shell').get('bin/main.sh').get('../lib/config.sh'), 'lib/config.sh')
 })
 
 test('buildBashBundle resolves ../ references across subdirectories', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'subdir'), entries: ['bin/main.sh'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['bin/main.sh', 'lib/helper.sh'])
-  t.assert.equal(bundle.imports.get('bash').get('bin/main.sh').get('../lib/helper.sh'), 'lib/helper.sh')
+  t.assert.equal(bundle.imports.get('shell').get('bin/main.sh').get('../lib/helper.sh'), 'lib/helper.sh')
 })
 
 test('buildBashBundle bundles local sources but tolerates commands and absolute system paths', async (t) => {
@@ -1878,7 +1880,7 @@ test('buildBashBundle tolerates a ../ source that escapes the bundle root', asyn
 test('buildBashBundle accepts .bash entries', async (t) => {
   const bundle = await buildBashBundle({ cwd: join(bashFixtures, 'dotbash'), entries: ['main.bash'] })
   t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['lib.sh', 'main.bash'])
-  t.assert.equal(bundle.formats.get('main.bash'), 'bash')
+  t.assert.equal(bundle.formats.get('main.bash'), 'shell')
 })
 
 test('buildBashBundle rejects an empty entry list', async (t) => {
@@ -1928,8 +1930,8 @@ test('bundleCommand writes a bash Bundle that round-trips through Bundle.parse',
   const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['main.sh'])
   t.assert.deepEqual(Object.keys(parsed.modules.get('.').files).toSorted(), ['lib.sh', 'main.sh'])
-  t.assert.equal(parsed.formats.get('main.sh'), 'bash')
-  t.assert.equal(parsed.imports.get('bash').get('main.sh').get('./lib.sh'), 'lib.sh')
+  t.assert.equal(parsed.formats.get('main.sh'), 'shell')
+  t.assert.equal(parsed.imports.get('shell').get('main.sh').get('./lib.sh'), 'lib.sh')
 }))
 
 test('CLI: bundle writes a brotli-compressed Bundle for a .sh entry', withTmp((t, tmp) => {
@@ -1940,7 +1942,7 @@ test('CLI: bundle writes a brotli-compressed Bundle for a .sh entry', withTmp((t
   t.assert.notEqual(buf[0], 0x7b)
   const parsed = Bundle.parse(brotliDecompressSync(buf).toString('utf8'))
   t.assert.deepEqual([...parsed.entries], ['main.sh'])
-  t.assert.equal(parsed.imports.get('bash').get('main.sh').get('./lib.sh'), 'lib.sh')
+  t.assert.equal(parsed.imports.get('shell').get('main.sh').get('./lib.sh'), 'lib.sh')
 }))
 
 test('CLI: bundle rejects mixing .sh and .js entries', (t) => {
@@ -2207,7 +2209,7 @@ test('buildBundle dispatches .php, .sh, and .rs entries to their builders', asyn
 
   const bash = await buildBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'] })
   t.assert.ok(bash instanceof Bundle)
-  t.assert.equal(bash.formats.get('main.sh'), 'bash')
+  t.assert.equal(bash.formats.get('main.sh'), 'shell')
 
   const rust = await buildBundle({ cwd: join(rustFixtures, 'basic'), entries: ['src/main.rs'] })
   t.assert.ok(rust instanceof Bundle)

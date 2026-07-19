@@ -16,7 +16,7 @@ const sep = '/'
 // artifact fails closed at the schema boundary, not at a later string compare.
 // Categories:
 //   Executable by Node's loader — module, commonjs, json, *-typescript
-//   Source languages (analysis-only, not runnable by Node) — solidity, php, bash, rust
+//   Source languages (analysis-only, not runnable by Node) — solidity, php, shell, rust
 //   Native build inputs (analysis-only, not runnable by Node; the Metro native capture
 //     attests them for the CocoaPods/Gradle toolchain, so they carry a source tag rather
 //     than being lumped into 'resource') — java, kotlin, gradle, objc, objcpp, swift, c, cpp,
@@ -38,7 +38,7 @@ export const KNOWN_FORMATS = new Set([
   'commonjs-typescript',
   'solidity',
   'php',
-  'bash',
+  'shell',
   'rust',
   'java',
   'kotlin',
@@ -207,6 +207,9 @@ const NATIVE_CODE_FORMATS = new Map([
   ['podspec', 'podspec'], // CocoaPods spec (Ruby DSL)
   ['template', 'template'], // build-input template
   ['xml', 'xml'], // e.g. AndroidManifest.xml
+  ['plist', 'xml'], // Apple property list (XML)
+  ['xcprivacy', 'xml'], // Apple privacy manifest (XML plist)
+  ['xcscheme', 'xml'], // Xcode scheme (XML)
 ])
 
 // Native build-input files recognized by exact (lowercased) BASENAME rather than extension:
@@ -217,6 +220,7 @@ const NATIVE_CODE_FILENAMES = new Map([
   ['podfile', 'podfile'],
   ['podfile.lock', 'podfile-lock'],
   ['cmakelists.txt', 'cmake'],
+  ['gradlew', 'shell'], // the Gradle wrapper (a POSIX shell script, no extension)
 ])
 
 // The SINGLE decision for how the Metro native capture -- the StasisMetro plugin AND

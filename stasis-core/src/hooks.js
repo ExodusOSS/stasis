@@ -31,7 +31,7 @@ const NODEJS_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript
 // Per-kind messages for the few categories we recognize; everything else gets a
 // generic "unrecognized format" message. Kept separate from NODEJS_FORMATS so
 // the allowlist stays the single trust gate and the message is just UX.
-const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'bash', 'rust'])
+const NON_NODE_SOURCE_LANGUAGES = new Set(['solidity', 'php', 'shell', 'rust'])
 // Native build-input source the Metro capture attests for the CocoaPods/Gradle toolchain
 // (prune keeps them, frozen verifies them) -- code, but never executable by Node.
 const NATIVE_SOURCE_FORMATS = new Set(['java', 'kotlin', 'gradle', 'objc', 'objcpp', 'swift', 'c', 'cpp', 'c-header', 'cpp-header', 'ruby', 'cmake', 'podspec', 'podfile', 'podfile-lock', 'template', 'xml'])
