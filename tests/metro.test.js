@@ -871,6 +871,27 @@ const writeNativeDep = (tmp, name) => {
   writeFileSync(join(root, 'libs', 'android', 'arm64-v8a', 'libskia.a'), '!<arch>\0\xff')
   writeFileSync(join(root, 'libs', 'apple', 'Skia.xcframework', 'Info.plist'), '<plist/>\n') // text, but inside a skipped bundle dir
   writeFileSync(join(root, 'libs', 'apple', 'Skia.xcframework', 'ios-arm64', 'Skia.a'), '!<arch>\0\xff')
+  // Non-build-input NOISE -- docs / editor-lint-CI config / logs / source maps / Xcode-project
+  // metadata / off-platform -- excluded from the native globbing (no native build requires them):
+  writeFileSync(join(root, 'README.md'), '# doc\n')
+  writeFileSync(join(root, 'LICENSE'), 'MIT\n')
+  writeFileSync(join(root, '.prettierrc'), '{}\n')
+  writeFileSync(join(root, '.gitattributes'), '* text=auto\n')
+  writeFileSync(join(root, '.flowconfig'), '[ignore]\n')
+  writeFileSync(join(root, '.eslintignore'), 'lib/\n')
+  writeFileSync(join(root, '.releaserc'), '{}\n')
+  writeFileSync(join(root, '.clang-format'), 'BasedOnStyle: Google\n')
+  writeFileSync(join(root, '.buckconfig'), '[buildfile]\n')
+  writeFileSync(join(root, '.watchmanconfig'), '{}\n')
+  writeFileSync(join(root, 'debug.log'), 'log line\n')
+  writeFileSync(join(root, 'ios', 'RNThing.js.map'), '{"version":3}\n')
+  writeFileSync(join(root, 'install.bat'), '@echo off\n')       // Windows batch -> excluded off Windows
+  mkdirSync(join(root, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace'), { recursive: true }) // Xcode project bundle
+  writeFileSync(join(root, 'ios', 'RNThing.xcodeproj', 'project.pbxproj'), '// pbxproj\n')
+  writeFileSync(join(root, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace', 'contents.xcworkspacedata'), '<Workspace/>\n')
+  mkdirSync(join(root, 'windows'), { recursive: true })         // react-native-windows project -> off Windows
+  writeFileSync(join(root, 'windows', 'RNThing.cpp'), '// windows-only\n')
+  // (Info.plist / PrivacyInfo.xcprivacy are written above as real build inputs -- kept, tagged xml.)
   return root
 }
 
@@ -926,6 +947,16 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.equal(mod.files['android/src/main/jniLibs/arm64-v8a/librnthing.so'], undefined, 'a jniLibs .so is excluded')
   t.assert.equal(mod.files['libs/apple/Skia.xcframework/ios-arm64/Skia.a'], undefined, 'a lib inside an xcframework is excluded')
   t.assert.equal(mod.files['libs/apple/Skia.xcframework/Info.plist'], undefined, 'the whole *.xcframework bundle dir is skipped, not descended into')
+  // Non-build-input noise is excluded from the native globbing: docs, editor/lint/CI config, logs,
+  // source maps, Xcode project bundles, and off-platform (windows/, .bat off Windows).
+  for (const f of ['README.md', 'LICENSE', '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore',
+    '.releaserc', '.clang-format', '.buckconfig', '.watchmanconfig', 'debug.log', 'ios/RNThing.js.map',
+    'install.bat', 'ios/RNThing.xcodeproj/project.pbxproj',
+    'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata', 'windows/RNThing.cpp']) {
+    t.assert.equal(mod.files[f], undefined, `expected ${f} to be excluded from native capture`)
+  }
+  // (Info.plist + Apple's privacy manifest are kept, tagged 'xml' -- asserted below with the
+  // other Apple-XML build inputs.)
   // Native build-input source is attested as CODE under a per-language source tag; package.json
   // rides the code path as json.
   const nlfmt = (rel) => lock.formats[`node_modules/react-native-native-lib/${rel}`]

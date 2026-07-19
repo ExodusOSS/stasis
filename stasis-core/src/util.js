@@ -153,17 +153,21 @@ export function classifyExtension(filePath, resources) {
 }
 
 // Compiled / installed / prebuilt native artifacts a package ships or generates on install
-// (e.g. react-native-skia's prebuilt Skia `libs/` -- hundreds of MiB of .a/.xcframework). These
-// are build OUTPUTS, not source, and typically non-deterministic across installs, so the native
-// capture skips them entirely -- bundling neither their bytes nor an integrity (a frozen run
-// would otherwise flake on regenerated blobs). Matched by suffix on a file OR directory name, so
-// an Apple `*.framework`/`*.xcframework` bundle (a directory of a binary + headers) is skipped
-// whole rather than descended into and captured header-by-header.
+// (e.g. react-native-skia's prebuilt Skia `libs/` -- hundreds of MiB of .a/.xcframework), plus
+// non-source directory BUNDLES that aren't a CocoaPods/Gradle build input. These are build
+// OUTPUTS / IDE metadata, not source, and typically non-deterministic across installs, so the
+// native capture skips them entirely -- bundling neither their bytes nor an integrity (a frozen
+// run would otherwise flake on regenerated blobs). Matched by suffix on a file OR directory name,
+// so an Apple `*.framework`/`*.xcframework` bundle (a directory of a binary + headers), or a
+// module's `*.xcodeproj`/`*.xcworkspace` (Xcode project/workspace metadata -- CocoaPods compiles
+// the podspec's source_files, never the module's own Xcode project), is skipped whole rather than
+// descended into and captured file-by-file.
 const NATIVE_ARTIFACT_EXTS = new Set([
   'a', 'so', 'o', 'obj', 'dylib', 'lib', 'dll', 'exe', 'pdb', // native objects / libraries
   'aar', 'jar', 'class', 'dex', // JVM / Android build output
   'node', // Node native addon
   'framework', 'xcframework', 'dsym', // Apple binary bundle directories
+  'xcodeproj', 'xcworkspace', // Xcode project/workspace bundle dirs -- IDE metadata, not build input
   'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', // opaque archives
 ])
 export function isNativeArtifact(name) {
@@ -223,6 +227,32 @@ const NATIVE_CODE_FILENAMES = new Map([
   ['gradlew', 'shell'], // the Gradle wrapper (a POSIX shell script, no extension)
 ])
 
+// Files a native package ships that are NOT build inputs -- docs, editor/lint/CI/tooling config,
+// changelogs, logs. Excluded from the Metro native capture so the bundle carries only what the
+// CocoaPods/Gradle build actually consumes; none of these is a file a native build requires.
+// `.bat` is a Windows batch script, excluded off Windows. `win32` defaults to the capturing
+// host's platform (a bundle built on macOS/Linux for an iOS/Android app drops Windows-only files).
+//   - md: docs.  log: build/test logs.  map: source maps (a JS build output, not a native input).
+const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map'])
+const NATIVE_EXCLUDE_NAMES = new Set([
+  'license', '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc',
+  '.clang-format', '.buckconfig', '.watchmanconfig',
+])
+export function isExcludedNativeFile(name, { win32 = process.platform === 'win32' } = {}) {
+  const base = basename(name).toLowerCase()
+  if (NATIVE_EXCLUDE_NAMES.has(base)) return true
+  const ext = pathExt(name)
+  if (NATIVE_EXCLUDE_EXTS.has(ext)) return true
+  return !win32 && ext === 'bat' // Windows batch scripts aren't a build input off Windows
+}
+
+// A native-module TOPLEVEL directory that's platform-specific to a platform we're not capturing:
+// react-native-windows' `windows/`, skipped off Windows -- its sources are never an iOS/Android
+// (or any off-Windows) build input. `win32` defaults to the capturing host's platform.
+export function isExcludedNativeDir(name, { win32 = process.platform === 'win32' } = {}) {
+  return !win32 && name === 'windows'
+}
+
 // The SINGLE decision for how the Metro native capture -- the StasisMetro plugin AND
 // `stasis bundle --metro` -- records one build-input file `name`, so the capture sites can't
 // drift. Returns `{ action, format }`:
@@ -235,8 +265,10 @@ const NATIVE_CODE_FILENAMES = new Map([
 //   - action 'resource': any other file -- an asset payload (State derives 'resource' vs
 //     'resource:base64' from the bytes).
 // A code-classified file is source, so it must be UTF-8; callers assert that (State.addFile
-// does too). `name` may be a bare basename or a path.
-export function classifyNativeCapture(name) {
+// does too). `name` may be a bare basename or a path. Docs/config/log noise and off-platform
+// files (isExcludedNativeFile) return action 'skip' -- they aren't build inputs.
+export function classifyNativeCapture(name, { win32 = process.platform === 'win32' } = {}) {
+  if (isExcludedNativeFile(name, { win32 })) return { action: 'skip' }
   const base = basename(name).toLowerCase()
   // package.json and JSON podspecs are JSON build inputs -> Node 'json' loader format.
   if (base === 'package.json' || base.endsWith('.podspec.json')) return { action: 'code', format: 'json' }

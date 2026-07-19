@@ -12,7 +12,7 @@ import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { findPackageMetadata, normalizeEntries, readJson } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -721,7 +721,7 @@ function walkNativeDir(dirAbs, out) {
 // output/binary subtrees as walkNativeDir. React Native's own podspecs live in scattered subdirs
 // (third-party-podspecs/, Libraries/*/, sdks/hermes-engine/) that `react-native config` never
 // enumerates -- it reports only reactNativePath -- so a root-only scan misses them.
-function collectNativeManifests(dirAbs, out) {
+function collectNativeManifests(dirAbs, out, atRoot = false) {
   let entries
   try {
     entries = readdirSync(dirAbs, { withFileTypes: true })
@@ -732,7 +732,9 @@ function collectNativeManifests(dirAbs, out) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) collectNativeManifests(full, out)
+      // Skip build output/binary bundles and a toplevel off-platform dir (windows/ off Windows).
+      const skipDir = NATIVE_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
+      if (!skipDir) collectNativeManifests(full, out)
     } else if (ent.isFile() && isNativeManifest(ent.name)) {
       out.push(full)
     }
@@ -748,7 +750,7 @@ function collectNativeManifests(dirAbs, out) {
 // JS-only dependency's package.json would be pulled in. Returns deduped absolute paths.
 function nativeModuleFiles(pkgAbs) {
   const manifests = []
-  collectNativeManifests(pkgAbs, manifests)
+  collectNativeManifests(pkgAbs, manifests, true)
   const hasIos = existsSync(join(pkgAbs, 'ios'))
   const hasAndroid = existsSync(join(pkgAbs, 'android'))
   if (!hasIos && !hasAndroid && !manifests.some((f) => isPodspec(f))) return []
