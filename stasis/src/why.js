@@ -13,13 +13,17 @@ import { parseFile } from './parse.js'
 // `a` directly (a is the top of the chain), and `b -> c` surfaces additionally
 // when `b` is itself imported by src.
 //
-// The reason PREFIX names, per chain, the top-level importers of its head: the
-// consumers (`run`, `webpack`, ...) that recorded the src files importing
-// the head module -- `run: a -> b -> c`. Two consumers importing the same head
-// yield two lines. When the head is not imported from top-level at all (e.g. a
-// `scope=node_modules` bundle has no src), the head's OWN file reasons are used
-// instead. A bundle with a single consumer omits the `reason` map entirely;
-// there every chain renders bare, with no prefix.
+// The reason PREFIX (`run`, `webpack`, ...) names the consumer a chain belongs to.
+// Import edges are FILE-level: a consumer "has" the edge `b -> c` only if it
+// recorded the specific file in `b` that imports `c`. So a chain belongs to a
+// consumer only when that consumer recorded the file forming EVERY one of its
+// edges -- `metro: a -> b -> c` can't appear if the file importing `c` from `b`
+// isn't metro's. Each consumer's chains are therefore enumerated on its own
+// subgraph (only its edges), so a consumer sees its MAXIMAL file-level path: if
+// metro's edges only reach up to `b`, its line is the shorter `metro: b -> c`. A
+// flagged package a consumer merely shipped (recorded its files) but never imports
+// through the graph still surfaces for it as a bare `metro: c`. A bundle with a
+// single consumer omits the `reason` map entirely; there every chain renders bare.
 
 // Cap on paths enumerated per target to bound pathological graphs (many diamond
 // dependencies compound into a combinatorial number of simple paths). Hitting it
@@ -74,15 +78,23 @@ function fileEdges(imports) {
   return edges
 }
 
-// The global cross-module graph:
+// Per-reason cross-module subgraphs. Every import edge is a FILE edge (a specific
+// file in the parent importing the target), and a consumer only "has" that edge if
+// it recorded the PARENT file. So a chain belongs to a reason only when that reason
+// bundled the file forming EVERY one of its edges. We build one subgraph per
+// consumer (bucket) -- holding only the edges that consumer's files created -- and
+// later enumerate that consumer's chains on it. With no reason map there is a single
+// bucket '' holding the full graph (chains render bare). Each subgraph:
 //   adjRev:       depDir -> Set(dep predecessor dir)  -- dep->dep edges, reversed
-//   srcImporters: depDir -> Set(src file)             -- src->dep edges, keeping
-//                                                        the importing src file
-// Intra-module edges and edges targeting a src module are irrelevant to a chain
-// INTO a dependency and are dropped.
-function moduleGraph(edges, fileToDir, dirInfo) {
-  const adjRev = new Map()
-  const srcImporters = new Map()
+//   srcImporters: depDir -> Set(src file)             -- src->dep edges
+// Intra-module edges and edges into a src module are dropped.
+function bucketGraphs(edges, fileToDir, dirInfo, fileReasons) {
+  const graphs = new Map()
+  const graphFor = (bucket) => {
+    let g = graphs.get(bucket)
+    if (g === undefined) graphs.set(bucket, (g = { adjRev: new Map(), srcImporters: new Map() }))
+    return g
+  }
   for (const [pf, tf] of edges) {
     const pd = fileToDir.get(pf)
     const td = fileToDir.get(tf)
@@ -92,17 +104,18 @@ function moduleGraph(edges, fileToDir, dirInfo) {
     // pull unrelated packages into the --why graph.
     if (dirInfo.get(pd).name === 'react-native' && tf.endsWith('/package.json')) continue
     if (!dirInfo.get(td).dep) continue
-    if (dirInfo.get(pd).dep) {
-      let set = adjRev.get(td)
-      if (set === undefined) adjRev.set(td, (set = new Set()))
-      set.add(pd)
-    } else {
-      let set = srcImporters.get(td)
-      if (set === undefined) srcImporters.set(td, (set = new Set()))
-      set.add(pf)
+    // The consumers this edge belongs to: those that recorded its parent file.
+    const buckets = fileReasons === null ? [''] : (fileReasons.get(pf) ?? [])
+    const dep = dirInfo.get(pd).dep
+    for (const bucket of buckets) {
+      const map = dep ? graphFor(bucket).adjRev : graphFor(bucket).srcImporters
+      let set = map.get(td)
+      if (set === undefined) map.set(td, (set = new Set()))
+      set.add(dep ? pd : pf)
     }
   }
-  return { adjRev, srcImporters }
+  if (fileReasons === null) graphFor('') // the bare bucket exists even with no edges
+  return graphs
 }
 
 // Invert the reason map to file -> Set(consumer). null when the artifact carries
@@ -121,63 +134,27 @@ function invertReason(reason) {
   return byFile
 }
 
-// The consumers that prefix a chain headed by `head`: those that recorded the
-// src files importing `head` (its top-level importers). When `head` has no
-// top-level importer (not imported from src), fall back to the consumers that
-// recorded `head`'s own files. Empty when the artifact has no reason map.
-function reasonsForHead(head, { srcImporters, dirFiles, fileReasons }, terminal = false) {
-  if (fileReasons === null) return []
-  const importers = srcImporters.get(head)
-  const hasImporters = importers !== undefined && importers.size > 0
-  const consumers = new Set()
-  const credit = (files) => {
-    for (const f of files) for (const c of fileReasons.get(f) ?? []) consumers.add(c)
+// dir -> Set(consumer): the consumers that recorded any of the dir's own files.
+// null when the artifact has no reason map. Used to decide whether a bare target
+// belongs to a reason that never imports it (a flagged package a bundler shipped).
+function dirReasonsIndex(dirFiles, fileReasons) {
+  if (fileReasons === null) return null
+  const byDir = new Map()
+  for (const [dir, files] of dirFiles) {
+    let set
+    for (const f of files) for (const c of fileReasons.get(f) ?? []) (set ??= new Set()).add(c)
+    if (set !== undefined) byDir.set(dir, set)
   }
-  if (hasImporters) credit(importers)
-  // Non-terminal heads use src importers alone (that's their provenance); when
-  // there are none, or the head is terminal, credit its own files too.
-  if (terminal || !hasImporters) credit(dirFiles.get(head) ?? [])
-  return [...consumers]
+  return byDir
 }
 
-// The consumers that reach a TERMINAL head (@babel/core / react-native / metro).
-// A terminal is shown bare / as a chain head -- the imports ABOVE it are noise and
-// hidden -- but its provenance must still name every consumer whose graph pulls it
-// in. Its own recorded files are unreliable here: a hoisted dep is recorded once
-// (under a single consumer), so a consumer reaching it transitively (`metro` via
-// c -> d -> @babel/core) would be lost. Derive the reasons from what IMPORTS it
-// instead: climb above it and union the head-reasons of every chain reaching it,
-// stopping at heads and at other terminals. The terminal's own direct provenance
-// (a consumer that src-imports it, or that recorded its files) is the base.
-function reasonsForTerminalHead(node, adjRev, isHead, isTerminal, reasonCtx) {
-  if (reasonCtx.fileReasons === null) return []
-  const consumers = new Set()
-  const seen = new Set([node])
-  for (const r of reasonsForHead(node, reasonCtx, true)) consumers.add(r)
-  const walk = (n) => {
-    for (const pred of adjRev.get(n) ?? []) {
-      if (seen.has(pred)) continue // no repeated module -> break cycles
-      seen.add(pred)
-      if (isTerminal(pred)) {
-        for (const r of reasonsForHead(pred, reasonCtx, true)) consumers.add(r)
-      } else {
-        if (isHead(pred)) for (const r of reasonsForHead(pred, reasonCtx)) consumers.add(r)
-        walk(pred)
-      }
-    }
-  }
-  walk(node)
-  return [...consumers]
-}
-
-// Every simple dep-only path that ends at `targetDir`, walking predecessors
-// backward and emitting a path each time its head is a HEAD node (`isHead`) or a
-// terminal package (`isTerminal`). A terminal node ALSO stops the walk -- the
-// chain never goes past @babel/core / react-native / metro, and this applies to
-// `targetDir` too: a terminal target is emitted bare (just `[targetDir]`), never
-// climbed above. Its provenance instead comes from every consumer that recorded
-// it (see reasonsForHead), so no reason is lost. Returns dirs head-first;
-// `truncated` flags the cap.
+// Every simple dep-only path (within one reason's subgraph) that ends at
+// `targetDir`, walking predecessors backward and emitting a path each time its
+// head is a HEAD node (`isHead`) or a terminal package (`isTerminal`). A terminal
+// node ALSO stops the walk -- the chain never goes past @babel/core / react-native
+// / metro, and this applies to `targetDir` too: a terminal target is emitted bare
+// (just `[targetDir]`), never climbed above. Its provenance instead comes from the
+// reason whose subgraph this is. Returns dirs head-first; `truncated` flags the cap.
 function pathsTo(adjRev, isHead, isTerminal, targetDir) {
   const results = []
   let truncated = false
@@ -278,6 +255,8 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
   }
   const addChain = (key, bucket, nodes) => bucketChains(key, bucket).set(nodes.join('\0'), nodes)
 
+  const EMPTY_GRAPH = { adjRev: new Map(), srcImporters: new Map() }
+
   for (const file of files) {
     const artifact = parseFile(file)
     const imports = artifact.imports
@@ -285,13 +264,17 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
 
     const { fileToDir, dirInfo, dirFiles } = moduleIndex(artifact)
     const edges = fileEdges(imports)
-    const { adjRev, srcImporters } = moduleGraph(edges, fileToDir, dirInfo)
     const fileReasons = invertReason(artifact.reason)
-    // A head tops a chain: a src file imports it directly, or nothing in
-    // node_modules imports it (no dep predecessor).
-    const isHead = (node) => srcImporters.has(node) || !adjRev.has(node)
+    const graphs = bucketGraphs(edges, fileToDir, dirInfo, fileReasons)
+    const dirReasons = dirReasonsIndex(dirFiles, fileReasons)
     // Terminal packages end a chain regardless of what imports them.
     const isTerminal = (node) => TERMINAL_PACKAGES.has(dirInfo.get(node)?.name)
+
+    // Buckets to enumerate: '' (bare) with no reason map, else every consumer --
+    // including ones with no import edges, so a bundler that merely shipped a
+    // flagged package still gets a bare line for it.
+    const buckets = new Set(fileReasons === null ? [''] : [])
+    if (fileReasons !== null) for (const set of fileReasons.values()) for (const c of set) buckets.add(c)
 
     // Group target dirs by `name@version` (a package can appear at several dirs,
     // e.g. nested node_modules); paths from every matching dir are unioned.
@@ -306,27 +289,28 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
     }
     if (dirsByKey.size === 0) continue
 
-    const reasonCtx = { srcImporters, dirFiles, fileReasons }
     for (const [key, dirs] of dirsByKey) {
       for (const targetDir of dirs) {
-        const { results, truncated } = pathsTo(adjRev, isHead, isTerminal, targetDir)
-        if (truncated) truncatedKeys.add(key)
-        for (const p of results) {
-          const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
-          // A terminal head hides its importers, so derive its reasons by climbing
-          // above it (reasonsForTerminalHead); a normal head uses its own.
-          const reasons = isTerminal(p[0])
-            ? reasonsForTerminalHead(p[0], adjRev, isHead, isTerminal, reasonCtx)
-            : reasonsForHead(p[0], reasonCtx)
-          if (reasonFilter) {
-            // Keep this chain only when the requested consumer accounts for it.
-            // Under --reason the column is already all one consumer, so drop the
-            // prefix (bare bucket) -- an unattributed chain can't match anyway.
-            if (reasons.includes(reasonFilter)) addChain(key, '', nodes)
-          } else if (reasons.length === 0) {
-            addChain(key, '', nodes)
-          } else {
-            for (const r of reasons) addChain(key, r, nodes)
+        for (const bucket of buckets) {
+          if (reasonFilter !== null && bucket !== reasonFilter) continue
+          const { adjRev, srcImporters } = graphs.get(bucket) ?? EMPTY_GRAPH
+          // A head tops a chain: a src file imports it directly, or nothing else
+          // in this bucket's graph imports it.
+          const isHead = (node) => srcImporters.has(node) || !adjRev.has(node)
+          const { results, truncated } = pathsTo(adjRev, isHead, isTerminal, targetDir)
+          if (truncated) truncatedKeys.add(key)
+          for (const p of results) {
+            // A single-node result is just the bare target. In a named bucket keep
+            // it only when that consumer actually reaches the target -- it imports
+            // it (a dep or src edge) or recorded its files -- so a reason that
+            // never touches the target gets no spurious bare line. Multi-node
+            // chains are real by construction: every edge is this bucket's.
+            if (bucket !== '' && p.length === 1) {
+              const d = p[0]
+              if (!adjRev.has(d) && !srcImporters.has(d) && !dirReasons?.get(d)?.has(bucket)) continue
+            }
+            const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
+            addChain(key, reasonFilter !== null ? '' : bucket, nodes)
           }
         }
       }
