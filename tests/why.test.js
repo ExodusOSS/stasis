@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { brotliCompressSync } from 'node:zlib'
 
 import { collectWhy } from '../stasis/src/why.js'
+import { collectReasons } from '../stasis/src/audit.js'
 
 const withTmp = (fn) => (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'stasis-why-'))
@@ -448,11 +449,11 @@ test('collectWhy keeps every reason for a terminal head, even one src-imported u
   ])
 }))
 
-test('collectWhy credits a terminal by its importers, not its (hoisted) own file record', withTmp((t, tmp) => {
-  // @babel/core is reached by run (a -> b -> @babel/core) and metro (c -> d ->
-  // @babel/core), but its own file is recorded ONLY under run -- a hoisted dep is
-  // recorded once. Its reasons must come from what IMPORTS it (b under run, d under
-  // metro), so both reasons show; relying on its own file record would drop metro.
+test('collectWhy reports only the reasons the flagged package itself was recorded under', withTmp((t, tmp) => {
+  // @babel/core is reached by run (a -> b -> @babel/core) AND metro (c -> d ->
+  // @babel/core), but its own file is recorded only under run: metro imports it yet
+  // never shipped it (externalized). A package's reasons are the ones that recorded
+  // IT -- exactly the non-`--why` column -- so only run shows, never metro.
   const file = writeGraphBundle(tmp, {
     deps: ['a', 'b', 'c', 'd', '@babel/core'],
     edges: [
@@ -460,12 +461,29 @@ test('collectWhy credits a terminal by its importers, not its (hoisted) own file
       ['metroEntry', 'c'], ['c', 'd'], ['d', '@babel/core'],
     ],
     reason: {
-      run: ['runEntry', 'a', 'b', '@babel/core'], // @babel/core recorded here only
-      metro: ['metroEntry', 'c', 'd'], //            metro reaches it via d, doesn't record it
+      run: ['runEntry', 'a', 'b', '@babel/core'], // run recorded @babel/core
+      metro: ['metroEntry', 'c', 'd'], //            metro imports it via d but never recorded it
     },
   })
   t.assert.deepEqual(linesFor(collectWhy([file], new Set(['@babel/core@1.0.0'])), '@babel/core@1.0.0'), [
-    'metro: @babel/core',
     'run: @babel/core',
   ])
+}))
+
+test('collectWhy --why reason set matches the non-why reasons of the flagged package', withTmp((t, tmp) => {
+  // The distinct reason PREFIXES in --why must equal the reasons collectReasons
+  // reports without --why -- both directions -- for the same package.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c'],
+    edges: [['runEntry', 'a'], ['a', 'b'], ['b', 'c'], ['metroEntry', 'b']],
+    reason: {
+      run: ['runEntry', 'a', 'b', 'c'],
+      metro: ['metroEntry', 'b', 'c'],
+    },
+  })
+  const why = collectWhy([file], new Set(['c@1.0.0']))
+  const whyReasons = [...new Set([...why.get('c@1.0.0')].map((l) => l.split(':')[0]))].toSorted()
+  const flagged = [...collectReasons([file]).get('c@1.0.0')].toSorted()
+  t.assert.deepEqual(whyReasons, flagged)
+  t.assert.deepEqual(flagged, ['metro', 'run'])
 }))

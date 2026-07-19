@@ -13,17 +13,22 @@ import { parseFile } from './parse.js'
 // `a` directly (a is the top of the chain), and `b -> c` surfaces additionally
 // when `b` is itself imported by src.
 //
-// The reason PREFIX (`run`, `webpack`, ...) names the consumer a chain belongs to.
-// Import edges are FILE-level: a consumer "has" the edge `b -> c` only if it
-// recorded the specific file in `b` that imports `c`. So a chain belongs to a
-// consumer only when that consumer recorded the file forming EVERY one of its
-// edges -- `metro: a -> b -> c` can't appear if the file importing `c` from `b`
-// isn't metro's. Each consumer's chains are therefore enumerated on its own
-// subgraph (only its edges), so a consumer sees its MAXIMAL file-level path: if
-// metro's edges only reach up to `b`, its line is the shorter `metro: b -> c`. A
-// flagged package a consumer merely shipped (recorded its files) but never imports
-// through the graph still surfaces for it as a bare `metro: c`. A bundle with a
-// single consumer omits the `reason` map entirely; there every chain renders bare.
+// The reasons shown for a flagged package are EXACTLY the ones that recorded the
+// package itself -- the same set the non-`--why` column reports (see collectReasons).
+// `--why` only adds, per reason, HOW that reason reaches it. So a consumer that
+// imports a package but never recorded it (externalized it) is not one of its
+// reasons and is never shown; and every reason that did record it appears, at least
+// as a bare line.
+//
+// The per-reason PATH is file-level. A consumer "has" the edge `b -> c` only if it
+// recorded the specific file in `b` that imports `c`, so a chain belongs to a
+// consumer only when it recorded the file forming EVERY edge -- `metro: a -> b -> c`
+// can't appear if the file importing `c` from `b` isn't metro's. Each reason's
+// chains are enumerated on its own subgraph (only its edges), so it shows its
+// MAXIMAL file-level path: if metro's edges only reach up to `b`, its line is the
+// shorter `metro: b -> c`; a reason that recorded the package but never imports it
+// through the graph shows a bare `metro: c`. A bundle with a single consumer omits
+// the `reason` map entirely; there every chain renders bare, with no prefix.
 
 // Cap on paths enumerated per target to bound pathological graphs (many diamond
 // dependencies compound into a combinatorial number of simple paths). Hitting it
@@ -270,12 +275,6 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
     // Terminal packages end a chain regardless of what imports them.
     const isTerminal = (node) => TERMINAL_PACKAGES.has(dirInfo.get(node)?.name)
 
-    // Buckets to enumerate: '' (bare) with no reason map, else every consumer --
-    // including ones with no import edges, so a bundler that merely shipped a
-    // flagged package still gets a bare line for it.
-    const buckets = new Set(fileReasons === null ? [''] : [])
-    if (fileReasons !== null) for (const set of fileReasons.values()) for (const c of set) buckets.add(c)
-
     // Group target dirs by `name@version` (a package can appear at several dirs,
     // e.g. nested node_modules); paths from every matching dir are unioned.
     const dirsByKey = new Map()
@@ -291,7 +290,15 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
 
     for (const [key, dirs] of dirsByKey) {
       for (const targetDir of dirs) {
-        for (const bucket of buckets) {
+        // The reasons to report are exactly the ones the FLAGGED package itself was
+        // recorded under -- identical to the non-`--why` column (see collectReasons).
+        // For each, enumerate that reason's MAXIMAL file-level chains on its own
+        // subgraph; a reason that recorded the package but doesn't import it through
+        // the graph still yields a bare line. A reason that IMPORTS the package but
+        // never recorded it (externalized it) is not one of the package's reasons and
+        // is not shown -- so the --why reason set matches non-`--why` exactly.
+        const own = fileReasons === null ? [''] : (dirReasons.get(targetDir) ?? [])
+        for (const bucket of own) {
           if (reasonFilter !== null && bucket !== reasonFilter) continue
           const { adjRev, srcImporters } = graphs.get(bucket) ?? EMPTY_GRAPH
           // A head tops a chain: a src file imports it directly, or nothing else
@@ -300,15 +307,6 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
           const { results, truncated } = pathsTo(adjRev, isHead, isTerminal, targetDir)
           if (truncated) truncatedKeys.add(key)
           for (const p of results) {
-            // A single-node result is just the bare target. In a named bucket keep
-            // it only when that consumer actually reaches the target -- it imports
-            // it (a dep or src edge) or recorded its files -- so a reason that
-            // never touches the target gets no spurious bare line. Multi-node
-            // chains are real by construction: every edge is this bucket's.
-            if (bucket !== '' && p.length === 1) {
-              const d = p[0]
-              if (!adjRev.has(d) && !srcImporters.has(d) && !dirReasons?.get(d)?.has(bucket)) continue
-            }
             const nodes = p.map((d) => dirInfo.get(d)?.name ?? d)
             addChain(key, reasonFilter !== null ? '' : bucket, nodes)
           }
