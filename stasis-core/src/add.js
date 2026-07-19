@@ -7,29 +7,25 @@ import { Bundle } from './bundle.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath } from './state-util.js'
-import { addSourceFormat, assertRealPathWithinBase, isBrotliQuality, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, isBrotliQuality, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 
-// The loader format a CODE/source file gets from its path alone, WITHOUT parsing it -- or null
-// for an extension `add` does not recognize as source (the caller then treats it as a resource
-// iff it's declared in the config `resources` allowlist, else refuses it). Beyond the .js/.ts
-// package-`type` rule below (which reads the nearest package.json, so it can't be name-only),
-// classification is delegated to util's addSourceFormat -- the SINGLE name->format authority
-// `add` shares with the Metro native capture (the extension-fixed loader/source formats plus the
-// native build-input vocabulary). For .js/.cjs/.mjs/.ts/.cts/.mts/.json this matches scan.js's
-// `formatForFile`, so an `add` bundle and a deep/native one agree on a file's format and the two
-// can be merged.
+// The loader format a CODE/source file gets from its path alone, WITHOUT parsing it -- or null when
+// `add` doesn't recognize it as source (the caller then treats it as a resource iff declared in the
+// config `resources` allowlist, else refuses it). Beyond the .js/.ts package-`type` rule (which
+// reads the nearest package.json, so it can't be name-only), it just consults classifyFormat -- the
+// single name->format authority -- so an `add` bundle and a deep/native one agree on every format
+// and can be merged. `content` is passed only so an extensionless `#!/usr/bin/env bash` wrapper is
+// recognized as 'shell'.
 //
-// LIMITATION: a `.js`/`.ts` file in a package with no (or an unrecognized) `type` field falls
-// back to commonjs here. The deep bundler resolves that case by parsing for module syntax;
-// add deliberately doesn't parse, so use `.mjs`/`.cjs` or a package.json `type` when
-// the module system matters. `content` (the file bytes) is passed to addSourceFormat only so an
-// extensionless shell wrapper (a `#!/usr/bin/env bash` script) is recognized as 'shell'.
+// LIMITATION: a `.js`/`.ts` file with no (or an unrecognized) package `type` falls back to commonjs
+// here -- the deep bundler parses for module syntax, but `add` doesn't; use `.mjs`/`.cjs` or a
+// package.json `type` when the module system matters.
 function sourceFormat(absFile, content) {
   const ext = extname(absFile).toLowerCase()
   if (ext === '.js' || ext === '.ts') return `${packageType(absFile) ?? 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
-  return addSourceFormat(absFile, { content }) ?? null
+  return classifyFormat(absFile, { content }) ?? null
 }
 
 // Total file count + non-empty-package count from a bundle's module buckets, in one pass --

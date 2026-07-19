@@ -30,14 +30,10 @@ function getParser() {
 }
 
 // Format per Node's own rules, via classifyFormat -- the ONE name->format authority, shared with
-// the runtime capture so a static bundle and a runtime one agree on every file's format.
-// classifyFormat fixes the extension-determined Node formats (.mjs/.cjs/.json/.mts/.cts) and
-// returns null for the JS-family whose module system is NOT fixed by extension (.js/.ts): that
-// comes from the nearest package.json `type`, and when it's absent (or unrecognized) Node falls
-// back to module-syntax detection, which requires the parse -- null is signaled up to mean "detect
-// from syntax". TypeScript files get Node's type-stripping formats, matching the load hook. (scan
-// only ever reaches JS/TS files -- RESOLVABLE_EXTS -- so a native/source-language format never
-// comes back here.)
+// the runtime capture so a static and a runtime bundle agree. It fixes the extension-determined
+// Node formats and returns null for the JS-family whose module system isn't fixed by extension
+// (.js/.ts): that comes from the nearest package.json `type`, and a null `type` means "detect from
+// syntax" (signaled up as null). scan only reaches JS/TS files, so no native format comes back here.
 function formatForFile(file) {
   const format = classifyFormat(file)
   if (format != null) return format

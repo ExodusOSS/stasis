@@ -138,7 +138,7 @@ if (command === '-v' || command === '--version') {
   // core. It takes no flags; everything comes from the config.
   if (argv.length === 0) usage('Nothing to add: no file given')
   if (argv.some((a) => a.startsWith('-'))) usage('Error: add takes no options; its targets and resource allowlist come from stasis.config.json')
-  const { addCommand } = await import('../src/bundle-cmd.js')
+  const { addCommand } = await import('../src/add.js')
   // Let addCommand's runtime errors (missing/invalid config, an unclassifiable file, a merge
   // conflict) propagate as-is, like prune below: they're specific, actionable messages, so
   // dumping the whole usage block over them -- or swallowing the stack -- only buries the cause.

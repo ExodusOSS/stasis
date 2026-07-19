@@ -312,7 +312,7 @@ if (command === '-v' || command === '--version') {
   // core implementation. It takes no flags; everything comes from the config.
   if (argv.length === 0) usage('Nothing to add: no file given')
   if (argv.some((a) => a.startsWith('-'))) usage('Error: add takes no options; its targets and resource allowlist come from stasis.config.json')
-  const { addCommand } = await import('@exodus/stasis-core/bundle-cmd')
+  const { addCommand } = await import('@exodus/stasis-core/add')
   // Let addCommand's runtime errors propagate as-is (see `stasis-core add`), like the deep
   // bundleCommand above -- dumping the full usage block or swallowing the stack buries the cause.
   addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis' })

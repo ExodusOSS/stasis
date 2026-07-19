@@ -13,28 +13,20 @@ const { realpathSync } = fs
 const sep = '/'
 
 // --- Format vocabulary --------------------------------------------------------
-// KNOWN_FORMATS is the full, finite universe of `format` strings stasis knows -- lockfile and
-// bundle parsers reject anything outside it, so a tampered or forward-incompatible artifact fails
-// closed at the schema boundary, not at a later string compare. It is built as the union of the
-// CATEGORY sets below, which are the SINGLE partition every consumer derives its policy from
-// (rather than re-listing formats per call site): "which formats can Node execute", "which are
-// analysis-only source", etc. all live here.
-//   NODE_FORMATS             executable/importable by Node's loader (module/commonjs/json/*-ts).
-//                            The runtime loader (hooks.js) serves ONLY these; everything else
-//                            fails closed at load.
-//   SOURCE_LANGUAGE_FORMATS  analysis-only code bundled for external tooling, never run by Node
-//                            (solidity/php/shell/rust) -- also what `stasis bundle`'s dedicated
-//                            per-language bundlers emit.
-//   NATIVE_BUILD_FORMATS     React Native native build inputs the Metro capture attests for the
-//                            CocoaPods/Gradle toolchain -- code, but never executable by Node.
-//                            (`pbxproj` is here too, reached only via `stasis add`/`--fs`: the
-//                            packager excludes the `.xcodeproj`/`.xcworkspace` bundles it lives in.)
+// KNOWN_FORMATS is the finite universe of `format` strings; parsers reject anything outside it, so
+// a tampered/forward-incompatible artifact fails closed at the schema boundary. It's the union of
+// the category sets below -- the SINGLE partition every consumer's policy derives from:
+//   NODE_FORMATS             Node can execute/import (module/commonjs/json/*-ts); the runtime
+//                            loader serves ONLY these, everything else fails closed at load.
+//   SOURCE_LANGUAGE_FORMATS  analysis-only code, never run by Node (solidity/php/shell/rust).
+//   NATIVE_BUILD_FORMATS     React Native native build inputs (code, not Node-executable). pbxproj
+//                            is here but reached only via `stasis add`/`--fs` -- the packager
+//                            excludes the `.xcodeproj`/`.xcworkspace` bundles it lives in.
 //   RESOURCE_FORMATS         asset payloads (resource = raw UTF-8, resource:base64 = binary).
-//   STAT_FORMATS             payload-free `--fs` lstat/stat records: existence + KIND, no bytes,
-//                            no hash, no module-files entry (see isStatFormat below).
+//   STAT_FORMATS             payload-free `--fs` lstat/stat records (existence + KIND, no bytes).
 //   'directory'              a JSON-serialized, sorted `fs.readdirSync` listing (`--fs`).
-// Adding a format is a deliberate schema change: put it in the right category here AND, if Node
-// should serve it from a bundle, it must be in NODE_FORMATS.
+// Adding a format is a schema change: add it to the right category, and to NODE_FORMATS if Node
+// should serve it from a bundle.
 export const NODE_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript'])
 export const SOURCE_LANGUAGE_FORMATS = new Set(['solidity', 'php', 'shell', 'rust'])
 export const NATIVE_BUILD_FORMATS = new Set([
@@ -52,20 +44,12 @@ export const KNOWN_FORMATS = new Set([
   ...STAT_FORMATS,
 ])
 
-// JS-shaped code extensions, keyed dot-less + lowercase (matching pathExt), split by how their
-// Node loader format is determined:
-//   NODE_EXT_FORMATS   fixed by the extension alone -- mjs/cjs/json + the TS-CJS/TS-ESM variants.
-//   JS_UNRESOLVED_EXTS format NOT fixed by extension -- .js/.ts take it from the nearest
-//                      package.json `type` (or Node's syntax detection), and .jsx/.tsx are code a
-//                      bundler transforms but Node can't load, so they carry NO loader format.
-//                      classifyFormat returns `null` for all four ("code, resolved by the loader,
-//                      or none").
-// CODE_EXTENSIONS (their union) is the SINGLE "is this JS-graph code" answer: the bundler plugins'
-// classifyExtension counts exactly these as code, parseResourcesOption refuses to admit any into a
-// `resources` allowlist (a code file is never an asset), and State guards `resource:true` against
-// them. Drift here once desynced a lockfile/bundle: `.jsx`/`.tsx` were code to the plugins but
-// missing from the fs-capture set, so an fs-read tagged a `.jsx` 'resource' while the import tagged
-// it code -- keeping this one derived set removes that failure mode.
+// JS-shaped code extensions (dot-less, lowercase), split by how the Node loader format is found:
+// NODE_EXT_FORMATS fixes it by extension (mjs/cjs/json + TS variants); JS_UNRESOLVED_EXTS don't
+// (.js/.ts come from package.json `type`/syntax, .jsx/.tsx are bundler-transformed with no Node
+// format) -- classifyFormat returns null for those four. CODE_EXTENSIONS (their union) is the one
+// "is this JS-graph code" answer: classifyExtension counts exactly these as code, and
+// parseResourcesOption / State's resource:true guard reject them (a code file is never an asset).
 const NODE_EXT_FORMATS = new Map([
   ['mjs', 'module'], ['cjs', 'commonjs'], ['json', 'json'],
   ['mts', 'module-typescript'], ['cts', 'commonjs-typescript'],
@@ -132,19 +116,13 @@ export function parseBrotliQuality(name, value) {
   return n
 }
 
-// The JS-GRAPH bundlers' policy view over classifyFormat (webpack/esbuild/Metro's module-graph
-// capture). Returns 'code' (track with its loader format), 'resource' (track with a
-// 'resource'/'resource:base64' format, encoding chosen from content), or 'unknown' (caller must
-// reject). These bundlers bundle only what Node executes, so ONLY JS-family code counts as 'code'
-// here; a non-JS code format (a native build input / source-language file that happens to appear)
-// is treated like any other non-JS file -- 'resource' iff its extension (or basename, when it has
-// none: LICENSE, Makefile, a dotless name) is in the allowlist, else 'unknown'. The 'unknown' path
-// forces every non-JS asset to be declared explicitly -- no silent attestation widening. NOTE:
-// `stasis run --fs` classifies WIDER -- it follows classifyFormat's full vocabulary (see
-// State.addFsFile), so a native/source file it READS is captured as code, not funneled through here.
+// The JS-GRAPH bundlers' policy view over classifyFormat (webpack/esbuild/Metro modules). Returns
+// 'code', 'resource' (allowlisted asset -- by extension, or basename when it has none), or
+// 'unknown' (caller rejects -- no silent widening). Only JS-family code counts as 'code'; a
+// native/source format that happens to appear is a resource-or-unknown like any other non-JS file.
+// `stasis run --fs` classifies WIDER (State.addFsFile follows the full vocabulary).
 export function classifyExtension(filePath, resources) {
-  // classifyFormat returns null for the JS-family extensions (.js/.ts/.jsx/.tsx) and a NODE_FORMATS
-  // string for the fixed ones (.mjs/.cjs/.json/.mts/.cts) -- together exactly the JS-graph code set.
+  // null (js-family) + NODE_FORMATS (fixed mjs/cjs/json/*-ts) == exactly the JS-graph code set.
   const format = classifyFormat(filePath)
   if (format === null || NODE_FORMATS.has(format)) return 'code'
   if (resources.has(pathExt(filePath) || basename(filePath).toLowerCase())) return 'resource'
@@ -180,11 +158,9 @@ export function isPodspec(name) {
   return name.endsWith('.podspec') || name.endsWith('.podspec.json')
 }
 
-// Non-JS code formats keyed by lowercase, dot-less extension (pathExt): the analysis-only source
-// languages and every React Native native build input. Merged with NODE_EXT_FORMATS to form the
-// extension half of classifyFormat -- the ONE table every classifier consults. These aren't
-// runnable by Node, so each carries a source-language / native TAG (never a Node loader format);
-// every value here is in KNOWN_FORMATS (SOURCE_LANGUAGE_FORMATS or NATIVE_BUILD_FORMATS).
+// Non-JS code formats by lowercase, dot-less extension (pathExt): the analysis-only source
+// languages + every React Native native build input. With NODE_EXT_FORMATS these are the extension
+// half of classifyFormat; every value is in KNOWN_FORMATS.
 const CODE_EXT_FORMATS = new Map([
   // Source languages (also emitted by `stasis bundle`'s dedicated per-language bundlers).
   ['sol', 'solidity'], // Solidity
@@ -216,18 +192,15 @@ const CODE_EXT_FORMATS = new Map([
   ['env', 'env'], // dotenv config
   ['pbxproj', 'pbxproj'], // Xcode project file (old-style plist) -- see NB below
   ['xcworkspacedata', 'xml'], // Xcode workspace descriptor (XML) -- see NB below
-  // NB: project.pbxproj / *.xcworkspacedata live inside the `.xcodeproj`/`.xcworkspace` bundle
-  // dirs the Metro native capture excludes as IDE metadata (isNativeArtifact), so the packager's
-  // deep walk never reaches them; they're attestable only via `stasis add` / `--fs`, which walk no
-  // tree and classify exactly the file handed them. Tagged here (the one vocabulary) so every path
-  // agrees on the format.
+  // NB: project.pbxproj / *.xcworkspacedata live inside the `.xcodeproj`/`.xcworkspace` bundle dirs
+  // the Metro capture excludes (isNativeArtifact), so the packager never reaches them -- only
+  // `stasis add` / `--fs` do. Tagged here (the one vocabulary) so every path agrees on the format.
 ])
 
-// Code formats keyed by exact (lowercased) BASENAME rather than extension: Podfile (a Ruby DSL, no
-// ext), Podfile.lock (`.lock` is too generic -- yarn.lock/Gemfile.lock are unrelated), CMakeLists.txt
-// (`.txt` likewise too generic), gradlew (the Gradle wrapper shell script, no ext), Appfile/Fastfile
-// (Fastlane Ruby DSLs, no ext), and apple-app-site-association (Associated Domains manifest, JSON, no
-// ext). package.json and JSON podspecs (`*.podspec.json`) are handled in classifyFormat directly.
+// Code formats by exact (lowercased) BASENAME, for names an extension can't key: Podfile,
+// Podfile.lock (`.lock` too generic), CMakeLists.txt (`.txt` too generic), gradlew (shell wrapper),
+// Appfile/Fastfile (Fastlane), apple-app-site-association (JSON). package.json / `*.podspec.json`
+// are handled in classifyFormat directly.
 const CODE_NAME_FORMATS = new Map([
   ['podfile', 'podfile'],
   ['podfile.lock', 'podfile-lock'],
@@ -239,9 +212,8 @@ const CODE_NAME_FORMATS = new Map([
 ])
 
 // A POSIX shell shebang (`#!/bin/sh`, `#!/usr/bin/env bash`, ...) on an EXTENSIONLESS, UTF-8 file
-// -> 'shell'. This is the "content for no-extension bash" arm of classifyFormat: a wrapper script
-// carrying no `.sh`. Only the first line's interpreter is inspected; a non-shell interpreter
-// (node/python/ruby/...) doesn't match and the file falls through to its extension/name rule.
+// -> 'shell' (classifyFormat's "content for no-extension bash" arm). Only the first line's
+// interpreter is inspected; a non-shell one falls through to the extension/name rules.
 const SHELL_SHEBANG = /^#![^\n]*\b(?:bash|sh)\b/u
 function isShellShebang(content) {
   if (!Buffer.isBuffer(content) || !isUtf8(content)) return false
@@ -276,24 +248,18 @@ export function isExcludedNativeDir(name, { win32 = process.platform === 'win32'
   return !win32 && name === 'windows'
 }
 
-// THE single name->format classifier -- the one authority every capture path is a policy view of,
-// so no two can disagree on a file's format. Given a file NAME (and, for the extensionless shell
-// case, its bytes as `content`), returns:
-//   - a concrete format string when the name determines one: every source-language / native build
-//     input (CODE_EXT_FORMATS, CODE_NAME_FORMATS), the fixed Node formats (mjs/cjs/json/mts/cts),
-//     package.json + JSON podspecs (json), and an extensionless shell shebang (shell);
-//   - null for a JS-family file whose Node loader format is package-`type`/syntax dependent
-//     (.js/.ts) or nonexistent (.jsx/.tsx) -- "code, resolved by the loader (or none)";
-//   - undefined when the name is not recognized code (the caller treats it as a resource or
-//     rejects it, per its own policy).
-// FORMAT only -- never capture-vs-skip, resource-vs-reject, or executability. Those are each
-// caller's concern: `run` executes only NODE_FORMATS (hooks.js); a bundler bundles only the formats
-// it expects; classifyExtension keeps the JS-graph narrow; `--fs` (State.addFsFile) follows this
-// result wholesale; classifyNativeCapture layers the Metro skip/resource policy on top.
+// THE single name->format classifier -- the one authority every capture path is a policy view of.
+// Given a file NAME (and, for the extensionless-shell case, its bytes as `content`), returns a
+// concrete format when the name determines one (source-language / native build inputs, the fixed
+// Node formats, package.json + JSON podspecs -> json, an extensionless shell shebang -> shell);
+// null for a JS-family file whose Node format is package-`type`/syntax dependent (.js/.ts) or none
+// (.jsx/.tsx); or undefined when the name isn't recognized code. FORMAT only -- each caller layers
+// its own policy (`run` executes only NODE_FORMATS; classifyExtension keeps the JS-graph narrow;
+// `--fs` follows this wholesale; classifyNativeCapture adds the Metro skip/resource rules).
 export function classifyFormat(name, { content } = {}) {
   const base = basename(name).toLowerCase()
-  // package.json + JSON podspecs are 'json' by name (a `*.podspec.json` is BOTH a podspec and JSON;
-  // Node reads it as JSON, so json wins). Checked before the extension rules so it isn't shadowed.
+  // package.json / JSON podspecs are 'json' by name (a `*.podspec.json` is both, and Node reads it
+  // as JSON) -- checked before the extension rules so it isn't shadowed.
   if (base === 'package.json' || base.endsWith('.podspec.json')) return 'json'
   const byName = CODE_NAME_FORMATS.get(base)
   if (byName !== undefined) return byName
@@ -305,28 +271,14 @@ export function classifyFormat(name, { content } = {}) {
   return undefined
 }
 
-// `stasis add`'s policy view over classifyFormat: attest any recognized CODE file by name (it
-// applies the .js/.ts package-`type` rule itself first, so a JS-family `null` reaching here --
-// .jsx/.tsx -- is treated as "not source"). Returns the format, or null when `name` isn't a source
-// file `add` recognizes (the caller then treats it as a resource iff declared, else refuses it).
-export function addSourceFormat(name, opts) {
-  return classifyFormat(name, opts) ?? null
-}
-
-// The Metro native capture's policy view (StasisMetro plugin AND `stasis bundle --metro`) -- the
-// SINGLE decision for how a build-input file `name` is recorded, so the two sites can't drift.
-// Returns `{ action, format }`:
-//   - action 'code' + a format tag: a native build input for the CODE bundle.
-//   - action 'skip': excluded noise (isExcludedNativeFile), or a JS-family file matched BY
-//     EXTENSION -- Metro's module graph owns those (reachable JS is in the graph; unused JS is
-//     neither a native input nor reachable). Files matched BY NAME are the exception: package.json /
-//     JSON podspecs (json), Podfile, gradlew, Appfile/Fastfile, AASA, ... are build inputs the
-//     native toolchain reads, so they ride the code path even when their tag is a Node format.
-//   - action 'resource': any other file -- an asset payload (State derives 'resource' vs
-//     'resource:base64' from the bytes).
-// A code-classified file is source, so it must be UTF-8; callers assert that (State.addFile does
-// too). `name` may be a bare basename or a path; `content` (optional) enables the extensionless
-// shell-shebang rule. Docs/config/log noise and off-platform files (isExcludedNativeFile) skip.
+// The Metro native capture's policy view (StasisMetro AND `stasis bundle --metro`) -- one decision
+// for how a build-input file is recorded, so the sites can't drift. Returns { action, format }:
+//   - 'code' + tag: a native build input for the CODE bundle.
+//   - 'skip': excluded noise (isExcludedNativeFile), or a JS-family file matched BY EXTENSION
+//     (Metro's module graph owns those). Files matched BY NAME are the exception -- package.json /
+//     JSON podspecs, Podfile, gradlew, AASA, ... are build inputs, so they ride the code path.
+//   - 'resource': anything else (State derives resource vs resource:base64 from the bytes).
+// A code file must be UTF-8 (callers assert it). `content` (optional) enables the shell-shebang rule.
 export function classifyNativeCapture(name, { win32 = process.platform === 'win32', content } = {}) {
   if (isExcludedNativeFile(name, { win32 })) return { action: 'skip' }
   const base = basename(name).toLowerCase()

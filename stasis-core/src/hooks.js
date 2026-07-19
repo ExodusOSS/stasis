@@ -25,14 +25,10 @@ const { mkdtempSync, opendirSync, readFileSync, renameSync, rmSync, statSync, wr
 
 // Warning: only covers code imports, not file reads
 
-// The format-category trust partition is imported from util.js (the single partition of
-// KNOWN_FORMATS -- see above), under the loader's historical local names. NODEJS_FORMATS
-// (util's NODE_FORMATS) is the trust boundary: a file served from the bundle whose attested
-// format is outside it is refused at load time (and earlier at resolve, where applicable) with a
-// contextual message -- everything else (resource/asset content, source-language + native
-// build-input bundles, an unknown string from a tampered or newer bundle) fails closed. The other
-// sets (NON_NODE_SOURCE_LANGUAGES, NATIVE_SOURCE_FORMATS, RESOURCE_FORMATS, STAT_FORMATS) only
-// shape the per-kind UX message in refuseNonNodeFormat.
+// The format-category trust partition is imported from util.js under the loader's historical local
+// names. NODEJS_FORMATS (util's NODE_FORMATS) is the trust boundary: a bundle-served file whose
+// attested format is outside it is refused at load (and earlier at resolve, where applicable) --
+// everything else fails closed. The other sets only shape the per-kind UX message below.
 
 // The executable CommonJS formats (plain CJS + TS-CJS). Kept local -- a sub-partition of
 // NODEJS_FORMATS the require-repair below keys off.

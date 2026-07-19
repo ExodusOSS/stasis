@@ -1345,24 +1345,19 @@ export class State {
   }
 
   // Record an `fs.readFileSync` capture (`stasis run --fs`, capture side). `source` is the raw
-  // bytes (a Buffer). Classification FOLLOWS classifyFormat's full vocabulary -- the single
-  // name->format authority -- so `--fs` attests exactly what the classifier recognizes, WIDER than
-  // the JS-graph bundlers' classifyExtension: a native/source-language file it reads is code, no
-  // resources allowlist entry required.
-  //  - a concrete code format (mjs/cjs/json/*-ts, a source language like solidity/shell, or a
-  //    native build input like swift/podspec/xml) → recorded as code under that format. addFile
-  //    asserts the bytes are UTF-8 -- a non-UTF-8 code file is malformed input, refused there
-  //    rather than silently re-tagged as a resource.
-  //  - `null` (a JS-family file: .js/.ts by package `type`/syntax, .jsx/.tsx none) → recorded as
-  //    code with NO format imposed, so the loader stays the authority when the file is also
-  //    imported (forcing a default here would collide at noupsert with the loader's record).
-  //  - undefined (not recognized code) → a 'resource'/'resource:base64' payload IFF its extension
-  //    (or basename, when it has none) is in the resources allowlist, else THROW. Recording an
-  //    undeclared file as a resource would silently widen the attested set (the exact desync this
-  //    guards); the --fs hook catches the throw, warns, and writes nothing.
-  // Routing through addFile means a file that is BOTH imported and fs-read lands in one consistent,
-  // deduped entry, hashed and bucketed exactly like every other file. `content` is passed so an
-  // extensionless shell wrapper (a `#!/usr/bin/env bash` script) is recognized as 'shell'.
+  // bytes. Classification FOLLOWS classifyFormat's full vocabulary -- WIDER than the JS-graph
+  // bundlers' classifyExtension -- so a native/source-language file it reads is code, no resources
+  // allowlist entry needed:
+  //  - a concrete code format (mjs/cjs/json/*-ts, a source language, a native build input) →
+  //    recorded as code under it. addFile asserts UTF-8 -- a non-UTF-8 code file is refused, not
+  //    silently re-tagged as a resource.
+  //  - null (a JS-family file: .js/.ts by package `type`/syntax, .jsx/.tsx none) → code with NO
+  //    format imposed, so the loader stays authoritative if the file is also imported.
+  //  - undefined (not code) → a 'resource'/'resource:base64' payload IFF its extension/basename is
+  //    allowlisted, else THROW (recording an undeclared file would silently widen the attested set;
+  //    the --fs hook turns the throw into a tainted, nothing-written run).
+  // Routing through addFile means a both-imported-and-fs-read file lands in one deduped entry.
+  // `content` is passed so an extensionless `#!/usr/bin/env bash` wrapper is recognized as 'shell'.
   addFsFile(url, source) {
     assert.ok(Buffer.isBuffer(source), 'addFsFile requires a Buffer source')
     const path = fileURLToPath(url)
