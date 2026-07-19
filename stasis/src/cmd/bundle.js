@@ -2,7 +2,7 @@ import { isUtf8 } from 'node:buffer'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { brotliCompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
@@ -313,13 +313,16 @@ function assembleCodeBundle({
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([[conditionKey, importsForKey]])
 
+  // Every statically built bundle attributes its files to the `bundle` consumer in the
+  // informational reason map (the static builders don't go through State's per-file
+  // consumer tagging), so `stasis bundle` names itself as their source.
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(entries),
     modules,
     formats: formatsMap,
     imports,
-  })
+  }).withReason('bundle')
 }
 
 // Build a stasis Bundle (in-memory) from a list of entry .sol files and
@@ -533,13 +536,15 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([['php', importsForKey]])
 
+  // Attribute to the `bundle` consumer like the other static builders (see
+  // assembleCodeBundle); PHP builds its own Bundle rather than going through it.
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(normalized),
     modules,
     formats,
     imports,
-  })
+  }).withReason('bundle')
 }
 
 // Classify a scanner's unresolved edges + parse errors into `fatal` (the bundle
@@ -1068,7 +1073,8 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory
 // Bundle from a list of entry files, without writing anything to disk
 // (serialize with bundle.serialize() to get the JSON that `stasis bundle`
-// brotli-compresses into stasis.code.br).
+// brotli-compresses into stasis.code.br). Every file is attributed to the `bundle`
+// consumer in the informational `reason` map, the same way the CLI records it.
 //
 // Dispatch by extension matches the CLI: all entries must be one language —
 // .sol (Solidity), .php (PHP), .js/.cjs/.mjs/.ts/.cts/.mts (JS/TS, via static
@@ -1103,7 +1109,9 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
     return bundle
   }
   const state = await buildJsBundle({ cwd, entries, scope, conditions })
-  return state.sourceBundle
+  // state.sourceBundle carries no reason (a single-consumer static build), so stamp the
+  // `bundle` consumer here, matching assembleCodeBundle's non-JS path.
+  return state.sourceBundle.withReason('bundle')
 }
 
 // Where `stasis bundle` writes when no --output is given: stasis.code.br, the
@@ -1144,8 +1152,29 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // replay the same `--conditions` at run time, so the attested and observed graphs agree.
 // `brotliQuality` (integer 0..11, optional; unset = brotli's default 11) tunes the
 // output compression, forwarded to brotliOptions().
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality } = {}) {
+//
+// `add` merges the freshly built bundle INTO the one already at `output` (or
+// stasis.code.br) instead of replacing it: the file set, entries, import graph, and
+// formats are unioned (see Bundle.merge). When the target doesn't exist yet this is a
+// plain write, so `stasis bundle --add` bootstraps on the first run and accretes on
+// every run after. The merge is strict -- a file whose bytes/identity/format/
+// resolution differ from what the existing bundle attests throws. `--add` can't target
+// stdout (there is nothing to merge into), and when a `lockfile` is written too it is
+// unioned into any existing one on disk so it keeps attesting the whole merged graph.
+//
+// Every file this command bundles is attributed to the `bundle` consumer in the
+// bundle's informational `reason` map. On `--add` that attribution is unioned with the
+// existing bundle's, so a bundle grown from a runtime/plugin capture keeps naming those
+// consumers alongside `bundle` for the statically added files.
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality, add = false } = {}) {
   const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
+
+  const target = output ?? DEFAULT_BUNDLE_FILE
+  // --add reads the artifact already at `target` back and unions the new build into
+  // it; a stdout stream is write-only, so there is nothing to merge into there.
+  if (add && target === '-') {
+    throw new Error('bundleCommand: --add cannot be combined with --output=- (nothing to merge into on stdout)')
+  }
 
   let bundle
   let lockData
@@ -1168,11 +1197,52 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     // The companion lockfile attests file hashes, which only State carries —
     // a Bundle holds sources, not digests — so this path keeps the State.
     const state = await buildJsBundle({ cwd, entries, scope, conditions })
-    bundle = state.sourceBundle
+    // Stamp the `bundle` consumer, like buildBundle's plain-JS path (this branch
+    // bypasses buildBundle to keep the State for its lockfile digests).
+    bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
     bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions })
   }
+
+  // --add: grow the artifact already on disk rather than replacing it. Merging a
+  // freshly built bundle into the existing one unions their files/entries/imports/
+  // formats; a conflict (same path, different bytes/format/resolution) throws. When
+  // nothing is on disk yet this branch is skipped and the write below is a fresh one.
+  const outAbs = target === '-' ? undefined : resolve(cwd, target)
+  // Count of files the pre-existing bundle carried; stays undefined when no merge
+  // happened (fresh write), which the summary line below uses as the merged sentinel.
+  let mergedFrom
+  if (add && existsSync(outAbs)) {
+    let existing
+    try {
+      existing = Bundle.parse(brotliDecompressSync(readFileSync(outAbs)).toString('utf8'))
+    } catch (cause) {
+      throw new Error(`bundleCommand: --add failed to read the existing bundle at ${target}`, { cause })
+    }
+    mergedFrom = existing.sources.size
+    bundle = existing.merge(bundle)
+    // Keep the companion lockfile consistent with the merged bundle. When one exists on
+    // disk, union it so it attests the whole merged graph. When it DOESN'T, the fresh
+    // lockData attests only the newly added files -- not the pre-existing bundle's -- so
+    // a --lock=frozen --bundle=load pair would fail closed. The hashes for the old files
+    // live only in that missing lockfile, so we can't reconstruct a complete one here;
+    // refuse rather than write an under-attesting lockfile.
+    if (lockData && lockfile) {
+      const lockAbs = resolve(cwd, lockfile)
+      if (!existsSync(lockAbs)) {
+        throw new Error(`bundleCommand: --add can't write a complete lockfile at ${lockfile}: the bundle at ${target} already carries files a fresh lockfile wouldn't attest, and there's no existing lockfile to merge into. Write --lockfile alongside the bundle from the first build, or drop --lockfile.`)
+      }
+      let existingLock
+      try {
+        existingLock = Lockfile.parse(readFileSync(lockAbs, 'utf8'))
+      } catch (cause) {
+        throw new Error(`bundleCommand: --add failed to read the existing lockfile at ${lockfile}`, { cause })
+      }
+      lockData = existingLock.merge(Lockfile.parse(lockData)).serialize()
+    }
+  }
+
   const serialized = bundle.serialize()
   const files = [...bundle.sources.keys()]
   const modules = bundle.modules
@@ -1180,11 +1250,9 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   const data = brotliCompressSync(serialized, brotliOptions(brotliQuality))
   // Default to writing stasis.code.br in cwd; `-` is the conventional opt-in
   // for streaming the raw brotli bytes to stdout (e.g. to pipe somewhere else).
-  const target = output ?? DEFAULT_BUNDLE_FILE
   if (target === '-') {
     process.stdout.write(data)
   } else {
-    const outAbs = resolve(cwd, target)
     mkdirSync(dirname(outAbs), { recursive: true })
     writeFileSync(outAbs, data)
   }
@@ -1199,5 +1267,13 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   // "." workspace bucket) counting as one package alongside each dependency.
   const packages = [...modules.values()].filter((m) => Object.keys(m.files).length > 0).length
   const pkgLabel = `${packages} package${packages === 1 ? '' : 's'}`
-  console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
+  // When we merged into an existing bundle, report how many files were newly added
+  // alongside the merged totals; a fresh write (including --add with nothing on disk)
+  // keeps the plain "Bundled N files" line.
+  if (mergedFrom !== undefined) {
+    const added = files.length - mergedFrom
+    console.warn(`[stasis] Added ${added} file${added === 1 ? '' : 's'} (${files.length} total in ${pkgLabel}) from ${fromDir} to ${dest}`)
+  } else {
+    console.warn(`[stasis] Bundled ${files.length} files in ${pkgLabel} from ${fromDir} to ${dest}`)
+  }
 }

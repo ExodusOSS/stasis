@@ -22,13 +22,14 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
- stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--output=(path|-)] path/to/file.sol ...
- stasis bundle [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle [--output=(path|-)] path/to/file.(sh|bash) ...
- stasis bundle [--output=(path|-)] path/to/file.rs ...
+ stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
+ stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
+ stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (stasis bundle writes to stasis.code.br by default; --output=- streams to stdout;
+  --add merges into an existing bundle instead of replacing it (not with --output=-);
   --brotli-quality=0..11 tunes bundle compression for any entry language, default 9)
  stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
@@ -202,6 +203,7 @@ if (command === '-v' || command === '--version') {
     metro: { type: 'boolean' },
     platforms: { type: 'string', multiple: true },
     'brotli-quality': { type: 'string' },
+    add: { type: 'boolean' },
   }
   let values
   try {
@@ -280,6 +282,11 @@ if (command === '-v' || command === '--version') {
       usage(`Error: ${cause.message}`)
     }
   }
+  // --add: merge into the bundle already at --output (default stasis.code.br) instead
+  // of replacing it. Reading the existing artifact back is the whole point, so it can't
+  // target the write-only stdout stream.
+  const add = Boolean(values.add)
+  if (add && values.output === '-') usage('Error: --add cannot be combined with --output=-')
   const { bundleCommand } = await import('../src/cmd/bundle.js')
   await bundleCommand({
     cwd: process.cwd(),
@@ -293,6 +300,7 @@ if (command === '-v' || command === '--version') {
     metro,
     platforms,
     brotliQuality,
+    add,
   })
 } else if (command === 'build') {
   const flags = []

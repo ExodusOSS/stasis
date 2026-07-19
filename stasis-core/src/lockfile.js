@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -155,4 +155,34 @@ export class Lockfile {
     if (this.formats !== null) Object.assign(store, { formats: fileMapToObject(this.formats) })
     return JSON.stringify(store, undefined, 2) + '\n'
   }
+
+  // Merge another Lockfile into this one, returning a NEW Lockfile carrying the union
+  // of both -- the companion to Bundle.merge for `stasis bundle --add --lockfile`. Same
+  // strictness: overlapping module buckets must agree on identity, and a file present
+  // in both must carry the identical integrity hash (a hash divergence means the two
+  // lockfiles attest different bytes for the same path -- fail closed). imports/formats
+  // are nullable (a legacy lockfile predates attesting them): both-null stays null,
+  // both-present merge, and a one-sided null throws rather than silently dropping the
+  // attestation the other side carries.
+  merge(other) {
+    assert(this.config.scope === other.config.scope,
+      `lockfile merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
+    return new Lockfile({
+      config: { scope: this.config.scope },
+      entries: new Set([...this.entries, ...other.entries]),
+      modules: mergeModuleMaps(this.modules, other.modules, 'lockfile merge'),
+      imports: mergeNullable(this.imports, other.imports, (a, b) => mergeImportMaps(a, b, 'lockfile merge'), 'imports'),
+      formats: mergeNullable(this.formats, other.formats, (a, b) => mergeFormatMaps(a, b, 'lockfile merge'), 'formats'),
+    })
+  }
+}
+
+// Merge two nullable lockfile facets (imports/formats): both-null stays null (a legacy
+// lockfile that predates attesting them), both-present merges via `merge`, and a
+// one-sided null throws rather than silently dropping the attestation the other carries.
+const mergeNullable = (a, b, merge, what) => {
+  if (a === null && b === null) return null
+  assert(a !== null && b !== null,
+    `lockfile merge: cannot merge ${what} (one lockfile attests ${what}, the other does not)`)
+  return merge(a, b)
 }

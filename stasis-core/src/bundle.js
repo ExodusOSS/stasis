@@ -5,6 +5,9 @@ import {
   fileSetToObject,
   fromEntries,
   isPlainObject,
+  mergeFormatMaps,
+  mergeImportMaps,
+  mergeModuleMaps,
   moduleFileKey,
   objectToMaps,
   posixPathEscapes,
@@ -24,6 +27,22 @@ const normalize = ({ name, version, ecosystem, files }) => {
 
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
+
+// Union the informational `reason` provenance of two bundles (consumer -> the files
+// it contributed). Undefined on one side yields the other; present on both unions
+// each consumer's file list (sorted the way State serializes it -- see #bundleReason).
+// Never attested, so a best-effort union is fine.
+const mergeReason = (a, b) => {
+  if (a === undefined) return b
+  if (b === undefined) return a
+  const out = {}
+  for (const src of [a, b]) {
+    for (const [consumer, files] of Object.entries(src)) {
+      out[consumer] = fileSetToObject(new Set([...(out[consumer] ?? []), ...files]))
+    }
+  }
+  return out
+}
 
 // Bundle handles the JSON shape of stasis.code.br; callers (State) are responsible
 // for the brotli wrapper around the JSON text. One unified shape carries both code
@@ -261,5 +280,45 @@ export class Bundle {
     // Informational provenance, last: only present when set (more than one consumer).
     if (this.reason !== undefined) data.reason = this.reason
     return JSON.stringify(data, undefined, 2)
+  }
+
+  // Return a NEW Bundle attributing every file it carries to `consumer` in the
+  // informational `reason` map (unioned with any attribution already present). This is
+  // how `stasis bundle` names itself ('bundle') as the source of the files it writes:
+  // the runtime path tags files with a consumer (`run`, `StasisWebpack`, ...) as it
+  // records them, but the static builders construct a Bundle directly, so they stamp
+  // the consumer here instead. It keeps the provenance map complete when `--add` merges
+  // statically bundled files into a bundle other consumers also touched.
+  withReason(consumer) {
+    const files = [...this.sources.keys()]
+    return new Bundle({
+      version: this.version,
+      config: this.config,
+      entries: this.entries,
+      modules: this.modules,
+      formats: this.formats,
+      imports: this.imports,
+      reason: mergeReason(this.reason, { [consumer]: files }),
+    })
+  }
+
+  // Merge another Bundle into this one, returning a NEW Bundle carrying the union of
+  // both. Backs `stasis bundle --add`: a freshly built bundle is merged into the one
+  // already on disk so the artifact GROWS instead of being overwritten. Strict by
+  // design -- a bundle is an attestation, so any genuine conflict (a differing scope,
+  // module identity, file's bytes, format tag, or resolved import target) throws
+  // rather than silently picking a winner; re-adding an identical file is a no-op. The
+  // informational `reason` provenance is unioned per consumer.
+  merge(other) {
+    assert(this.config.scope === other.config.scope,
+      `bundle merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
+    return new Bundle({
+      config: { scope: this.config.scope },
+      entries: new Set([...this.entries, ...other.entries]),
+      modules: mergeModuleMaps(this.modules, other.modules, 'bundle merge'),
+      formats: mergeFormatMaps(this.formats, other.formats, 'bundle merge'),
+      imports: mergeImportMaps(this.imports, other.imports, 'bundle merge'),
+      reason: mergeReason(this.reason, other.reason),
+    })
   }
 }

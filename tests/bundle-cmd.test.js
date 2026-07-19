@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
-import { brotliDecompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
@@ -2244,3 +2244,194 @@ test('buildBundle rejects scope for non-JS entries', async (t) => {
     /--scope is only valid for JS bundles/,
   )
 })
+
+// --- `stasis bundle --add`: grow an existing bundle instead of replacing it ---
+//
+// The default is `replace` (a fresh build overwrites whatever was at --output; see
+// the "does not inherit stale formats/imports" regression above). `--add` opts into
+// the inverse: merge the freshly built bundle INTO the one already on disk, so a
+// second entry (and its import graph) accretes rather than clobbering the first.
+
+test('bundleCommand --add merges a second entry\'s graph into an existing bundle', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const cwd = join(fixtures, 'shared')
+  // First build: A.sol pulls in Shared.sol.
+  await bundleCommand({ cwd, entries: ['src/A.sol'], output: outPath })
+  const first = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...first.entries], ['src/A.sol'])
+  t.assert.deepEqual(Object.keys(first.modules.get('.').files).toSorted(), ['src/A.sol', 'src/Shared.sol'])
+
+  // Add B.sol (which also imports Shared.sol) to the same bundle.
+  await bundleCommand({ cwd, entries: ['src/B.sol'], output: outPath, add: true })
+  const merged = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  // Entries and files are unioned; the shared file is not duplicated.
+  t.assert.deepEqual([...merged.entries].toSorted(), ['src/A.sol', 'src/B.sol'])
+  t.assert.deepEqual(
+    Object.keys(merged.modules.get('.').files).toSorted(),
+    ['src/A.sol', 'src/B.sol', 'src/Shared.sol'],
+  )
+  // Both entries' resolution edges survive.
+  t.assert.equal(merged.imports.get('solidity').get('src/A.sol').get('./Shared.sol'), 'src/Shared.sol')
+  t.assert.equal(merged.imports.get('solidity').get('src/B.sol').get('./Shared.sol'), 'src/Shared.sol')
+}))
+
+test('bundleCommand --add writes a fresh bundle when the target does not exist yet', withTmp(async (t, tmp) => {
+  // Bootstrap: `--add` against a non-existent target is just a plain write, so the
+  // first-run/every-run-after invocation is uniform.
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath, add: true })
+  t.assert.ok(existsSync(outPath))
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual(Object.keys(parsed.modules.get('.').files).toSorted(), ['src/A.sol', 'src/B.sol'])
+}))
+
+test('bundleCommand --add cannot stream to stdout', async (t) => {
+  await t.assert.rejects(
+    () => bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: '-', add: true }),
+    /--add cannot be combined with --output=-/,
+  )
+})
+
+test('bundleCommand --add fails closed on a file whose bytes conflict, leaving the existing bundle intact', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  // basic/src/A.sol and shared/src/A.sol are DIFFERENT files at the same project path.
+  await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
+  const before = readFileSync(outPath)
+  await t.assert.rejects(
+    () => bundleCommand({ cwd: join(fixtures, 'shared'), entries: ['src/A.sol'], output: outPath, add: true }),
+    /content mismatch for 'src\/A\.sol'/,
+  )
+  // The pre-existing bundle is untouched (the merge throws before any write).
+  t.assert.deepEqual(readFileSync(outPath), before)
+}))
+
+test('CLI: bundle --add merges into stasis.code.br and reports the added count', withTmp((t, tmp) => {
+  cpSync(join(fixtures, 'shared'), tmp, { recursive: true })
+  const r1 = runCli(['bundle', 'src/A.sol'], { cwd: tmp })
+  t.assert.equal(r1.status, 0, `stderr: ${r1.stderr}`)
+
+  const r2 = runCli(['bundle', '--add', 'src/B.sol'], { cwd: tmp })
+  t.assert.equal(r2.status, 0, `stderr: ${r2.stderr}`)
+  // One new file (B.sol) on top of the two already there (A.sol + Shared.sol).
+  t.assert.match(r2.stderr, /\[stasis\] Added 1 file \(3 total in 1 package\) from src to stasis\.code\.br/)
+
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(join(tmp, 'stasis.code.br'))).toString('utf8'))
+  t.assert.deepEqual([...parsed.entries].toSorted(), ['src/A.sol', 'src/B.sol'])
+  t.assert.deepEqual(
+    Object.keys(parsed.modules.get('.').files).toSorted(),
+    ['src/A.sol', 'src/B.sol', 'src/Shared.sol'],
+  )
+}))
+
+test('CLI: bundle --add (JS) carries both entries and unions the companion lockfile', withTmp((t, tmp) => {
+  // Contrast with the "does not inherit stale formats/imports" regression above:
+  // there a second plain build REPLACES; here `--add` keeps the first entry too.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'add-js', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  writeFileSync(join(tmp, 'shared.js'), 'export const S = 1\n')
+  writeFileSync(join(tmp, 'a.js'), "import { S } from './shared.js'\nexport const A = S\n")
+  writeFileSync(join(tmp, 'b.js'), "import { S } from './shared.js'\nexport const B = S\n")
+
+  const bundlePath = join(tmp, 'stasis.code.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  // Bootstrap with a.js.
+  const r1 = runCli(['bundle', '--add', `--lockfile=${lockPath}`, `--output=${bundlePath}`, 'a.js'], { cwd: tmp })
+  t.assert.equal(r1.status, 0, `stderr: ${r1.stderr}`)
+  // Add b.js.
+  const r2 = runCli(['bundle', '--add', `--lockfile=${lockPath}`, `--output=${bundlePath}`, 'b.js'], { cwd: tmp })
+  t.assert.equal(r2.status, 0, `stderr: ${r2.stderr}`)
+  t.assert.match(r2.stderr, /\[stasis\] Added 1 file/)
+
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.entries].toSorted(), ['a.js', 'b.js'])
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['a.js', 'b.js', 'shared.js'])
+
+  // The companion lockfile attests the whole merged graph, not just b.js's subset.
+  const lockfile = Lockfile.parse(readFileSync(lockPath, 'utf8'))
+  t.assert.deepEqual([...lockfile.entries].toSorted(), ['a.js', 'b.js'])
+  t.assert.deepEqual(Object.keys(lockfile.modules.get('.').files).toSorted(), ['a.js', 'b.js', 'shared.js'])
+}))
+
+test('CLI: bundle --add with --output=- prints usage', (t) => {
+  const r = runCli(['bundle', '--add', '--output=-', 'src/A.sol'], { cwd: join(fixtures, 'basic') })
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--add cannot be combined with --output=-/)
+})
+
+// --- `reason` provenance: `stasis bundle` attributes its files to `bundle` ---
+//
+// Unlike the runtime (`stasis run`), which drops a single-consumer reason map as
+// noise, a statically built bundle ALWAYS names `bundle` as the consumer of the files
+// it wrote -- so a `--add` that merges these into a bundle other consumers touched
+// keeps the provenance map complete.
+
+test('bundleCommand attributes every bundled file to the `bundle` consumer', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual(parsed.reason, { bundle: ['src/A.sol', 'src/B.sol'] })
+}))
+
+test('buildBundle attributes files to `bundle`, matching what bundleCommand writes', async (t) => {
+  const bundle = await buildBundle({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'] })
+  t.assert.deepEqual(bundle.reason, { bundle: ['src/A.sol', 'src/B.sol'] })
+})
+
+test('bundleCommand --add unions the `bundle` attribution across builds', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const cwd = join(fixtures, 'shared')
+  await bundleCommand({ cwd, entries: ['src/A.sol'], output: outPath })
+  await bundleCommand({ cwd, entries: ['src/B.sol'], output: outPath, add: true })
+  const merged = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  // Both builds attributed under `bundle`; the union covers every merged file.
+  t.assert.deepEqual(merged.reason, { bundle: ['src/A.sol', 'src/B.sol', 'src/Shared.sol'] })
+}))
+
+test('bundleCommand --add preserves other consumers when growing a captured bundle', withTmp(async (t, tmp) => {
+  // Seed an existing bundle that looks like a multi-consumer runtime/plugin capture
+  // (it carries a `reason` naming `run` and `StasisWebpack`). A static `--add` must
+  // keep those and attribute only the newly added file to `bundle`.
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const seed = new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(['src/A.sol']),
+    modules: new Map([['.', { name: 'solidity-bundle', version: '0.0.0', files: {
+      'src/A.sol': readFileSync(join(fixtures, 'shared', 'src/A.sol'), 'utf8'),
+      'src/Shared.sol': readFileSync(join(fixtures, 'shared', 'src/Shared.sol'), 'utf8'),
+    } }]]),
+    formats: new Map([['src/A.sol', 'solidity'], ['src/Shared.sol', 'solidity']]),
+    imports: new Map([['solidity', new Map([['src/A.sol', new Map([['./Shared.sol', 'src/Shared.sol']])]])]]),
+    reason: { run: ['src/A.sol'], StasisWebpack: ['src/Shared.sol'] },
+  })
+  writeFileSync(outPath, brotliCompressSync(seed.serialize()))
+
+  await bundleCommand({ cwd: join(fixtures, 'shared'), entries: ['src/B.sol'], output: outPath, add: true })
+  const merged = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  // Original consumers survive; the added file (B.sol) is attributed to `bundle`.
+  // (Shared.sol was re-bundled by the static build too, so `bundle` names it as well.)
+  t.assert.deepEqual(merged.reason.run, ['src/A.sol'])
+  t.assert.deepEqual(merged.reason.StasisWebpack, ['src/Shared.sol'])
+  t.assert.deepEqual(merged.reason.bundle, ['src/B.sol', 'src/Shared.sol'])
+}))
+
+test('bundleCommand --add refuses to write an under-attesting lockfile when the bundle exists but its lockfile does not', withTmp(async (t, tmp) => {
+  // Build a bundle WITHOUT a companion lockfile.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'add-nolock', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'a.js'), 'export const a = 1\n')
+  writeFileSync(join(tmp, 'b.js'), 'export const b = 2\n')
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  await bundleCommand({ cwd: tmp, entries: ['a.js'], output: outPath })
+  t.assert.ok(!existsSync(lockPath))
+
+  // --add WITH a lockfile now: the bundle carries a.js already, but a fresh lockfile
+  // would attest only b.js, and there's no prior lockfile to merge into -> refuse
+  // rather than write a lockfile that a later --lock=frozen --bundle=load would reject.
+  await t.assert.rejects(
+    () => bundleCommand({ cwd: tmp, entries: ['b.js'], output: outPath, lockfile: lockPath, add: true }),
+    /can't write a complete lockfile/,
+  )
+  t.assert.ok(!existsSync(lockPath), 'no lockfile is written on refusal')
+}))
