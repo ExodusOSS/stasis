@@ -982,3 +982,110 @@ test('file-loader frozen run passes against committed asset hashes and rejects a
   t.assert.notEqual(r.status, 0, `expected frozen rejection; stderr=${r.stderr}`)
   t.assert.match(r.stderr, /Build failed|ERR_ASSERTION|sha512-/)
 }))
+
+// Regression: a RESOURCE import (`import logo from './logo.png'` under esbuild's file
+// loader) must round-trip under bundle=load from a clean dir, exactly like a code
+// import. Two capture-side gaps used to break this: (1) the resolve hook recorded an
+// import edge only for kind==='code', so the asset edge was absent from the bundle and
+// load-mode onResolve couldn't map './logo.png' to its bundled path (it deferred to
+// esbuild's disk resolver, which fails in a clean dir); and (2) load-mode onLoad returned
+// the asset `contents` with no `loader`, so esbuild parsed the bytes as JS instead of
+// replaying the configured file loader. With both fixed the load output is byte-identical
+// to the capture output.
+test('bundle=load round-trips resource imports (png/svg) from a clean dir', withTmp((t, tmp) => {
+  // Phase 1: capture in a full-fixture dir (sources + config), writing a bundle.
+  const capDir = join(tmp, 'cap')
+  cpSync(assetsFixture, capDir, { recursive: true })
+  rmSync(join(capDir, 'stasis.lock.json'), { force: true })
+  const capBundle = join(capDir, 'snapshot.br')
+  const outA = join(tmp, 'out-capture')
+
+  const capture = run(['src/entry.js'], {
+    cwd: capDir,
+    env: {
+      STASIS_TEST_ESBUILD_LOADER: FILE_LOADER,
+      STASIS_TEST_ESBUILD_OUTDIR: outA,
+      ...withOpts({ lock: 'add', bundle: 'add', bundleFile: capBundle, resources: ['png', 'svg'] }),
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+  const captureOutput = readFileSync(join(outA, 'entry.js'), 'utf-8')
+
+  // The bundle must carry the resource edges (this is the fix): without them the clean-dir
+  // load below can't resolve './logo.png' / './icon.svg'.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(capBundle)))
+  t.assert.equal(decoded.imports['*']['src/entry.js']['./logo.png'], 'src/logo.png', 'png edge recorded')
+  t.assert.equal(decoded.imports['*']['src/entry.js']['./icon.svg'], 'src/icon.svg', 'svg edge recorded')
+
+  // Phase 2: clean load dir holding only the bundle + a minimal package.json. NO sources on
+  // disk, so serving the assets from the bundle is the only path to a build.
+  const loadDir = join(tmp, 'load')
+  mkdirSync(loadDir)
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  writeFileSync(join(loadDir, 'package.json'), '{ "name": "stasis-load", "version": "0.0.0", "private": true, "type": "module" }')
+  t.assert.ok(!existsSync(join(loadDir, 'src')), 'load dir must not contain src/')
+
+  const outB = join(tmp, 'out-load')
+  const replay = run(['src/entry.js'], {
+    cwd: loadDir,
+    env: {
+      STASIS_TEST_ESBUILD_LOADER: FILE_LOADER,
+      STASIS_TEST_ESBUILD_OUTDIR: outB,
+      ...withOpts({ lock: 'none', bundle: 'load', bundleFile: join(loadDir, 'snapshot.br'), resources: ['png', 'svg'] }),
+    },
+  })
+  t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+  const replayOutput = readFileSync(join(outB, 'entry.js'), 'utf-8')
+
+  // Byte-identical round-trip: esbuild's file loader hashes the asset bytes into the emitted
+  // filename, so the load run (fed bundle bytes) must produce the same output as capture (fed
+  // disk bytes). If the loader replay were wrong the asset filename -- and thus this JS -- would differ.
+  t.assert.equal(replayOutput, captureOutput)
+}))
+
+// Regression (integrity, resource counterpart of the missing-code-file test above): with
+// the resource edge now recorded, a resource whose BYTES were dropped from the bundle must
+// fail closed at bundle=load -- it must NOT silently fall through to the asset still sitting
+// on disk. Before the edge was recorded, load mode deferred every asset import to esbuild's
+// disk resolver, reading it unattested; recording the edge routes it through onLoad's getFile
+// gate, which throws when the bundle doesn't carry the bytes.
+test('bundle=load fails closed when a resource\'s bytes are dropped from the bundle (no silent disk fallback)', withTmp((t, tmp) => {
+  const capDir = join(tmp, 'cap')
+  cpSync(assetsFixture, capDir, { recursive: true })
+  rmSync(join(capDir, 'stasis.lock.json'), { force: true })
+  const capBundle = join(capDir, 'snapshot.br')
+
+  const capture = run(['src/entry.js'], {
+    cwd: capDir,
+    env: {
+      STASIS_TEST_ESBUILD_LOADER: FILE_LOADER,
+      STASIS_TEST_ESBUILD_OUTDIR: join(tmp, 'out-capture'),
+      ...withOpts({ lock: 'add', bundle: 'add', bundleFile: capBundle, resources: ['png', 'svg'] }),
+    },
+  })
+  t.assert.equal(capture.status, 0, `capture stderr: ${capture.stderr}`)
+
+  // Drop the png BYTES from the bundle but keep its edge + format tag: onResolve still maps
+  // './logo.png' to src/logo.png, so onLoad's getFile is the fail-closed gate.
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(capBundle)))
+  delete decoded.sources['.'].files['src/logo.png']
+  writeFileSync(capBundle, brotliCompressSync(JSON.stringify(decoded)))
+
+  // Load dir keeps the FULL source tree on disk (asset present), so a silent disk fallback
+  // would succeed -- the point is that it must not.
+  const loadDir = join(tmp, 'load')
+  cpSync(capDir, loadDir, { recursive: true })
+  copyFileSync(capBundle, join(loadDir, 'snapshot.br'))
+  rmSync(join(loadDir, 'stasis.lock.json'), { force: true })
+
+  const r = run(['src/entry.js'], {
+    cwd: loadDir,
+    env: {
+      STASIS_TEST_ESBUILD_LOADER: FILE_LOADER,
+      STASIS_TEST_ESBUILD_OUTDIR: join(tmp, 'out-load'),
+      ...withOpts({ lock: 'none', bundle: 'load', bundleFile: join(loadDir, 'snapshot.br'), resources: ['png', 'svg'] }),
+    },
+  })
+  t.assert.notEqual(r.status, 0, 'load must fail when a resource\'s bytes are missing from the bundle')
+  t.assert.match(r.stderr, /logo\.png/)
+}))

@@ -54,7 +54,7 @@ export class StasisEsbuild {
     return 'stasis'
   }
 
-  setup = ({ onResolve, onLoad, onStart, onEnd, resolve }) => {
+  setup = ({ onResolve, onLoad, onStart, onEnd, resolve, initialOptions }) => {
     if (!this.#state) return  // noop plugin
 
     // Watch/rebuild capture is EXPLICITLY UNSUPPORTED -- fail the second build loudly before it
@@ -182,7 +182,17 @@ export class StasisEsbuild {
             }],
           }
         }
-        if (kind === 'code' && !isEntry) {
+        // Record the import edge for BOTH code and resource targets (never entries).
+        // Load mode resolves every in-bundle specifier through this map -- including
+        // asset imports like `import logo from './logo.png'` under esbuild's file/dataurl
+        // loader. A resource whose edge went unrecorded can't be found at bundle=load: the
+        // load-mode onResolve's getImport misses, treats the miss as an external, and
+        // defers to esbuild's disk resolver -- which fails in a clean load dir (the asset
+        // isn't there) and, worse, silently serves the on-disk asset UNATTESTED when it is
+        // (the fail-closed getFile gate in onLoad is only reached for edges we resolved).
+        // kind is 'code' or 'resource' here: 'unknown' already returned an error above and
+        // 'skip' can't enter this `namespace === 'file' && !external` block.
+        if (!isEntry) {
           const parentURL = pathToFileURL(args.importer).toString()
           const url = pathToFileURL(res.path).toString()
           // Forward import attributes (e.g. `with { type: 'json' }`) symmetrically
@@ -209,13 +219,25 @@ export class StasisEsbuild {
       // Load mode: serve bytes the bundle attested. `getFile` verifies the hash
       // against the lockfile (when one is loaded), and throws on a file the
       // bundle doesn't carry -- a missing in-scope file is a hard error, not a
-      // silent disk fallback. Resources return `{ contents }` only; esbuild's
-      // loader config (file/dataurl/copy/...) interprets and emits them by
-      // extension, the same way capture mode lets esbuild's loader machinery
-      // handle resource emission.
+      // silent disk fallback.
       if (this.#state.config.loadBundle) {
         const { source } = this.#state.getFile(pathToFileURL(path).toString())
-        if (kind === 'resource') return { contents: source }
+        if (kind === 'resource') {
+          // A plugin onLoad result that returns `contents` WITHOUT a `loader`
+          // defaults to the `js` loader -- esbuild consults the build's per-extension
+          // `loader` config ONLY on its own (pluginless) load path, not on
+          // plugin-provided contents. Capture mode dodges this by returning undefined
+          // for resources and letting esbuild's default pipeline apply the configured
+          // loader; load mode can't (the asset isn't on disk in a clean deploy dir), so
+          // we must replay the SAME loader the build configured for this extension.
+          // Read it from initialOptions.loader (e.g. { '.png': 'file', '.svg': 'file' })
+          // so file/dataurl/copy/binary/... reproduce the capture-mode emission. A resource
+          // with no configured loader would have failed the capture build too (esbuild
+          // errors "No loader is configured for ..."), so leaving it undefined here fails
+          // symmetrically rather than papering over a misconfigured load build.
+          const loader = initialOptions.loader?.[extname(path)]
+          return loader ? { contents: source, loader } : { contents: source }
+        }
         return { contents: source, loader: this.#loaderFor(path) }
       }
 
