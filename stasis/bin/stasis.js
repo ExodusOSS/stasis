@@ -217,18 +217,13 @@ if (command === '-v' || command === '--version') {
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
   if (values.shallow) {
     // --shallow packs exactly the listed files, with no dependency resolution or graph
-    // walk, so it has no scanner/loaders and lives in stasis-core -- delegate to it. The
-    // deep-only knobs (which all steer resolution) make no sense here, so reject them.
-    for (const [flag, present] of [
-      ['--mapping', values.mapping !== undefined],
-      ['--scope', values.scope !== undefined],
-      ['--lockfile', values.lockfile !== undefined],
-      ['--conditions', values.conditions !== undefined],
-      ['--mainFields', values.mainFields !== undefined],
-      ['--metro', Boolean(values.metro)],
-      ['--platforms', (values.platforms ?? []).length > 0],
-    ]) {
-      if (present) usage(`Error: ${flag} is not supported with --shallow (shallow packs files verbatim, resolving nothing)`)
+    // walk, so it has no scanner/loaders and lives in stasis-core -- delegate to it. Every
+    // other bundle flag steers the resolution shallow skips, so allow ONLY these four and
+    // reject the rest: an allowlist means a future deep flag is refused here automatically,
+    // with no second edit.
+    const SHALLOW_FLAGS = new Set(['shallow', 'output', 'add', 'brotli-quality'])
+    for (const flag of Object.keys(values)) {
+      if (!SHALLOW_FLAGS.has(flag)) usage(`Error: --${flag} is not supported with --shallow (shallow packs files verbatim, resolving nothing)`)
     }
     const add = Boolean(values.add)
     if (add && values.output === '-') usage('Error: --add cannot be combined with --output=-')

@@ -27,32 +27,31 @@ function packageType(file) {
   }
 }
 
-// The format a shallow-packed file gets, WITHOUT parsing it. For the extensions the
-// static bundler recognizes it matches scan.js's `formatForFile` exactly (so a shallow
-// bundle and a deep one agree on a file's format, and `--add` can merge them); it adds
-// the analysis-only source languages by extension, and classifies everything else as a
-// resource -- raw UTF-8 ('resource') or, for non-UTF-8 bytes, base64 ('resource:base64').
+// Extensions whose loader format depends on the extension alone. `.js`/`.ts` (which also
+// need the package `type`) and unknown extensions (resources, decided from the bytes) are
+// handled by shallowFormat / the read loop.
+const FIXED_FORMATS = new Map([
+  ['.mjs', 'module'], ['.cjs', 'commonjs'], ['.json', 'json'],
+  ['.mts', 'module-typescript'], ['.cts', 'commonjs-typescript'],
+  ['.sol', 'solidity'], ['.php', 'php'], ['.sh', 'bash'], ['.bash', 'bash'], ['.rs', 'rust'],
+])
+
+// The loader format a shallow-packed CODE/source file gets from its path alone, WITHOUT
+// parsing it -- or null for an extension shallow treats as a resource (the caller decides
+// resource vs resource:base64 from the bytes). For .js/.cjs/.mjs/.ts/.cts/.mts/.json this
+// matches scan.js's `formatForFile` (so a shallow bundle and a deep one agree on a file's
+// format, and `--add` can merge them); it adds the analysis-only source languages by extension.
 //
 // LIMITATION: a `.js`/`.ts` file in a package with no (or an unrecognized) `type` field
 // falls back to commonjs here. The deep bundler resolves that case by parsing for module
 // syntax; shallow mode deliberately doesn't parse, so use `.mjs`/`.cjs` or a package.json
 // `type` when the module system matters.
-function shallowFormat(absFile, buf) {
+function shallowFormat(absFile) {
   const ext = extname(absFile).toLowerCase()
-  if (ext === '.mjs') return 'module'
-  if (ext === '.cjs') return 'commonjs'
-  if (ext === '.json') return 'json'
-  if (ext === '.mts') return 'module-typescript'
-  if (ext === '.cts') return 'commonjs-typescript'
-  if (ext === '.js' || ext === '.ts') {
-    const suffix = ext === '.ts' ? '-typescript' : ''
-    return `${packageType(absFile) ?? 'commonjs'}${suffix}`
-  }
-  if (ext === '.sol') return 'solidity'
-  if (ext === '.php') return 'php'
-  if (ext === '.sh' || ext === '.bash') return 'bash'
-  if (ext === '.rs') return 'rust'
-  return isUtf8(buf) ? 'resource' : 'resource:base64'
+  const fixed = FIXED_FORMATS.get(ext)
+  if (fixed) return fixed
+  if (ext === '.js' || ext === '.ts') return `${packageType(absFile) ?? 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
+  return null
 }
 
 // Nearest package.json (walking up from the file's dir) that declares BOTH name and
@@ -137,10 +136,14 @@ export function buildShallowBundle({ cwd = process.cwd(), entries } = {}) {
     // symlink whose target escapes the project root (matches the deep bundler / loaders).
     assertRealPathWithinBase(realBase, baseDir, rel)
     const buf = readFileSync(abs)
-    const format = shallowFormat(abs, buf)
+    // A code/source file's format comes from its path; anything else is a resource,
+    // stored raw UTF-8 or base64 by content. isUtf8 is consulted at most once per file.
+    let format = shallowFormat(abs)
     let content
-    if (format === 'resource:base64') {
-      content = buf.toString('base64')
+    if (format === null) {
+      const utf8 = isUtf8(buf)
+      format = utf8 ? 'resource' : 'resource:base64'
+      content = utf8 ? buf.toString('utf8') : buf.toString('base64')
     } else {
       // Stored source is a UTF-8 string, so the bytes must BE UTF-8 or the stored text
       // would lossily diverge from the file on disk.
@@ -179,6 +182,22 @@ export function buildShallowBundle({ cwd = process.cwd(), entries } = {}) {
   }).withReason('bundle')
 }
 
+// Total file count + non-empty-package count from a bundle's module buckets, in one pass
+// -- avoids materializing the flat `sources` Map (a getter that rebuilds it on each access)
+// just to read a length.
+const tally = (bundle) => {
+  let files = 0
+  let packages = 0
+  for (const m of bundle.modules.values()) {
+    const n = Object.keys(m.files).length
+    if (n > 0) {
+      files += n
+      packages += 1
+    }
+  }
+  return { files, packages }
+}
+
 // Run the shallow bundle CLI command end-to-end: build a shallow Bundle from `entries`,
 // optionally merge it into the bundle already at `output` (--add), brotli-compress, and
 // write to `output` (stasis.code.br by default, or `-` for stdout). `logLabel` prefixes
@@ -203,7 +222,7 @@ export function shallowBundleCommand({ cwd = process.cwd(), entries, output, add
     } catch (cause) {
       throw new Error(`shallowBundleCommand: --add failed to read the existing bundle at ${target}`, { cause })
     }
-    mergedFrom = existing.sources.size
+    mergedFrom = tally(existing).files
     bundle = existing.merge(bundle)
   }
 
@@ -215,14 +234,13 @@ export function shallowBundleCommand({ cwd = process.cwd(), entries, output, add
     writeFileSync(outAbs, data)
   }
 
-  const files = [...bundle.sources.keys()]
-  const packages = [...bundle.modules.values()].filter((m) => Object.keys(m.files).length > 0).length
+  const { files, packages } = tally(bundle)
   const pkgLabel = `${packages} package${packages === 1 ? '' : 's'}`
   const dest = target === '-' ? '<stdout>' : target
   if (mergedFrom !== undefined) {
-    const added = files.length - mergedFrom
-    console.warn(`[${logLabel}] Added ${added} file${added === 1 ? '' : 's'} (${files.length} total in ${pkgLabel}) to ${dest} (shallow)`)
+    const added = files - mergedFrom
+    console.warn(`[${logLabel}] Added ${added} file${added === 1 ? '' : 's'} (${files} total in ${pkgLabel}) to ${dest} (shallow)`)
   } else {
-    console.warn(`[${logLabel}] Bundled ${files.length} file${files.length === 1 ? '' : 's'} in ${pkgLabel} to ${dest} (shallow)`)
+    console.warn(`[${logLabel}] Bundled ${files} file${files === 1 ? '' : 's'} in ${pkgLabel} to ${dest} (shallow)`)
   }
 }
