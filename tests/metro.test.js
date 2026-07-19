@@ -836,17 +836,25 @@ const writeNativeDep = (tmp, name) => {
     name, version: '1.2.3', codegenConfig: { name: 'RNThingSpec', type: 'modules', jsSrcsDir: 'src' },
   }))
   writeFileSync(join(root, `${name}.podspec`), `Pod::Spec.new do |s|\n  s.name = "${name}"\nend\n`)
+  writeFileSync(join(root, 'Extra.podspec.json'), JSON.stringify({ name: 'Extra', version: '1.0.0' })) // JSON podspec -> json
   writeFileSync(join(root, 'ios', 'RNThing.h'), '#import <React/RCTBridgeModule.h>\n')
   writeFileSync(join(root, 'ios', 'RNThing.m'), '#import "RNThing.h"\n@implementation RNThing\n@end\n')
   writeFileSync(join(root, 'ios', 'RNThing.mm'), '#import "RNThing.h"\n@implementation RNThing\n@end\n')
+  writeFileSync(join(root, 'ios', 'RNThing.swift'), 'import Foundation\nclass RNThing {}\n')
   writeFileSync(join(root, 'ios', 'util.c'), 'int rn_util(void) { return 0; }\n')
   writeFileSync(join(root, 'ios', 'util.cpp'), 'int rn_util() { return 0; }\n')
+  writeFileSync(join(root, 'ios', 'util.cc'), 'int rn_util_cc() { return 0; }\n')
+  writeFileSync(join(root, 'ios', 'util.cxx'), 'int rn_util_cxx() { return 0; }\n')
   writeFileSync(join(root, 'ios', 'legacy.c++'), 'int rn_legacy() { return 0; }\n')
   writeFileSync(join(root, 'ios', 'util.hpp'), 'int rn_util();\n')
+  writeFileSync(join(root, 'ios', 'util.hh'), 'int rn_util_hh();\n')
+  writeFileSync(join(root, 'ios', 'util.hxx'), 'int rn_util_hxx();\n')
   writeFileSync(join(root, 'ios', 'legacy.h++'), 'int rn_legacy();\n')
   writeFileSync(join(root, 'ios', 'Podfile'), "pod 'RNThing', :path => '.'\n")
   writeFileSync(join(root, 'ios', 'Podfile.lock'), 'PODS:\n  - RNThing (3.1.0)\n')
   writeFileSync(join(root, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
+  writeFileSync(join(root, 'android', 'settings.gradle.kts'), 'rootProject.name = "rnthing"\n')
+  writeFileSync(join(root, 'android', 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.13)\n')
   writeFileSync(join(root, 'android', 'src', 'main', 'AndroidManifest.xml'), '<manifest/>\n')
   writeFileSync(join(root, 'android', 'src', 'main', 'java', 'com', 'Thing.java'), 'package com;\nclass Thing {}\n')
   writeFileSync(join(root, 'android', 'src', 'main', 'kotlin', 'com', 'Thing.kt'), 'package com\nclass Thing\n')
@@ -863,11 +871,12 @@ const writeNativeDep = (tmp, name) => {
 }
 
 const NATIVE_INPUTS = [
-  'react-native-native-lib.podspec',
-  'ios/RNThing.h', 'ios/RNThing.m', 'ios/RNThing.mm',
-  'ios/util.c', 'ios/util.cpp', 'ios/legacy.c++', 'ios/util.hpp', 'ios/legacy.h++',
+  'react-native-native-lib.podspec', 'Extra.podspec.json',
+  'ios/RNThing.h', 'ios/RNThing.m', 'ios/RNThing.mm', 'ios/RNThing.swift',
+  'ios/util.c', 'ios/util.cpp', 'ios/util.cc', 'ios/util.cxx', 'ios/legacy.c++',
+  'ios/util.hpp', 'ios/util.hh', 'ios/util.hxx', 'ios/legacy.h++',
   'ios/Podfile', 'ios/Podfile.lock',
-  'android/build.gradle',
+  'android/build.gradle', 'android/settings.gradle.kts', 'android/CMakeLists.txt',
   'android/src/main/AndroidManifest.xml',
   'android/src/main/java/com/Thing.java',
   'android/src/main/kotlin/com/Thing.kt',
@@ -916,16 +925,24 @@ test('native modules: config discovers native deps; native sources attested, unu
   // rides the code path as json.
   const nlfmt = (rel) => lock.formats[`node_modules/react-native-native-lib/${rel}`]
   t.assert.equal(nlfmt('react-native-native-lib.podspec'), 'podspec')
+  t.assert.equal(nlfmt('Extra.podspec.json'), 'json') // JSON podspec rides the code path as json
   t.assert.equal(nlfmt('android/build.gradle'), 'gradle')
+  t.assert.equal(nlfmt('android/settings.gradle.kts'), 'kotlin') // Kotlin build script
+  t.assert.equal(nlfmt('android/CMakeLists.txt'), 'cmake') // matched by basename
   t.assert.equal(nlfmt('android/src/main/java/com/Thing.java'), 'java')
   t.assert.equal(nlfmt('android/src/main/kotlin/com/Thing.kt'), 'kotlin')
   t.assert.equal(nlfmt('ios/RNThing.mm'), 'objcpp')
   t.assert.equal(nlfmt('ios/RNThing.m'), 'objc')
+  t.assert.equal(nlfmt('ios/RNThing.swift'), 'swift')
   t.assert.equal(nlfmt('ios/RNThing.h'), 'c-header')
   t.assert.equal(nlfmt('ios/util.c'), 'c')
   t.assert.equal(nlfmt('ios/util.cpp'), 'cpp')
+  t.assert.equal(nlfmt('ios/util.cc'), 'cpp')
+  t.assert.equal(nlfmt('ios/util.cxx'), 'cpp')
   t.assert.equal(nlfmt('ios/legacy.c++'), 'cpp') // .c++ alt spelling
   t.assert.equal(nlfmt('ios/util.hpp'), 'cpp-header')
+  t.assert.equal(nlfmt('ios/util.hh'), 'cpp-header')
+  t.assert.equal(nlfmt('ios/util.hxx'), 'cpp-header')
   t.assert.equal(nlfmt('ios/legacy.h++'), 'cpp-header') // .h++ alt spelling
   t.assert.equal(nlfmt('ios/Podfile'), 'podfile') // matched by basename (no extension)
   t.assert.equal(nlfmt('ios/Podfile.lock'), 'podfile-lock') // basename, not the generic .lock ext
@@ -954,10 +971,12 @@ test('native modules: config discovers native deps; native sources attested, unu
   for (const f of ['ReactCommon/yoga/CMakeLists.txt', 'ReactCommon/yoga/yoga/Yoga.cpp', 'ReactCommon/yoga/cmake/yoga.cmake', 'scripts/react_native_pods.rb', 'scripts/react-native-xcode.sh', 'sdks/.hermesversion']) {
     t.assert.ok(core.files[f]?.startsWith('sha512-'), `expected core include ${f} to be captured`)
   }
-  // C++ source and the CocoaPods Ruby script are code; the CMake/txt/shell scaffolding stays a resource.
+  // C++ source, the CocoaPods Ruby script, and CMake files are code; the shell script stays a resource.
   t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/yoga/Yoga.cpp'], 'cpp')
   t.assert.equal(lock.formats['node_modules/react-native/scripts/react_native_pods.rb'], 'ruby')
-  t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'], 'resource')
+  t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'], 'cmake') // matched by basename
+  t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/cmake/yoga.cmake'], 'cmake')
+  t.assert.equal(lock.formats['node_modules/react-native/scripts/react-native-xcode.sh'], 'resource') // a .sh script stays a resource
   // ...but NOT core's JS, native source outside the include dirs, or prebuilt binaries.
   t.assert.equal(core.files['index.js'], undefined, 'core JS is not captured')
   t.assert.equal(core.files['scripts/build.js'], undefined, 'a code file inside an include dir is still skipped')
