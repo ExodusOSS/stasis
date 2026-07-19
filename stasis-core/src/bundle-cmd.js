@@ -33,7 +33,7 @@ function packageType(file) {
 const FIXED_FORMATS = new Map([
   ['.mjs', 'module'], ['.cjs', 'commonjs'], ['.json', 'json'],
   ['.mts', 'module-typescript'], ['.cts', 'commonjs-typescript'],
-  ['.sol', 'solidity'], ['.php', 'php'], ['.sh', 'bash'], ['.bash', 'bash'], ['.rs', 'rust'],
+  ['.sol', 'solidity'], ['.php', 'php'], ['.sh', 'shell'], ['.bash', 'shell'], ['.rs', 'rust'],
 ])
 
 // The loader format a shallow-packed CODE/source file gets from its path alone, WITHOUT

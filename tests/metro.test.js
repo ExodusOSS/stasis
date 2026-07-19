@@ -852,6 +852,10 @@ const writeNativeDep = (tmp, name) => {
   writeFileSync(join(root, 'ios', 'legacy.h++'), 'int rn_legacy();\n')
   writeFileSync(join(root, 'ios', 'Podfile'), "pod 'RNThing', :path => '.'\n")
   writeFileSync(join(root, 'ios', 'Podfile.lock'), 'PODS:\n  - RNThing (3.1.0)\n')
+  writeFileSync(join(root, 'ios', 'RNThing-Info.plist'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
+  writeFileSync(join(root, 'ios', 'PrivacyInfo.xcprivacy'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
+  writeFileSync(join(root, 'ios', 'RNThing.xcscheme'), '<?xml version="1.0"?>\n<Scheme/>\n')
+  writeFileSync(join(root, 'gradlew'), '#!/usr/bin/env sh\nexec gradle "$@"\n') // the Gradle wrapper (shell)
   writeFileSync(join(root, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
   writeFileSync(join(root, 'android', 'settings.gradle.kts'), 'rootProject.name = "rnthing"\n')
   writeFileSync(join(root, 'android', 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.13)\n')
@@ -876,6 +880,7 @@ const NATIVE_INPUTS = [
   'ios/util.c', 'ios/util.cpp', 'ios/util.cc', 'ios/util.cxx', 'ios/legacy.c++',
   'ios/util.hpp', 'ios/util.hh', 'ios/util.hxx', 'ios/legacy.h++',
   'ios/Podfile', 'ios/Podfile.lock',
+  'ios/RNThing-Info.plist', 'ios/PrivacyInfo.xcprivacy', 'ios/RNThing.xcscheme', 'gradlew',
   'android/build.gradle', 'android/settings.gradle.kts', 'android/CMakeLists.txt',
   'android/src/main/AndroidManifest.xml',
   'android/src/main/java/com/Thing.java',
@@ -946,6 +951,10 @@ test('native modules: config discovers native deps; native sources attested, unu
   t.assert.equal(nlfmt('ios/legacy.h++'), 'cpp-header') // .h++ alt spelling
   t.assert.equal(nlfmt('ios/Podfile'), 'podfile') // matched by basename (no extension)
   t.assert.equal(nlfmt('ios/Podfile.lock'), 'podfile-lock') // basename, not the generic .lock ext
+  t.assert.equal(nlfmt('gradlew'), 'shell') // the Gradle wrapper, matched by basename
+  t.assert.equal(nlfmt('ios/RNThing-Info.plist'), 'xml')
+  t.assert.equal(nlfmt('ios/PrivacyInfo.xcprivacy'), 'xml')
+  t.assert.equal(nlfmt('ios/RNThing.xcscheme'), 'xml')
   t.assert.equal(nlfmt('android/src/main/AndroidManifest.xml'), 'xml')
   t.assert.equal(nlfmt('android/BuildConfig.java.template'), 'template')
   t.assert.equal(nlfmt('package.json'), 'json')

@@ -200,7 +200,7 @@ test('Bundle.parse and Lockfile.parse accept every documented KNOWN_FORMAT', (t)
   // Exercise every recognized format value through both parsers so the allowlist
   // and the recognized-format documentation stay in lockstep.
   const all = ['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript',
-    'solidity', 'php', 'bash', 'rust', 'java', 'kotlin', 'gradle', 'objc', 'objcpp', 'swift', 'c',
+    'solidity', 'php', 'shell', 'rust', 'java', 'kotlin', 'gradle', 'objc', 'objcpp', 'swift', 'c',
     'cpp', 'c-header', 'cpp-header', 'ruby', 'cmake', 'podspec', 'podfile', 'podfile-lock',
     'template', 'xml', 'resource', 'resource:base64']
   for (const format of all) {
