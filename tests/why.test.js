@@ -343,3 +343,24 @@ test('collectWhy treats metro and react-native as terminal too', withTmp((t, tmp
   t.assert.deepEqual(linesFor(why, 'x@1.0.0'), ['metro -> x']) // `top` dropped past metro
   t.assert.deepEqual(linesFor(why, 'y@1.0.0'), ['react-native -> y'])
 }))
+
+test('collectWhy lists every chain (and reason) reaching a terminal package that is the target', withTmp((t, tmp) => {
+  // The terminal-stop applies to predecessors, never the target itself: when the
+  // target IS @babel/core we must still climb above it, or every chain reaching
+  // it -- and its reasons -- would be lost (only the bare `@babel/core` would show).
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c', 'e', 'f', 'g', '@babel/core'],
+    edges: [
+      ['runEntry', 'a'], ['a', 'b'], ['b', 'c'], ['c', '@babel/core'],
+      ['metroEntry', 'e'], ['e', 'f'], ['f', 'g'], ['g', '@babel/core'],
+    ],
+    reason: {
+      run: ['runEntry', 'a', 'b', 'c', '@babel/core'],
+      metro: ['metroEntry', 'e', 'f', 'g', '@babel/core'],
+    },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['@babel/core@1.0.0'])), '@babel/core@1.0.0'), [
+    'metro: e -> f -> g -> @babel/core',
+    'run: a -> b -> c -> @babel/core',
+  ])
+}))
