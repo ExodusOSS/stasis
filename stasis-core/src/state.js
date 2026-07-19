@@ -1558,26 +1558,32 @@ export class State {
     return `${cond} (with: ${JSON.stringify(sorted)})`
   }
 
-  // A require()/import() given an already-resolved ABSOLUTE path arrives at the resolve hook
-  // with that absolute path AS the specifier -- CJS `require('/repo/node_modules/pkg/index.js')`
-  // is the common case (webpack's loader-runner does `require(loader.path)`). Recorded
-  // verbatim, that machine-specific path becomes a resolution KEY in the lockfile/bundle:
-  // non-portable and unmatchable elsewhere. Once the target is confirmed inside the project
-  // root, renormalize it relative to the IMPORTING FILE's directory -- the shape a hand-written
-  // `require('./x')` / `require('../../pkg/x')` has. The resulting key may itself contain '../',
-  // which is fine as long as the target stayed inside root.
+  // A require()/import() given an already-resolved ABSOLUTE target arrives at the resolve hook
+  // with that target AS the specifier, as an fs path or a file: URL. The fs-path case is CJS
+  // `require('/repo/node_modules/pkg/index.js')` (webpack's loader-runner does
+  // `require(loader.path)`); the file:-URL case is Node's ESM->CJS translator, which resolves a
+  // require()d target to a file: URL before the hook sees it (so `entry.cjs`'s
+  // `require('./hello.cjs')` arrives as `file:///abs/.../hello.cjs`). Recorded verbatim, that
+  // machine-specific target becomes a resolution KEY in the lockfile/bundle: non-portable and
+  // unmatchable elsewhere -- and, since which path a require() takes varies by Node version, the
+  // same edge is seen absolute on one version and source-relative on another. Once the target is
+  // confirmed inside the project root, renormalize it relative to the IMPORTING FILE's directory
+  // -- the shape a hand-written `require('./x')` / `require('../../pkg/x')` has. The resulting
+  // key may itself contain '../', which is fine as long as the target stayed inside root.
   //
   // Keying against the parent makes the key portable AND collision-free: it is always
   // '.'-prefixed, so it can't clash with a bare ('pkg') or root-relative key, and an absolute
   // path naming the same file as a relative import unifies onto the identical key (noupsert
-  // agrees). Bare/relative specifiers and file: URLs pass through untouched; an absolute path
-  // escaping the root has no in-root relative form, so it's left as-is. Applied identically in
-  // addImport and getImport so the key written and queried agree.
+  // agrees). Bare/relative specifiers pass through untouched; an absolute target (path or file:
+  // URL) escaping the root has no in-root relative form, so it's left as-is. Applied identically
+  // in addImport and getImport so the key written and queried agree.
   #canonicalSpecifier(parentURL, specifier) {
-    if (typeof specifier !== 'string' || !isAbsolute(specifier)) return specifier
-    const fromRoot = relative(this.root, specifier)
+    if (typeof specifier !== 'string') return specifier
+    const path = specifier.startsWith('file:') ? fileURLToPath(specifier) : specifier
+    if (!isAbsolute(path)) return specifier
+    const fromRoot = relative(this.root, path)
     if (fromRoot === '' || fromRoot.startsWith('..')) return specifier // outside the project root
-    const rel = relative(dirname(fileURLToPath(parentURL)), specifier)
+    const rel = relative(dirname(fileURLToPath(parentURL)), path)
     return rel.startsWith('.') ? rel : `./${rel}`
   }
 

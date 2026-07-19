@@ -65,34 +65,44 @@ const RESOLVE_RESOLVE_FROM_BUNDLE = (() => {
   }
 })()
 
-test('run --lock=add records a CJS entry and its require()d files idempotently', (t) => {
-  const lockPath = join(fixture, 'stasis.lock.json')
+// These exercises write into the project dir (`stasis run --lock=add` drops
+// stasis.lock.json next to package.json), so each runs against a fresh copy of
+// the fixture in a tmp dir rather than the committed source tree -- otherwise a
+// run leaks edges into tests/fixtures/cli-run-cjs/stasis.lock.json and the next
+// run sees a different graph. Same convention as scan.test.js / bundle-cmd.test.js.
+test('run --lock=add records a CJS entry and its require()d files idempotently', withTmp((t, tmp) => {
+  cpSync(fixture, tmp, { recursive: true })
+  const lockPath = join(tmp, 'stasis.lock.json')
   const before = readFileSync(lockPath, 'utf-8')
 
-  const r = run(['run', '--lock=add', 'src/entry.cjs'], { cwd: fixture })
+  const r = run(['run', '--lock=add', 'src/entry.cjs'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
 
   const after = readFileSync(lockPath, 'utf-8')
-  t.assert.equal(after, before)
+  t.assert.equal(after, before, 'lock=add against a matching committed lockfile must be a no-op')
 
   const parsed = JSON.parse(after)
   t.assert.deepEqual(parsed.entries, ['src/entry.cjs'])
   t.assert.ok(parsed.sources['.'].files['src/entry.cjs'].startsWith('sha512-'))
   t.assert.ok(parsed.sources['.'].files['src/hello.cjs'].startsWith('sha512-'))
-})
+}))
 
-test('run --lock=frozen replays a CJS program from the committed lockfile', (t) => {
-  const r = run(['run', '--lock=frozen', 'src/entry.cjs'], { cwd: fixture })
+test('run --lock=frozen replays a CJS program from the committed lockfile', withTmp((t, tmp) => {
+  // Replaying from a *copy* under a different absolute path also proves the
+  // committed lockfile is portable -- it must not embed this checkout's path.
+  cpSync(fixture, tmp, { recursive: true })
+  const r = run(['run', '--lock=frozen', 'src/entry.cjs'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
-})
+}))
 
 test('run --bundle=add records commonjs format for CJS files', withTmp((t, tmp) => {
+  cpSync(fixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(
     ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
-    { cwd: fixture }
+    { cwd: tmp }
   )
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.equal(r.stdout, 'hello, world\n')
@@ -101,21 +111,22 @@ test('run --bundle=add records commonjs format for CJS files', withTmp((t, tmp) 
   const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
   t.assert.equal(decoded.formats['src/entry.cjs'], 'commonjs')
   t.assert.equal(decoded.formats['src/hello.cjs'], 'commonjs')
-  t.assert.equal(decoded.sources['.'].files['src/entry.cjs'], readFileSync(join(fixture, 'src/entry.cjs'), 'utf-8'))
-  t.assert.equal(decoded.sources['.'].files['src/hello.cjs'], readFileSync(join(fixture, 'src/hello.cjs'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/entry.cjs'], readFileSync(join(tmp, 'src/entry.cjs'), 'utf-8'))
+  t.assert.equal(decoded.sources['.'].files['src/hello.cjs'], readFileSync(join(tmp, 'src/hello.cjs'), 'utf-8'))
 }))
 
 test('run --bundle=load executes a CJS program from a saved bundle', withTmp((t, tmp) => {
+  cpSync(fixture, tmp, { recursive: true })
   const bundlePath = join(tmp, 'snapshot.br')
   const save = run(
     ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
-    { cwd: fixture }
+    { cwd: tmp }
   )
   t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
 
   const load = run(
     ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.cjs'],
-    { cwd: fixture }
+    { cwd: tmp }
   )
   t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
   t.assert.equal(load.stdout, 'hello, world\n')
