@@ -1,6 +1,6 @@
 import { isUtf8 } from 'node:buffer'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { basename, dirname, extname, join, resolve } from 'node:path'
+import { existsSync, globSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, extname, join, relative, resolve } from 'node:path'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from './bundle.js'
@@ -43,31 +43,34 @@ const tally = (bundle) => {
   return { files, packages }
 }
 
-// Read add's inputs from stasis.config.json: the two split targets (`bundleFile` for
-// code, `resourcesBundleFile` for resources) and the `resources` allowlist that classifies
-// which non-source files are resources. add REQUIRES a config -- unlike the deep
-// `bundle`, which infers everything from the entries -- because the split targets and the
-// resource classification are project decisions that belong in the config, not on the CLI.
+// Read add's inputs from stasis.config.json. add REQUIRES the config file to exist -- it's where
+// project decisions live -- but every field is optional and defaults sensibly:
+//   - bundleFile: the code target; defaults to the conventional `stasis.code.br`.
+//   - resourcesBundleFile: when set, declared resources split into their own bundle; when unset,
+//     they go into bundleFile alongside the code (non-split).
+//   - resources: the allowlist classifying which non-source files count as resources; default none.
 function readAddConfig(baseDir) {
   const cfg = readJson(join(baseDir, CONFIG_FILE))
   if (cfg === null) {
-    throw new Error(`add requires a ${CONFIG_FILE} (it declares bundleFile, resourcesBundleFile, and the resources allowlist)`)
+    throw new Error(`add requires a ${CONFIG_FILE} (its bundleFile, resourcesBundleFile, and resources are all optional)`)
   }
   const resources = parseResourcesOption(CONFIG_FILE, cfg.resources)
   if (cfg.brotliQuality !== undefined && !isBrotliQuality(cfg.brotliQuality)) {
     throw new Error(`${CONFIG_FILE}: brotliQuality must be an integer 0..11 (got ${JSON.stringify(cfg.brotliQuality)})`)
   }
-  // The two split targets must name distinct on-disk files. The code bundle and the resources
-  // bundle have incompatible shapes (the runtime asserts a resources bundle has no entries and
-  // only resource formats), so aiming both at one path yields a pair the loader can't consume --
-  // and the second write would clobber the first. Canonicalize (resolve + realpath) like
-  // Config's write-target collision check, so './dist/x.br' vs 'dist/x.br', or two symlinks to
-  // the same inode, are caught -- not just byte-identical strings.
-  if (cfg.bundleFile && cfg.resourcesBundleFile &&
-    canonicalizePath(resolve(baseDir, cfg.bundleFile)) === canonicalizePath(resolve(baseDir, cfg.resourcesBundleFile))) {
-    throw new Error(`${CONFIG_FILE}: bundleFile and resourcesBundleFile must name distinct paths (both resolve to ${resolve(baseDir, cfg.bundleFile)})`)
+  const bundleFile = cfg.bundleFile ?? 'stasis.code.br'
+  const resourcesBundleFile = cfg.resourcesBundleFile
+  // When both targets are set they must name distinct on-disk files: the code bundle and the
+  // resources bundle have incompatible shapes (the runtime asserts a resources bundle has no
+  // entries and only resource formats), so aiming both at one path yields a pair the loader
+  // can't consume -- and the second write would clobber the first. Canonicalize (resolve +
+  // realpath) like Config's write-target collision check, so './dist/x.br' vs 'dist/x.br', or
+  // two symlinks to the same inode, are caught -- not just byte-identical strings.
+  if (resourcesBundleFile &&
+    canonicalizePath(resolve(baseDir, bundleFile)) === canonicalizePath(resolve(baseDir, resourcesBundleFile))) {
+    throw new Error(`${CONFIG_FILE}: bundleFile and resourcesBundleFile must name distinct paths (both resolve to ${resolve(baseDir, bundleFile)})`)
   }
-  return { bundleFile: cfg.bundleFile, resourcesBundleFile: cfg.resourcesBundleFile, resources, brotliQuality: cfg.brotliQuality }
+  return { bundleFile, resourcesBundleFile, resources, brotliQuality: cfg.brotliQuality }
 }
 
 // Assemble a Bundle from files already read into `rel -> { content, format }`, bucketed per
@@ -151,13 +154,44 @@ function addToBundleFile(baseDir, targetPath, bundle, brotliQuality) {
   return { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom }
 }
 
-// Run `stasis[-core] add` end-to-end: add the explicitly listed files to the project's
-// split bundles. Reads stasis.config.json (REQUIRED) for the two targets + the resources
-// allowlist, classifies each file -- a recognized source file (see sourceFormat) goes to the
-// code bundle (`bundleFile`), a file declared in `resources` goes to the resources bundle
-// (`resourcesBundleFile`), and anything else is refused -- then merges each set into its
-// target on disk, creating it if absent. No dependency scan/loaders/resolver, so this lives in
-// stasis-core. The two bundles are a split pair that (at run time) share ONE lockfile;
+// Expand any directory in `rels` into the files under it (recursively, via Node's built-in
+// fs.globSync), so `add src/` attests every file in src/ without listing them. Plain files pass
+// through unchanged; a path that doesn't exist is kept as-is so the per-file existsSync check
+// reports it. `**/*` follows glob's usual rule of not sweeping in dotfiles (`.env`, `.git/...`),
+// so add a leading-dot file by naming it explicitly.
+function expandDirectories(baseDir, rels) {
+  const out = []
+  for (const rel of rels) {
+    let stat
+    try {
+      stat = statSync(join(baseDir, rel))
+    } catch {
+      out.push(rel) // not found -- defer to the caller's clean "file not found" error
+      continue
+    }
+    if (!stat.isDirectory()) {
+      out.push(rel)
+      continue
+    }
+    const dirAbs = join(baseDir, rel)
+    for (const match of globSync('**/*', { cwd: dirAbs })) {
+      const fileAbs = join(dirAbs, match)
+      // `**/*` also matches nested directories; keep only files.
+      if (statSync(fileAbs).isFile()) out.push(relative(baseDir, fileAbs).split(/[\\/]/u).join('/'))
+    }
+  }
+  return out
+}
+
+// Run `stasis[-core] add` end-to-end: add the listed files (a directory entry expands to the
+// files under it) to the project's bundle(s). Reads stasis.config.json (REQUIRED, though its
+// fields default) for the targets + the resources allowlist, classifies each file -- a
+// recognized source file (see sourceFormat) is code, a file whose extension is declared in
+// `resources` is a resource, anything else is refused -- then writes: with a resourcesBundleFile
+// configured the two kinds split into `bundleFile` and `resourcesBundleFile` (a pair that share
+// ONE lockfile at run time); without one, everything lands in `bundleFile` (non-split). Each
+// target is assembled in memory and written exactly ONCE (one brotli pass), merging into an
+// existing bundle if present. No dependency scan/loaders/resolver, so this lives in stasis-core;
 // add writes no lockfile of its own. `logLabel` prefixes the one-line stderr summary.
 export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-core' } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
@@ -171,8 +205,10 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   const workspaceName = rootPkg.name ?? 'workspace'
   const workspaceVersion = rootPkg.version ?? '0.0.0'
 
-  // De-duplicate while keeping first-seen order (the same file listed twice is one file).
-  const files = [...new Set(normalizeEntries(entries, cwd))]
+  // Expand directory entries to their files, then de-duplicate while keeping first-seen order
+  // (the same file listed twice, or reached via both a name and its parent dir, is one file).
+  const files = [...new Set(expandDirectories(baseDir, normalizeEntries(entries, cwd)))]
+  if (files.length === 0) throw new Error('add: no files to add (directory entries matched nothing)')
   const codeFiles = new Map()
   const resourceFiles = new Map()
   for (const rel of files) {
@@ -196,21 +232,24 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     }
   }
 
-  if (codeFiles.size > 0 && !bundleFile) {
-    throw new Error(`add: ${CONFIG_FILE} must set "bundleFile" to add source files (${[...codeFiles.keys()].join(', ')})`)
-  }
-  if (resourceFiles.size > 0 && !resourcesBundleFile) {
-    throw new Error(`add: ${CONFIG_FILE} must set "resourcesBundleFile" to add resources (${[...resourceFiles.keys()].join(', ')})`)
-  }
-
+  // Group files by target bundle, then write each target exactly once. Split mode (a
+  // resourcesBundleFile is configured) sends code to bundleFile and resources to
+  // resourcesBundleFile; non-split sends everything to bundleFile together.
   const summary = []
-  if (codeFiles.size > 0) {
-    const r = addToBundleFile(baseDir, bundleFile, assembleBundle(baseDir, codeFiles, workspaceName, workspaceVersion), brotliQuality)
-    summary.push(`+${r.added} source (${r.total} total) -> ${r.path}`)
+  const writeTarget = (target, entriesForTarget, kind) => {
+    if (entriesForTarget.size === 0) return
+    const r = addToBundleFile(baseDir, target, assembleBundle(baseDir, entriesForTarget, workspaceName, workspaceVersion), brotliQuality)
+    summary.push(`+${r.added} ${kind} (${r.total} total) -> ${r.path}`)
   }
-  if (resourceFiles.size > 0) {
-    const r = addToBundleFile(baseDir, resourcesBundleFile, assembleBundle(baseDir, resourceFiles, workspaceName, workspaceVersion), brotliQuality)
-    summary.push(`+${r.added} resource (${r.total} total) -> ${r.path}`)
+  if (resourcesBundleFile) {
+    writeTarget(bundleFile, codeFiles, 'source')
+    writeTarget(resourcesBundleFile, resourceFiles, 'resource')
+  } else {
+    // Non-split: one combined bundle. Label it by what it holds -- pure code / pure resources
+    // keep the split wording; a mix reports the neutral "file".
+    const all = new Map([...codeFiles, ...resourceFiles])
+    const kind = codeFiles.size > 0 && resourceFiles.size > 0 ? 'file' : resourceFiles.size > 0 ? 'resource' : 'source'
+    writeTarget(bundleFile, all, kind)
   }
   console.warn(`[${logLabel}] add: ${summary.join('; ')}`)
 }
