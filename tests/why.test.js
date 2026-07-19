@@ -344,23 +344,46 @@ test('collectWhy treats metro and react-native as terminal too', withTmp((t, tmp
   t.assert.deepEqual(linesFor(why, 'y@1.0.0'), ['react-native -> y'])
 }))
 
-test('collectWhy lists every chain (and reason) reaching a terminal package that is the target', withTmp((t, tmp) => {
-  // The terminal-stop applies to predecessors, never the target itself: when the
-  // target IS @babel/core we must still climb above it, or every chain reaching
-  // it -- and its reasons -- would be lost (only the bare `@babel/core` would show).
+test('collectWhy renders a terminal target bare, once per reason that reaches it', withTmp((t, tmp) => {
+  // A terminal package is never walked past -- and that applies when it's the
+  // flagged target too: `run: a -> b -> @babel/core` / `metro: c -> d -> @babel/core`
+  // both stop AT @babel/core, so the target is emitted bare (`@babel/core`), once
+  // per reason that reaches it. The chains above it are noise and never shown.
   const file = writeGraphBundle(tmp, {
-    deps: ['a', 'b', 'c', 'e', 'f', 'g', '@babel/core'],
+    deps: ['a', 'b', 'c', 'd', '@babel/core'],
     edges: [
-      ['runEntry', 'a'], ['a', 'b'], ['b', 'c'], ['c', '@babel/core'],
-      ['metroEntry', 'e'], ['e', 'f'], ['f', 'g'], ['g', '@babel/core'],
+      ['runEntry', 'a'], ['a', 'b'], ['b', '@babel/core'],
+      ['metroEntry', 'c'], ['c', 'd'], ['d', '@babel/core'],
     ],
     reason: {
-      run: ['runEntry', 'a', 'b', 'c', '@babel/core'],
-      metro: ['metroEntry', 'e', 'f', 'g', '@babel/core'],
+      run: ['runEntry', 'a', 'b', '@babel/core'],
+      metro: ['metroEntry', 'c', 'd', '@babel/core'],
     },
   })
   t.assert.deepEqual(linesFor(collectWhy([file], new Set(['@babel/core@1.0.0'])), '@babel/core@1.0.0'), [
-    'metro: e -> f -> g -> @babel/core',
-    'run: a -> b -> c -> @babel/core',
+    'metro: @babel/core',
+    'run: @babel/core',
+  ])
+}))
+
+test('collectWhy keeps every reason for a terminal head, even one src-imported under another', withTmp((t, tmp) => {
+  // @babel/core is src-imported under metro AND pulled in via a -> b -> c under run,
+  // and it imports victim. The chain to victim stops at @babel/core (terminal); its
+  // provenance must include BOTH reasons -- crediting only its src importer (metro)
+  // would silently drop run. So both `run:` and `metro: @babel/core -> victim` show.
+  const file = writeGraphBundle(tmp, {
+    deps: ['a', 'b', 'c', '@babel/core', 'victim'],
+    edges: [
+      ['runEntry', 'a'], ['a', 'b'], ['b', 'c'], ['c', '@babel/core'],
+      ['metroEntry', '@babel/core'], ['@babel/core', 'victim'],
+    ],
+    reason: {
+      run: ['runEntry', 'a', 'b', 'c', '@babel/core', 'victim'],
+      metro: ['metroEntry', '@babel/core', 'victim'],
+    },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['victim@1.0.0'])), 'victim@1.0.0'), [
+    'metro: @babel/core -> victim',
+    'run: @babel/core -> victim',
   ])
 }))
