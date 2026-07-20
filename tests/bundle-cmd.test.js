@@ -1760,6 +1760,48 @@ test('CLI: bundle --metro --jsx bundles a React Native JSX-in-.js entry (the rep
     'the whole JSX chain must be walked on every platform')
 }))
 
+test('CLI: bundle --metro --jsx handles a typeless package (RN convention: no "type"), still detecting ESM', withTmp((t, tmp) => {
+  // A React Native app's package.json usually has NO "type" field, so its .js files hit oxc's
+  // `unambiguous` sourceType (declared === null) -- the primary --jsx path. It must parse the JSX
+  // *and* keep detecting the ESM syntax, or the file lands in the wrong module format. (The other
+  // --jsx tests all use "type": "module", exercising only the `module` sourceType branch.)
+  jsProject(tmp, {
+    'index.js': "import { Component } from './Component.js'\nexport const App = () => <Component />\n",
+    'Component.js': "export const Component = () => <View>hi</View>\n",
+  }, { name: 'rn-typeless', version: '0.0.0' }) // deliberately no "type" -> typeless package
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['Component.js', 'index.js'],
+    'the whole JSX chain must be walked in a typeless package')
+  // ESM syntax must still be detected under lang:jsx -> module format, not commonjs.
+  t.assert.equal(decoded.formats['index.js'], 'module', 'import/export syntax must resolve to module even with JSX enabled')
+}))
+
+test('CLI: bundle --jsx parses JSX in a CommonJS .js file cleanly (no salvaged-parse warning)', withTmp((t, tmp) => {
+  // JSX in a CJS file is only a *recovered* (tolerated) parse error without --jsx: the CLI warns
+  // and salvages the require() edges but exits 0. With --jsx the file parses cleanly, so the
+  // parse-error warning must disappear entirely while the graph is still walked. (Typeless
+  // package so `require`/`module.exports` keeps the file CommonJS.)
+  jsProject(tmp, {
+    'index.js': "const { Row } = require('./Row.js')\nmodule.exports = () => <Row>hi</Row>\n",
+    'Row.js': "exports.Row = () => null\n",
+  }, { name: 'rn-cjs', version: '0.0.0' })
+  const outPath = join(tmp, 'out.br')
+
+  const noJsx = runCli(['bundle', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(noJsx.status, 0, `CJS JSX is tolerated (recovered) without --jsx; stderr: ${noJsx.stderr}`)
+  t.assert.match(noJsx.stderr, /file\(s\) with parse errors/, 'without --jsx the CJS JSX must warn as a salvaged parse error')
+
+  const r = runCli(['bundle', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.doesNotMatch(r.stderr, /parse error/, '--jsx must parse the CJS JSX cleanly (no salvaged-parse warning)')
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['Row.js', 'index.js'])
+  t.assert.equal(decoded.formats['index.js'], 'commonjs', 'the require/module.exports file stays CommonJS')
+}))
+
 test('CLI: bundle --jsx does not enable JSX for .ts files (its <T> generics collide with JSX)', withTmp((t, tmp) => {
   // TypeScript reserves JSX for .tsx; a .ts file uses `<T>` for generics, so --jsx deliberately
   // leaves the .ts family JSX-free. A plain generic .ts still parses; JSX in a .ts still fails.

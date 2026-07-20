@@ -205,6 +205,29 @@ test('scan records a parse error for JSX in a .js file, and js:true parses past 
   t.assert.ok([...withJsx.files].some(([url]) => url.endsWith('/greet.js')), 'the import past the JSX is now walked')
 }))
 
+test('scan jsx:true parses JSX in a typeless package and still detects module vs commonjs (RN convention)', withTmp((t, tmp) => {
+  // React Native's package.json usually has no "type", so .js files hit oxc's `unambiguous`
+  // sourceType (declared === null) -- the primary jsx path. JSX must parse AND syntax detection
+  // must still pick the right format: ESM syntax -> module, require/module.exports -> commonjs.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'rn-typeless', version: '0.0.0' })) // no "type"
+
+  const esm = join(tmp, 'esm.js')
+  writeFileSync(esm, "import { greet } from './greet.js'\nexport const App = () => <Text>{greet}</Text>\n")
+  writeFileSync(join(tmp, 'greet.js'), "export const greet = 'hi'\n")
+  const esmScan = scan([esm], { jsx: true })
+  t.assert.deepEqual(esmScan.parseErrors, [], 'JSX in a typeless .js must parse under jsx:true')
+  t.assert.equal([...esmScan.files].find(([url]) => url.endsWith('/esm.js'))[1].format, 'module',
+    'import/export syntax must still be detected as module even with JSX enabled')
+  t.assert.ok([...esmScan.files].some(([url]) => url.endsWith('/greet.js')), 'the edge behind the JSX is walked')
+
+  const cjs = join(tmp, 'cjs.js')
+  writeFileSync(cjs, "const { Row } = require('./greet.js')\nmodule.exports = () => <Row/>\n")
+  const cjsScan = scan([cjs], { jsx: true })
+  t.assert.deepEqual(cjsScan.parseErrors, [], 'JSX in a typeless CJS .js must parse under jsx:true')
+  t.assert.equal([...cjsScan.files].find(([url]) => url.endsWith('/cjs.js'))[1].format, 'commonjs',
+    'require/module.exports must still be detected as commonjs even with JSX enabled')
+}))
+
 test('scan jsx:true does not enable JSX for the .ts family (its <T> generics collide with JSX)', withTmp((t, tmp) => {
   // TypeScript reserves JSX for .tsx; a .ts file uses `<T>` for generics. jsx:true leaves .ts
   // JSX-free: a generic .ts still parses, and JSX in a .ts is still a parse error.

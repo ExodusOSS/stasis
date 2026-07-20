@@ -849,7 +849,7 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
-// (--mapping/.sol, --scope|--conditions|--mainFields|--metro/JS) is enforced by classifyEntries.
+// (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx/JS) is enforced by classifyEntries.
 export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, jsx = false } = {}) {
   const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, jsx })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
