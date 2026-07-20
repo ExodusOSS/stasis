@@ -76,10 +76,8 @@ function resolveGlobalEsbuild() {
   return undefined
 }
 
-// Artifact-wide preconditions, independent of which entry we build: full scope (a
-// node_modules-scope artifact omits the entry + workspace code) and at least one recorded
-// entry (so selectEntry has something to choose). The per-entry / per-file language checks
-// are deferred to assertBuildableEntry, once the entry to build is known.
+// Preconditions independent of which entry we build. Per-entry language checks are deferred
+// to assertBuildableEntry, once selectEntry has picked one.
 function assertBuildableArtifact(artifact, label) {
   if (artifact.config.scope !== 'full') {
     throw new Error(
@@ -92,10 +90,8 @@ function assertBuildableArtifact(artifact, label) {
   }
 }
 
-// The set of files the build will actually touch: the entry plus everything reachable from
-// it through the artifact's recorded import graph (walked across every conditions bucket; a
-// --metro edge's per-platform targets are all followed). esbuild follows this same graph, so
-// nothing outside it reaches the build -- which is why the language checks below scope to it.
+// The entry plus its transitive imports in the recorded graph -- the exact set esbuild loads
+// (all conditions buckets; a --metro edge's per-platform targets included).
 function reachableFiles(entry, imports) {
   const seen = new Set([entry])
   const stack = [entry]
@@ -105,7 +101,7 @@ function reachableFiles(entry, imports) {
       const specifiers = byParent.get(parent)
       if (specifiers === undefined) continue
       for (const [, target] of specifiers) {
-        // A plain edge records a file string; a --metro edge records a {platform: file} Map.
+        // A plain edge is a file string; a --metro edge is a {platform: file} Map.
         const targets = typeof target === 'string' ? [target] : [...target.values()]
         for (const file of targets) {
           if (!seen.has(file)) {
@@ -119,18 +115,16 @@ function reachableFiles(entry, imports) {
   return seen
 }
 
-// Language checks scoped to the ONE entry we build: the entry itself must be JS/TS, and every
-// file reachable from it must have a buildable format. An unrelated non-JS file elsewhere in
-// the artifact -- a second entry's subtree, or a file attested with `stasis add` -- is never
-// reached from this entry, so it does not block the build. `imports`/`formats` may be null on
-// a legacy lockfile (an empty graph; bundleFromLockfile then fails closed on the missing graph).
+// Language checks scoped to the built entry: it must be JS/TS, and every file reachable from
+// it must be buildable. A non-JS file elsewhere (another entry, or a `stasis add` attachment)
+// isn't reached, so it doesn't block the build. imports/formats are null on a legacy lockfile.
 function assertBuildableEntry(artifact, entry, label) {
   if (!JS_EXTS.has(extname(entry))) {
     throw new Error(`stasis build only builds JavaScript/TypeScript entries (esbuild); got non-JS entry '${entry}' in ${label}`)
   }
   const reachable = reachableFiles(entry, artifact.imports ?? new Map())
-  // Resource formats stay in the allowlist deliberately: assets are files, never import edges,
-  // so a reachable-only check never even sees them (an entry that imports one fails at build time).
+  // A reachable resource (plugin captures DO record asset edges) stays allowed via BUILDABLE_FORMATS;
+  // an entry that imports an unbuildable asset fails later at esbuild, not here.
   for (const [file, format] of artifact.formats ?? new Map()) {
     if (!reachable.has(file)) continue
     if (!BUILDABLE_FORMATS.has(format)) {
@@ -207,8 +201,6 @@ export async function buildCommand({
   // are read + verified from there.
   const root = dirname(artifactAbs)
   const selectedEntry = selectEntry(entry, parsed.entries, { cwd, root, label: artifact })
-  // Language checks run against the SELECTED entry only: other entries (and their non-JS
-  // subtrees) are not our concern when building this one.
   assertBuildableEntry(parsed, selectedEntry, artifact)
 
   const bundle = kind === 'lockfile' ? bundleFromLockfile(parsed, { root }) : parsed
