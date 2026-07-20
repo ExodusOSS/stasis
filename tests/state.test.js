@@ -7,6 +7,7 @@ import { brotliCompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
 import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'state')
 const fileAbs = join(root, 'src', 'foo.js')
@@ -631,6 +632,40 @@ test('mergeShard carries a child format even when the root already recorded the 
       'child-recorded module format carried through the hash-skip, not dropped')
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('mergeShard skips a shard key whose on-disk path escapes the root via a symlink', (t) => {
+  // A shard carries in-root KEYS, but the root re-reads listings/bytes from ITS OWN disk. An in-root
+  // directory key that is a symlink pointing OUTSIDE the root reads an external listing, which
+  // re-attesting would record under the in-root key. mergeShard must skip it (matching the stat
+  // replay + fs.js containment), while still attesting a legitimate in-root sibling.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-mergeshard-esc-'))
+  const external = mkdtempSync(join(tmpdir(), 'stasis-external-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    mkdirSync(join(dir, 'ok'))
+    writeFileSync(join(dir, 'ok', 'a.txt'), 'hi') // legit in-root directory
+    writeFileSync(join(external, 'SECRET.txt'), 'secret') // external content
+    symlinkSync(external, join(dir, 'leak'), 'dir') // in-root key 'leak' -> external dir
+
+    const shard = new Lockfile({
+      config: { scope: 'full' },
+      entries: new Set(),
+      modules: new Map([['.', { name: 'p', version: '1.0.0', files: { ok: 'sha512-x', leak: 'sha512-y' } }]]),
+      imports: new Map(),
+      formats: new Map([['ok', 'directory'], ['leak', 'directory']]),
+    }).serialize()
+
+    const rootState = new State(dir, { scope: 'full', lock: 'add' })
+    rootState.mergeShard(shard)
+
+    t.assert.equal(rootState.formats.get('ok'), 'directory', 'a legitimate in-root directory listing is still attested')
+    t.assert.ok(!rootState.hashes.has('leak') && rootState.formats.get('leak') === undefined,
+      'a symlink-escaping directory key is NOT attested (external listing rejected)')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(external, { recursive: true, force: true })
   }
 })
 

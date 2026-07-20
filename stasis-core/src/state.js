@@ -1657,6 +1657,20 @@ export class State {
     // A shard must describe the SAME scope as this root (defense-in-depth: cross-scope is
     // signature-rejected upstream, but a mismatch here means a malformed/foreign shard -- refuse).
     assert.equal(lf.config.scope, this.config.scope, `shard scope "${lf.config.scope}" != root scope "${this.config.scope}"`)
+    // A shard carries in-root KEYS, but the root re-reads bytes/listings from ITS OWN disk, where a
+    // key may resolve (through a symlink) OUTSIDE the root. Re-attesting that would pull external
+    // content in under an in-root key, so every replay below re-checks real-path containment -- the
+    // same boundary fs.js enforces on live --fs reads. realRoot resolved once.
+    let realRoot
+    const realContained = (absolute) => {
+      if (realRoot === undefined) {
+        try { realRoot = realpathSync(this.root) } catch { realRoot = this.root }
+      }
+      let real
+      try { real = realpathSync(absolute) } catch { return false }
+      const rel = relative(realRoot, real)
+      return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+    }
     // Files first (addFile records bytes/format/identity), then edges. Merged files are NEVER marked
     // entries -- a child's "entry" is its fork-target main, not a root entry; lf.entries is ignored.
     for (const [dir, info] of lf.modules) {
@@ -1674,6 +1688,9 @@ export class State {
         const absolute = resolve(this.root, file)
         const url = pathToFileURL(absolute).toString()
         const format = lf.formats?.get(file)
+        // Skip a key whose on-disk path escapes the root through a symlink (see realContained), so no
+        // external bytes/listing are attested under an in-root key.
+        if (!realContained(absolute)) continue
         try {
           if (format === 'directory') {
             // A child's readdir capture: replay as a directory listing, re-reading from disk
@@ -1705,7 +1722,6 @@ export class State {
     // here by re-deriving the kind from DISK (a shard can't inject a forged kind). Range-check
     // BEFORE touching disk; best-effort skip on a gone/unmodelled path.
     if (lf.formats) {
-      let realRoot // resolved once, on the first record: the containment anchor below
       for (const [file, format] of lf.formats) {
         if (!isStatFormat(format)) continue
         const absolute = resolve(this.root, file)
@@ -1717,13 +1733,9 @@ export class State {
           const stats = statSync(absolute)
           const kind = stats.isDirectory() ? 'directory' : stats.isFile() ? 'file' : null
           if (kind === null) continue
-          // statSync follows links, so re-assert containment (fs.js captureStat's realContained): the
-          // REAL location must stay inside the root's real path, else a symlink pointing OUT is skipped.
-          if (realRoot === undefined) {
-            try { realRoot = realpathSync(this.root) } catch { realRoot = this.root }
-          }
-          const relReal = relative(realRoot, realpathSync(absolute))
-          if (relReal !== '' && (relReal.startsWith('..') || isAbsolute(relReal))) continue
+          // statSync follows links, so re-assert real-path containment (see realContained): a symlink
+          // pointing OUT must not attest an external kind under an in-root key.
+          if (!realContained(absolute)) continue
           this.addFsStat(pathToFileURL(absolute).toString(), kind)
         } catch {
           // Gone/dangling, or a kind conflict with the root's capture: skip.
