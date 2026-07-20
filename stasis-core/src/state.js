@@ -267,6 +267,8 @@ export class State {
 
     // default root is top-level package.json, to opt-in to per-dir create stasis.config.json
     this.root = potentialRoots.at(-1)
+    // No package.json up the tree = no root: fail closed here, else relative-path calls below throw cryptically.
+    assert.ok(this.root, `stasis: no package.json found at or above ${resolve(root)}; run stasis from within a project`)
 
     let loaded = false
     let lockfileLoaded = false
@@ -1329,7 +1331,11 @@ export class State {
       const file = byParent.get(parent)?.get(spec)
       if (file !== undefined) matches.add(file)
     }
-    return matches.size === 1 ? resolve(this.root, [...matches][0]) : undefined
+    if (matches.size !== 1) return undefined
+    const [only] = matches
+    // Per-platform { platform: file } Map (--metro) has no single path: defer to native, not resolve()'s TypeError.
+    if (typeof only !== 'string') return undefined
+    return resolve(this.root, only)
   }
 
   // Union of lockfile-attested resolutions and the live map, so a partial lock=add run extends
