@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Destructure off the namespace (not `import { ... } from 'node:fs'`): captures the real
@@ -382,7 +382,7 @@ export class State {
 
     const includeSources = lockfile.config.scope === 'full' && this.config.full
     for (const [dir, info] of lockfile.modules) {
-      if (!dir.includes('node_modules') && !includeSources) continue
+      if (!hasNodeModulesSegment(dir) && !includeSources) continue
       this.modules.set(dir, info)
     }
     if (includeSources) this.entries = lockfile.entries
@@ -939,7 +939,7 @@ export class State {
     const rel = relative(dir, file)
     assert.ok(!rel.startsWith('..'))
 
-    const inAttestedZone = dir.includes('node_modules') || this.config.full
+    const inAttestedZone = hasNodeModulesSegment(dir) || this.config.full
     if (this.config.frozen && inAttestedZone) {
       assert.ok(Object.hasOwn(module.files, rel))
     }
@@ -1030,7 +1030,7 @@ export class State {
     assert.ok(!rel.startsWith('..'))
 
     // Frozen attestation (mirrors addFile): in the attested zone the listing must already be recorded and match.
-    const inAttestedZone = dir.includes('node_modules') || this.config.full
+    const inAttestedZone = hasNodeModulesSegment(dir) || this.config.full
     if (this.config.frozen && inAttestedZone) {
       assert.ok(Object.hasOwn(module.files, rel))
     }
@@ -1258,7 +1258,7 @@ export class State {
     // Frozen runs verify disk resolutions against the lockfile: hashes can't see a redirect to a
     // different attested file. Unknown edges fatal in full scope; tolerated for workspace parents
     // in node_modules scope (the workspace is deliberately unattested there).
-    const tolerateUnknown = !this.config.full && !parent.includes('node_modules')
+    const tolerateUnknown = !this.config.full && !hasNodeModulesSegment(parent)
     if (this.config.frozen && this.#lockImports !== null) {
       this.#assertAttestedResolution(this.#lockImports, key, parent, specifier, file, { what: 'observed', source: 'lockfile', tolerateUnknown })
     }

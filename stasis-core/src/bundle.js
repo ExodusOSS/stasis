@@ -4,6 +4,7 @@ import {
   fileMapToObject,
   fileSetToObject,
   fromEntries,
+  hasNodeModulesSegment,
   isPlainObject,
   mergeFormatMaps,
   mergeImportMaps,
@@ -120,7 +121,7 @@ export class Bundle {
       if (json.modules !== undefined) {
         assert(typeof json.modules === 'object' && json.modules !== null)
         for (const [dir, info] of Object.entries(json.modules)) {
-          assert(dir.includes('node_modules'))
+          assert(hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
@@ -129,7 +130,7 @@ export class Bundle {
       if (full) {
         assert(json.sources && typeof json.sources === 'object')
         for (const [dir, info] of Object.entries(json.sources)) {
-          assert(!dir.includes('node_modules'))
+          assert(!hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
@@ -210,7 +211,7 @@ export class Bundle {
     const sourceEntries = []
     for (const [dir, { name, version, ecosystem, files }] of this.modules) {
       if (Object.keys(files).length === 0) continue
-      const inNodeModules = dir.includes('node_modules')
+      const inNodeModules = hasNodeModulesSegment(dir)
       if (inNodeModules) assert(name && version && files)
       const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
       const target = inNodeModules ? moduleEntries : sourceEntries

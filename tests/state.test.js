@@ -305,6 +305,38 @@ test('a frozen bundle attests an absolute-specifier edge: match passes, redirect
     frozen.addImport(parentURL, childAbs, parentURL, { conditions: ['require', 'node'] }))
 })
 
+// A directory whose name merely CONTAINS `node_modules` (e.g. `foo_node_modules/`) is a workspace
+// source, not a dependency: the marker must match a full path SEGMENT. Regression for the old
+// substring-based lastIndexOf('node_modules/') that bucketed such files as phantom npm deps.
+test('a `foo_node_modules` directory is bucketed as a source, not an npm dependency', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-nm-segment-'))
+  t.after(() => rmSync(tmp, { recursive: true, force: true }))
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'root', version: '1.0.0' }))
+
+  // A genuine dependency under node_modules...
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'index.js'), 'module.exports = 1\n')
+  // ...and a source dir whose name merely contains the substring `node_modules`.
+  mkdirSync(join(tmp, 'foo_node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'foo_node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'foo-dep', version: '2.0.0' }))
+  writeFileSync(join(tmp, 'foo_node_modules', 'dep', 'index.js'), 'module.exports = 2\n')
+
+  const st = new State(tmp, { scope: 'full', bundle: 'add' })
+  st.addFile(pathToFileURL(join(tmp, 'node_modules', 'dep', 'index.js')).toString(), { format: 'commonjs' })
+  st.addFile(pathToFileURL(join(tmp, 'foo_node_modules', 'dep', 'index.js')).toString(), { format: 'commonjs' })
+
+  // The genuine dependency is bucketed under node_modules and tagged `npm`.
+  t.assert.ok(st.modules.has('node_modules/dep'))
+  t.assert.equal(st.modules.get('node_modules/dep').ecosystem, 'npm')
+
+  // The impostor is a plain workspace source: its own bucket, NOT tagged as a dependency.
+  t.assert.ok(st.modules.has('foo_node_modules/dep'))
+  t.assert.equal(st.modules.get('foo_node_modules/dep').ecosystem, undefined)
+  t.assert.ok(![...st.modules].some(([, info]) => info.ecosystem === 'npm' && info.name === 'foo-dep'),
+    'the foo_node_modules source is never tagged as an npm dependency')
+})
+
 test('addImport keys by importAttributes: same specifier with vs without {type:json} are distinct', (t) => {
   const parentURL = pathToFileURL(fileAbs2).toString()
   const jsonURL = pathToFileURL(join(root, 'src', 'data.json')).toString()
