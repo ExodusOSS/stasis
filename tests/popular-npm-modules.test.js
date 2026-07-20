@@ -56,7 +56,7 @@ const cleanEnv = (() => {
 })()
 
 // Async child-process runner. Sync I/O would block the node:test event loop,
-// reducing describe-level `concurrency: true` to wall-clock-sequential — the
+// reducing the describe-level `concurrency` cap to wall-clock-sequential — the
 // scheduler can't interleave tests if every spawn/read/write blocks the
 // thread. Using spawn() + once('close') yields between tests, so concurrent
 // describes actually overlap their stasis subprocess time.
@@ -172,13 +172,19 @@ before(async () => {
   }
 })
 
-// All eight tests are independent — each gets its own hardlinked tmp via
+// Cap on concurrent stasis subprocesses per matrix. `concurrency: true`
+// (unbounded) fired every matrix cell at once; on a 4-core box that
+// oversubscribed CPU and ran ~30% slower than a bound near the core count
+// (measured: unbounded ~42s -> CONCURRENCY=4 ~30s isolated). Matches the
+// per-file cap the spawning test files use.
+const CONCURRENCY = 4
+
+// All tests are independent — each gets its own hardlinked tmp via
 // withTmp + freshCopy, and the shared lockText/bundleBuf are read-only after
-// before(). describe({ concurrency: true }) interleaves them: each test runs
-// to its first await, suspends, and the next one starts. With async run() the
-// stasis subprocesses overlap on CPU and the OS schedules them across cores.
-// Measured on a 4-core box: 6.4s parallel vs ~10s sequential.
-describe('bundle + lockfile on the 10-package set', { concurrency: true }, () => {
+// before(). describe({ concurrency: CONCURRENCY }) interleaves them: each test
+// runs to its first await, suspends, and the next one starts. With async run()
+// the stasis subprocesses overlap on CPU and the OS schedules them across cores.
+describe('bundle + lockfile on the 10-package set', { concurrency: CONCURRENCY }, () => {
 
   // --- Headline: the full 10-package set bundles and loads byte-for-byte. ---
 
@@ -403,7 +409,7 @@ before(async () => {
   }
 })
 
-describe('static bundle (stasis bundle) on the 10-package set', { concurrency: true }, () => {
+describe('static bundle (stasis bundle) on the 10-package set', { concurrency: CONCURRENCY }, () => {
 
   test('stasis bundle captures all 10 popular packages and loads with identical output', withTmp(async (t, tmp) => {
     await freshCopy(tmp)
@@ -545,7 +551,7 @@ describe('static bundle (stasis bundle) on the 10-package set', { concurrency: t
 // the bundle (bundle=add, bundle=replace, bundle=none) exercise the runtime
 // path independently and are still useful as cross-checks.
 
-describe('lock x bundle matrix with statically-built bundle', { concurrency: true }, () => {
+describe('lock x bundle matrix with statically-built bundle', { concurrency: CONCURRENCY }, () => {
   for (const lock of LOCK_MODES) {
     for (const bundle of BUNDLE_MODES) {
       if (!isValidCombo(lock, bundle)) continue
@@ -601,7 +607,7 @@ describe('lock x bundle matrix with statically-built bundle', { concurrency: tru
   }
 })
 
-describe('lock x bundle x mock matrix', { concurrency: true }, () => {
+describe('lock x bundle x mock matrix', { concurrency: CONCURRENCY }, () => {
   for (const lock of LOCK_MODES) {
     for (const bundle of BUNDLE_MODES) {
       for (const mock of MOCK_MODES) {
