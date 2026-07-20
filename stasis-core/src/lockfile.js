@@ -114,6 +114,14 @@ export class Lockfile {
       }
     }
 
+    // Both facets ship together from every writer (lockData and shardSnapshot always emit both;
+    // merge rejects a one-sided null), so exactly one missing can only come from hand-editing or
+    // corruption -- fail closed at the schema boundary, in EVERY lock mode. Both-null stays valid
+    // (a true pre-attestation legacy lockfile); a silent one-facet accept would let lock=add
+    // regenerate the stripped facet from one run's partial observations, dropping attestation.
+    assert((imports === null) === (formats === null),
+      'lockfile attests exactly one of imports/formats; every stasis writer emits both or neither -- the file is corrupt or hand-edited')
+
     return new Lockfile({ config: json.config, entries, modules, imports, formats })
   }
 

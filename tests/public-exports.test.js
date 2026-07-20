@@ -101,6 +101,7 @@ test('Lockfile round-trip preserves imports and a legacy lockfile stays without 
     imports: {
       'node, import': { 'src/a.js': { './b.js': 'src/b.js' } },
     },
+    formats: {},
   })
   const parsed = Lockfile.parse(withImports)
   t.assert.equal(parsed.imports.get('node, import').get('src/a.js').get('./b.js'), 'src/b.js')
@@ -129,6 +130,7 @@ test('Lockfile round-trip preserves formats and a legacy lockfile stays without 
     sources: { '.': { name: 'x', version: '1.0.0', files: { 'src/a.js': 'sha512-aaa' } } },
     modules: {},
     formats: { 'src/a.js': 'module' },
+    imports: {},
   })
   const parsed = Lockfile.parse(withFormats)
   t.assert.equal(parsed.formats.get('src/a.js'), 'module')
@@ -147,6 +149,21 @@ test('Lockfile round-trip preserves formats and a legacy lockfile stays without 
   const legacyParsed = Lockfile.parse(legacy)
   t.assert.equal(legacyParsed.formats, null)
   t.assert.equal(JSON.parse(legacyParsed.serialize()).formats, undefined)
+})
+
+test('Lockfile.parse rejects a lockfile attesting exactly one of imports/formats (tamper-shaped)', (t) => {
+  // Every stasis writer emits both facets together; both-null is a true legacy lockfile and stays
+  // valid. Exactly one missing can only come from hand-editing or corruption -- rejected at the
+  // schema boundary in EVERY mode, so lock=add can't silently regenerate the stripped facet.
+  const base = {
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
+  }
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: {} })), /corrupt or hand-edited/)
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, imports: {} })), /corrupt or hand-edited/)
+  t.assert.doesNotThrow(() => Lockfile.parse(JSON.stringify(base)), 'both-null legacy stays parseable')
+  t.assert.doesNotThrow(() => Lockfile.parse(JSON.stringify({ ...base, imports: {}, formats: {} })))
 })
 
 test('Lockfile.parse rejects malformed formats (escaping path / non-string value)', (t) => {
@@ -209,6 +226,7 @@ test('Bundle.parse and Lockfile.parse accept every documented KNOWN_FORMAT', (t)
       config: { scope: 'node_modules' },
       modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
       formats: { 'node_modules/w/i.js': format },
+      imports: {},
     }
     t.assert.ok(Lockfile.parse(JSON.stringify(lockBase)), `Lockfile accepts format=${format}`)
     const bundleBase = {

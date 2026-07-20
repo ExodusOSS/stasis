@@ -731,17 +731,18 @@ test('addFile throws on a format flip in lock=add (attested format changed, byte
 })
 
 test('lock=frozen fails closed when the loaded lockfile predates resolution/format attestation', (t) => {
-  // A null `imports`/`formats` in the lockfile means "does not attest" (distinct from an empty
-  // Map = "attests none"). Under lock=frozen, stasis must refuse at construction rather than
-  // trust that metadata unchecked -- otherwise a redirected resolution or a flipped loader format
-  // could ride hash-valid bytes past a frozen run. The error names the missing attestation and
-  // points at --lock=replace. Non-frozen modes are unaffected (they regenerate on write).
+  // Null `imports`/`formats` mean "does not attest" (distinct from an empty Map = "attests none"),
+  // and every stasis writer emits both facets together. So: exactly ONE missing is tamper-shaped --
+  // Lockfile.parse refuses it in EVERY lock mode (else lock=add would silently regenerate the
+  // stripped facet from one run's partial observations, dropping attestation). BOTH missing is a
+  // true pre-attestation legacy lockfile: lock=frozen refuses it at construction (it cannot verify
+  // that metadata) pointing at --lock=replace, while non-frozen modes still construct.
   const dir = mkdtempSync(join(tmpdir(), 'stasis-frozen-attest-'))
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fx', version: '0.0.0' }))
     const lockPath = join(dir, 'stasis.lock.json')
     // A fully-attested v1-shape lockfile: `imports` and `formats` present (empty = "attests none",
-    // which is NOT null). Stripping a key below yields the legacy "does not attest" shape.
+    // which is NOT null). Stripping keys below yields the tampered / legacy shapes.
     const fullLock = {
       version: 0,
       config: { scope: 'full' },
@@ -753,29 +754,31 @@ test('lock=frozen fails closed when the loaded lockfile predates resolution/form
     }
     const writeLock = (obj) => writeFileSync(lockPath, JSON.stringify(obj, undefined, 2) + '\n')
     const frozen = () => new State(dir, { scope: 'full', lock: 'frozen', bundle: 'none' })
+    const add = () => new State(dir, { scope: 'full', lock: 'add', bundle: 'none' })
 
-    // imports === null (key absent): frozen throws, naming the missing attestation + the fix.
+    // imports stripped (formats kept): tamper-shaped -- rejected at parse in BOTH modes.
     const noImports = structuredClone(fullLock)
     delete noImports.imports
     writeLock(noImports)
-    t.assert.throws(frozen, /lock=frozen: .* does not attest resolutions[\s\S]*--lock=replace/)
+    t.assert.throws(frozen, /corrupt or hand-edited/)
+    t.assert.throws(add, /corrupt or hand-edited/, 'lock=add must not silently heal a stripped facet')
 
-    // formats === null: frozen throws likewise.
+    // formats stripped (imports kept): same tamper shape, same rejection.
     const noFormats = structuredClone(fullLock)
     delete noFormats.formats
     writeLock(noFormats)
-    t.assert.throws(frozen, /lock=frozen: .* does not attest formats[\s\S]*--lock=replace/)
+    t.assert.throws(frozen, /corrupt or hand-edited/)
+    t.assert.throws(add, /corrupt or hand-edited/)
 
-    // Both absent: one throw naming both facets.
+    // BOTH absent: a true legacy lockfile. frozen refuses (cannot verify), naming the fix.
     const neither = structuredClone(fullLock)
     delete neither.imports
     delete neither.formats
     writeLock(neither)
-    t.assert.throws(frozen, /does not attest resolutions or formats/)
+    t.assert.throws(frozen, /lock=frozen: .* does not attest resolutions\/formats[\s\S]*--lock=replace/)
 
-    // Only config.frozen fails closed: a non-frozen mode against the same legacy lockfile still
-    // constructs (lock=add regenerates full attestation on write).
-    t.assert.doesNotThrow(() => new State(dir, { scope: 'full', lock: 'add', bundle: 'none' }))
+    // Non-frozen modes tolerate the legacy shape (lock=add regenerates full attestation on write).
+    t.assert.doesNotThrow(add)
 
     // A fully-attested lockfile constructs a frozen run cleanly.
     writeLock(fullLock)

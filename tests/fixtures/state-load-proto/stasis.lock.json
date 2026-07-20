@@ -22,6 +22,6 @@
       }
     }
   },
-  "formats": {},
+  "formats": { "src/entry.js": "module", "node_modules/widget/index.js": "commonjs" },
   "imports": {}
 }

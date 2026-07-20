@@ -248,6 +248,7 @@ const importsLock = (edges) => ({
   version: 0, config: { scope: 'node_modules' },
   modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } },
   imports: edges,
+  formats: {}, // writers emit both facets together; parse rejects a one-sided shape
 })
 
 test('diffArtifacts only diffs imports when asked', (t) => {
@@ -581,8 +582,8 @@ test('diff --stat --imports reports redirected edges and exits 1 on an import-on
     version: 0, config: { scope: 'node_modules' },
     modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } },
   }
-  const a = writeLock(tmp, { ...base, imports: { '*': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/old.js' } } } }, 'a.lock.json')
-  const b = writeLock(tmp, { ...base, imports: { '*': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/new.js' } } } }, 'b.lock.json')
+  const a = writeLock(tmp, { ...base, formats: {}, imports: { '*': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/old.js' } } } }, 'a.lock.json')
+  const b = writeLock(tmp, { ...base, formats: {}, imports: { '*': { 'node_modules/foo/index.js': { './x.js': 'node_modules/foo/new.js' } } } }, 'b.lock.json')
 
   const without = runCli(['diff', '--stat', a, b])
   t.assert.equal(without.status, 0)
