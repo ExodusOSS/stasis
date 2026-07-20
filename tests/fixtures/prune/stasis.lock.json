@@ -1,6 +1,8 @@
 {
   "version": 0,
-  "config": { "scope": "node_modules" },
+  "config": {
+    "scope": "node_modules"
+  },
   "modules": {
     "node_modules/widget": {
       "name": "widget",
@@ -17,5 +19,7 @@
         "index.js": "sha512-zOU8RwbAiwyOEmLDEiAfhY9C29N6ZmDoNGTJr0vQmP1qNmCefNu4YqQP/25s8meh2L+sywEm9mDInmi3JcTgmQ=="
       }
     }
-  }
+  },
+  "imports": {},
+  "formats": {}
 }

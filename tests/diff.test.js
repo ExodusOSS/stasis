@@ -19,7 +19,8 @@ const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 // The `@exodus/stasis/diff` API operates on already-parsed artifacts, so build
 // Lockfile/Bundle instances straight from JSON — no disk, no brotli — and tag
 // each with the kind the CLI's loader would have reported.
-const lockOf = (obj) => ({ artifact: Lockfile.parse(JSON.stringify(obj)), kind: 'lockfile' })
+// parse requires imports+formats; default them so terse shapes stay valid (explicit keys win).
+const lockOf = (obj) => ({ artifact: Lockfile.parse(JSON.stringify({ imports: {}, formats: {}, ...obj })), kind: 'lockfile' })
 const codeOf = (obj) => ({ artifact: Bundle.parse(JSON.stringify(obj)), kind: 'bundle' })
 // A resources bundle is now just a unified bundle whose files are all tagged as
 // base64 resources. Synthesize the formats map so the fixtures stay terse.
@@ -44,6 +45,8 @@ const LOCK = {
   entries: ['src/index.js'],
   sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/index.js': 'sha512-AAA', 'src/util.js': 'sha512-UTIL' } } },
   modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', ecosystem: 'npm', files: { 'index.js': 'sha512-FOO' } } },
+  imports: {},
+  formats: {},
 }
 
 // ── normalizeArtifact ────────────────────────────────────────────────────────
@@ -248,7 +251,6 @@ const importsLock = (edges) => ({
   version: 0, config: { scope: 'node_modules' },
   modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } },
   imports: edges,
-  formats: {}, // writers emit both facets together; parse rejects a one-sided shape
 })
 
 test('diffArtifacts only diffs imports when asked', (t) => {
@@ -339,10 +341,10 @@ test('a resource-only bundle attests an empty import set (unified format always 
 })
 
 test('diffArtifacts skips the import diff (without flipping hasDifferences) when a side does not attest imports', (t) => {
-  // A legacy lockfile with no `imports` key parses to imports === null.
-  const legacy = { version: 0, config: { scope: 'node_modules' }, modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } } }
+  // An in-memory Lockfile with null imports (parse always yields Maps; only constructs can be null).
+  const legacy = { artifact: new Lockfile({ config: { scope: 'node_modules' }, modules: new Map([['node_modules/foo', { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } }]]) }), kind: 'lockfile' }
   const withEdges = importsLock({ '*': { 'node_modules/foo/index.js': { './a.js': 'node_modules/foo/a.js' } } })
-  const diff = diffArtifacts(lockOf(legacy), lockOf(withEdges), { imports: true })
+  const diff = diffArtifacts(legacy, lockOf(withEdges), { imports: true })
   t.assert.deepEqual(diff.imports.attested, { left: false, right: true })
   t.assert.equal(diff.imports.added.length + diff.imports.removed.length + diff.imports.changed.length, 0)
   // nothing else differs, and an un-comparable import graph must not invent one
@@ -356,8 +358,8 @@ test('formatDiffStat renders the imports section and its skip note', (t) => {
   t.assert.match(out, /Imports: 0 added, 0 removed, 1 changed/)
   t.assert.match(out, /\* node_modules\/foo\/index\.js {2}'\.\/a\.js' {2}node_modules\/foo\/old\.js -> node_modules\/foo\/new\.js/)
 
-  const legacy = { version: 0, config: { scope: 'node_modules' }, modules: { 'node_modules/foo': { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } } } }
-  const note = formatDiffStat(diffArtifacts(lockOf(legacy), lockOf(a), { imports: true }), { left: 'a', right: 'b' })
+  const legacy = { artifact: new Lockfile({ config: { scope: 'node_modules' }, modules: new Map([['node_modules/foo', { name: 'foo', version: '1.0.0', files: { 'index.js': 'sha512-same' } }]]) }), kind: 'lockfile' }
+  const note = formatDiffStat(diffArtifacts(legacy, lockOf(a), { imports: true }), { left: 'a', right: 'b' })
   t.assert.match(note, /Imports: a does not attest resolutions; skipping import diff/)
 })
 
@@ -422,7 +424,7 @@ const withTmp = (fn) => (t) => {
 
 const writeLock = (dir, obj, name) => {
   const p = join(dir, name)
-  writeFileSync(p, JSON.stringify(obj))
+  writeFileSync(p, JSON.stringify({ imports: {}, formats: {}, ...obj })) // defaults, as in lockOf
   return p
 }
 const writeBundle = (dir, obj, name) => {

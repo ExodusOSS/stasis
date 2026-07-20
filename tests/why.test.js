@@ -224,7 +224,7 @@ test('collectWhy restricts work to the requested target keys', withTmp((t, tmp) 
   t.assert.deepEqual(linesFor(why, 'b@1.0.0'), ['a -> b'])
 }))
 
-test('collectWhy returns nothing for an artifact without an imports graph', withTmp((t, tmp) => {
+test('collectWhy returns nothing for an artifact with an empty imports graph', withTmp((t, tmp) => {
   const path = join(tmp, 'stasis.lock.json')
   writeFileSync(path, JSON.stringify({
     version: 0,
@@ -232,6 +232,8 @@ test('collectWhy returns nothing for an artifact without an imports graph', with
     entries: ['src/entry.js'],
     sources: { '.': { name: 'top', version: '1.0.0', files: { 'src/entry.js': 'sha512-x' } } },
     modules: { 'node_modules/c': { name: 'c', version: '1.0.0', files: { 'index.js': 'sha512-y' } } },
+    imports: {},
+    formats: {},
   }))
   t.assert.equal(collectWhy([path]).size, 0)
 }))

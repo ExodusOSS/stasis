@@ -730,19 +730,13 @@ test('addFile throws on a format flip in lock=add (attested format changed, byte
   }
 })
 
-test('lock=frozen fails closed when the loaded lockfile predates resolution/format attestation', (t) => {
-  // Null `imports`/`formats` mean "does not attest" (distinct from an empty Map = "attests none"),
-  // and every stasis writer emits both facets together. So: exactly ONE missing is tamper-shaped --
-  // Lockfile.parse refuses it in EVERY lock mode (else lock=add would silently regenerate the
-  // stripped facet from one run's partial observations, dropping attestation). BOTH missing is a
-  // true pre-attestation legacy lockfile: lock=frozen refuses it at construction (it cannot verify
-  // that metadata) pointing at --lock=replace, while non-frozen modes still construct.
+test('a lockfile missing imports and/or formats is refused at parse, in every lock mode', (t) => {
+  // Every stasis writer emits both facets; Lockfile.parse requires them, so a stripped facet can't
+  // make lock=add silently regenerate it from partial observations, and frozen never sees one.
   const dir = mkdtempSync(join(tmpdir(), 'stasis-frozen-attest-'))
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fx', version: '0.0.0' }))
     const lockPath = join(dir, 'stasis.lock.json')
-    // A fully-attested v1-shape lockfile: `imports` and `formats` present (empty = "attests none",
-    // which is NOT null). Stripping keys below yields the tampered / legacy shapes.
     const fullLock = {
       version: 0,
       config: { scope: 'full' },
@@ -756,31 +750,14 @@ test('lock=frozen fails closed when the loaded lockfile predates resolution/form
     const frozen = () => new State(dir, { scope: 'full', lock: 'frozen', bundle: 'none' })
     const add = () => new State(dir, { scope: 'full', lock: 'add', bundle: 'none' })
 
-    // imports stripped (formats kept): tamper-shaped -- rejected at parse in BOTH modes.
-    const noImports = structuredClone(fullLock)
-    delete noImports.imports
-    writeLock(noImports)
-    t.assert.throws(frozen, /corrupt or hand-edited/)
-    t.assert.throws(add, /corrupt or hand-edited/, 'lock=add must not silently heal a stripped facet')
+    for (const strip of [['imports'], ['formats'], ['imports', 'formats']]) {
+      const lock = structuredClone(fullLock)
+      for (const key of strip) delete lock[key]
+      writeLock(lock)
+      t.assert.throws(frozen, /must attest imports and formats/, `frozen refuses without ${strip}`)
+      t.assert.throws(add, /must attest imports and formats/, `add refuses without ${strip}`)
+    }
 
-    // formats stripped (imports kept): same tamper shape, same rejection.
-    const noFormats = structuredClone(fullLock)
-    delete noFormats.formats
-    writeLock(noFormats)
-    t.assert.throws(frozen, /corrupt or hand-edited/)
-    t.assert.throws(add, /corrupt or hand-edited/)
-
-    // BOTH absent: a true legacy lockfile. frozen refuses (cannot verify), naming the fix.
-    const neither = structuredClone(fullLock)
-    delete neither.imports
-    delete neither.formats
-    writeLock(neither)
-    t.assert.throws(frozen, /lock=frozen: .* does not attest resolutions\/formats[\s\S]*--lock=replace/)
-
-    // Non-frozen modes tolerate the legacy shape (lock=add regenerates full attestation on write).
-    t.assert.doesNotThrow(add)
-
-    // A fully-attested lockfile constructs a frozen run cleanly.
     writeLock(fullLock)
     t.assert.doesNotThrow(frozen)
   } finally {

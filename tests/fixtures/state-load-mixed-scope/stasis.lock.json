@@ -1,19 +1,29 @@
 {
   "version": 0,
-  "config": { "scope": "full" },
-  "entries": ["src/entry.js"],
+  "config": {
+    "scope": "full"
+  },
+  "entries": [
+    "src/entry.js"
+  ],
   "sources": {
     ".": {
       "name": "stasis-load-mixed-scope-fixture",
       "version": "0.0.0",
-      "files": { "src/entry.js": "sha512-src-aaa" }
+      "files": {
+        "src/entry.js": "sha512-src-aaa"
+      }
     }
   },
   "modules": {
     "node_modules/widget": {
       "name": "widget",
       "version": "1.2.3",
-      "files": { "index.js": "sha512-mod-bbb" }
+      "files": {
+        "index.js": "sha512-mod-bbb"
+      }
     }
-  }
+  },
+  "imports": {},
+  "formats": {}
 }

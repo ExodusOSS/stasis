@@ -19,6 +19,8 @@ test('Lockfile serializes `ecosystem` next to name/version for an npm dep and om
       ['.', { name: 'app', version: '1.0.0', files: { 'src/index.js': 'sha512-aaa' } }],
       ['node_modules/dep', { name: 'dep', version: '2.0.0', ecosystem: 'npm', files: { 'index.js': 'sha512-bbb' } }],
     ]),
+    imports: new Map(),
+    formats: new Map(),
   })
 
   const json = JSON.parse(lock.serialize())
@@ -42,6 +44,8 @@ test('Lockfile carries a `composer` ecosystem on a (non-node_modules) vendor dep
       ['.', { name: 'acme/app', version: '0.0.0', files: { 'index.php': 'sha512-a' } }],
       ['vendor/acme/lib', { name: 'acme/lib', version: '1.4.2', ecosystem: 'composer', files: { 'src/Client.php': 'sha512-b' } }],
     ]),
+    imports: new Map(),
+    formats: new Map(),
   })
 
   const json = JSON.parse(lock.serialize())
@@ -103,6 +107,8 @@ test('a module with no `ecosystem` serializes without the key (clean omission)',
     modules: new Map([
       ['node_modules/dep', { name: 'dep', version: '2.0.0', files: { 'index.js': 'sha512-x' } }],
     ]),
+    imports: new Map(),
+    formats: new Map(),
   })
   const text = lock.serialize()
   t.assert.ok(!text.includes('ecosystem'), 'no ecosystem key when none is set')
@@ -115,6 +121,8 @@ test('lockfiles/bundles predating `ecosystem` still parse (backward compatible)'
     version: 0,
     config: { scope: 'node_modules' },
     modules: { 'node_modules/dep': { name: 'dep', version: '1.0.0', files: { 'index.js': 'sha512-x' } } },
+    imports: {},
+    formats: {},
   })
   t.assert.doesNotThrow(() => Lockfile.parse(lockText))
   t.assert.equal(Lockfile.parse(lockText).modules.get('node_modules/dep').ecosystem, undefined)

@@ -118,8 +118,7 @@ Unknown keys are rejected. A key set by both file and env var must match. Only
   checked: a divergence from the recorded target is fatal (catching a specifier
   redirected to a *different* attested file, which byte hashes can't); an
   unrecorded edge is fatal in `scope = full` but tolerated for workspace parents
-  in `scope = node_modules`. Lockfiles predating this field omit it; a `lock = frozen`
-  run refuses such a lockfile -- regenerate with `--lock=replace`.
+  in `scope = node_modules`.
 - Per-platform edges (`stasis bundle --metro --platforms=…`): a resolution target
   is normally a project-relative file string. When `--metro` resolves one
   `(parent, specifier)` edge to **different** files across platforms (e.g.
@@ -143,8 +142,7 @@ Unknown keys are rejected. A key set by both file and env var must match. Only
   module-vs-commonjs and (for `*-typescript`) type-stripping purely from this
   value. Checked like `imports`: a mismatch is fatal, and on disk only the attested
   zone is enforced (`node_modules` files in `node_modules` scope, everything in
-  `full`). Lockfiles predating this field omit it; a `lock = frozen` run refuses
-  such a lockfile -- regenerate with `--lock=replace`.
+  `full`).
 - File and module maps are sorted by the project's `sortPaths` rule (files in a
   dir before sub-dirs; `*` first, `node_modules` last).
 
@@ -211,8 +209,7 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   the file the lockfile attests for that `(parent, specifier)`. The conditions key
   is matched exactly first; on a miss the edge passes only if every condition set
   the lockfile records for that parent+specifier agrees on the same target. Unknown
-  or inconsistently-attested edges are fatal. A lockfile without `imports` is refused
-  outright under `lock = frozen`; regenerate it with `--lock=replace`.
+  or inconsistently-attested edges are fatal.
 - In `bundle = load` with `scope = full`, entry-point resolutions are checked
   against `entries`.
 

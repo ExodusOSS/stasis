@@ -83,13 +83,15 @@ test('Lockfile round-trip preserves structure', (t) => {
     modules: {
       'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-bbb' } },
     },
+    imports: {},
+    formats: {},
   })
   const first = Lockfile.parse(text).serialize()
   const second = Lockfile.parse(first).serialize()
   t.assert.equal(first, second)
 })
 
-test('Lockfile round-trip preserves imports and a legacy lockfile stays without them', (t) => {
+test('Lockfile round-trip preserves imports', (t) => {
   const withImports = JSON.stringify({
     version: 0,
     config: { scope: 'full' },
@@ -109,20 +111,9 @@ test('Lockfile round-trip preserves imports and a legacy lockfile stays without 
   const second = Lockfile.parse(first).serialize()
   t.assert.equal(first, second)
   t.assert.ok(JSON.parse(first).imports, 'imports must survive serialization')
-
-  // A legacy lockfile (no imports key) parses to imports === null and
-  // round-trips without gaining the key.
-  const legacy = JSON.stringify({
-    version: 0,
-    config: { scope: 'node_modules' },
-    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-bbb' } } },
-  })
-  const legacyParsed = Lockfile.parse(legacy)
-  t.assert.equal(legacyParsed.imports, null)
-  t.assert.equal(JSON.parse(legacyParsed.serialize()).imports, undefined)
 })
 
-test('Lockfile round-trip preserves formats and a legacy lockfile stays without them', (t) => {
+test('Lockfile round-trip preserves formats', (t) => {
   const withFormats = JSON.stringify({
     version: 0,
     config: { scope: 'full' },
@@ -138,31 +129,18 @@ test('Lockfile round-trip preserves formats and a legacy lockfile stays without 
   const second = Lockfile.parse(first).serialize()
   t.assert.equal(first, second)
   t.assert.deepEqual(JSON.parse(first).formats, { 'src/a.js': 'module' })
-
-  // A legacy lockfile (no formats key) parses to formats === null and
-  // round-trips without gaining the key.
-  const legacy = JSON.stringify({
-    version: 0,
-    config: { scope: 'node_modules' },
-    modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-bbb' } } },
-  })
-  const legacyParsed = Lockfile.parse(legacy)
-  t.assert.equal(legacyParsed.formats, null)
-  t.assert.equal(JSON.parse(legacyParsed.serialize()).formats, undefined)
 })
 
-test('Lockfile.parse rejects a lockfile attesting exactly one of imports/formats (tamper-shaped)', (t) => {
-  // Every stasis writer emits both facets together; both-null is a true legacy lockfile and stays
-  // valid. Exactly one missing can only come from hand-editing or corruption -- rejected at the
-  // schema boundary in EVERY mode, so lock=add can't silently regenerate the stripped facet.
+test('Lockfile.parse requires both imports and formats', (t) => {
+  // Every stasis writer emits both facets; a file missing either is not a stasis lockfile.
   const base = {
     version: 0,
     config: { scope: 'node_modules' },
     modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
   }
-  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: {} })), /corrupt or hand-edited/)
-  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, imports: {} })), /corrupt or hand-edited/)
-  t.assert.doesNotThrow(() => Lockfile.parse(JSON.stringify(base)), 'both-null legacy stays parseable')
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: {} })), /must attest imports and formats/)
+  t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, imports: {} })), /must attest imports and formats/)
+  t.assert.throws(() => Lockfile.parse(JSON.stringify(base)), /must attest imports and formats/)
   t.assert.doesNotThrow(() => Lockfile.parse(JSON.stringify({ ...base, imports: {}, formats: {} })))
 })
 
@@ -171,6 +149,7 @@ test('Lockfile.parse rejects malformed formats (escaping path / non-string value
     version: 0,
     config: { scope: 'node_modules' },
     modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
+    imports: {},
   }
   t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { '../evil.js': 'module' } })))
   t.assert.throws(() => Lockfile.parse(JSON.stringify({ ...base, formats: { 'a/../../evil.js': 'module' } })))
@@ -187,6 +166,7 @@ test('Lockfile.parse rejects an unknown format string (allowlist gate)', (t) => 
     version: 0,
     config: { scope: 'node_modules' },
     modules: { 'node_modules/w': { name: 'w', version: '1.0.0', files: { 'i.js': 'sha512-x' } } },
+    imports: {},
   }
   t.assert.throws(
     () => Lockfile.parse(JSON.stringify({ ...base, formats: { 'node_modules/w/i.js': 'banana' } })),

@@ -27,10 +27,8 @@ function getBase() {
 }
 
 // Per-worker load State, built once from the usual env + stasis.config.json. Non-load mode -> null
-// -> transparent pass-through, so wiring it permanently is safe. A construction FAILURE (tampered
-// artifact, misconfiguration, fail-closed lockfile guard) is cached and rethrown on EVERY call:
-// without that, the first transform()/getCacheKey() would throw and later calls would silently
-// pass through as if stasis weren't wired -- one confusing error, then fail-open.
+// -> transparent pass-through, so wiring it permanently is safe. A construction failure is cached
+// and rethrown on every call -- never throw-once-then-silently-pass-through.
 let stateInited = false
 let loadState = null
 let stateError = null
