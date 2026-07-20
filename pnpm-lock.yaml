@@ -65,9 +65,6 @@ importers:
       flow-remove-types:
         specifier: '*'
         version: 2.322.0
-      metro-resolver:
-        specifier: '*'
-        version: 0.87.0
       oxc-parser:
         specifier: ^0.94.0
         version: 0.94.0(@emnapi/core@1.11.0)(@emnapi/runtime@1.11.0)

@@ -74,17 +74,13 @@
   },
   "peerDependencies": {
     "esbuild": "*",
-    "flow-remove-types": "*",
-    "metro-resolver": "*"
+    "flow-remove-types": "*"
   },
   "peerDependenciesMeta": {
     "esbuild": {
       "optional": true
     },
     "flow-remove-types": {
-      "optional": true
-    },
-    "metro-resolver": {
       "optional": true
     }
   }

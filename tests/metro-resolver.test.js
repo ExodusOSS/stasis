@@ -19,8 +19,9 @@ const fx = join(here, 'fixtures', 'resolve-fields')
 const entry = join(fx, 'src', 'entry.js')
 const redirIndex = join(fx, 'node_modules', 'redir', 'index.js')
 
-// metro-resolver is an optional peer (it ships with the project's Metro). It's a workspace
-// devDependency here, but skip cleanly rather than hard-fail where it isn't installed.
+// The adapter auto-discovers metro-resolver from the project being bundled (where stasis is
+// RUN), not from stasis's own install -- so it's a workspace devDependency here purely for these
+// tests, resolvable from the fixture via node_modules walk-up. Skip cleanly where it's absent.
 const metroResolverAvailable = (() => {
   try {
     createRequire(join(fx, 'noop.js')).resolve('metro-resolver')
