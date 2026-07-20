@@ -11,8 +11,10 @@
 //      graphs plain node refuses. FIXED for resolution: an ESM import edge resolves by ESM
 //      rules, so these fail closed at build like plain node. B2 (JSON import missing the
 //      `type` attribute) is a load-time gate, not a resolution difference, and still diverges.
-//   C. Over-inclusion: a shadowed `require` identifier in dead code attests files/edges the
-//      runtime can never resolve; frozen verify tolerates them.
+//   C. Over-inclusion: a shadowed `require` identifier in dead code once attested files/edges
+//      the runtime can never resolve. FIXED: a require() call whose `require` is bound by a
+//      function/catch parameter is not a real module edge (the value comes from the caller),
+//      so the scan skips it; createRequire() variable bindings stay real.
 //   D. Under-inclusion: aliased require, require.resolve(), import.meta.resolve() edges exist
 //      only in the runtime capture. Not pinned (how --bundle=load reacts varies across the
 //      Node floor); see the git history for the removed test.
@@ -348,27 +350,36 @@ console.log(data.k)
 
 // --- Class C: spurious static edges ---
 
-test('DIVERGENCE C: a shadowed `require` identifier adds files/edges the runtime never resolves', withTmp((t, tmp) => {
-  // scan matches `require(<literal>)` by identifier name -- even a shadowed parameter in
-  // dead ESM code. The artifact gains files the app can never load; frozen verify tolerates
-  // over-attestation.
+test('FIXED C: a `require` bound by a parameter is not recorded as an edge; createRequire bindings still are', withTmp((t, tmp) => {
+  // A `require(<literal>)` whose `require` is a function parameter (here, dead shadowed code)
+  // is not the CommonJS require -- the scan skips it, matching the run (which records nothing).
+  // A createRequire() binding inside the same file must still resolve.
   const entry = 'main.mjs'
-  const dirs = scenario(tmp, entry, `export function f(require) { if (globalThis.__never) require('./phantom.cjs') }
-console.log('ok')
+  const dirs = scenario(tmp, entry, `import { createRequire } from 'node:module'
+export function shadow(require) { if (globalThis.__never) require('./phantom.cjs') }
+function load() { const require = createRequire(import.meta.url); return require('dual').which }
+console.log(load())
 `)
   const run = stasisRun(dirs.run, entry)
   t.assert.equal(run.status, 0, run.stderr)
+  t.assert.equal(run.stdout, 'dual:CJS\n')
   const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
   t.assert.ok(!runLock.files.has('phantom.cjs'))
   t.assert.ok(!runLock.edges.has('main.mjs :: ./phantom.cjs'))
 
   t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
   const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: ./phantom.cjs'), 'phantom.cjs') // DIVERGENCE
-  t.assert.ok(staticLock.files.has('phantom.cjs'))
+  // The parameter-shadowed require is gone (matching the run); the createRequire edge remains.
+  t.assert.ok(!staticLock.edges.has('main.mjs :: ./phantom.cjs'), 'shadowed-param require must not be recorded')
+  t.assert.ok(!staticLock.files.has('phantom.cjs'))
+  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: dual'), 'node_modules/dual/cjs.cjs')
+
+  const load = bundleLoad(dirs.bundle, entry)
+  t.assert.equal(load.status, 0, load.stderr)
+  t.assert.equal(load.stdout, 'dual:CJS\n')
 
   installStaticLock(dirs)
-  t.assert.equal(frozenRun(dirs.frozen, entry).status, 0, 'frozen tolerates over-attestation')
+  t.assert.equal(frozenRun(dirs.frozen, entry).status, 0, frozenRun(dirs.frozen, entry).stderr)
 }))
 
 // --- Class E: URL-flavored relative specifiers ---

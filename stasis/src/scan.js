@@ -101,8 +101,31 @@ function literalSpec(node) {
   return null
 }
 
+// Does a binding pattern bind the name `require` (so calls in its scope use that binding, not
+// the module's `require`)? Recurses defaults/rest/destructuring; only VALUE positions bind.
+function patternBindsRequire(node) {
+  if (!node || typeof node !== 'object') return false
+  switch (node.type) {
+    case 'Identifier': return node.name === 'require'
+    case 'AssignmentPattern': return patternBindsRequire(node.left)
+    case 'RestElement': return patternBindsRequire(node.argument)
+    case 'ArrayPattern': return node.elements.some((e) => patternBindsRequire(e))
+    case 'ObjectPattern':
+      return node.properties.some((p) => patternBindsRequire(p.type === 'RestElement' ? p.argument : p.value))
+    default: return false
+  }
+}
+
+const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'])
+
 // Walks require()/import() calls only; ESM static imports/re-exports come from oxc module records.
 function findCallSpecifiers(ast, push) {
+  // >0 inside a function/catch whose PARAMETER binds `require`: a parameter's value comes from the
+  // caller, so it is never the CommonJS require or a createRequire() result -- calls there are not
+  // real module edges (e.g. a `function (require) {...}` webpack/UMD wrapper, or dead shadowed code).
+  // Variable bindings (`const require = createRequire(...)`, module- or function-scoped) are left
+  // real, so they still resolve.
+  let shadowDepth = 0
   const visit = (node) => {
     if (!node || typeof node !== 'object') return
     if (Array.isArray(node)) {
@@ -111,9 +134,15 @@ function findCallSpecifiers(ast, push) {
     }
     if (typeof node.type !== 'string') return
 
+    const params = FUNCTION_TYPES.has(node.type) ? node.params
+      : node.type === 'CatchClause' && node.param ? [node.param]
+      : null
+    const shadows = params?.some((p) => patternBindsRequire(p)) ?? false
+    if (shadows) shadowDepth++
+
     if (node.type === 'CallExpression') {
       const { callee, arguments: args } = node
-      if (callee.type === 'Identifier' && callee.name === 'require' && args.length >= 1) {
+      if (callee.type === 'Identifier' && callee.name === 'require' && args.length >= 1 && shadowDepth === 0) {
         const spec = literalSpec(args[0])
         if (spec != null) push({ kind: 'require', spec })
         else push({ kind: 'require', dynamic: true })
@@ -136,6 +165,8 @@ function findCallSpecifiers(ast, push) {
       if (key === 'type' || key === 'loc' || key === 'range' || key === 'start' || key === 'end') continue
       visit(node[key])
     }
+
+    if (shadows) shadowDepth--
   }
   visit(ast)
 }
