@@ -1,27 +1,26 @@
 // Characterization tests for resolution differences between `stasis run` (Node's real
-// resolvers, observed via hooks) and `stasis bundle` (scan.js: the CJS algorithm via
-// createRequire(file).resolve with steered conditions). Identical on Node 24.18 / 26.5.
+// resolvers, observed via hooks) and `stasis bundle` (scan.js: import()-context edges by ESM
+// rules, require()-context by the CJS algorithm). Identical on Node 24.14/24.18/26.0/26.5.
 //
-//   A. Silent wrong-file: everything builds and runs, but the static graph attests a
-//      different file than Node loads, and --bundle=load executes it. A1 (createRequire()d
-//      require() in ESM) and A2 (literal import() in CJS) are FIXED: scan resolves per edge
-//      kind, and divergent targets keep their real condition keys instead of one '*' entry.
-//      A3 (ESM percent-decoding vs CJS literal paths) remains.
+//   A. Silent wrong-file: the static graph once attested a different file than Node loads,
+//      and --bundle=load executed it. FIXED: scan resolves per edge kind (A1 createRequire()d
+//      require() in ESM, A2 literal import() in CJS -- divergent targets keep their real
+//      condition keys) and per ESM URL semantics (A3 percent-decoding, vs CJS literal paths).
 //   B. Over-resolution: CJS-only probing (extensionless, directory index, nested dir main,
-//      subpaths) leaks into ESM import edges -- bundles build, and --bundle=load runs,
-//      graphs plain node refuses.
+//      subpaths) once leaked into ESM import edges, so bundles built and --bundle=load ran
+//      graphs plain node refuses. FIXED for resolution: an ESM import edge resolves by ESM
+//      rules, so these fail closed at build like plain node. B2 (JSON import missing the
+//      `type` attribute) is a load-time gate, not a resolution difference, and still diverges.
 //   C. Over-inclusion: a shadowed `require` identifier in dead code attests files/edges the
 //      runtime can never resolve; frozen verify tolerates them.
-//   D. Under-inclusion: aliased require, require.resolve(), import.meta.resolve() edges
-//      exist only in the runtime capture. Not pinned yet: how --bundle=load reacts (resolve
-//      error, unattested-load error, or even success for resolve-only edges) varies across
-//      the supported Node floor (24.14/26.0 vs latest).
-//   E. ?query/#fragment relative imports: plain node runs them; `stasis run` dies on a
-//      State.absolute round-trip assert, `stasis bundle` fails closed.
+//   D. Under-inclusion: aliased require, require.resolve(), import.meta.resolve() edges exist
+//      only in the runtime capture. Not pinned (how --bundle=load reacts varies across the
+//      Node floor); see the git history for the removed test.
+//   E. ?query/#fragment relative imports: plain node runs them. FIXED: scan resolves them by
+//      URL, and State strips the suffix for the file identity (it once crashed the run capture).
 //
-// Only a real (disk) run under --lock=frozen / --bundle=frozen catches class A;
-// --bundle=load alone executes it silently. DIVERGENCE assertions pin current behavior --
-// when a class is fixed, update them to the converged expectations (see A1/A2).
+// DIVERGENCE assertions pin still-open behavior; FIXED/CONTROL pin the converged behavior a
+// real run must match. Class A's silent wrong-file was caught only by a frozen disk run.
 
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
@@ -248,9 +247,10 @@ import('dual').then((m) => {
   t.assert.equal(frozen.stdout, plain.stdout)
 }))
 
-test('DIVERGENCE A3: percent-encoded relative import resolves literally in the static scan, decoded by Node', withTmp((t, tmp) => {
+test('FIXED A3: percent-encoded relative import resolves by ESM URL semantics, matching Node', withTmp((t, tmp) => {
   // ESM specifiers are URLs ('./enc/a%20b.mjs' loads 'enc/a b.mjs'); the CJS algorithm takes
-  // the literal path. With both spellings on disk the resolvers silently pick different files.
+  // the literal path. With both spellings on disk the scan now resolves the import edge as a
+  // URL (fileURLToPath decodes the %20), so it picks the same file Node does.
   const entry = 'main.mjs'
   const dirs = scenario(tmp, entry, `import { which } from './enc/a%20b.mjs'
 console.log(which)
@@ -267,18 +267,19 @@ console.log(which)
 
   t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
   const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  // DIVERGENCE: the literal-spelling file is attested; the file Node loads is not.
-  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: ./enc/a%20b.mjs'), 'enc/a%20b.mjs')
-  t.assert.ok(!staticLock.files.has('enc/a b.mjs'))
+  // The decoded file is attested (matching the run); the literal-spelling file is not reached.
+  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: ./enc/a%20b.mjs'), 'enc/a b.mjs')
+  t.assert.ok(!staticLock.files.has('enc/a%20b.mjs'))
 
   const load = bundleLoad(dirs.bundle, entry)
   t.assert.equal(load.status, 0, load.stderr)
-  t.assert.equal(load.stdout, 'enc:LITERAL\n') // wrong file executes
+  t.assert.equal(load.stdout, 'enc:DECODED\n')
 
   installStaticLock(dirs)
-  t.assert.notEqual(frozenRun(dirs.frozen, entry).status, 0)
+  const frozen = frozenRun(dirs.frozen, entry)
+  t.assert.equal(frozen.status, 0, frozen.stderr)
 
-  // Control: a CJS parent loads the literal path -- no divergence.
+  // Control: a CJS parent takes the literal path in every mode (require is not URL-flavored).
   const cjs = scenario(join(tmp, 'cjs'), 'main.cjs', `console.log(require('./enc/a%20b.mjs').which)
 `)
   t.assert.equal(plainNode(cjs.run, 'main.cjs').stdout, 'enc:LITERAL\n')
@@ -286,45 +287,43 @@ console.log(which)
   t.assert.equal(bundleLoad(cjs.bundle, 'main.cjs').stdout, 'enc:LITERAL\n')
 }))
 
-// --- Class B: CJS-only resolution features leak into ESM import edges ---
+// --- Class B: CJS-only resolution features must not leak into ESM import edges ---
 
-test('DIVERGENCE B: static bundles build and load graphs plain node refuses (extensionless/dir/subpath imports)', withTmp((t, tmp) => {
+test('FIXED B: ESM import edges resolve by ESM rules, so the static build fails closed like plain node (extensionless/dir/subpath)', withTmp((t, tmp) => {
   const cases = [
-    // [entry, spec, source, plain-node error, target scan invents, output under --bundle=load]
-    ['extless.mjs', './helpers/util', `import { u } from './helpers/util'\nconsole.log(u)\n`,
-      /ERR_MODULE_NOT_FOUND/u, 'helpers/util.js', 'helpers:UTIL\n'],
-    ['dir.mjs', './helpers', `import h from './helpers'\nconsole.log(h.h)\n`,
-      /ERR_UNSUPPORTED_DIR_IMPORT/u, 'helpers/index.js', 'helpers:INDEX\n'],
-    ['subpath.mjs', 'noexp/lib/util', `import { u } from 'noexp/lib/util'\nconsole.log(u)\n`,
-      /ERR_MODULE_NOT_FOUND/u, 'node_modules/noexp/lib/util.js', 'noexp:UTIL\n'],
-    // dir subpath honoring nested package.json main (LOAD_AS_DIRECTORY): require()-only behavior
-    ['dirsub.mjs', 'nested-main/lib', `import nm from 'nested-main/lib'\nconsole.log(nm.which)\n`,
-      /ERR_UNSUPPORTED_DIR_IMPORT/u, 'node_modules/nested-main/lib/real.js', 'nested-main:REAL\n'],
+    // [entry, source, plain-node error] -- ESM refuses each; the static build must too.
+    ['extless.mjs', `import { u } from './helpers/util'\nconsole.log(u)\n`, /ERR_MODULE_NOT_FOUND/u],
+    ['dir.mjs', `import h from './helpers'\nconsole.log(h.h)\n`, /ERR_UNSUPPORTED_DIR_IMPORT/u],
+    ['subpath.mjs', `import { u } from 'noexp/lib/util'\nconsole.log(u)\n`, /ERR_MODULE_NOT_FOUND/u],
+    // dir subpath honoring nested package.json main -- require()-only (LOAD_AS_DIRECTORY) behavior
+    ['dirsub.mjs', `import nm from 'nested-main/lib'\nconsole.log(nm.which)\n`, /ERR_UNSUPPORTED_DIR_IMPORT/u],
   ]
-  for (const [entry, spec, source, plainErr, invented, loadOut] of cases) {
+  for (const [entry, source, plainErr] of cases) {
     const dirs = scenario(join(tmp, entry), entry, source)
     const plain = plainNode(dirs.run, entry)
     t.assert.notEqual(plain.status, 0, `${entry}: plain node must refuse`)
     t.assert.match(plain.stderr, plainErr, entry)
 
-    // DIVERGENCE: builds, attesting an edge Node would never resolve...
-    t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0, entry)
-    const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-    t.assert.equal(soleTarget(t, staticLock, `${entry} :: ${spec}`), invented, entry)
-
-    // ...and --bundle=load executes what plain node refuses to run.
-    const load = bundleLoad(dirs.bundle, entry)
-    t.assert.equal(load.status, 0, `${entry}: ${load.stderr}`)
-    t.assert.equal(load.stdout, loadOut, entry)
-
-    installStaticLock(dirs)
-    t.assert.notEqual(frozenRun(dirs.frozen, entry).status, 0, entry)
+    // The static build fails closed (the unresolved static import is broken at load), rather
+    // than inventing a CJS-probed target and letting --bundle=load run what plain node won't.
+    const build = stasisBundle(dirs.bundle, entry)
+    t.assert.notEqual(build.status, 0, entry)
+    t.assert.match(build.stderr, /JS bundle would be broken at load time/u, entry)
   }
+
+  // Control: with the exact extension, the same imports resolve and agree everywhere.
+  const ok = scenario(join(tmp, 'ok'), 'ok.mjs', `import { u } from './helpers/util.js'\nconsole.log(u)\n`)
+  t.assert.equal(plainNode(ok.run, 'ok.mjs').stdout, 'helpers:UTIL\n')
+  t.assert.equal(stasisBundle(ok.bundle, 'ok.mjs').status, 0)
+  t.assert.equal(bundleLoad(ok.bundle, 'ok.mjs').stdout, 'helpers:UTIL\n')
 }))
 
 test('DIVERGENCE B2: JSON import without attribute -- bundle accepts a graph plain node refuses to load', withTmp((t, tmp) => {
-  // Resolution agrees; the runtime dies at load (ERR_IMPORT_ATTRIBUTE_MISSING) -- invisible
-  // to the scan, unenforced by the bundle loader.
+  // Still open, and distinct from B: resolution AGREES (data.json is found); the runtime dies
+  // at load on the missing `type: 'json'` attribute (ERR_IMPORT_ATTRIBUTE_MISSING) -- a load
+  // gate, not a resolution difference. The scan doesn't see it and the bundle loader doesn't
+  // enforce it, so --bundle=load runs what plain node refuses. Fixing it means threading import
+  // attributes through scan + loader, not the resolution mechanism A3/B/E share.
   const entry = 'main.mjs'
   const dirs = scenario(tmp, entry, `import data from './data.json'
 console.log(data.k)
@@ -374,25 +373,31 @@ console.log('ok')
 
 // --- Class E: URL-flavored relative specifiers ---
 
-test('DIVERGENCE E: ?query and #fragment relative imports run under plain node; stasis run asserts, stasis bundle fails closed', withTmp((t, tmp) => {
-  const cases = [
-    ['query.mjs', `import { q } from './q/mod.mjs?v=1'\nconsole.log(q)\n`, 'query:MOD\n'],
-    ['fragment.mjs', `import { q } from './q/mod.mjs#frag'\nconsole.log(q)\n`, 'query:MOD\n'],
-  ]
-  for (const [entry, source, out] of cases) {
+test('FIXED E: ?query and #fragment relative imports agree across plain node, run, bundle, and load', withTmp((t, tmp) => {
+  // ESM specifiers are URLs: './q/mod.mjs?v=1' loads q/mod.mjs (the ?query/#fragment key the
+  // module, not the file). The scan resolves them by URL, and State strips the suffix for the
+  // file identity -- which previously crashed the run capture on a lossless round-trip assert.
+  for (const [entry, source] of [
+    ['query.mjs', `import { q } from './q/mod.mjs?v=1'\nconsole.log(q)\n`],
+    ['fragment.mjs', `import { q } from './q/mod.mjs#frag'\nconsole.log(q)\n`],
+  ]) {
     const dirs = scenario(join(tmp, entry), entry, source)
-    t.assert.equal(plainNode(dirs.run, entry).stdout, out, entry)
+    t.assert.equal(plainNode(dirs.run, entry).stdout, 'query:MOD\n', entry)
 
-    // Capture-side: the observing loader dies on State.absolute's lossless URL round-trip
-    // assert (?/# make it lossy).
     const run = stasisRun(dirs.run, entry)
-    t.assert.notEqual(run.status, 0, entry)
-    t.assert.match(run.stderr, /ERR_ASSERTION/u, entry)
+    t.assert.equal(run.status, 0, `${entry}: ${run.stderr}`)
+    t.assert.equal(run.stdout, 'query:MOD\n', entry)
+    // The edge keeps the raw suffixed specifier; the file identity drops the suffix.
+    const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
+    t.assert.equal(soleTarget(t, runLock, `${entry} :: ${source.match(/'([^']+)'/u)[1]}`), 'q/mod.mjs', entry)
 
-    // Static build fails closed.
-    const build = stasisBundle(dirs.bundle, entry)
-    t.assert.notEqual(build.status, 0, entry)
-    t.assert.match(build.stderr, /JS bundle would be broken at load time/u, entry)
+    t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0, entry)
+    const load = bundleLoad(dirs.bundle, entry)
+    t.assert.equal(load.status, 0, `${entry}: ${load.stderr}`)
+    t.assert.equal(load.stdout, 'query:MOD\n', entry)
+
+    installStaticLock(dirs)
+    t.assert.equal(frozenRun(dirs.frozen, entry).status, 0, entry)
   }
 }))
 

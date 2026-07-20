@@ -709,6 +709,16 @@ export class State {
   // source (pnpm): canonicalize to the real path so it's recorded as a source, not a dependency.
   // Everything else passes through (plain sources, real deps, node_modules->node_modules links).
   #canonical(url) {
+    // An ESM module URL can carry ?query/#fragment (a cache-busting `import './x.js?v=1'`); the
+    // bundle keys files by path, so drop them for the file identity. pathToFileURL percent-encodes
+    // a literal ? or # in a path, so their unescaped presence here is always a real query/fragment.
+    // The specifier edge keeps its raw form (#canonicalSpecifier), so getImport still matches.
+    if (url.includes('?') || url.includes('#')) {
+      const u = new URL(url)
+      u.search = ''
+      u.hash = ''
+      url = u.toString()
+    }
     const absolute = this.absolute(url)
     const file = relative(this.root, absolute)
     if (file.startsWith('..') || !splitNodeModulesPath(file)) return { url, absolute }

@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from 'node:fs'
-import { extname, resolve as resolvePath, relative } from 'node:path'
+import { readFileSync, existsSync, statSync } from 'node:fs'
+import { dirname, extname, resolve as resolvePath, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire, isBuiltin } from 'node:module'
 import assert from 'node:assert/strict'
@@ -11,6 +11,68 @@ import { classifyFormat } from '@exodus/stasis-core/util'
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
+
+// The package name of a bare specifier ('foo/sub' -> 'foo', '@s/n/sub' -> '@s/n').
+function packageName(spec) {
+  const parts = spec.split('/')
+  return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+}
+
+// ESM finalizeResolution: a resolved file: target must be an existing regular FILE. Unlike the
+// CJS resolver, ESM adds no extension and never falls back to a directory index -- a missing
+// path is ERR_MODULE_NOT_FOUND and a directory is ERR_UNSUPPORTED_DIR_IMPORT.
+function finalizeEsm(targetPath) {
+  let st
+  try {
+    st = statSync(targetPath)
+  } catch {
+    return { error: 'ERR_MODULE_NOT_FOUND' }
+  }
+  if (st.isDirectory()) return { error: 'ERR_UNSUPPORTED_DIR_IMPORT' }
+  return { childURL: pathToFileURL(targetPath).toString() }
+}
+
+// Resolve an import()-context specifier the way Node's ESM loader does, so the static graph
+// matches a real run rather than the more permissive CJS algorithm. `req` is createRequire(parent).
+//   - relative/absolute/file: -> URL resolution against the parent (percent-decoded, ?query/#fragment
+//     dropped by fileURLToPath), then finalizeEsm. No extension probing, no directory index.
+//   - bare (incl. #imports) -> createRequire resolution (parent-correct node_modules + exports/imports
+//     maps), except a SUBPATH of a package with no `exports`, where ESM does an exact URL join +
+//     finalizeEsm instead of the CJS probing/directory-main the require resolver would apply.
+function resolveEsm(parentURL, spec, conditions, req) {
+  if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/') || spec.startsWith('file:')) {
+    let targetURL
+    try {
+      targetURL = new URL(spec, parentURL)
+    } catch {
+      return { error: 'ERR_INVALID_MODULE_SPECIFIER' }
+    }
+    if (targetURL.protocol !== 'file:') return { error: 'ERR_UNSUPPORTED_ESM_URL_SCHEME' }
+    return finalizeEsm(fileURLToPath(targetURL))
+  }
+  let candidate
+  try {
+    candidate = req.resolve(spec, { conditions })
+  } catch (cause) {
+    return { error: cause.code ?? cause.message }
+  }
+  const pkg = packageName(spec)
+  const subpath = spec.slice(pkg.length + 1)
+  if (!subpath) return { childURL: pathToFileURL(candidate).toString() } // bare package: main agrees with ESM
+  let pkgJson
+  try {
+    pkgJson = req.resolve(`${pkg}/package.json`, { conditions })
+  } catch {
+    return { childURL: pathToFileURL(candidate).toString() } // exports blocks package.json -> exports honored
+  }
+  let exports
+  try {
+    exports = JSON.parse(readFileSync(pkgJson, 'utf8')).exports
+  } catch { /* unreadable: treat as no exports */ }
+  if (exports != null) return { childURL: pathToFileURL(candidate).toString() } // exports subpath honored by ESM
+  // No `exports`: ESM resolves the subpath as an exact URL join, no probing/directory.
+  return finalizeEsm(fileURLToPath(new URL(subpath, pathToFileURL(dirname(pkgJson) + sep))))
+}
 
 // Required lazily so non-JS bundlers don't load the native oxc parser.
 let _parser
@@ -257,16 +319,24 @@ export class Scan {
         edges.push({ ...s, builtin: true })
         continue
       }
-      try {
-        const childPath = req.resolve(s.spec, { conditions })
-        const childURL = pathToFileURL(childPath).toString()
-        edges.push({ ...s, child: childURL })
-        record(key, s.spec, childURL)
-        const childExt = extname(childPath)
-        if (RESOLVABLE_EXTS.has(childExt)) queue.push(childURL)
-      } catch (cause) {
-        edges.push({ ...s, error: cause.code ?? cause.message })
-        this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: cause.code ?? cause.message })
+      // import()-context edges resolve by ESM rules; require()-context by the CJS algorithm.
+      let outcome
+      if (context === 'import') {
+        outcome = resolveEsm(url, s.spec, conditions, req)
+      } else {
+        try {
+          outcome = { childURL: pathToFileURL(req.resolve(s.spec, { conditions })).toString() }
+        } catch (cause) {
+          outcome = { error: cause.code ?? cause.message }
+        }
+      }
+      if (outcome.error) {
+        edges.push({ ...s, error: outcome.error })
+        this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: outcome.error })
+      } else {
+        edges.push({ ...s, child: outcome.childURL })
+        record(key, s.spec, outcome.childURL)
+        if (RESOLVABLE_EXTS.has(extname(fileURLToPath(outcome.childURL)))) queue.push(outcome.childURL)
       }
     }
 
