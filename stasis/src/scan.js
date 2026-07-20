@@ -114,12 +114,9 @@ export class Scan {
     return this
   }
 
-  // Must match the runtime resolver's full condition set (Node 24/26: node, import|require,
-  // module-sync, node-addons); omitting any resolves `exports`-gated packages to a different file.
-  // Order mirrors what the runtime resolve hooks report -- irrelevant for resolution (`exports`/
-  // `imports` matching follows the map's key order), but the recorded condition KEY must equal the
-  // runtime's string for exact lockfile/bundle lookups. Extras land where Node puts user
-  // conditions: appended for import, before the trailing module-sync for require.
+  // Must match the runtime resolver's condition set (omitting one resolves `exports`-gated
+  // packages to a different file) AND its order: the recorded key must equal the runtime
+  // hooks' string for exact lookups. Extras go where Node puts user conditions in each set.
   #conditionSet(context) {
     return context === 'import'
       ? new Set(['node', 'import', 'module-sync', 'node-addons', ...this.extraConditions])
@@ -216,12 +213,10 @@ export class Scan {
     }
     findCallSpecifiers(parsed.program, (s) => specs.push(s))
 
-    // The edge KIND picks the resolution context, not the parent's format: a createRequire()d
-    // require() inside ESM resolves under Node's REQUIRE conditions, and a literal import()
-    // inside CJS under its IMPORT conditions -- resolving both with the parent-format set baked
-    // the wrong `exports` branch into the bundle (and dropped the right branch's file). The
-    // custom (legacy-field) resolver keeps the parent-format set: bundlers compile import to
-    // require and don't split resolution context per edge.
+    // The edge KIND picks the resolution context, not the parent's format: createRequire()d
+    // require() inside ESM resolves under REQUIRE conditions, literal import() inside CJS under
+    // IMPORT conditions -- the parent-format set baked the wrong `exports` branch into the bundle.
+    // The custom (legacy-field) resolver keeps the format set: bundlers don't split per edge.
     const formatContext = ['module', 'module-typescript'].includes(format) ? 'import' : 'require'
     const req = createRequire(file)
     const edges = []

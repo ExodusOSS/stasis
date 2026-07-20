@@ -510,14 +510,10 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
     const isEntry = scanner.entries.has(url)
     state.addFile(url, { format: info.format, isEntry })
   }
-  // Collapse the per-context buckets per (parent, specifier). A single distinct target is
-  // stored under the wildcard '*' key: static bundles can't anticipate Node's runtime
-  // conditions, and getImport falls back to '*' when a condition lookup misses. Where the
-  // require()- and import()-context resolutions DIVERGE (conditional exports consumed from
-  // both contexts in one file), each target keeps its real condition key -- one '*' entry
-  // can only hold one target (noupsert), and would serve one context the other's file. The
-  // runtime's exact-conditions lookup picks its branch; an unmatched condition set fails
-  // closed (resolveBundled treats divergent buckets as ambiguous) instead of misresolving.
+  // Edges where every context agrees keep the wildcard '*' key (getImport's fallback when a
+  // condition lookup misses). Where the require()- and import()-context resolutions of one
+  // (parent, specifier) DIVERGE, each target keeps its real condition key -- one '*' entry
+  // would serve one context the other's file; an unmatched set fails closed via resolveBundled.
   const byParent = new Map()
   for (const [key, parents] of scanner.imports) {
     for (const [parentURL, specs] of parents) {

@@ -1,37 +1,25 @@
-// Characterization tests for resolution differences between `stasis run` (runtime-observed
-// graph: Node's real resolvers, recorded via hooks) and `stasis bundle` (static graph:
-// scan.js resolving every edge through createRequire(file).resolve(spec, { conditions }),
-// i.e. the CommonJS algorithm with a per-FILE condition set).
+// Characterization tests for resolution differences between `stasis run` (Node's real
+// resolvers, observed via hooks) and `stasis bundle` (scan.js: the CJS algorithm via
+// createRequire(file).resolve with steered conditions). Identical on Node 24.18 / 26.5.
 //
-// Verified identical on Node 24.18.0 and 26.5.0. Divergence classes (see per-test comments):
+//   A. Silent wrong-file: everything builds and runs, but the static graph attests a
+//      different file than Node loads, and --bundle=load executes it. A1 (createRequire()d
+//      require() in ESM) and A2 (literal import() in CJS) are FIXED: scan resolves per edge
+//      kind, and divergent targets keep their real condition keys instead of one '*' entry.
+//      A3 (ESM percent-decoding vs CJS literal paths) remains.
+//   B. Over-resolution: CJS-only probing (extensionless, directory index, nested dir main,
+//      subpaths) leaks into ESM import edges -- bundles build, and --bundle=load runs,
+//      graphs plain node refuses.
+//   C. Over-inclusion: a shadowed `require` identifier in dead code attests files/edges the
+//      runtime can never resolve; frozen verify tolerates them.
+//   D. Under-inclusion: aliased require, require.resolve(), import.meta.resolve() edges
+//      exist only in the runtime capture; --bundle=load and frozen verify fail closed.
+//   E. ?query/#fragment relative imports: plain node runs them; `stasis run` dies on a
+//      State.absolute round-trip assert, `stasis bundle` fails closed.
 //
-//   A. Silent wrong-file: both artifacts build and plain node runs fine, but the static
-//      graph attests a DIFFERENT file than the one Node loads, and --bundle=load executes
-//      that wrong file. A1 (createRequire() require() inside ESM resolved with `import`
-//      conditions) and A2 (literal import() inside CJS resolved with `require` conditions)
-//      are FIXED: scan now picks the condition set per edge KIND, and buildJsBundle keeps
-//      divergent (parent, specifier) targets under their real condition keys instead of
-//      collapsing them onto one '*' entry. A3 (CJS path-string resolution vs ESM URL
-//      semantics: percent-decoding) remains.
-//   B. Over-resolution: CJS-only features (extension probing, directory index, nested
-//      package.json main, subpath probing) leak into ESM import edges, so the bundle
-//      builds -- and --bundle=load runs -- graphs plain node refuses to load.
-//   C. Over-inclusion: a shadowed `require` identifier in never-executed code adds
-//      spurious files/edges to the attested artifact; frozen verify tolerates them.
-//   D. Under-inclusion: resolution-only or aliased edges (const r = require;
-//      require.resolve(), import.meta.resolve()) exist only in the runtime capture;
-//      --bundle=load fails closed on them, and frozen verify flags them as unattested.
-//   E. URL-flavored specifiers (?query / #fragment on relative imports): plain node runs
-//      them, `stasis run` dies on a State.absolute round-trip assert, and `stasis bundle`
-//      fails closed.
-//
-// Class A is the dangerous one: the only mode that catches it is a real (disk) execution
-// under --lock=frozen / --bundle=frozen against the static artifact -- which these tests
-// also assert. --bundle=load alone executes the misresolution silently.
-//
-// These tests pin CURRENT behavior. If you fix another class (e.g. ESM-semantics
-// validation for module parents), its DIVERGENCE assertions below are supposed to fail --
-// update them to the new, converged expectations, as was done for A1/A2.
+// Only a real (disk) run under --lock=frozen / --bundle=frozen catches class A;
+// --bundle=load alone executes it silently. DIVERGENCE assertions pin current behavior --
+// when a class is fixed, update them to the converged expectations (see A1/A2).
 
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
@@ -71,12 +59,10 @@ const stasisBundle = (dir, entry) =>
   exec([cli, 'bundle', '--lockfile=static.lock.json', '--output=static.code.br', entry], dir)
 const bundleLoad = (dir, entry) =>
   exec([cli, 'run', '--lock=none', '--bundle=load', '--bundle-file=static.code.br', entry], dir)
-// Real (disk) execution verified against the STATIC artifact's lockfile: the safety net
-// that must catch class-A misresolutions and class-D unattested edges.
+// Real (disk) execution verified against the STATIC lockfile -- must catch classes A and D.
 const frozenRun = (dir, entry) => exec([cli, 'run', '--lock=frozen', entry], dir)
 
-// Flatten a lockfile: edges as "parent :: spec" -> { conditionsKey: target }, plus the
-// full attested file set.
+// Lockfile edges as "parent :: spec" -> { conditionKey: target }, plus the attested file set.
 function flattenLock(path) {
   const lock = JSON.parse(readFileSync(path, 'utf-8'))
   const edges = new Map()
@@ -116,14 +102,14 @@ const json = (o) => `${JSON.stringify(o, null, 2)}\n`
 function makeApp(base) {
   const w = put(base)
   w('package.json', json({ name: 'matrix-app', version: '1.0.0' }))
-  // The canonical import/require conditional-exports package.
+  // Conditional import/require exports.
   w('node_modules/dual/package.json', json({
     name: 'dual', version: '1.0.0',
     exports: { '.': { import: './esm.mjs', require: './cjs.cjs' } },
   }))
   w('node_modules/dual/esm.mjs', 'export const which = "dual:ESM"\n')
   w('node_modules/dual/cjs.cjs', 'exports.which = "dual:CJS"\n')
-  // No exports; main points at a directory that has its own package.json main.
+  // No exports; main is a directory with its own package.json main.
   w('node_modules/nested-main/package.json', json({ name: 'nested-main', version: '1.0.0', main: './lib' }))
   w('node_modules/nested-main/lib/package.json', json({ main: './real.js' }))
   w('node_modules/nested-main/lib/real.js', 'exports.which = "nested-main:REAL"\n')
@@ -132,7 +118,7 @@ function makeApp(base) {
   w('node_modules/noexp/package.json', json({ name: 'noexp', version: '1.0.0', main: './lib/main.js' }))
   w('node_modules/noexp/lib/main.js', 'exports.main = "noexp:MAIN"\n')
   w('node_modules/noexp/lib/util.js', 'export const u = "noexp:UTIL"\n')
-  // Babelified ESM->CJS package consuming `dual`; `module` field must be ignored by Node.
+  // Babelified ESM->CJS dep consuming `dual`; Node must ignore the `module` field.
   w('node_modules/babel-dep/package.json', json({
     name: 'babel-dep', version: '1.0.0', main: 'lib/index.js', module: 'src/index.mjs',
   }))
@@ -145,8 +131,7 @@ function makeApp(base) {
     'function _interopRequireWildcard(e) { return e && e.__esModule ? e : { default: e, ...e }; }\n' +
     'const report = () => `babel-dep saw ${_dual.which}`;\n' +
     'exports.report = report;\n')
-  // Conditional exports + conditional #imports (+ an imports target that is itself a bare
-  // specifier with conditional exports).
+  // Conditional exports + conditional #imports; '#ext' is itself a bare conditional-exports target.
   w('node_modules/imports-pkg/package.json', json({
     name: 'imports-pkg', version: '1.0.0',
     exports: { '.': { import: './entry.mjs', require: './entry.cjs' } },
@@ -158,7 +143,6 @@ function makeApp(base) {
     'const { which } = require("#impl")\nconst { which: ext } = require("#ext")\nexports.via = `cjs-entry:${which}:${ext}`\n')
   w('node_modules/imports-pkg/impl.mjs', 'export const which = "impl:ESM"\n')
   w('node_modules/imports-pkg/impl.cjs', 'exports.which = "impl:CJS"\n')
-  // App-level helper files.
   w('helpers/util.js', 'export const u = "helpers:UTIL"\n')
   w('helpers/index.js', 'exports.h = "helpers:INDEX"\n')
   w('enc/a b.mjs', 'export const which = "enc:DECODED"\n')
@@ -170,9 +154,8 @@ function makeApp(base) {
   return w
 }
 
-// Three sibling dirs per scenario so artifacts never cross-contaminate: `run` gets
-// stasis.lock.json from the capture, `bundle` gets the static artifacts (+ load runs
-// there), `frozen` gets a fresh tree with the STATIC lockfile installed as stasis.lock.json.
+// Sibling dirs so artifacts never cross-contaminate: capture in `run`, static build + load
+// in `bundle`, disk run against the static lockfile in `frozen`.
 function scenario(tmp, entry, source) {
   const dirs = { run: join(tmp, 'run'), bundle: join(tmp, 'bundle'), frozen: join(tmp, 'frozen') }
   for (const d of Object.values(dirs)) makeApp(d)(entry, source)
@@ -183,16 +166,13 @@ const installStaticLock = (dirs) =>
 
 // --- Class A: silent wrong-file misresolutions (A1/A2 fixed, now pinned as controls) ---
 
-// The exact condition keys Node's runtime resolve hooks report on 24/26; scan emits the
-// same strings so the runtime's exact-conditions lookup hits the right divergent bucket.
+// Exact condition keys Node's runtime hooks report (24/26); scan emits the same strings.
 const IMPORT_KEY = 'node, import, module-sync, node-addons'
 const REQUIRE_KEY = 'require, node, node-addons, module-sync'
 
 test('FIXED A1: require() via createRequire inside ESM resolves with require conditions', withTmp((t, tmp) => {
-  // The createRequire()d require() resolves `dual` with the REQUIRE condition set (cjs.cjs)
-  // while the import edge of the SAME (parent, specifier) takes the import branch. Scan
-  // resolves per edge kind, and the divergent targets are recorded under their real
-  // condition keys (a single '*' entry can only hold one target).
+  // The require() edge takes the require branch, the import edge of the SAME (parent,
+  // specifier) the import branch; divergent targets are keyed by real conditions.
   const entry = 'main.mjs'
   const dirs = scenario(tmp, entry, `import { createRequire } from 'node:module'
 import { which as viaImport } from 'dual'
@@ -209,7 +189,6 @@ console.log('require', require('dual').which)
   t.assert.equal(run.status, 0, run.stderr)
   t.assert.equal(run.stdout, plain.stdout, 'the observing loader must not change behavior')
   const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
-  // Runtime records BOTH branches for the same (parent, spec), keyed by conditions.
   t.assert.deepEqual(
     new Set(Object.values(runLock.edges.get('main.mjs :: dual'))),
     new Set(['node_modules/dual/esm.mjs', 'node_modules/dual/cjs.cjs']),
@@ -217,7 +196,6 @@ console.log('require', require('dual').which)
 
   t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
   const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  // The static graph carries both branches under the runtime's condition keys, and both files.
   t.assert.deepEqual(staticLock.edges.get('main.mjs :: dual'), {
     [IMPORT_KEY]: 'node_modules/dual/esm.mjs',
     [REQUIRE_KEY]: 'node_modules/dual/cjs.cjs',
@@ -225,12 +203,10 @@ console.log('require', require('dual').which)
   t.assert.ok(staticLock.files.has('node_modules/dual/cjs.cjs'))
   t.assert.ok(staticLock.files.has('node_modules/dual/esm.mjs'))
 
-  // --bundle=load executes the same branches as plain node.
   const load = bundleLoad(dirs.bundle, entry)
   t.assert.equal(load.status, 0, load.stderr)
   t.assert.equal(load.stdout, plain.stdout)
 
-  // A real (disk) execution verifies cleanly against the static lockfile.
   installStaticLock(dirs)
   const frozen = frozenRun(dirs.frozen, entry)
   t.assert.equal(frozen.status, 0, frozen.stderr)
@@ -238,9 +214,8 @@ console.log('require', require('dual').which)
 }))
 
 test('FIXED A2: literal import() inside CJS resolves with import conditions', withTmp((t, tmp) => {
-  // The dynamic-import OPERATOR with a static specifier resolves under the IMPORT condition
-  // set even from a commonjs parent; the require edge of the same specifier keeps the
-  // require branch. (The specifier is static; only the operator is "dynamic".)
+  // The dynamic-import OPERATOR with a static specifier resolves under IMPORT conditions
+  // even from a CJS parent; the require edge keeps the require branch.
   const entry = 'main.cjs'
   const dirs = scenario(tmp, entry, `const viaRequire = require('dual').which
 import('dual').then((m) => {
@@ -272,9 +247,8 @@ import('dual').then((m) => {
 }))
 
 test('DIVERGENCE A3: percent-encoded relative import resolves literally in the static scan, decoded by Node', withTmp((t, tmp) => {
-  // ESM specifiers are URLs: './enc/a%20b.mjs' decodes to 'enc/a b.mjs'. The CJS algorithm
-  // treats the specifier as a literal path. With BOTH spellings on disk the two resolvers
-  // silently pick different files.
+  // ESM specifiers are URLs ('./enc/a%20b.mjs' loads 'enc/a b.mjs'); the CJS algorithm takes
+  // the literal path. With both spellings on disk the resolvers silently pick different files.
   const entry = 'main.mjs'
   const dirs = scenario(tmp, entry, `import { which } from './enc/a%20b.mjs'
 console.log(which)
@@ -302,7 +276,7 @@ console.log(which)
   installStaticLock(dirs)
   t.assert.notEqual(frozenRun(dirs.frozen, entry).status, 0)
 
-  // Control: from a CJS parent the literal path IS what Node loads -- no divergence.
+  // Control: a CJS parent loads the literal path -- no divergence.
   const cjs = scenario(join(tmp, 'cjs'), 'main.cjs', `console.log(require('./enc/a%20b.mjs').which)
 `)
   t.assert.equal(plainNode(cjs.run, 'main.cjs').stdout, 'enc:LITERAL\n')
@@ -321,8 +295,7 @@ test('DIVERGENCE B: static bundles build and load graphs plain node refuses (ext
       /ERR_UNSUPPORTED_DIR_IMPORT/u, 'helpers/index.js', 'helpers:INDEX\n'],
     ['subpath.mjs', 'noexp/lib/util', `import { u } from 'noexp/lib/util'\nconsole.log(u)\n`,
       /ERR_MODULE_NOT_FOUND/u, 'node_modules/noexp/lib/util.js', 'noexp:UTIL\n'],
-    // Directory subpath whose nested package.json main redirects: require()-only behavior
-    // (LOAD_AS_DIRECTORY) applied to an import edge.
+    // dir subpath honoring nested package.json main (LOAD_AS_DIRECTORY): require()-only behavior
     ['dirsub.mjs', 'nested-main/lib', `import nm from 'nested-main/lib'\nconsole.log(nm.which)\n`,
       /ERR_UNSUPPORTED_DIR_IMPORT/u, 'node_modules/nested-main/lib/real.js', 'nested-main:REAL\n'],
   ]
@@ -332,7 +305,7 @@ test('DIVERGENCE B: static bundles build and load graphs plain node refuses (ext
     t.assert.notEqual(plain.status, 0, `${entry}: plain node must refuse`)
     t.assert.match(plain.stderr, plainErr, entry)
 
-    // DIVERGENCE: the static build succeeds and attests an edge Node would never resolve...
+    // DIVERGENCE: builds, attesting an edge Node would never resolve...
     t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0, entry)
     const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
     t.assert.equal(soleTarget(t, staticLock, `${entry} :: ${spec}`), invented, entry)
@@ -342,15 +315,14 @@ test('DIVERGENCE B: static bundles build and load graphs plain node refuses (ext
     t.assert.equal(load.status, 0, `${entry}: ${load.stderr}`)
     t.assert.equal(load.stdout, loadOut, entry)
 
-    // The frozen (disk) execution reproduces the plain-node refusal.
     installStaticLock(dirs)
     t.assert.notEqual(frozenRun(dirs.frozen, entry).status, 0, entry)
   }
 }))
 
 test('DIVERGENCE B2: JSON import without attribute -- bundle accepts a graph plain node refuses to load', withTmp((t, tmp) => {
-  // Resolution itself agrees; the runtime dies at load (ERR_IMPORT_ATTRIBUTE_MISSING),
-  // which the static scan cannot see -- and the bundle loader doesn't enforce.
+  // Resolution agrees; the runtime dies at load (ERR_IMPORT_ATTRIBUTE_MISSING) -- invisible
+  // to the scan, unenforced by the bundle loader.
   const entry = 'main.mjs'
   const dirs = scenario(tmp, entry, `import data from './data.json'
 console.log(data.k)
@@ -376,10 +348,9 @@ console.log(data.k)
 // --- Class C: spurious static edges ---
 
 test('DIVERGENCE C: a shadowed `require` identifier adds files/edges the runtime never resolves', withTmp((t, tmp) => {
-  // scan matches every `require(<literal>)` CallExpression by identifier name, including a
-  // shadowed parameter in dead code -- ESM files have no `require` at all. The artifact
-  // gains a file (potentially a whole package graph) the app can never load; frozen verify
-  // tolerates extra attested edges, so nothing downstream flags it.
+  // scan matches `require(<literal>)` by identifier name -- even a shadowed parameter in
+  // dead ESM code. The artifact gains files the app can never load; frozen verify tolerates
+  // over-attestation.
   const entry = 'main.mjs'
   const dirs = scenario(tmp, entry, `export function f(require) { if (globalThis.__never) require('./phantom.cjs') }
 console.log('ok')
@@ -421,7 +392,7 @@ test('DIVERGENCE D: aliased require / require.resolve / import.meta.resolve edge
     const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
     t.assert.ok(!staticLock.edges.has(`${entry} :: ${spec}`), `${entry}: static scan misses the edge`) // DIVERGENCE
 
-    // --bundle=load fails closed on the unrecorded edge (plain node would run this).
+    // --bundle=load fails closed on the unrecorded edge (plain node would run this)...
     const load = bundleLoad(dirs.bundle, entry)
     t.assert.notEqual(load.status, 0, entry)
     t.assert.match(load.stderr, /Cannot find module/u, entry)
@@ -445,20 +416,20 @@ test('DIVERGENCE E: ?query and #fragment relative imports run under plain node; 
     const dirs = scenario(join(tmp, entry), entry, source)
     t.assert.equal(plainNode(dirs.run, entry).stdout, out, entry)
 
-    // DIVERGENCE (capture-side): the observing loader crashes on the URL round-trip
-    // (State.absolute asserts fileURLToPath/pathToFileURL is lossless; ?/# make it lossy).
+    // Capture-side: the observing loader dies on State.absolute's lossless URL round-trip
+    // assert (?/# make it lossy).
     const run = stasisRun(dirs.run, entry)
     t.assert.notEqual(run.status, 0, entry)
     t.assert.match(run.stderr, /ERR_ASSERTION/u, entry)
 
-    // Static build fails closed: the resolved-with-suffix path isn't a bundleable file.
+    // Static build fails closed.
     const build = stasisBundle(dirs.bundle, entry)
     t.assert.notEqual(build.status, 0, entry)
     t.assert.match(build.stderr, /JS bundle would be broken at load time/u, entry)
   }
 }))
 
-// --- Controls: the per-file condition steering IS correct for whole-file formats ---
+// --- Controls: per-file condition steering IS correct for whole-file formats ---
 
 test('CONTROL: babelified CJS dep and direct ESM import pick their own branches of a dual package, identically at run and bundle', withTmp((t, tmp) => {
   const entry = 'main.mjs'
@@ -476,8 +447,7 @@ console.log('dep', report())
 
   t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
   const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  // Both branches present, each under its consumer's edge; the bundler-only `module`
-  // field (untranspiled ESM source) must NOT be followed.
+  // Both branches, each under its consumer's edge; the bundler-only `module` field is not followed.
   t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: dual'), 'node_modules/dual/esm.mjs')
   t.assert.equal(soleTarget(t, staticLock, 'node_modules/babel-dep/lib/index.js :: dual'), 'node_modules/dual/cjs.cjs')
   t.assert.ok(!staticLock.files.has('node_modules/babel-dep/src/index.mjs'))
@@ -511,9 +481,8 @@ test('CONTROL: conditional exports + conditional #imports agree between run and 
 }))
 
 test('CONTROL: package main chains use LOAD_INDEX, not recursive LOAD_AS_DIRECTORY -- import and require agree', withTmp((t, tmp) => {
-  // main "./lib" with lib/package.json { main: "./real.js" } present: BOTH loaders ignore
-  // the nested package.json for the package-level lookup and land on lib/index.js. (The
-  // nested main only applies to a directory SUBPATH require -- covered as divergence B.)
+  // main "./lib" with lib/package.json { main: "./real.js" }: both loaders skip the nested
+  // package.json at package level and land on lib/index.js (subpath require = divergence B).
   for (const [entry, source] of [
     ['main.mjs', `import nm from 'nested-main'\nconsole.log(nm.which)\n`],
     ['main.cjs', `console.log(require('nested-main').which)\n`],
