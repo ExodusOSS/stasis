@@ -1,6 +1,6 @@
 // Test harness: runs a webpack build with the StasisWebpack plugin against the cwd
 // as the project root, then writes stasis state. Driven by tests/webpack.test.js
-// via spawnSync, so each test gets a fresh State per process.
+// via spawn (one child per test), so each test gets a fresh State per process.
 //
 // Important: by default this helper constructs a preload State first (mirroring the
 // plugin's options onto it) so the plugin's resolvePluginState call lands in the
