@@ -72,10 +72,14 @@
     "oxc-parser": "^0.94.0"
   },
   "peerDependencies": {
-    "esbuild": "*"
+    "esbuild": "*",
+    "flow-remove-types": "*"
   },
   "peerDependenciesMeta": {
     "esbuild": {
+      "optional": true
+    },
+    "flow-remove-types": {
       "optional": true
     }
   }

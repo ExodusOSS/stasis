@@ -1098,6 +1098,124 @@ test('CLI: bundle --conditions --lockfile attests the conditions-selected resolu
   t.assert.equal(lock.imports['*']['src/entry.js'].rnpkg, 'node_modules/rnpkg/rn.js')
 }))
 
+// --- Flow-stripping JS bundling (`--flow`) ---
+//
+// oxc parses JS/TS but not Flow, so a Flow-annotated source fails to parse and its import edges
+// vanish from the graph. `--flow` runs the optional flow-remove-types dep over each JS-family
+// source *before* oxc, blanking Flow syntax to whitespace so the real graph resolves. Only the
+// parse input is rewritten -- the bundle stores the pristine on-disk source.
+const writeFlowProject = (dir) => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'flow-app', version: '1.2.3', type: 'module' }))
+  writeFileSync(join(dir, 'entry.js'),
+    '// @flow\n' +
+    'import type { T } from "./types.js"\n' +
+    'import { dep } from "./dep.js"\n' +
+    'function f(x: number): string { return String(x) }\n' +
+    'export const v: string = f(dep)\n')
+  writeFileSync(join(dir, 'dep.js'), 'export const dep = 1\n')
+  writeFileSync(join(dir, 'types.js'), 'export const T = 1\n')
+}
+
+test('buildBundle (JS) --flow resolves the Flow import graph and stores the pristine source', withTmp(async (t, tmp) => {
+  writeFlowProject(tmp)
+  const bundle = await buildBundle({ cwd: tmp, entries: ['entry.js'], flow: true })
+  // The value import is walked; the type-only import is erased (never loaded at runtime).
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['dep.js', 'entry.js'])
+  t.assert.ok(!bundle.sources.has('types.js'), 'the Flow type-only import must not be bundled')
+  t.assert.equal(bundle.imports.get('*').get('entry.js').get('./dep.js'), 'dep.js')
+  // Attestation covers the real bytes: the stored source keeps its Flow annotations verbatim.
+  t.assert.equal(bundle.sources.get('entry.js'), readFileSync(join(tmp, 'entry.js'), 'utf8'))
+  t.assert.match(bundle.sources.get('entry.js'), /export const v: string = f\(dep\)/)
+}))
+
+test('buildBundle (JS) without --flow fails closed on an unparseable Flow entry', withTmp(async (t, tmp) => {
+  writeFlowProject(tmp)
+  await t.assert.rejects(
+    () => buildBundle({ cwd: tmp, entries: ['entry.js'] }),
+    /would be broken at load time|parse error/,
+  )
+}))
+
+test('buildBundle rejects --flow for non-JS entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], flow: true }),
+    /--flow is only valid for JS bundles/,
+  )
+})
+
+test('CLI: bundle --flow strips Flow types so a Flow-typed entry bundles', withTmp((t, tmp) => {
+  writeFlowProject(tmp)
+  const out = join(tmp, 'snap.br')
+  const r = runCli(['bundle', '--flow', `--output=${out}`, 'entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  t.assert.deepEqual([...parsed.sources.keys()].toSorted(), ['dep.js', 'entry.js'])
+  // Stored source is the original Flow bytes, not the whitespace-blanked parse input.
+  t.assert.equal(parsed.sources.get('entry.js'), readFileSync(join(tmp, 'entry.js'), 'utf8'))
+}))
+
+test('CLI: bundle without --flow reports the Flow entry as broken at load time', withTmp((t, tmp) => {
+  writeFlowProject(tmp)
+  const out = join(tmp, 'snap.br')
+  const r = runCli(['bundle', `--output=${out}`, 'entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /broken at load time/)
+}))
+
+test('CLI: bundle --flow combines with --lockfile, attesting the Flow import graph', withTmp((t, tmp) => {
+  writeFlowProject(tmp)
+  const out = join(tmp, 'snap.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const r = runCli(['bundle', '--flow', `--lockfile=${lockPath}`, `--output=${out}`, 'entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
+  t.assert.equal(lock.imports['*']['entry.js']['./dep.js'], 'dep.js')
+  // The Flow type-only import is erased, so it never becomes an attested edge.
+  t.assert.ok(!('./types.js' in lock.imports['*']['entry.js']), 'the type-only import is not attested')
+}))
+
+test('CLI: bundle rejects --flow for .sol entries', (t) => {
+  const r = runCli(['bundle', '--flow', 'a.sol'])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--flow is only valid for JS bundles/)
+})
+
+test('buildBundle --flow threads through the legacy-field resolver (--mainFields path)', withTmp(async (t, tmp) => {
+  writeFlowProject(tmp)
+  const bundle = await buildBundle({ cwd: tmp, entries: ['entry.js'], mainFields: ['browser', 'main'], flow: true })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['dep.js', 'entry.js'])
+  t.assert.equal(bundle.sources.get('entry.js'), readFileSync(join(tmp, 'entry.js'), 'utf8'))
+}))
+
+test('CLI: bundle --flow --jsx bundles React-Native-style Flow+JSX source', withTmp((t, tmp) => {
+  // The motivating case: RN source is both Flow-typed and uses JSX-in-.js. flow-remove-types
+  // strips the Flow annotations while leaving the JSX intact, then oxc parses it under --jsx.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'rn-app', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.js'),
+    '// @flow\n' +
+    'import { Dep } from "./dep.js"\n' +
+    'type Props = { n: number }\n' +
+    'export function App(props: Props): React$Node { return <Dep count={props.n}><span>{props.n}</span></Dep> }\n')
+  writeFileSync(join(tmp, 'dep.js'), 'export const Dep = () => null\n')
+  const out = join(tmp, 'snap.br')
+  const r = runCli(['bundle', '--flow', '--jsx', `--output=${out}`, 'entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  t.assert.deepEqual([...parsed.sources.keys()].toSorted(), ['dep.js', 'entry.js'])
+  // The stored source keeps both the Flow annotation and the JSX verbatim.
+  t.assert.match(parsed.sources.get('entry.js'), /React\$Node/)
+  t.assert.match(parsed.sources.get('entry.js'), /<Dep count=/)
+}))
+
+test('CLI: bundle --flow alone still fails on JSX (JSX needs --jsx too)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'rn-app', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.js'),
+    '// @flow\nexport function App(): React$Node { return <span>hi</span> }\n')
+  const r = runCli(['bundle', '--flow', `--output=${join(tmp, 'snap.br')}`, 'entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /broken at load time/)
+}))
+
 // --- Legacy-field / Metro resolution (`--mainFields`, `--metro --platforms`) ---
 //
 // These drive the legacy-field resolver (tests/resolve-fields.test.js covers it in
