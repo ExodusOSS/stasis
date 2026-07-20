@@ -1707,11 +1707,12 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     delete lock.formats
     writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
 
-    for (const mode of ['frozen', 'add']) {
-      const r = await run(['run', `--lock=${mode}`, 'src/entry.js'], { cwd: tmp })
-      t.assert.notEqual(r.status, 0, `lock=${mode} must refuse the tamper-shaped lockfile`)
+    const modes = ['frozen', 'add']
+    const runs = await Promise.all(modes.map((mode) => run(['run', `--lock=${mode}`, 'src/entry.js'], { cwd: tmp })))
+    for (const [i, r] of runs.entries()) {
+      t.assert.notEqual(r.status, 0, `lock=${modes[i]} must refuse the tamper-shaped lockfile`)
       t.assert.match(r.stderr, /corrupt or hand-edited/)
-      t.assert.doesNotMatch(r.stdout, /hello/, `no code may run under lock=${mode} against a tamper-shaped lockfile`)
+      t.assert.doesNotMatch(r.stdout, /hello/, `no code may run under lock=${modes[i]} against a tamper-shaped lockfile`)
     }
   }))
 
