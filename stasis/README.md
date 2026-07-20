@@ -58,6 +58,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis bundle --conditions=react-native,browser app.js` | statically bundle, asserting extra `exports`/`imports` resolution conditions |
 | `stasis bundle --mainFields=react-native,browser,main app.js` | statically bundle, honoring legacy package `mainFields` (incl. browser-field object redirection) |
 | `stasis bundle --metro --platforms=ios,android app.js` | statically bundle the way Metro resolves: RN conditions + mainFields + `.ios`/`.android`/`.native` suffixes, all platforms at once, plus each bundled native dependency's `ios/`/`android/` sources + podspec |
+| `stasis bundle --flow app.js` | statically bundle Flow-typed sources: when oxc can't parse a `.js`/`.cjs`/`.mjs` file, strip its Flow syntax and retry so the import graph resolves (needs the optional `flow-remove-types` dependency; the stored source stays the original bytes). Combines with `--jsx`/`--conditions`/`--mainFields`/`--metro` |
 | `stasis build --output=out.js app.stasis.code.br [entry]` | rebuild a runnable JS bundle with esbuild, following the bundle's recorded import graph exactly (entry optional when the bundle has one) |
 | `stasis build --output=out.js stasis.lock.json [entry]` | same, reading + verifying sources from disk against the lockfile |
 | `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |

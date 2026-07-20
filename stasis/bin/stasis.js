@@ -24,13 +24,14 @@ function usage(prefix = '') {
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro --platforms=ios,android [--platforms=web] [--jsx] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
-  --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file))
+  --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
+  --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep))
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -182,6 +183,7 @@ if (command === '-v' || command === '--version') {
     metro: { type: 'boolean' },
     platforms: { type: 'string', multiple: true },
     jsx: { type: 'boolean' },
+    flow: { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
@@ -219,6 +221,9 @@ if (command === '-v' || command === '--version') {
   if (values.conditions !== undefined && conditions.length === 0) {
     usage('Error: --conditions must list at least one condition name (e.g. --conditions=react-native,browser)')
   }
+  // --flow: strip Flow type syntax (via the optional flow-remove-types dep) before parsing; JS-only.
+  if (values.flow && !allJs) usage('Error: --flow is only valid for JS bundles')
+  const flow = Boolean(values.flow)
   // --mainFields: legacy package entry fields (e.g. react-native,browser,main) for the non-exports resolver.
   if (values.mainFields !== undefined && !allJs) usage('Error: --mainFields is only valid for JS bundles')
   const mainFields = values.mainFields === undefined
@@ -273,6 +278,7 @@ if (command === '-v' || command === '--version') {
     metro,
     platforms,
     jsx,
+    flow,
     brotliQuality,
     add,
   })

@@ -15,11 +15,32 @@ const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
 // generics collide with JSX, so tsc/oxc reserve JSX for .tsx — JSX-in-TS belongs in a .tsx file.
 const JSX_EXTS = new Set(['.js', '.cjs', '.mjs'])
 
+// Flow type syntax lives in the JS (non-TS) family; oxc parses TS natively, and running
+// flow-remove-types over a .ts file would corrupt TS-only constructs, so --flow only strips these.
+const FLOW_EXTS = new Set(['.js', '.cjs', '.mjs'])
+
 // Required lazily so non-JS bundlers don't load the native oxc parser.
 let _parser
 function getParser() {
   _parser ??= createRequire(import.meta.url)('oxc-parser')
   return _parser
+}
+
+// flow-remove-types is an optional dependency, loaded lazily and only under --flow: it strips
+// Flow type syntax down to plain JS before oxc (which parses JS/TS, not Flow) sees it. A missing
+// dep is an env error, so surface it with an actionable install hint rather than a bare resolve throw.
+let _flowRemoveTypes
+function getFlowRemoveTypes() {
+  if (_flowRemoveTypes) return _flowRemoveTypes
+  try {
+    _flowRemoveTypes = createRequire(import.meta.url)('flow-remove-types')
+  } catch (cause) {
+    throw new Error(
+      "--flow needs the optional 'flow-remove-types' dependency; install it (e.g. `npm i flow-remove-types`)",
+      { cause }
+    )
+  }
+  return _flowRemoveTypes
 }
 
 // classifyFormat is the shared name->format authority (static and runtime bundles must agree); it
@@ -97,10 +118,12 @@ export class Scan {
   // (`empty` = a browser/react-native `false` redirect) and owns builtin handling when set.
   // `jsx` opts the .js/.cjs/.mjs family into JSX syntax (React Native's JSX-in-.js convention);
   // off by default because oxc, like tsc, only auto-enables JSX for .jsx/.tsx by extension.
-  constructor({ conditions = [], resolve = null, jsx = false } = {}) {
+  // `flow`: strip Flow type syntax from JS-family sources before parsing (see #scanFile).
+  constructor({ conditions = [], resolve = null, jsx = false, flow = false } = {}) {
     this.extraConditions = [...conditions]
     this.customResolve = resolve
     this.jsx = jsx
+    this.flow = flow
   }
 
   walk(entries) {
@@ -136,6 +159,22 @@ export class Scan {
     this.parseErrors.push({ url, format, message, recovered })
   }
 
+  // Strip Flow type syntax to plain JS via the optional flow-remove-types dep (resolved lazily; a
+  // missing dep is an env error and propagates). Only invoked as a parse fallback (see #scanFile),
+  // so plain-JS files never reach it. Returns the rewritten source, or null when the transform
+  // itself fails on this file -- the caller then keeps oxc's original parse error.
+  #stripFlow(src, file) {
+    const flowRemoveTypes = getFlowRemoveTypes()
+    try {
+      // `all: true` ignores the @flow/@noflow pragma (RN sources mix both); the transform blanks
+      // types with whitespace, so byte offsets and every import specifier are preserved.
+      return flowRemoveTypes(src, { all: true }).toString()
+    } catch (cause) {
+      console.warn(`[stasis] --flow: could not strip Flow types from ${file}; leaving it to oxc (${cause.message})`)
+      return null
+    }
+  }
+
   #scanFile(url, queue) {
     const file = fileURLToPath(url)
     const ext = extname(file)
@@ -159,12 +198,11 @@ export class Scan {
     // force the JSX variant when opted in (`--jsx`) to parse React Native's JSX-in-.js source.
     const lang = this.jsx && JSX_EXTS.has(ext) ? 'jsx' : undefined
     const parseOptions = (sourceType) => (lang ? { sourceType, lang } : { sourceType })
+    const baseSourceType = declared === null ? 'unambiguous'
+      : declared.startsWith('module') ? 'module' : 'script'
     let parsed
     try {
-      parsed = parser.parseSync(file, src, parseOptions(
-        declared === null ? 'unambiguous'
-          : declared.startsWith('module') ? 'module' : 'script'
-      ))
+      parsed = parser.parseSync(file, src, parseOptions(baseSourceType))
     } catch (cause) {
       this.#recordParseError(url, declared, cause.message, false)
       return
@@ -191,6 +229,26 @@ export class Scan {
           errors = []
         }
       } catch { /* keep the script parse and its recorded errors */ }
+    }
+
+    // --flow: oxc parses JS/TS but not Flow, so a Flow-typed .js/.cjs/.mjs file lands here with
+    // parse errors. Only now -- after a raw oxc parse actually failed -- strip Flow types and
+    // re-parse, so plain-JS files never pay the transform cost. Only the parse input is rewritten;
+    // the bundle stores the pristine on-disk source (State/buildResolvedJsBundle re-read it), so
+    // attestation still covers the real bytes. A clean re-parse replaces the errored one; otherwise
+    // we keep the original result so a genuine (non-Flow) parse error still surfaces.
+    if (errors.length > 0 && this.flow && FLOW_EXTS.has(ext)) {
+      const flowSrc = this.#stripFlow(src, file)
+      if (flowSrc !== null) {
+        try {
+          const asFlow = parser.parseSync(file, flowSrc, parseOptions(baseSourceType))
+          if (nonWarning(asFlow).length === 0) {
+            parsed = asFlow
+            format = declared ?? `${parsed.module.hasModuleSyntax ? 'module' : 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
+            errors = []
+          }
+        } catch { /* keep the original parse + its errors */ }
+      }
     }
 
     let parseError

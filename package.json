@@ -27,6 +27,7 @@
     "babel-plugin-module-resolver": "^3.2.0",
     "esbuild": "^0.27.3",
     "file-loader": "^6.2.0",
+    "flow-remove-types": "^2.322.0",
     "oxlint": "^1.52.0",
     "string-replace-loader": "^2.3.0",
     "webpack": "^4.47.0",

@@ -372,6 +372,74 @@ test('scan files TS ESM-parent edges under the full ESM condition key Node uses'
   t.assert.deepEqual([...result.imports.keys()], ['node, import, module-sync, node-addons'])
 })
 
+test('scan without --flow cannot parse a Flow-typed file (edges vanish, parse error recorded)', withTmp((t, tmp) => {
+  // oxc parses JS/TS, not Flow: a Flow-annotated module fails to parse, and (being an
+  // eagerly-linked module file) its partial records are discarded, so its import edges vanish.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'flow', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.js'),
+    '// @flow\nimport { dep } from "./dep.js"\nfunction f(x: number): string { return String(x) }\nexport const v: string = f(1)\n')
+  writeFileSync(join(tmp, 'dep.js'), 'export const dep = 1\n')
+  const result = scan([join(tmp, 'entry.js')]).toRelative(tmp)
+  t.assert.equal(result.parseErrors.length, 1)
+  t.assert.equal(result.parseErrors[0].file, 'entry.js')
+  t.assert.deepEqual(result.files.get('entry.js').edges, [], 'a Flow file oxc cannot parse contributes no edges')
+  t.assert.ok(!result.files.has('dep.js'), 'the unparsed edge means dep.js is never walked')
+}))
+
+test('scan --flow still surfaces a genuine (non-Flow) parse error instead of masking it', withTmp((t, tmp) => {
+  // The Flow strip is a fallback that only fires when oxc fails; on a broken-but-not-Flow file the
+  // re-parse also fails, so oxc's original parse error must still be recorded (not swallowed).
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.mjs'), 'export const x = {\nimport "./hidden.mjs"\n')
+  const result = scan([join(tmp, 'entry.mjs')], { flow: true }).toRelative(tmp)
+  t.assert.equal(result.parseErrors.length, 1)
+  t.assert.equal(result.parseErrors[0].file, 'entry.mjs')
+}))
+
+test('scan --flow strips Flow type syntax before oxc so the real import graph resolves', withTmp((t, tmp) => {
+  // flow-remove-types blanks the annotations to whitespace; oxc then parses clean JS and the
+  // value import survives, while the type-only import is erased (never loaded at runtime).
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'flow', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.js'),
+    '// @flow\n' +
+    'import type { T } from "./types.js"\n' +
+    'import { dep } from "./dep.js"\n' +
+    'type Local = { a: number }\n' +
+    'function f(x: number): string { return String(x) }\n' +
+    'export const v: Local = { a: f(dep).length }\n')
+  writeFileSync(join(tmp, 'dep.js'), 'export const dep = 1\n')
+  writeFileSync(join(tmp, 'types.js'), 'export const T = 1\n')
+  const result = scan([join(tmp, 'entry.js')], { flow: true }).toRelative(tmp)
+  t.assert.deepEqual(result.parseErrors, [])
+  t.assert.deepEqual(result.unresolved, [])
+  const edges = result.files.get('entry.js').edges
+  t.assert.deepEqual(edges, [{ kind: 'import', spec: './dep.js', child: 'dep.js' }])
+  t.assert.ok(result.files.has('dep.js'), 'the value import is walked')
+  t.assert.ok(!result.files.has('types.js'), 'the Flow type-only import is erased, so types.js is never walked')
+}))
+
+test('scan --flow works on Flow files with no @flow pragma (all:true ignores the pragma)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'flow', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.js'), 'import { dep } from "./dep.js"\nexport const v: number = dep\n')
+  writeFileSync(join(tmp, 'dep.js'), 'export const dep = 1\n')
+  const result = scan([join(tmp, 'entry.js')], { flow: true }).toRelative(tmp)
+  t.assert.deepEqual(result.parseErrors, [])
+  t.assert.ok(result.files.has('dep.js'))
+}))
+
+test('scan --flow leaves .ts sources to oxc (does not run flow-remove-types on TS constructs)', withTmp((t, tmp) => {
+  // TS-only syntax (enum) must still bundle under --flow: .ts is excluded from Flow stripping
+  // and handed straight to oxc's TS parser.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import { dep } from "./dep.ts"\nexport enum E { A, B }\nexport const v: E = dep\n')
+  writeFileSync(join(tmp, 'dep.ts'), 'export const dep = 0\n')
+  const result = scan([join(tmp, 'entry.ts')], { flow: true }).toRelative(tmp)
+  t.assert.deepEqual(result.parseErrors, [])
+  t.assert.equal(result.files.get('entry.ts').format, 'module-typescript')
+  t.assert.ok(result.files.has('dep.ts'), 'the TS import graph is unaffected by --flow')
+}))
+
 test('scan instance is reusable via the Scan class', (t) => {
   const s = new Scan().walk([join(cjsFixture, 'src/entry.cjs')])
   t.assert.ok(s.files.size > 0)
