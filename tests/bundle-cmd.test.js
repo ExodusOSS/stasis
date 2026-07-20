@@ -1305,10 +1305,11 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(mod, 'the native dep is a bundled module')
   const files = new Set(Object.keys(mod.files))
   // Native build inputs are carried alongside the graph-reached index.js.
-  for (const f of ['index.js', 'RNThing.podspec', 'Extra.podspec.json', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/RNThing.swift', 'ios/RNThing-Info.plist', 'ios/Main.storyboard', 'ios/config.env', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
+  for (const f of ['index.js', 'RNThing.podspec', 'Extra.podspec.json', 'ios/RNThing.h', 'ios/RNThing.mm', 'ios/RNThing.swift', 'ios/RNThing-Info.plist', 'ios/Main.storyboard', 'ios/util.c', 'ios/Podfile', 'ios/Podfile.lock', 'ios/logo.png', 'android/build.gradle', 'android/src/main/AndroidManifest.xml']) {
     t.assert.ok(files.has(f), `expected ${f} in the bundle`)
   }
   t.assert.ok(!files.has('ios/helper.js'), 'a code file under ios/ is not captured as native')
+  t.assert.ok(!files.has('ios/config.env'), 'a *.env-extension file is env-family: skipped by automated capture')
   t.assert.ok(!files.has('android/build/generated.o'), 'build output is excluded')
   // Non-build-input noise + Xcode project bundle excluded; podspec-referenced plist/xcprivacy kept.
   for (const f of ['ios/README.md', 'ios/install.bat', 'ios/RNThing.js.map', 'ios/RNThing.xcodeproj/project.pbxproj', 'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata']) {
@@ -1350,7 +1351,7 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing.h'), 'c-header')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing-Info.plist'), 'xml') // Apple plist is XML
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Main.storyboard'), 'xml')
-  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/config.env'), 'env')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/config.env'), undefined, 'env-family: never auto-captured')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/util.c'), 'c')
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile'), 'podfile') // matched by basename
   t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Podfile.lock'), 'podfile-lock')

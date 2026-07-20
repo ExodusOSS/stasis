@@ -150,15 +150,19 @@ test('addCommand classifies the native build-input vocabulary as code (shared wi
 }))
 
 test('addCommand still captures an explicitly-listed .env (manual add is a deliberate choice)', withTmp(async (t, tmp) => {
-  // Automated capture skips `.env` secrets, but an explicit `stasis add .env` is the user opting
-  // in -- it must still be recorded as 'env' code (classifyFormat keeps tagging it).
+  // Automated capture skips the whole env family, but an explicit `stasis add` is the user opting
+  // in -- basename AND extension family must still be recorded as 'env' code (classifyFormat keeps
+  // tagging them).
   seed(tmp, { bundleFile: 'dist/code.br' })
   writeFileSync(join(tmp, '.env'), 'API_KEY=secret\n')
-  addCommand({ cwd: tmp, entries: ['.env'] })
+  writeFileSync(join(tmp, 'web.env'), 'PORT=80\n')
+  addCommand({ cwd: tmp, entries: ['.env', 'web.env'] })
   const code = decode(join(tmp, 'dist/code.br'))
   t.assert.equal(code.formats.get('.env'), 'env', 'an explicitly added .env is captured as env code')
+  t.assert.equal(code.formats.get('web.env'), 'env', 'an explicitly added *.env is captured as env code')
   t.assert.equal(code.modules.get('.').files['.env'], 'API_KEY=secret\n')
-  t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), '.env is code, not a resource')
+  t.assert.equal(code.modules.get('.').files['web.env'], 'PORT=80\n')
+  t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'env files are code, not resources')
 }))
 
 test('addCommand attributes packed files to the `add` consumer in `reason`', withTmp(async (t, tmp) => {
