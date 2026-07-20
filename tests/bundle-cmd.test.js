@@ -1986,7 +1986,9 @@ test('CLI: bundle --metro carries a .tsx dependency only under --jsx (else fails
   t.assert.match(noJsx.stderr, /JS bundle would be broken at load time/)
   // Relativized message: project-relative parent + target, never the machine's absolute path.
   t.assert.match(noJsx.stderr, /tsx-dep from index\.js resolves to node_modules\/tsx-dep\/src\/index\.tsx, which a source bundle can't carry/)
-  t.assert.doesNotMatch(noJsx.stderr, /resolves to \//, 'the resolved path must be project-relative, not absolute')
+  // The absolute project path must not leak into the message (the stack trace names stasis' own
+  // source, but the scan-issue paths themselves must be project-relative).
+  t.assert.doesNotMatch(noJsx.stderr, new RegExp(tmp.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'), 'scan-issue paths must be project-relative, not absolute')
   t.assert.ok(!existsSync(outPath))
 
   const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
@@ -2018,6 +2020,54 @@ test('CLI: bundle --metro --jsx probes .tsx for an extensionless import (sourceE
   const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['Widget.tsx', 'index.js'],
     'the extensionless import must resolve to Widget.tsx and carry it')
+}))
+
+test('CLI: bundle (plain, no --metro) --jsx carries explicit .tsx AND .jsx imports via the Node resolver', withTmp((t, tmp) => {
+  // Exercises the DEFAULT (Node-resolver) scan branch, not the --metro custom resolver: an explicit
+  // `import './x.tsx'` / `import './y.jsx'` resolves to the exact file, and --jsx must carry both.
+  // Covers .jsx as well as .tsx (they share JSX_FILE_EXTS). The entry is plain ESM so it parses
+  // without --jsx, isolating the dependency extensions.
+  jsProject(tmp, {
+    'index.js': "import { t } from './widget.tsx'\nimport { j } from './legacy.jsx'\nexport const App = [t, j]\n",
+    'widget.tsx': 'export const t = (): unknown => <View>t</View>\n',
+    'legacy.jsx': 'export const j = () => <View>j</View>\n',
+  })
+  const outPath = join(tmp, 'out.br')
+
+  const noJsx = runCli(['bundle', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.notEqual(noJsx.status, 0, 'plain path must fail closed on reached .tsx/.jsx without --jsx')
+  t.assert.match(noJsx.stderr, /which a source bundle can't carry/)
+
+  const r = runCli(['bundle', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['index.js', 'legacy.jsx', 'widget.tsx'],
+    'both the .tsx and .jsx dependency must be carried under --jsx on the plain path')
+}))
+
+test('CLI: bundle --jsx --flow strips Flow types from a .jsx dependency and walks its graph', withTmp((t, tmp) => {
+  // .jsx is JS + JSX and can carry Flow types (like .js); --flow must strip them so the scanner
+  // parses past to the import graph, while .tsx (TypeScript) is left to oxc. Without --flow the
+  // Flow-typed .jsx fails closed; the on-disk source is stored verbatim (only the parse input is
+  // rewritten).
+  jsProject(tmp, {
+    'index.js': "import { C } from './comp.jsx'\nexport const App = C\n",
+    'comp.jsx': "import { dep } from './dep.js'\nexport const C = (x: number): mixed => <View>{dep}{x}</View>\n",
+    'dep.js': 'export const dep = 1\n',
+  })
+  const outPath = join(tmp, 'out.br')
+
+  const noFlow = runCli(['bundle', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.notEqual(noFlow.status, 0, 'a Flow-typed .jsx must fail closed under --jsx without --flow')
+  t.assert.match(noFlow.stderr, /JS bundle would be broken at load time/)
+
+  const r = runCli(['bundle', '--jsx', '--flow', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['comp.jsx', 'dep.js', 'index.js'],
+    'stripping Flow from the .jsx must reveal its edge to dep.js')
+  // Stored bytes are pristine: the Flow annotation survives in the bundle (only parsing saw it stripped).
+  t.assert.match(bundle.sources.get('comp.jsx'), /x: number/u)
 }))
 
 test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', withTmp((t, tmp) => {

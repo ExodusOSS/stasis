@@ -22,8 +22,10 @@ const JSX_EXTS = new Set(['.js', '.cjs', '.mjs'])
 const JSX_FILE_EXTS = new Set(['.jsx', '.tsx'])
 
 // Flow type syntax lives in the JS (non-TS) family; oxc parses TS natively, and running
-// flow-remove-types over a .ts file would corrupt TS-only constructs, so --flow only strips these.
-const FLOW_EXTS = new Set(['.js', '.cjs', '.mjs'])
+// flow-remove-types over a .ts/.tsx file would corrupt TS-only constructs, so --flow only strips
+// these. .jsx is included (it's JS + JSX, and can carry Flow types like .js); .tsx is not (it's
+// TypeScript). flow-remove-types preserves JSX, so a stripped .jsx re-parses under lang:jsx.
+const FLOW_EXTS = new Set(['.js', '.cjs', '.mjs', '.jsx'])
 
 // Required lazily so non-JS bundlers don't load the native oxc parser.
 let _parser
@@ -219,7 +221,10 @@ export class Scan {
     }
 
     // Match Node's syntax detection for typeless packages: ESM syntax picks the module variant
-    // (mislabeling as commonjs makes `--bundle=load` feed the wrong translator).
+    // (mislabeling as commonjs makes `--bundle=load` feed the wrong translator). Only .ts takes the
+    // `-typescript` suffix; .jsx/.tsx deliberately land on plain module/commonjs (like a JSX-in-.js
+    // file) — they're bundler-transformed, keyed by extension in `stasis build`, not Node-strippable,
+    // so the "needs a JSX/TS transform" signal rides the .jsx/.tsx extension, not the format tag.
     let format = declared
       ?? `${parsed.module.hasModuleSyntax ? 'module' : 'commonjs'}${ext === '.ts' ? '-typescript' : ''}`
 
