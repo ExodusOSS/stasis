@@ -7,19 +7,59 @@ import { collectWhy } from './why.js'
 
 // Only audit installed dependencies; first-party packages live under non-`node_modules` keys and
 // must not be sent to the public registry (leaks names, adds noise).
+//
+// A package counts as present only when its REAL code is. Evidence is the
+// resolution graph, which both bundles and lockfiles carry (a lockfile only
+// omits `reason`): an edge whose target is a corrected file (e.g. ws's noop
+// browser.js stub) is not evidence, so ws pulled in only via `-> ws/browser.js`
+// is skipped, while `-> ws/lib.js` keeps ws (see audit-corrections.js). This also
+// ignores files that are recorded but never imported as code (a resolver-read
+// package.json). Only a legacy artifact with no graph falls back to its recorded
+// files -- every one except inert metadata counts.
 export function collectPackagesFromFile(file) {
-  const out = []
-  for (const [dir, { name, version, files }] of parseFile(file).modules) {
-    if (!dir.includes('node_modules')) continue
-    if (!name || !version) continue
-    // A module instance whose recorded files are all audit-irrelevant (e.g. ws
-    // shipped only as its noop browser.js stub) carries none of the package's
-    // code -- don't audit it (see audit-corrections.js).
-    const rels = Object.keys(files)
-    if (rels.length > 0 && rels.every((rel) => isCorrectedFile(name, version, rel))) continue
-    out.push({ name, version })
+  const { modules, imports } = parseFile(file)
+
+  const deps = new Map() // dir -> { name, version, files }
+  const fileToModule = new Map() // project-relative file -> { dir, rel }
+  for (const [dir, info] of modules) {
+    if (!dir.includes('node_modules') || !info.name || !info.version) continue
+    deps.set(dir, info)
+    for (const rel of Object.keys(info.files)) fileToModule.set(moduleFileKey(dir, rel), { dir, rel })
   }
-  return out
+
+  const present = new Set() // module dirs with real (non-corrected) code present
+  const mark = (dir, rel) => {
+    const info = deps.get(dir)
+    if (info && !isCorrectedFile(info.name, info.version, rel)) present.add(dir)
+  }
+
+  if (imports && imports.size > 0) {
+    // Evidence is the graph: a module is present when an edge targets one of its
+    // non-corrected files. (`--metro` targets may be a {platform: file} map.)
+    for (const [, byParent] of imports) {
+      for (const [, specifiers] of byParent) {
+        for (const [, target] of specifiers) {
+          for (const t of target instanceof Map ? target.values() : [target]) {
+            const owner = fileToModule.get(t)
+            if (owner) mark(owner.dir, owner.rel)
+          }
+        }
+      }
+    }
+  } else {
+    // No graph (a legacy artifact): fall back to the recorded files -- every one
+    // except inert metadata counts.
+    for (const [dir, info] of deps) {
+      for (const rel of Object.keys(info.files)) {
+        if (rel !== 'package.json') mark(dir, rel)
+      }
+    }
+  }
+
+  return [...present].map((dir) => {
+    const { name, version } = deps.get(dir)
+    return { name, version }
+  })
 }
 
 export function collectPackages(files) {

@@ -125,55 +125,100 @@ test('collectPackages dedupes exact name+version duplicates', withTmp((t, tmp) =
   t.assert.equal(pkgs.length, 2)
 }))
 
-// --- audit corrections: files that don't count as a package being present ---
+// --- audit corrections: import edges to a corrected file don't count ---
 
-test('collectPackages skips a ws module recorded only as its noop browser.js', withTmp((t, tmp) => {
-  // ws's browser.js is a throw-only stub: a module instance carrying nothing else
-  // ships no ws code, so ws is not audited (see audit-corrections.js).
-  const bundle = writeBundle(tmp, 'ws.br', {
-    modules: {
-      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n' } },
-      'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// f\n' } },
-    },
-  })
+// Build a bundle from module file listings + import edges [parentFile, targetFile].
+// The specifier key is never read (parse/audit iterate only the edge targets), so
+// key by the full target path -- two edges from one parent into the same package
+// (e.g. ws/browser.js and ws/lib.js) then stay distinct instead of colliding.
+const writeAuditBundle = (dir, modules, edges, name = 'audit.br') => {
+  const byParent = {}
+  for (const [from, to] of edges) (byParent[from] ??= {})[to] = to
+  return writeBundle(dir, name, { modules, imports: { '*': byParent } })
+}
+
+test('collectPackages skips ws imported only through its noop browser.js (with package.json)', withTmp((t, tmp) => {
+  // The real shape: ws is recorded as browser.js + package.json, and the only edge
+  // targeting it is `-> ws/browser.js` (a throw-only stub). ws ships no real code,
+  // so it is not audited; foo (imported via its index.js) is.
+  const bundle = writeAuditBundle(tmp, {
+    'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'package.json': '{}' } },
+    'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// f\n' } },
+  }, [
+    ['src/entry.js', 'node_modules/ws/browser.js'],
+    ['src/entry.js', 'node_modules/foo/index.js'],
+  ])
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'foo', version: '2.0.0' }])
 }))
 
-test('collectPackages keeps ws when real files accompany browser.js', withTmp((t, tmp) => {
-  const bundle = writeBundle(tmp, 'ws.br', {
-    modules: {
-      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'index.js': '// real\n' } },
-    },
-  })
+test('collectPackages keeps ws when a non-browser.js edge targets it', withTmp((t, tmp) => {
+  // `A -> ws/browser.js` doesn't count, but `B -> ws/lib.js` does -> ws stays.
+  const bundle = writeAuditBundle(tmp, {
+    'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'lib.js': '// real\n', 'package.json': '{}' } },
+  }, [
+    ['src/entry.js', 'node_modules/ws/browser.js'],
+    ['src/entry.js', 'node_modules/ws/lib.js'],
+  ])
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'ws', version: '7.5.9' }])
 }))
 
-test('collectPackages does not correct ws versions newer than the verified bound', withTmp((t, tmp) => {
-  // The stub is only verified a noop up to the version pinned in
-  // audit-corrections.js; a newer ws stays audited even as browser.js-only.
-  const bundle = writeBundle(tmp, 'ws.br', {
-    modules: {
-      'node_modules/ws': { name: 'ws', version: '99.0.0', files: { 'browser.js': '// ?\n' } },
-    },
-  })
-  t.assert.deepEqual(collectPackages([bundle]), [{ name: 'ws', version: '99.0.0' }])
+test('collectPackages does not correct ws versions outside the verified range', withTmp((t, tmp) => {
+  // The stub is only verified up to the range pinned in audit-corrections.js; a
+  // newer ws stays audited even when reached only through browser.js.
+  const bundle = writeAuditBundle(tmp, {
+    'node_modules/ws': { name: 'ws', version: '9.0.0', files: { 'browser.js': '// ?\n', 'package.json': '{}' } },
+  }, [['src/entry.js', 'node_modules/ws/browser.js']])
+  t.assert.deepEqual(collectPackages([bundle]), [{ name: 'ws', version: '9.0.0' }])
+}))
+
+test('collectPackages skips node-fetch imported only through browser.js (<= 2.7.0)', withTmp((t, tmp) => {
+  // node-fetch's browser.js just re-exports the native fetch; it carries none of
+  // the node-fetch implementation. Corrected through 2.7.0 (the last with it).
+  const bundle = writeAuditBundle(tmp, {
+    'node_modules/node-fetch': { name: 'node-fetch', version: '2.7.0', files: { 'browser.js': '// native fetch\n', 'package.json': '{}' } },
+  }, [['src/entry.js', 'node_modules/node-fetch/browser.js']])
+  t.assert.deepEqual(collectPackages([bundle]), [])
+}))
+
+test('collectPackages keeps node-fetch 3.x (no browser.js correction)', withTmp((t, tmp) => {
+  const bundle = writeAuditBundle(tmp, {
+    'node_modules/node-fetch': { name: 'node-fetch', version: '3.3.2', files: { 'src.js': '// impl\n' } },
+  }, [['src/entry.js', 'node_modules/node-fetch/src.js']])
+  t.assert.deepEqual(collectPackages([bundle]), [{ name: 'node-fetch', version: '3.3.2' }])
 }))
 
 test('collectPackages corrections are package-specific', withTmp((t, tmp) => {
-  // A browser.js-only module of any OTHER package still counts as present.
-  const bundle = writeBundle(tmp, 'other.br', {
-    modules: {
-      'node_modules/other': { name: 'other', version: '1.0.0', files: { 'browser.js': '// b\n' } },
-    },
-  })
+  // A browser.js edge into any OTHER package still counts as present.
+  const bundle = writeAuditBundle(tmp, {
+    'node_modules/other': { name: 'other', version: '1.0.0', files: { 'browser.js': '// b\n' } },
+  }, [['src/entry.js', 'node_modules/other/browser.js']])
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'other', version: '1.0.0' }])
 }))
 
-test('collectPackages applies the ws correction to lockfiles too', withTmp((t, tmp) => {
+test('collectPackages uses a lockfile resolution graph for the ws correction', withTmp((t, tmp) => {
+  // Lockfiles carry a resolution graph too (they only lack `reason`), so the
+  // edge-based correction applies exactly as for a bundle: ws recorded with real
+  // files but reached only via its browser.js stub is skipped; foo stays.
+  const lock = writeLock(tmp, 'ws-graph.lock.json', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '8.21.1', files: { 'browser.js': 'sha512-w', 'lib.js': 'sha512-l', 'package.json': 'sha512-p' } },
+      'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y' } },
+    },
+    imports: {
+      '*': { 'src/entry.js': { ws: 'node_modules/ws/browser.js', foo: 'node_modules/foo/index.js' } },
+    },
+  })
+  t.assert.deepEqual(collectPackages([lock]), [{ name: 'foo', version: '1.2.3' }])
+}))
+
+test('collectPackages falls back to recorded files for a graph-less (legacy) lockfile', withTmp((t, tmp) => {
+  // A legacy lockfile records no resolution graph, so every recorded file except
+  // inert metadata counts. A ws recorded as only its browser.js (+package.json) is
+  // still corrected away; foo (real code recorded) stays audited.
   const lock = writeLock(tmp, 'ws.lock.json', {
     modules: {
-      'node_modules/ws': { name: 'ws', version: '8.21.1', files: { 'browser.js': 'sha512-w' } },
-      'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y' } },
+      'node_modules/ws': { name: 'ws', version: '8.21.1', files: { 'browser.js': 'sha512-w', 'package.json': 'sha512-p' } },
+      'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y', 'package.json': 'sha512-p' } },
     },
   })
   t.assert.deepEqual(collectPackages([lock]), [{ name: 'foo', version: '1.2.3' }])
