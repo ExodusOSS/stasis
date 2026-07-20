@@ -305,9 +305,7 @@ function initState(root) {
   // latched): a late lazy require() resolves after an earlier flush, so re-flushing picks up the
   // resolution edge beforeExit missed; write() skips unchanged artifacts so re-running is cheap.
   const save = () => {
-    // Read-only runs (lock=frozen / bundle=frozen|load) persist nothing -- no artifact, no shard --
-    // so save is a full no-op. `saved` stays false, so a module first loaded after this (e.g. a lazy
-    // import() from beforeExit) is still attested and doesn't trip the load hook's assert(saved===false).
+    // Read-only runs persist nothing: no-op, keeping `saved` false so a post-exit lazy import() stays attested.
     if (!state.config.writeLockfile && !state.config.writeBundle) return
     // A child never writes the real artifact (root owns it; a 2nd writer races); it forwards a
     // shard instead. writeChildShard no-ops unless the channel is on and a dir was inherited.
