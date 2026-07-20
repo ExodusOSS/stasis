@@ -305,8 +305,6 @@ function initState(root) {
   // latched): a late lazy require() resolves after an earlier flush, so re-flushing picks up the
   // resolution edge beforeExit missed; write() skips unchanged artifacts so re-running is cheap.
   const save = () => {
-    // Read-only runs persist nothing: no-op, keeping `saved` false so a post-exit lazy import() stays attested.
-    if (!state.config.writeLockfile && !state.config.writeBundle) return
     // A child never writes the real artifact (root owns it; a 2nd writer races); it forwards a
     // shard instead. writeChildShard no-ops unless the channel is on and a dir was inherited.
     if (isChildProcess) {
@@ -319,8 +317,12 @@ function initState(root) {
       if (aborted) return
       // Fold in every child's shard before writing, so child-only files/edges are attested too.
       if (createdShardDir) mergeChildShards(createdShardDir)
+      // write() self-gates the actual artifact writes, but its backfills also VERIFY in read-only frozen
+      // modes (reject a bundle/lockfile missing a referenced file), so it must run in every mode.
       state.write()
-      saved = true
+      // Latch only in write modes: a read-only run persists nothing, so a module first loaded after
+      // this (e.g. a lazy import() from beforeExit) is still attested and must not trip the load hook.
+      if (state.config.writeLockfile || state.config.writeBundle) saved = true
     } finally {
       // Always remove the shard dir we minted (sole owner of this cleanup); SIGKILL leaves it for the OS.
       if (createdShardDir) {
