@@ -267,10 +267,8 @@ export class State {
 
     // default root is top-level package.json, to opt-in to per-dir create stasis.config.json
     this.root = potentialRoots.at(-1)
-    // No package.json anywhere up the tree: there's no project root to key files against, so every
-    // relative-path computation below would later throw a bare ERR_INVALID_ARG_TYPE (undefined root).
-    // Fail closed now with an actionable message. A bare, package.json-less deployment (a standalone
-    // bundle) goes through the skipDiscovery path above, which anchors at the given root explicitly.
+    // No package.json up the tree -> no root to key files against; without this, every relative-path
+    // computation below throws a bare ERR_INVALID_ARG_TYPE later. Fail closed. (Bare bundles: skipDiscovery.)
     assert.ok(this.root, `stasis: no package.json found at or above ${resolve(root)}; run stasis from within a project`)
 
     let loaded = false
@@ -1336,9 +1334,8 @@ export class State {
     }
     if (matches.size !== 1) return undefined
     const [only] = matches
-    // A per-platform { platform: file } Map (a --metro multi-platform edge) has no single target and
-    // no platform context in this CJS shim, so defer to native rather than throw resolve()'s
-    // TypeError. The ESM path (getImport) fails closed with ERR_STASIS_PLATFORM_SPECIFIC instead.
+    // A per-platform { platform: file } Map (--metro multi-platform edge) has no single target here;
+    // defer to native rather than throw resolve()'s TypeError (ESM getImport fails closed instead).
     if (typeof only !== 'string') return undefined
     return resolve(this.root, only)
   }
