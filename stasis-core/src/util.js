@@ -63,6 +63,16 @@ export function pathExt(filePath) {
   return m ? m[1].toLowerCase() : ''
 }
 
+// A `.env` secrets file by BASENAME: `.env` itself or the `.env.*` family (`.env.local`,
+// `.env.production`). Keyed by basename because pathExt disagrees across the family --
+// pathExt('.env') is 'env' but pathExt('.env.local') is 'local'. A file merely USING the `.env`
+// extension (`config.env`) is NOT in the family and stays a normal 'env'-format build input.
+// Automated capture paths skip these (never bake a secret in); `stasis add .env` still captures.
+export function isDotEnvFile(name) {
+  const base = basename(name).toLowerCase()
+  return base === '.env' || base.startsWith('.env.')
+}
+
 // Validate + normalize a `resources` allowlist into a Set of lowercase entries: each a bare
 // extension (`png`) or extensionless filename (`LICENSE`). A dotted entry (`data.bin`) is rejected
 // -- a file with an extension is keyed by it, so it would never match; declare the extension.
@@ -232,6 +242,9 @@ export function classifyFormat(name, { content } = {}) {
 // or 'resource' (anything else). `content` (optional) enables the shell-shebang rule.
 export function classifyNativeCapture(name, { win32 = process.platform === 'win32', content } = {}) {
   if (isExcludedNativeFile(name, { win32 })) return { action: 'skip' }
+  // `.env`/`.env.*` carry secrets: an automated capture must never sweep them in. classifyFormat
+  // still tags `.env` as 'env', so an explicit `stasis add .env` keeps working.
+  if (isDotEnvFile(name)) return { action: 'skip' }
   const base = basename(name).toLowerCase()
   // Name-matched code is always a native build input, even when its tag is a Node format the JS
   // graph would otherwise own.
