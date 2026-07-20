@@ -23,8 +23,14 @@
 // --bundle=load alone executes it silently. DIVERGENCE assertions pin current behavior --
 // when a class is fixed, update them to the converged expectations (see A1/A2).
 
-import { test } from 'node:test'
-import { spawnSync } from 'node:child_process'
+/* eslint-disable no-await-in-loop -- several tests iterate a small set of independent
+   resolution scenarios and run each scenario's (bundle -> load -> frozen) subprocess
+   chain sequentially by design. Parallelism comes from the describe-level `concurrency`
+   below (across tests); awaiting per scenario keeps each test's live subprocess count at
+   one, rather than fanning out and oversubscribing the box. */
+import { test, describe } from 'node:test'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -54,7 +60,17 @@ const cleanEnv = (() => {
   return rest
 })()
 
-const exec = (args, cwd) => spawnSync(process.execPath, args, { cwd, encoding: 'utf-8', env: cleanEnv })
+// Async runner (see the other spawning test files): spawn() + once('close') yields
+// so the describe-level `concurrency` below actually overlaps the subprocesses.
+const exec = async (args, cwd) => {
+  const child = spawn(process.execPath, args, { cwd, env: cleanEnv })
+  const stdoutChunks = []
+  const stderrChunks = []
+  child.stdout.on('data', (d) => stdoutChunks.push(d))
+  child.stderr.on('data', (d) => stderrChunks.push(d))
+  const [status] = await once(child, 'close')
+  return { status, stdout: Buffer.concat(stdoutChunks).toString('utf-8'), stderr: Buffer.concat(stderrChunks).toString('utf-8') }
+}
 const plainNode = (dir, entry) => exec([entry], dir)
 const stasisRun = (dir, entry) => exec([cli, 'run', '--lock=add', entry], dir)
 const stasisBundle = (dir, entry) =>
@@ -172,294 +188,300 @@ const installStaticLock = (dirs) =>
 const IMPORT_KEY = 'node, import, module-sync, node-addons'
 const REQUIRE_KEY = 'require, node, node-addons, module-sync'
 
-test('FIXED A1: require() via createRequire inside ESM resolves with require conditions', withTmp((t, tmp) => {
-  // The require() edge takes the require branch, the import edge of the SAME (parent,
-  // specifier) the import branch; divergent targets are keyed by real conditions.
-  const entry = 'main.mjs'
-  const dirs = scenario(tmp, entry, `import { createRequire } from 'node:module'
+// node --test runs test files in parallel; each test here spawns several stasis /
+// node subprocesses. A small per-file cap bounds total concurrent subprocesses.
+const CONCURRENCY = 4 // matches CI runner cores
+
+describe('run vs bundle resolution (spawned, concurrent)', { concurrency: CONCURRENCY }, () => {
+  test('FIXED A1: require() via createRequire inside ESM resolves with require conditions', withTmp(async (t, tmp) => {
+    // The require() edge takes the require branch, the import edge of the SAME (parent,
+    // specifier) the import branch; divergent targets are keyed by real conditions.
+    const entry = 'main.mjs'
+    const dirs = scenario(tmp, entry, `import { createRequire } from 'node:module'
 import { which as viaImport } from 'dual'
 const require = createRequire(import.meta.url)
 console.log('import', viaImport)
 console.log('require', require('dual').which)
 `)
 
-  const plain = plainNode(dirs.run, entry)
-  t.assert.equal(plain.status, 0)
-  t.assert.equal(plain.stdout, 'import dual:ESM\nrequire dual:CJS\n')
+    const plain = await plainNode(dirs.run, entry)
+    t.assert.equal(plain.status, 0)
+    t.assert.equal(plain.stdout, 'import dual:ESM\nrequire dual:CJS\n')
 
-  const run = stasisRun(dirs.run, entry)
-  t.assert.equal(run.status, 0, run.stderr)
-  t.assert.equal(run.stdout, plain.stdout, 'the observing loader must not change behavior')
-  const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
-  t.assert.deepEqual(
-    new Set(Object.values(runLock.edges.get('main.mjs :: dual'))),
-    new Set(['node_modules/dual/esm.mjs', 'node_modules/dual/cjs.cjs']),
-  )
+    const run = await stasisRun(dirs.run, entry)
+    t.assert.equal(run.status, 0, run.stderr)
+    t.assert.equal(run.stdout, plain.stdout, 'the observing loader must not change behavior')
+    const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
+    t.assert.deepEqual(
+      new Set(Object.values(runLock.edges.get('main.mjs :: dual'))),
+      new Set(['node_modules/dual/esm.mjs', 'node_modules/dual/cjs.cjs']),
+    )
 
-  t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
-  const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  t.assert.deepEqual(staticLock.edges.get('main.mjs :: dual'), {
-    [IMPORT_KEY]: 'node_modules/dual/esm.mjs',
-    [REQUIRE_KEY]: 'node_modules/dual/cjs.cjs',
-  })
-  t.assert.ok(staticLock.files.has('node_modules/dual/cjs.cjs'))
-  t.assert.ok(staticLock.files.has('node_modules/dual/esm.mjs'))
+    t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0)
+    const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
+    t.assert.deepEqual(staticLock.edges.get('main.mjs :: dual'), {
+      [IMPORT_KEY]: 'node_modules/dual/esm.mjs',
+      [REQUIRE_KEY]: 'node_modules/dual/cjs.cjs',
+    })
+    t.assert.ok(staticLock.files.has('node_modules/dual/cjs.cjs'))
+    t.assert.ok(staticLock.files.has('node_modules/dual/esm.mjs'))
 
-  const load = bundleLoad(dirs.bundle, entry)
-  t.assert.equal(load.status, 0, load.stderr)
-  t.assert.equal(load.stdout, plain.stdout)
+    const load = await bundleLoad(dirs.bundle, entry)
+    t.assert.equal(load.status, 0, load.stderr)
+    t.assert.equal(load.stdout, plain.stdout)
 
-  installStaticLock(dirs)
-  const frozen = frozenRun(dirs.frozen, entry)
-  t.assert.equal(frozen.status, 0, frozen.stderr)
-  t.assert.equal(frozen.stdout, plain.stdout)
-}))
+    installStaticLock(dirs)
+    const frozen = await frozenRun(dirs.frozen, entry)
+    t.assert.equal(frozen.status, 0, frozen.stderr)
+    t.assert.equal(frozen.stdout, plain.stdout)
+  }))
 
-test('FIXED A2: literal import() inside CJS resolves with import conditions', withTmp((t, tmp) => {
-  // The dynamic-import OPERATOR with a static specifier resolves under IMPORT conditions
-  // even from a CJS parent; the require edge keeps the require branch.
-  const entry = 'main.cjs'
-  const dirs = scenario(tmp, entry, `const viaRequire = require('dual').which
+  test('FIXED A2: literal import() inside CJS resolves with import conditions', withTmp(async (t, tmp) => {
+    // The dynamic-import OPERATOR with a static specifier resolves under IMPORT conditions
+    // even from a CJS parent; the require edge keeps the require branch.
+    const entry = 'main.cjs'
+    const dirs = scenario(tmp, entry, `const viaRequire = require('dual').which
 import('dual').then((m) => {
   console.log('require', viaRequire)
   console.log('import()', m.which)
 })
 `)
 
-  const plain = plainNode(dirs.run, entry)
-  t.assert.equal(plain.status, 0)
-  t.assert.equal(plain.stdout, 'require dual:CJS\nimport() dual:ESM\n')
+    const plain = await plainNode(dirs.run, entry)
+    t.assert.equal(plain.status, 0)
+    t.assert.equal(plain.stdout, 'require dual:CJS\nimport() dual:ESM\n')
 
-  t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
-  const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  t.assert.deepEqual(staticLock.edges.get('main.cjs :: dual'), {
-    [IMPORT_KEY]: 'node_modules/dual/esm.mjs',
-    [REQUIRE_KEY]: 'node_modules/dual/cjs.cjs',
-  })
-  t.assert.ok(staticLock.files.has('node_modules/dual/esm.mjs'))
+    t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0)
+    const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
+    t.assert.deepEqual(staticLock.edges.get('main.cjs :: dual'), {
+      [IMPORT_KEY]: 'node_modules/dual/esm.mjs',
+      [REQUIRE_KEY]: 'node_modules/dual/cjs.cjs',
+    })
+    t.assert.ok(staticLock.files.has('node_modules/dual/esm.mjs'))
 
-  const load = bundleLoad(dirs.bundle, entry)
-  t.assert.equal(load.status, 0, load.stderr)
-  t.assert.equal(load.stdout, plain.stdout)
+    const load = await bundleLoad(dirs.bundle, entry)
+    t.assert.equal(load.status, 0, load.stderr)
+    t.assert.equal(load.stdout, plain.stdout)
 
-  installStaticLock(dirs)
-  const frozen = frozenRun(dirs.frozen, entry)
-  t.assert.equal(frozen.status, 0, frozen.stderr)
-  t.assert.equal(frozen.stdout, plain.stdout)
-}))
+    installStaticLock(dirs)
+    const frozen = await frozenRun(dirs.frozen, entry)
+    t.assert.equal(frozen.status, 0, frozen.stderr)
+    t.assert.equal(frozen.stdout, plain.stdout)
+  }))
 
-test('DIVERGENCE A3: percent-encoded relative import resolves literally in the static scan, decoded by Node', withTmp((t, tmp) => {
-  // ESM specifiers are URLs ('./enc/a%20b.mjs' loads 'enc/a b.mjs'); the CJS algorithm takes
-  // the literal path. With both spellings on disk the resolvers silently pick different files.
-  const entry = 'main.mjs'
-  const dirs = scenario(tmp, entry, `import { which } from './enc/a%20b.mjs'
+  test('DIVERGENCE A3: percent-encoded relative import resolves literally in the static scan, decoded by Node', withTmp(async (t, tmp) => {
+    // ESM specifiers are URLs ('./enc/a%20b.mjs' loads 'enc/a b.mjs'); the CJS algorithm takes
+    // the literal path. With both spellings on disk the resolvers silently pick different files.
+    const entry = 'main.mjs'
+    const dirs = scenario(tmp, entry, `import { which } from './enc/a%20b.mjs'
 console.log(which)
 `)
 
-  const plain = plainNode(dirs.run, entry)
-  t.assert.equal(plain.status, 0)
-  t.assert.equal(plain.stdout, 'enc:DECODED\n')
+    const plain = await plainNode(dirs.run, entry)
+    t.assert.equal(plain.status, 0)
+    t.assert.equal(plain.stdout, 'enc:DECODED\n')
 
-  const run = stasisRun(dirs.run, entry)
-  t.assert.equal(run.status, 0, run.stderr)
-  const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
-  t.assert.equal(soleTarget(t, runLock, 'main.mjs :: ./enc/a%20b.mjs'), 'enc/a b.mjs')
+    const run = await stasisRun(dirs.run, entry)
+    t.assert.equal(run.status, 0, run.stderr)
+    const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
+    t.assert.equal(soleTarget(t, runLock, 'main.mjs :: ./enc/a%20b.mjs'), 'enc/a b.mjs')
 
-  t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
-  const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  // DIVERGENCE: the literal-spelling file is attested; the file Node loads is not.
-  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: ./enc/a%20b.mjs'), 'enc/a%20b.mjs')
-  t.assert.ok(!staticLock.files.has('enc/a b.mjs'))
-
-  const load = bundleLoad(dirs.bundle, entry)
-  t.assert.equal(load.status, 0, load.stderr)
-  t.assert.equal(load.stdout, 'enc:LITERAL\n') // wrong file executes
-
-  installStaticLock(dirs)
-  t.assert.notEqual(frozenRun(dirs.frozen, entry).status, 0)
-
-  // Control: a CJS parent loads the literal path -- no divergence.
-  const cjs = scenario(join(tmp, 'cjs'), 'main.cjs', `console.log(require('./enc/a%20b.mjs').which)
-`)
-  t.assert.equal(plainNode(cjs.run, 'main.cjs').stdout, 'enc:LITERAL\n')
-  t.assert.equal(stasisBundle(cjs.bundle, 'main.cjs').status, 0)
-  t.assert.equal(bundleLoad(cjs.bundle, 'main.cjs').stdout, 'enc:LITERAL\n')
-}))
-
-// --- Class B: CJS-only resolution features leak into ESM import edges ---
-
-test('DIVERGENCE B: static bundles build and load graphs plain node refuses (extensionless/dir/subpath imports)', withTmp((t, tmp) => {
-  const cases = [
-    // [entry, spec, source, plain-node error, target scan invents, output under --bundle=load]
-    ['extless.mjs', './helpers/util', `import { u } from './helpers/util'\nconsole.log(u)\n`,
-      /ERR_MODULE_NOT_FOUND/u, 'helpers/util.js', 'helpers:UTIL\n'],
-    ['dir.mjs', './helpers', `import h from './helpers'\nconsole.log(h.h)\n`,
-      /ERR_UNSUPPORTED_DIR_IMPORT/u, 'helpers/index.js', 'helpers:INDEX\n'],
-    ['subpath.mjs', 'noexp/lib/util', `import { u } from 'noexp/lib/util'\nconsole.log(u)\n`,
-      /ERR_MODULE_NOT_FOUND/u, 'node_modules/noexp/lib/util.js', 'noexp:UTIL\n'],
-    // dir subpath honoring nested package.json main (LOAD_AS_DIRECTORY): require()-only behavior
-    ['dirsub.mjs', 'nested-main/lib', `import nm from 'nested-main/lib'\nconsole.log(nm.which)\n`,
-      /ERR_UNSUPPORTED_DIR_IMPORT/u, 'node_modules/nested-main/lib/real.js', 'nested-main:REAL\n'],
-  ]
-  for (const [entry, spec, source, plainErr, invented, loadOut] of cases) {
-    const dirs = scenario(join(tmp, entry), entry, source)
-    const plain = plainNode(dirs.run, entry)
-    t.assert.notEqual(plain.status, 0, `${entry}: plain node must refuse`)
-    t.assert.match(plain.stderr, plainErr, entry)
-
-    // DIVERGENCE: builds, attesting an edge Node would never resolve...
-    t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0, entry)
+    t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0)
     const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-    t.assert.equal(soleTarget(t, staticLock, `${entry} :: ${spec}`), invented, entry)
+    // DIVERGENCE: the literal-spelling file is attested; the file Node loads is not.
+    t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: ./enc/a%20b.mjs'), 'enc/a%20b.mjs')
+    t.assert.ok(!staticLock.files.has('enc/a b.mjs'))
 
-    // ...and --bundle=load executes what plain node refuses to run.
-    const load = bundleLoad(dirs.bundle, entry)
-    t.assert.equal(load.status, 0, `${entry}: ${load.stderr}`)
-    t.assert.equal(load.stdout, loadOut, entry)
+    const load = await bundleLoad(dirs.bundle, entry)
+    t.assert.equal(load.status, 0, load.stderr)
+    t.assert.equal(load.stdout, 'enc:LITERAL\n') // wrong file executes
 
     installStaticLock(dirs)
-    t.assert.notEqual(frozenRun(dirs.frozen, entry).status, 0, entry)
-  }
-}))
+    t.assert.notEqual((await frozenRun(dirs.frozen, entry)).status, 0)
 
-test('DIVERGENCE B2: JSON import without attribute -- bundle accepts a graph plain node refuses to load', withTmp((t, tmp) => {
-  // Resolution agrees; the runtime dies at load (ERR_IMPORT_ATTRIBUTE_MISSING) -- invisible
-  // to the scan, unenforced by the bundle loader.
-  const entry = 'main.mjs'
-  const dirs = scenario(tmp, entry, `import data from './data.json'
+    // Control: a CJS parent loads the literal path -- no divergence.
+    const cjs = scenario(join(tmp, 'cjs'), 'main.cjs', `console.log(require('./enc/a%20b.mjs').which)
+`)
+    t.assert.equal((await plainNode(cjs.run, 'main.cjs')).stdout, 'enc:LITERAL\n')
+    t.assert.equal((await stasisBundle(cjs.bundle, 'main.cjs')).status, 0)
+    t.assert.equal((await bundleLoad(cjs.bundle, 'main.cjs')).stdout, 'enc:LITERAL\n')
+  }))
+
+  // --- Class B: CJS-only resolution features leak into ESM import edges ---
+
+  test('DIVERGENCE B: static bundles build and load graphs plain node refuses (extensionless/dir/subpath imports)', withTmp(async (t, tmp) => {
+    const cases = [
+      // [entry, spec, source, plain-node error, target scan invents, output under --bundle=load]
+      ['extless.mjs', './helpers/util', `import { u } from './helpers/util'\nconsole.log(u)\n`,
+        /ERR_MODULE_NOT_FOUND/u, 'helpers/util.js', 'helpers:UTIL\n'],
+      ['dir.mjs', './helpers', `import h from './helpers'\nconsole.log(h.h)\n`,
+        /ERR_UNSUPPORTED_DIR_IMPORT/u, 'helpers/index.js', 'helpers:INDEX\n'],
+      ['subpath.mjs', 'noexp/lib/util', `import { u } from 'noexp/lib/util'\nconsole.log(u)\n`,
+        /ERR_MODULE_NOT_FOUND/u, 'node_modules/noexp/lib/util.js', 'noexp:UTIL\n'],
+      // dir subpath honoring nested package.json main (LOAD_AS_DIRECTORY): require()-only behavior
+      ['dirsub.mjs', 'nested-main/lib', `import nm from 'nested-main/lib'\nconsole.log(nm.which)\n`,
+        /ERR_UNSUPPORTED_DIR_IMPORT/u, 'node_modules/nested-main/lib/real.js', 'nested-main:REAL\n'],
+    ]
+    for (const [entry, spec, source, plainErr, invented, loadOut] of cases) {
+      const dirs = scenario(join(tmp, entry), entry, source)
+      const plain = await plainNode(dirs.run, entry)
+      t.assert.notEqual(plain.status, 0, `${entry}: plain node must refuse`)
+      t.assert.match(plain.stderr, plainErr, entry)
+
+      // DIVERGENCE: builds, attesting an edge Node would never resolve...
+      t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0, entry)
+      const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
+      t.assert.equal(soleTarget(t, staticLock, `${entry} :: ${spec}`), invented, entry)
+
+      // ...and --bundle=load executes what plain node refuses to run.
+      const load = await bundleLoad(dirs.bundle, entry)
+      t.assert.equal(load.status, 0, `${entry}: ${load.stderr}`)
+      t.assert.equal(load.stdout, loadOut, entry)
+
+      installStaticLock(dirs)
+      t.assert.notEqual((await frozenRun(dirs.frozen, entry)).status, 0, entry)
+    }
+  }))
+
+  test('DIVERGENCE B2: JSON import without attribute -- bundle accepts a graph plain node refuses to load', withTmp(async (t, tmp) => {
+    // Resolution agrees; the runtime dies at load (ERR_IMPORT_ATTRIBUTE_MISSING) -- invisible
+    // to the scan, unenforced by the bundle loader.
+    const entry = 'main.mjs'
+    const dirs = scenario(tmp, entry, `import data from './data.json'
 console.log(data.k)
 `)
-  const plain = plainNode(dirs.run, entry)
-  t.assert.notEqual(plain.status, 0)
-  t.assert.match(plain.stderr, /ERR_IMPORT_ATTRIBUTE_MISSING/u)
+    const plain = await plainNode(dirs.run, entry)
+    t.assert.notEqual(plain.status, 0)
+    t.assert.match(plain.stderr, /ERR_IMPORT_ATTRIBUTE_MISSING/u)
 
-  t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
-  const load = bundleLoad(dirs.bundle, entry)
-  t.assert.equal(load.status, 0, load.stderr)
-  t.assert.equal(load.stdout, 'json:VALUE\n')
+    t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0)
+    const load = await bundleLoad(dirs.bundle, entry)
+    t.assert.equal(load.status, 0, load.stderr)
+    t.assert.equal(load.stdout, 'json:VALUE\n')
 
-  // Control: with the attribute everything agrees end to end.
-  const ok = scenario(join(tmp, 'ok'), 'main.mjs', `import data from './data.json' with { type: 'json' }
+    // Control: with the attribute everything agrees end to end.
+    const ok = scenario(join(tmp, 'ok'), 'main.mjs', `import data from './data.json' with { type: 'json' }
 console.log(data.k)
 `)
-  t.assert.equal(plainNode(ok.run, 'main.mjs').stdout, 'json:VALUE\n')
-  t.assert.equal(stasisBundle(ok.bundle, 'main.mjs').status, 0)
-  t.assert.equal(bundleLoad(ok.bundle, 'main.mjs').stdout, 'json:VALUE\n')
-}))
+    t.assert.equal((await plainNode(ok.run, 'main.mjs')).stdout, 'json:VALUE\n')
+    t.assert.equal((await stasisBundle(ok.bundle, 'main.mjs')).status, 0)
+    t.assert.equal((await bundleLoad(ok.bundle, 'main.mjs')).stdout, 'json:VALUE\n')
+  }))
 
-// --- Class C: spurious static edges ---
+  // --- Class C: spurious static edges ---
 
-test('DIVERGENCE C: a shadowed `require` identifier adds files/edges the runtime never resolves', withTmp((t, tmp) => {
-  // scan matches `require(<literal>)` by identifier name -- even a shadowed parameter in
-  // dead ESM code. The artifact gains files the app can never load; frozen verify tolerates
-  // over-attestation.
-  const entry = 'main.mjs'
-  const dirs = scenario(tmp, entry, `export function f(require) { if (globalThis.__never) require('./phantom.cjs') }
+  test('DIVERGENCE C: a shadowed `require` identifier adds files/edges the runtime never resolves', withTmp(async (t, tmp) => {
+    // scan matches `require(<literal>)` by identifier name -- even a shadowed parameter in
+    // dead ESM code. The artifact gains files the app can never load; frozen verify tolerates
+    // over-attestation.
+    const entry = 'main.mjs'
+    const dirs = scenario(tmp, entry, `export function f(require) { if (globalThis.__never) require('./phantom.cjs') }
 console.log('ok')
 `)
-  const run = stasisRun(dirs.run, entry)
-  t.assert.equal(run.status, 0, run.stderr)
-  const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
-  t.assert.ok(!runLock.files.has('phantom.cjs'))
-  t.assert.ok(!runLock.edges.has('main.mjs :: ./phantom.cjs'))
+    const run = await stasisRun(dirs.run, entry)
+    t.assert.equal(run.status, 0, run.stderr)
+    const runLock = flattenLock(join(dirs.run, 'stasis.lock.json'))
+    t.assert.ok(!runLock.files.has('phantom.cjs'))
+    t.assert.ok(!runLock.edges.has('main.mjs :: ./phantom.cjs'))
 
-  t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
-  const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: ./phantom.cjs'), 'phantom.cjs') // DIVERGENCE
-  t.assert.ok(staticLock.files.has('phantom.cjs'))
+    t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0)
+    const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
+    t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: ./phantom.cjs'), 'phantom.cjs') // DIVERGENCE
+    t.assert.ok(staticLock.files.has('phantom.cjs'))
 
-  installStaticLock(dirs)
-  t.assert.equal(frozenRun(dirs.frozen, entry).status, 0, 'frozen tolerates over-attestation')
-}))
+    installStaticLock(dirs)
+    t.assert.equal((await frozenRun(dirs.frozen, entry)).status, 0, 'frozen tolerates over-attestation')
+  }))
 
-// --- Class E: URL-flavored relative specifiers ---
+  // --- Class E: URL-flavored relative specifiers ---
 
-test('DIVERGENCE E: ?query and #fragment relative imports run under plain node; stasis run asserts, stasis bundle fails closed', withTmp((t, tmp) => {
-  const cases = [
-    ['query.mjs', `import { q } from './q/mod.mjs?v=1'\nconsole.log(q)\n`, 'query:MOD\n'],
-    ['fragment.mjs', `import { q } from './q/mod.mjs#frag'\nconsole.log(q)\n`, 'query:MOD\n'],
-  ]
-  for (const [entry, source, out] of cases) {
-    const dirs = scenario(join(tmp, entry), entry, source)
-    t.assert.equal(plainNode(dirs.run, entry).stdout, out, entry)
+  test('DIVERGENCE E: ?query and #fragment relative imports run under plain node; stasis run asserts, stasis bundle fails closed', withTmp(async (t, tmp) => {
+    const cases = [
+      ['query.mjs', `import { q } from './q/mod.mjs?v=1'\nconsole.log(q)\n`, 'query:MOD\n'],
+      ['fragment.mjs', `import { q } from './q/mod.mjs#frag'\nconsole.log(q)\n`, 'query:MOD\n'],
+    ]
+    for (const [entry, source, out] of cases) {
+      const dirs = scenario(join(tmp, entry), entry, source)
+      t.assert.equal((await plainNode(dirs.run, entry)).stdout, out, entry)
 
-    // Capture-side: the observing loader dies on State.absolute's lossless URL round-trip
-    // assert (?/# make it lossy).
-    const run = stasisRun(dirs.run, entry)
-    t.assert.notEqual(run.status, 0, entry)
-    t.assert.match(run.stderr, /ERR_ASSERTION/u, entry)
+      // Capture-side: the observing loader dies on State.absolute's lossless URL round-trip
+      // assert (?/# make it lossy).
+      const run = await stasisRun(dirs.run, entry)
+      t.assert.notEqual(run.status, 0, entry)
+      t.assert.match(run.stderr, /ERR_ASSERTION/u, entry)
 
-    // Static build fails closed.
-    const build = stasisBundle(dirs.bundle, entry)
-    t.assert.notEqual(build.status, 0, entry)
-    t.assert.match(build.stderr, /JS bundle would be broken at load time/u, entry)
-  }
-}))
+      // Static build fails closed.
+      const build = await stasisBundle(dirs.bundle, entry)
+      t.assert.notEqual(build.status, 0, entry)
+      t.assert.match(build.stderr, /JS bundle would be broken at load time/u, entry)
+    }
+  }))
 
-// --- Controls: per-file condition steering IS correct for whole-file formats ---
+  // --- Controls: per-file condition steering IS correct for whole-file formats ---
 
-test('CONTROL: babelified CJS dep and direct ESM import pick their own branches of a dual package, identically at run and bundle', withTmp((t, tmp) => {
-  const entry = 'main.mjs'
-  const dirs = scenario(tmp, entry, `import { report } from 'babel-dep'
+  test('CONTROL: babelified CJS dep and direct ESM import pick their own branches of a dual package, identically at run and bundle', withTmp(async (t, tmp) => {
+    const entry = 'main.mjs'
+    const dirs = scenario(tmp, entry, `import { report } from 'babel-dep'
 import { which } from 'dual'
 console.log('app', which)
 console.log('dep', report())
 `)
-  const expected = 'app dual:ESM\ndep babel-dep saw dual:CJS\n'
-  t.assert.equal(plainNode(dirs.run, entry).stdout, expected)
+    const expected = 'app dual:ESM\ndep babel-dep saw dual:CJS\n'
+    t.assert.equal((await plainNode(dirs.run, entry)).stdout, expected)
 
-  const run = stasisRun(dirs.run, entry)
-  t.assert.equal(run.status, 0, run.stderr)
-  t.assert.equal(run.stdout, expected)
+    const run = await stasisRun(dirs.run, entry)
+    t.assert.equal(run.status, 0, run.stderr)
+    t.assert.equal(run.stdout, expected)
 
-  t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
-  const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  // Both branches, each under its consumer's edge; the bundler-only `module` field is not followed.
-  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: dual'), 'node_modules/dual/esm.mjs')
-  t.assert.equal(soleTarget(t, staticLock, 'node_modules/babel-dep/lib/index.js :: dual'), 'node_modules/dual/cjs.cjs')
-  t.assert.ok(!staticLock.files.has('node_modules/babel-dep/src/index.mjs'))
+    t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0)
+    const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
+    // Both branches, each under its consumer's edge; the bundler-only `module` field is not followed.
+    t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: dual'), 'node_modules/dual/esm.mjs')
+    t.assert.equal(soleTarget(t, staticLock, 'node_modules/babel-dep/lib/index.js :: dual'), 'node_modules/dual/cjs.cjs')
+    t.assert.ok(!staticLock.files.has('node_modules/babel-dep/src/index.mjs'))
 
-  const load = bundleLoad(dirs.bundle, entry)
-  t.assert.equal(load.status, 0, load.stderr)
-  t.assert.equal(load.stdout, expected)
+    const load = await bundleLoad(dirs.bundle, entry)
+    t.assert.equal(load.status, 0, load.stderr)
+    t.assert.equal(load.stdout, expected)
 
-  installStaticLock(dirs)
-  t.assert.equal(frozenRun(dirs.frozen, entry).status, 0)
-}))
-
-test('CONTROL: conditional exports + conditional #imports agree between run and bundle for both parent formats', withTmp((t, tmp) => {
-  const cases = [
-    ['main.mjs', `import { via } from 'imports-pkg'\nconsole.log(via)\n`, 'esm-entry:impl:ESM:dual:ESM\n'],
-    ['main.cjs', `console.log(require('imports-pkg').via)\n`, 'cjs-entry:impl:CJS:dual:CJS\n'],
-  ]
-  for (const [entry, source, expected] of cases) {
-    const dirs = scenario(join(tmp, entry), entry, source)
-    t.assert.equal(plainNode(dirs.run, entry).stdout, expected, entry)
-    const run = stasisRun(dirs.run, entry)
-    t.assert.equal(run.status, 0, `${entry}: ${run.stderr}`)
-    t.assert.equal(run.stdout, expected, entry)
-    t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0, entry)
-    const load = bundleLoad(dirs.bundle, entry)
-    t.assert.equal(load.status, 0, `${entry}: ${load.stderr}`)
-    t.assert.equal(load.stdout, expected, entry)
     installStaticLock(dirs)
-    t.assert.equal(frozenRun(dirs.frozen, entry).status, 0, entry)
-  }
-}))
+    t.assert.equal((await frozenRun(dirs.frozen, entry)).status, 0)
+  }))
 
-test('CONTROL: package main chains use LOAD_INDEX, not recursive LOAD_AS_DIRECTORY -- import and require agree', withTmp((t, tmp) => {
-  // main "./lib" with lib/package.json { main: "./real.js" }: both loaders skip the nested
-  // package.json at package level and land on lib/index.js (subpath require = divergence B).
-  for (const [entry, source] of [
-    ['main.mjs', `import nm from 'nested-main'\nconsole.log(nm.which)\n`],
-    ['main.cjs', `console.log(require('nested-main').which)\n`],
-  ]) {
-    const dirs = scenario(join(tmp, entry), entry, source)
-    t.assert.equal(plainNode(dirs.run, entry).stdout, 'nested-main:INDEX\n', entry)
-    t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0, entry)
-    const load = bundleLoad(dirs.bundle, entry)
-    t.assert.equal(load.stdout, 'nested-main:INDEX\n', entry)
-    installStaticLock(dirs)
-    t.assert.equal(frozenRun(dirs.frozen, entry).status, 0, entry)
-  }
-}))
+  test('CONTROL: conditional exports + conditional #imports agree between run and bundle for both parent formats', withTmp(async (t, tmp) => {
+    const cases = [
+      ['main.mjs', `import { via } from 'imports-pkg'\nconsole.log(via)\n`, 'esm-entry:impl:ESM:dual:ESM\n'],
+      ['main.cjs', `console.log(require('imports-pkg').via)\n`, 'cjs-entry:impl:CJS:dual:CJS\n'],
+    ]
+    for (const [entry, source, expected] of cases) {
+      const dirs = scenario(join(tmp, entry), entry, source)
+      t.assert.equal((await plainNode(dirs.run, entry)).stdout, expected, entry)
+      const run = await stasisRun(dirs.run, entry)
+      t.assert.equal(run.status, 0, `${entry}: ${run.stderr}`)
+      t.assert.equal(run.stdout, expected, entry)
+      t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0, entry)
+      const load = await bundleLoad(dirs.bundle, entry)
+      t.assert.equal(load.status, 0, `${entry}: ${load.stderr}`)
+      t.assert.equal(load.stdout, expected, entry)
+      installStaticLock(dirs)
+      t.assert.equal((await frozenRun(dirs.frozen, entry)).status, 0, entry)
+    }
+  }))
+
+  test('CONTROL: package main chains use LOAD_INDEX, not recursive LOAD_AS_DIRECTORY -- import and require agree', withTmp(async (t, tmp) => {
+    // main "./lib" with lib/package.json { main: "./real.js" }: both loaders skip the nested
+    // package.json at package level and land on lib/index.js (subpath require = divergence B).
+    for (const [entry, source] of [
+      ['main.mjs', `import nm from 'nested-main'\nconsole.log(nm.which)\n`],
+      ['main.cjs', `console.log(require('nested-main').which)\n`],
+    ]) {
+      const dirs = scenario(join(tmp, entry), entry, source)
+      t.assert.equal((await plainNode(dirs.run, entry)).stdout, 'nested-main:INDEX\n', entry)
+      t.assert.equal((await stasisBundle(dirs.bundle, entry)).status, 0, entry)
+      const load = await bundleLoad(dirs.bundle, entry)
+      t.assert.equal(load.stdout, 'nested-main:INDEX\n', entry)
+      installStaticLock(dirs)
+      t.assert.equal((await frozenRun(dirs.frozen, entry)).status, 0, entry)
+    }
+  }))
+})
