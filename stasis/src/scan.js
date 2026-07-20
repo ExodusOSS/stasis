@@ -14,6 +14,12 @@ const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
 // Under `jsx`, these get parsed with JSX enabled. Excludes the .ts family: TypeScript's `<T>`
 // generics collide with JSX, so tsc/oxc reserve JSX for .tsx — JSX-in-TS belongs in a .tsx file.
 const JSX_EXTS = new Set(['.js', '.cjs', '.mjs'])
+// The inherently-JSX extensions (oxc parses them as JSX/TSX purely from the filename, no flag).
+// Scanned + carried only under `--jsx`: off by default the scanner treats them as opaque leaves,
+// so a bundle whose toolchain can't build JSX never silently ships .jsx/.tsx source. Under `--jsx`
+// they join SCRIPT_EXTS/RESOLVABLE_EXTS (see the constructor) so a reached .jsx/.tsx dependency
+// — e.g. a package whose React Native entry is src/index.tsx — is parsed and carried like any .ts.
+const JSX_FILE_EXTS = new Set(['.jsx', '.tsx'])
 
 // Flow type syntax lives in the JS (non-TS) family; oxc parses TS natively, and running
 // flow-remove-types over a .ts file would corrupt TS-only constructs, so --flow only strips these.
@@ -124,6 +130,10 @@ export class Scan {
     this.customResolve = resolve
     this.jsx = jsx
     this.flow = flow
+    // --jsx widens the script/resolvable extension sets to include .jsx/.tsx, so those files are
+    // parsed (not left as opaque leaves) and queued when reached. Off by default the base sets apply.
+    this.scriptExts = jsx ? new Set([...SCRIPT_EXTS, ...JSX_FILE_EXTS]) : SCRIPT_EXTS
+    this.resolvableExts = jsx ? new Set([...RESOLVABLE_EXTS, ...JSX_FILE_EXTS]) : RESOLVABLE_EXTS
   }
 
   walk(entries) {
@@ -182,7 +192,7 @@ export class Scan {
       this.files.set(url, { format: 'json', edges: [] })
       return
     }
-    if (!SCRIPT_EXTS.has(ext)) {
+    if (!this.scriptExts.has(ext)) {
       this.files.set(url, { format: null, edges: [] })
       return
     }
@@ -314,7 +324,7 @@ export class Scan {
         } else if (r?.url) {
           edges.push({ ...s, child: r.url })
           record(key, s.spec, r.url)
-          if (RESOLVABLE_EXTS.has(extname(fileURLToPath(r.url)))) queue.push(r.url)
+          if (this.resolvableExts.has(extname(fileURLToPath(r.url)))) queue.push(r.url)
         } else {
           edges.push({ ...s, error: 'MODULE_NOT_FOUND' })
           this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: 'MODULE_NOT_FOUND' })
@@ -331,7 +341,7 @@ export class Scan {
         edges.push({ ...s, child: childURL })
         record(key, s.spec, childURL)
         const childExt = extname(childPath)
-        if (RESOLVABLE_EXTS.has(childExt)) queue.push(childURL)
+        if (this.resolvableExts.has(childExt)) queue.push(childURL)
       } catch (cause) {
         edges.push({ ...s, error: cause.code ?? cause.message })
         this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: cause.code ?? cause.message })

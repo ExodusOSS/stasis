@@ -18,6 +18,10 @@ const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 const fx = join(here, 'fixtures', 'resolve-fields')
 const entry = join(fx, 'src', 'entry.js')
 const redirIndex = join(fx, 'node_modules', 'redir', 'index.js')
+// A project whose only dependency's React Native entry is a .tsx source file (the
+// react-native-safe-area-context shape). The entry itself is plain ESM, so the .tsx dependency is
+// the sole variable: reachable always, carryable only under --jsx.
+const jsxFx = join(here, 'fixtures', 'jsx-tsx-dep')
 
 // The adapter auto-discovers metro-resolver from the project being bundled (where stasis is
 // RUN), not from stasis's own install -- so it's a workspace devDependency here purely for these
@@ -169,3 +173,52 @@ test('CLI: bundle --metro --metro-resolver writes a bundle + lockfile that round
 test('CLI: --metro-resolver requires --metro', (t) => {
   t.assert.match(runCli(['bundle', '--metro-resolver', 'src/entry.js'], { cwd: fx }).stderr, /--metro-resolver is only valid with --metro/u)
 })
+
+// --- .tsx dependency carried under --jsx (the reported --metro-resolver scenario) ------------
+//
+// Metro resolves a package whose entry is a .tsx source (e.g. react-native-safe-area-context) to
+// that .tsx file. The scanner used to record the edge but never carry the file (.tsx wasn't a
+// carryable extension), so the build died with "which a source bundle can't carry". --jsx now
+// makes .jsx/.tsx carryable, and the message is project-relative rather than an absolute path.
+
+test('buildBundle --metro --metro-resolver: --jsx carries a .tsx dependency, and without it fails closed (relative path)', ifMetro, async (t) => {
+  const opts = { cwd: jsxFx, entries: ['src/entry.js'], metro: true, metroResolver: true, platforms: ['ios', 'android'] }
+
+  // Without --jsx: the .tsx entry resolves but can't be carried -- fail closed, and the message
+  // names project-relative paths (not the machine's absolute paths).
+  await t.assert.rejects(
+    () => buildBundle(opts),
+    (err) => {
+      t.assert.match(err.message, /JS bundle would be broken at load time/u)
+      t.assert.match(
+        err.message,
+        /safe-area-like from src\/entry\.js resolves to node_modules\/safe-area-like\/src\/index\.tsx, which a source bundle can't carry/u,
+      )
+      t.assert.doesNotMatch(err.message, new RegExp(jsxFx.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'), 'the message must not leak the absolute project path')
+      return true
+    },
+  )
+
+  // With --jsx: the .tsx source is scanned and carried, tagged as a buildable code format.
+  const bundle = await buildBundle({ ...opts, jsx: true })
+  t.assert.deepEqual(
+    [...bundle.sources.keys()].toSorted(),
+    ['node_modules/safe-area-like/src/index.tsx', 'src/entry.js'],
+  )
+  t.assert.equal(bundle.formats.get('node_modules/safe-area-like/src/index.tsx'), 'module')
+})
+
+test('CLI: bundle --metro --metro-resolver --jsx carries a .tsx dep and stasis build transforms it', ifMetro, withTmp((t, tmp) => {
+  const out = join(tmp, 'out.br')
+  const r = runCli(['bundle', '--metro', '--metro-resolver', '--jsx', '--platforms=ios,android', `--output=${out}`, 'src/entry.js'], { cwd: jsxFx })
+  t.assert.equal(r.status, 0, r.stderr)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  t.assert.ok(bundle.sources.has('node_modules/safe-area-like/src/index.tsx'), 'the .tsx dependency must be carried')
+
+  // The carried .tsx must be buildable end to end: esbuild picks the tsx loader from the extension,
+  // stripping the TS annotation and transforming JSX (classic runtime -> createElement).
+  const built = join(tmp, 'out.js')
+  const b = runCli(['build', `--output=${built}`, out, 'src/entry.js'], { cwd: jsxFx })
+  t.assert.equal(b.status, 0, b.stderr)
+  t.assert.match(readFileSync(built, 'utf8'), /createElement\(View,\s*null,\s*"safe"\)/u)
+}))

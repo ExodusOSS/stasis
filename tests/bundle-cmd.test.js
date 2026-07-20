@@ -1957,6 +1957,69 @@ test('buildBundle threads jsx through to the scanner (programmatic API)', withTm
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['entry.js', 'x.js'])
 }))
 
+// --- .jsx/.tsx made carryable by --jsx -----------------------------------------------------
+//
+// A React Native dependency's entry is often a .tsx/.jsx source file (react-native-safe-area-context
+// ships src/index.tsx). The scanner used to resolve that edge but never carry the file (.jsx/.tsx
+// weren't carryable extensions), failing with "which a source bundle can't carry". --jsx now makes
+// .jsx/.tsx carryable -- scanned, bundled, and (extensionless) probed by the --metro resolver. These
+// use the BUILT-IN field resolver (no metro-resolver install needed); metro-resolver.test.js covers
+// the same behaviour through the project's real metro-resolver.
+
+const writeTsxDep = (tmp, tsx) => {
+  const dep = join(tmp, 'node_modules', 'tsx-dep', 'src')
+  mkdirSync(dep, { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'tsx-dep', 'package.json'),
+    JSON.stringify({ name: 'tsx-dep', version: '1.0.0', 'react-native': './src/index.tsx', main: './src/index.tsx' }))
+  writeFileSync(join(dep, 'index.tsx'), tsx)
+}
+
+test('CLI: bundle --metro carries a .tsx dependency only under --jsx (else fails closed, relative path)', withTmp((t, tmp) => {
+  // The entry is plain ESM (no JSX) so it parses with or without --jsx: the sole variable is the
+  // .tsx dependency, reachable always but carryable only under --jsx.
+  jsProject(tmp, { 'index.js': "import { SafeArea } from 'tsx-dep'\nexport const App = SafeArea\n" })
+  writeTsxDep(tmp, 'export const SafeArea = (): unknown => <View>hi</View>\n')
+  const outPath = join(tmp, 'out.br')
+
+  const noJsx = runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.notEqual(noJsx.status, 0, 'a reached .tsx dependency must fail closed without --jsx')
+  t.assert.match(noJsx.stderr, /JS bundle would be broken at load time/)
+  // Relativized message: project-relative parent + target, never the machine's absolute path.
+  t.assert.match(noJsx.stderr, /tsx-dep from index\.js resolves to node_modules\/tsx-dep\/src\/index\.tsx, which a source bundle can't carry/)
+  t.assert.doesNotMatch(noJsx.stderr, /resolves to \//, 'the resolved path must be project-relative, not absolute')
+  t.assert.ok(!existsSync(outPath))
+
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['index.js', 'node_modules/tsx-dep/src/index.tsx'],
+    'the .tsx dependency must be scanned and carried under --jsx')
+  // Stored verbatim (untransformed) and tagged as a buildable code format.
+  t.assert.match(bundle.sources.get('node_modules/tsx-dep/src/index.tsx'), /<View>hi<\/View>/u)
+  t.assert.equal(bundle.formats.get('node_modules/tsx-dep/src/index.tsx'), 'module')
+}))
+
+test('CLI: bundle --metro --jsx probes .tsx for an extensionless import (sourceExts)', withTmp((t, tmp) => {
+  // `import './Widget'` with only Widget.tsx on disk resolves only if the resolver probes .tsx --
+  // which --jsx adds to the metro/mainFields sourceExts. Without it the import is unresolved (fatal).
+  jsProject(tmp, {
+    'index.js': "import { W } from './Widget'\nexport const App = W\n",
+    'Widget.tsx': 'export const W = (): unknown => <b>x</b>\n',
+  })
+  const outPath = join(tmp, 'out.br')
+
+  const noJsx = runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.notEqual(noJsx.status, 0, 'without --jsx the resolver does not probe .tsx, so ./Widget is unresolved')
+  t.assert.match(noJsx.stderr, /JS bundle would be broken at load time/)
+  t.assert.match(noJsx.stderr, /unresolved import \.\/Widget from index\.js/)
+
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['Widget.tsx', 'index.js'],
+    'the extensionless import must resolve to Widget.tsx and carry it')
+}))
+
 test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', withTmp((t, tmp) => {
   // The original bug report's root cause: stasis installed without oxc-parser.
   // getParser()'s throw was caught by the per-file parse handler, so every file
