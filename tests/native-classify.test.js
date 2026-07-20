@@ -56,16 +56,21 @@ test('classifyNativeCapture: excluded files skip; a .bat is win32-conditional', 
   t.assert.deepEqual(classifyNativeCapture('build-phase.sh', NOT_WIN), { action: 'code', format: 'shell' })
 })
 
-test('classifyNativeCapture: a `.env`/`.env.*` secrets file is skipped, a `.env`-extension file is kept', (t) => {
-  // Secrets are never swept into an automated native capture, keyed by BASENAME (any depth).
-  for (const name of ['.env', '.env.local', '.env.production', 'ios/.env', 'android/app/.env.staging']) {
-    t.assert.equal(isDotEnvFile(name), true, `${name} is a dotenv file`)
+test('classifyNativeCapture: the whole env family (`.env`, `.env.*`, `*.env`) is skipped', (t) => {
+  // Secrets are never swept into an automated native capture: dotenv basenames (any depth) AND
+  // any `.env`-extension file (Docker Compose env_file `web.env`, reversed-dotenv `.abc.env`) --
+  // the stem carries no safety signal, so the extension family fails closed too.
+  for (const name of [
+    '.env', '.env.local', '.env.production', 'ios/.env', 'android/app/.env.staging',
+    'web.env', '.abc.env', '.dev.env', 'ios/config.env', 'compose/db.env',
+  ]) {
+    t.assert.equal(isDotEnvFile(name), true, `${name} is in the env family`)
     t.assert.deepEqual(classifyNativeCapture(name, NOT_WIN), { action: 'skip' }, `${name} skipped`)
     t.assert.deepEqual(classifyNativeCapture(name, WIN), { action: 'skip' }, `${name} skipped on Windows too`)
   }
-  // A file that merely USES the `.env` extension is a normal build input, tagged 'env' (pathExt='env').
-  t.assert.equal(isDotEnvFile('ios/config.env'), false)
-  t.assert.deepEqual(classifyNativeCapture('ios/config.env', NOT_WIN), { action: 'code', format: 'env' })
+  // Only the FINAL extension counts: an env-like stem with another extension is not in the family.
+  t.assert.equal(isDotEnvFile('ios/env.plist'), false)
+  t.assert.equal(isDotEnvFile('environment.js'), false)
 })
 
 test('classifyNativeCapture: an extensionless shell shebang is shell code (content-based)', (t) => {

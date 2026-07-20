@@ -64,13 +64,14 @@ export function pathExt(filePath) {
 }
 
 // A `.env` secrets file by BASENAME: `.env` itself or the `.env.*` family (`.env.local`,
-// `.env.production`). Keyed by basename because pathExt disagrees across the family --
-// pathExt('.env') is 'env' but pathExt('.env.local') is 'local'. A file merely USING the `.env`
-// extension (`config.env`) is NOT in the family and stays a normal 'env'-format build input.
-// Automated capture paths skip these (never bake a secret in); `stasis add .env` still captures.
+// `.env.production`), plus any file whose final extension is `.env` (`web.env`, `.abc.env` --
+// Docker Compose env_file / reversed-dotenv conventions, secret-bearing all the same). Basename
+// alone can't key the whole family (pathExt('.env.local') is 'local'), and extension alone misses
+// `.env.*`, so both rules apply. Automated capture paths skip these (never bake a secret in);
+// `stasis add .env` still captures (classifyFormat is unchanged).
 export function isDotEnvFile(name) {
   const base = basename(name).toLowerCase()
-  return base === '.env' || base.startsWith('.env.')
+  return base === '.env' || base.startsWith('.env.') || pathExt(base) === 'env'
 }
 
 // Validate + normalize a `resources` allowlist into a Set of lowercase entries: each a bare

@@ -1029,11 +1029,11 @@ test('run --fs=async --resources=map captures + serves a *.map (async opt-in, me
   t.assert.equal(load.stdout, 'map:{"version":3}\n')
 }))
 
-// ----- `.env` secrets files are skipped under --fs ------------------------------------
+// ----- env-family secrets files are skipped under --fs ------------------------------------
 // A program reads its own `.env` (dotenv), but an automated capture must NEVER bake secrets into
-// an artifact. --fs treats `.env`/`.env.*` as non-existent (ENOENT) in BOTH capture and load --
-// never recorded, never aborting a capture -- and (unlike `*.map`) with no opt-in. Detection is by
-// basename, so a file that merely USES the `.env` extension (`config.env`) is captured normally.
+// an artifact. --fs treats the whole env family -- `.env`, `.env.*`, and any `*.env`-extension
+// file -- as non-existent (ENOENT) in BOTH capture and load: never recorded, never aborting a
+// capture, and (unlike `*.map`) with no opt-in. Explicit `stasis add` is the only way in.
 
 test('run --fs treats a .env read as NON-EXISTENT in capture (skipped, never recorded, capture not aborted)', withTmp((t, tmp) => {
   // The secret EXISTS on disk; stasis still hands the reader ENOENT (never reads + records it),
@@ -1081,28 +1081,33 @@ test('run --fs=async treats a .env.local read as non-existent (family match, cap
   t.assert.equal(load.stdout, 'code:ENOENT\n', 'load returns ENOENT for the skipped .env.local despite it being on disk')
 }))
 
-test('run --fs skips `.env` by basename while a `.env`-extension file is still captured', withTmp((t, tmp) => {
-  // Detection keys on basename: `.env` is a secret (ENOENT), but `config.env` merely uses the
-  // extension and is captured as 'env' code -- pinning the pathExt('.env')==='env' subtlety.
+test('run --fs skips the whole env family: `.env` basename AND any `*.env`-extension file', withTmp((t, tmp) => {
+  // The stem carries no safety signal (`web.env`, `.abc.env` are secret-bearing conventions:
+  // Docker Compose env_file, reversed dotenv), so the `*.env` extension family is skipped like
+  // the `.env` basename family. An explicit `stasis add` remains the one way to attest them.
   writeFileSync(join(tmp, '.env'), 'SECRET=1\n')
   writeFileSync(join(tmp, 'src', 'config.env'), 'API_URL=https://x\n')
+  writeFileSync(join(tmp, 'src', '.abc.env'), 'TOKEN=abc\n')
   writeFileSync(join(tmp, 'src', 'entry.js'), [
     "import { readFileSync } from 'node:fs'",
     "import { join } from 'node:path'",
-    'let dot',
-    'try { readFileSync(join(process.cwd(), ".env"), "utf8"); dot = "read" } catch (e) { dot = e.code }',
-    'const cfg = readFileSync(join(import.meta.dirname, "config.env"), "utf8").trim()',
-    'console.log(`dot:${dot} cfg:${cfg}`)',
+    'const probe = (p) => { try { readFileSync(p, "utf8"); return "read" } catch (e) { return e.code } }',
+    'const dot = probe(join(process.cwd(), ".env"))',
+    'const cfg = probe(join(import.meta.dirname, "config.env"))',
+    'const abc = probe(join(import.meta.dirname, ".abc.env"))',
+    'console.log(`dot:${dot} cfg:${cfg} abc:${abc}`)',
     '',
   ].join('\n'))
   const bundlePath = join(tmp, 'snapshot.br')
   const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.equal(r.stdout, 'dot:ENOENT cfg:API_URL=https://x\n')
+  t.assert.equal(r.stdout, 'dot:ENOENT cfg:ENOENT abc:ENOENT\n', 'every env-family read is a synthetic ENOENT')
   const bundle = decode(bundlePath)
   t.assert.equal(bundle.formats['.env'], undefined, 'the .env secret is skipped')
-  t.assert.equal(bundle.formats['src/config.env'], 'env', 'a .env-extension file is captured as env code')
-  t.assert.equal(bundle.sources['.'].files['src/config.env'], 'API_URL=https://x\n')
+  t.assert.equal(bundle.formats['src/config.env'], undefined, 'a *.env-extension file is skipped too')
+  t.assert.equal(bundle.formats['src/.abc.env'], undefined, 'a dotted *.env (reversed dotenv) is skipped too')
+  t.assert.equal(bundle.sources['.'].files['src/config.env'], undefined)
+  t.assert.equal(bundle.sources['.'].files['src/.abc.env'], undefined)
 }))
 
 // --- fs settable via stasis.config.json ("fs": "sync" | "async") ------------------
