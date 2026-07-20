@@ -35,8 +35,7 @@ export class Lockfile {
     assert(json.version === VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
     // Every stasis writer emits both facets; a file missing either is not a stasis lockfile.
-    assert(json.imports !== undefined && json.formats !== undefined,
-      'lockfile must attest imports and formats (every stasis writer emits both)')
+    assert(json.imports !== undefined && json.formats !== undefined, 'lockfile must attest imports and formats')
 
     const full = json.config.scope === 'full'
     assert(!!json.entries === full)
