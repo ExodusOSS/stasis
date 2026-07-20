@@ -125,6 +125,60 @@ test('collectPackages dedupes exact name+version duplicates', withTmp((t, tmp) =
   t.assert.equal(pkgs.length, 2)
 }))
 
+// --- audit corrections: files that don't count as a package being present ---
+
+test('collectPackages skips a ws module recorded only as its noop browser.js', withTmp((t, tmp) => {
+  // ws's browser.js is a throw-only stub: a module instance carrying nothing else
+  // ships no ws code, so ws is not audited (see audit-corrections.js).
+  const bundle = writeBundle(tmp, 'ws.br', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n' } },
+      'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// f\n' } },
+    },
+  })
+  t.assert.deepEqual(collectPackages([bundle]), [{ name: 'foo', version: '2.0.0' }])
+}))
+
+test('collectPackages keeps ws when real files accompany browser.js', withTmp((t, tmp) => {
+  const bundle = writeBundle(tmp, 'ws.br', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'index.js': '// real\n' } },
+    },
+  })
+  t.assert.deepEqual(collectPackages([bundle]), [{ name: 'ws', version: '7.5.9' }])
+}))
+
+test('collectPackages does not correct ws versions newer than the verified bound', withTmp((t, tmp) => {
+  // The stub is only verified a noop up to the version pinned in
+  // audit-corrections.js; a newer ws stays audited even as browser.js-only.
+  const bundle = writeBundle(tmp, 'ws.br', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '99.0.0', files: { 'browser.js': '// ?\n' } },
+    },
+  })
+  t.assert.deepEqual(collectPackages([bundle]), [{ name: 'ws', version: '99.0.0' }])
+}))
+
+test('collectPackages corrections are package-specific', withTmp((t, tmp) => {
+  // A browser.js-only module of any OTHER package still counts as present.
+  const bundle = writeBundle(tmp, 'other.br', {
+    modules: {
+      'node_modules/other': { name: 'other', version: '1.0.0', files: { 'browser.js': '// b\n' } },
+    },
+  })
+  t.assert.deepEqual(collectPackages([bundle]), [{ name: 'other', version: '1.0.0' }])
+}))
+
+test('collectPackages applies the ws correction to lockfiles too', withTmp((t, tmp) => {
+  const lock = writeLock(tmp, 'ws.lock.json', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '8.21.1', files: { 'browser.js': 'sha512-w' } },
+      'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y' } },
+    },
+  })
+  t.assert.deepEqual(collectPackages([lock]), [{ name: 'foo', version: '1.2.3' }])
+}))
+
 test('collectPackagesFromFile rejects unknown JSON shape with a lockfile-specific error', withTmp((t, tmp) => {
   const file = join(tmp, 'junk.json')
   writeFileSync(file, JSON.stringify({ hello: 'world' }))

@@ -1,5 +1,6 @@
 import { moduleFileKey } from '@exodus/stasis-core/util'
 import { advisories } from './apis/npm/index.js'
+import { isCorrectedFile } from './audit-corrections.js'
 import semver from './apis/npm/semver.cjs'
 import { parseFile } from './parse.js'
 import { collectWhy } from './why.js'
@@ -8,9 +9,15 @@ import { collectWhy } from './why.js'
 // must not be sent to the public registry (leaks names, adds noise).
 export function collectPackagesFromFile(file) {
   const out = []
-  for (const [dir, { name, version }] of parseFile(file).modules) {
+  for (const [dir, { name, version, files }] of parseFile(file).modules) {
     if (!dir.includes('node_modules')) continue
-    if (name && version) out.push({ name, version })
+    if (!name || !version) continue
+    // A module instance whose recorded files are all audit-irrelevant (e.g. ws
+    // shipped only as its noop browser.js stub) carries none of the package's
+    // code -- don't audit it (see audit-corrections.js).
+    const rels = Object.keys(files)
+    if (rels.length > 0 && rels.every((rel) => isCorrectedFile(name, version, rel))) continue
+    out.push({ name, version })
   }
   return out
 }
