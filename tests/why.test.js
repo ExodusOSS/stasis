@@ -317,10 +317,11 @@ test('collectWhy collapses transitively onto an already-collapsed line', withTmp
   ])
 }))
 
-test('collectWhy collapses the shared tail once, keeping each chain\'s prefix', withTmp((t, tmp) => {
-  // All chains funnel through E -> D -> C -> B -> A; D is also a direct dep, so the
-  // shared tail is `D -> C -> B -> A`. It shows once (the D chain) and every other
-  // chain collapses just that tail's interior, keeping its prefix down to D.
+test('collectWhy collapses each chain at the first already-shown sub-path', withTmp((t, tmp) => {
+  // All chains funnel through E -> D -> C -> B -> A; D is also a direct dep. The
+  // shared tail shows once (the D chain); every later chain collapses at the first
+  // node whose tail is already visible above -- so each new line reveals one more
+  // node and the rest reference it transitively.
   const file = writeGraphBundle(tmp, {
     deps: ['P', 'Q', 'G', 'H', 'F', 'E', 'D', 'C', 'B', 'A'],
     edges: [
@@ -330,11 +331,11 @@ test('collectWhy collapses the shared tail once, keeping each chain\'s prefix', 
     ],
   })
   t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
-    'D -> C -> B -> A',            // shared tail, shown once, first
-    'P -> E -> D -> ... -> A',     // keep prefix down to the tail head D
-    'Q -> E -> D -> ... -> A',
-    'G -> F -> E -> D -> ... -> A',
-    'H -> F -> E -> D -> ... -> A',
+    'D -> C -> B -> A',         // shared tail, shown once, first
+    'P -> E -> D -> ... -> A',  // D's tail is in the full line
+    'Q -> E -> ... -> A',       // E's tail is now visible in P's line
+    'G -> F -> E -> ... -> A',
+    'H -> F -> ... -> A',       // F's tail is visible in G's line
   ])
 }))
 
