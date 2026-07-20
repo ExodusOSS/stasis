@@ -297,6 +297,26 @@ test('collectWhy collapses every importer of a hub to one line per importer', wi
   ])
 }))
 
+test('collectWhy collapses transitively onto an already-collapsed line', withTmp((t, tmp) => {
+  // Hub B reaches A via C and via D. E imports B (so E -> B -> ... -> A), and F,G
+  // import E. Because E's collapsed line is itself referenceable, F and G collapse
+  // ALL the way onto it -> `F -> E -> ... -> A`, not `F -> E -> B -> ... -> A`.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
+    edges: [
+      ['s', 'B'], ['B', 'C'], ['C', 'A'], ['B', 'D'], ['D', 'A'],
+      ['s', 'E'], ['E', 'B'], ['s', 'F'], ['F', 'E'], ['s', 'G'], ['G', 'E'],
+    ],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+    'B -> C -> A',
+    'B -> D -> A',
+    'E -> B -> ... -> A',
+    'F -> E -> ... -> A',
+    'G -> E -> ... -> A',
+  ])
+}))
+
 test('collectWhy collapses the shared tail once, keeping each chain\'s prefix', withTmp((t, tmp) => {
   // All chains funnel through E -> D -> C -> B -> A; D is also a direct dep, so the
   // shared tail is `D -> C -> B -> A`. It shows once (the D chain) and every other

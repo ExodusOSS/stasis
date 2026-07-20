@@ -184,16 +184,22 @@ function pathsTo(adjRev, isHead, isTerminal, targetDir) {
 
 // Compress one reason bucket's chains (node-name arrays, all ending at the same
 // target). A chain collapses its tail to `prefix -> node -> ... -> target` when
-// that tail -- the sub-path from `node` on -- has already been printed IN FULL by a
-// shorter chain (as its own line or as the tail of a longer one). So a repeated
-// tail is written out once and every longer chain through it references it with
-// `...`, keeping the tail's head node visible and hiding only the nodes between it
-// and the target. Chains are ordered shortest-first (then alphabetically) so the
-// full version always prints before the chains that collapse onto it, and when a
-// hub is reached by several already-shown sub-paths every importer of it collapses
-// to a single `importer -> hub -> ... -> target` line (deduped). Example:
-//   B -> C -> A / B -> D -> A / P -> B -> C -> A / P -> B -> D -> A
-// prints B -> C -> A, B -> D -> A, and P -> B -> ... -> A once.
+// the sub-path from `node` on is already recoverable from an earlier, shorter line.
+// Chains are processed shortest-first (then alphabetically) so a tail is always
+// emitted before the chains that reference it, and a line makes tails recoverable
+// two ways:
+//   - a FULL line spells out every node, so ANY of its tails is fully visible and a
+//     later chain can collapse onto any of them
+//     (`E -> C -> ... -> A` grounded on the full `D -> C -> B -> A`);
+//   - a COLLAPSED line still identifies its own EXACT chain (its hidden interior is
+//     recoverable from the line it referenced), so a longer chain ending in that
+//     whole chain collapses onto it -- transitively
+//     (`F -> E -> B -> C -> A` -> `F -> E -> ... -> A` once `E -> B -> ... -> A` is out).
+// A collapse only ever hides nodes between the tail's head and the target (the head
+// stays visible), and lines that collapse to the same text are emitted once. NB the
+// two reveal rules differ on purpose: a collapsed line does NOT expose its hidden
+// interior as a tail, so a node visible only mid-collapsed-line is never a collapse
+// point (`Q -> E -> D -> ... -> A` keeps E,D rather than collapsing at the mid-line E).
 function compressChains(chains) {
   const full = (c) => c.join(' -> ')
   const suffixKey = (c, i) => c.slice(i).join('\0')
@@ -202,7 +208,7 @@ function compressChains(chains) {
   const sorted = uniq.toSorted((a, b) => a.length - b.length || full(a).localeCompare(full(b)))
   const target = sorted[0][sorted[0].length - 1]
 
-  const revealed = new Set() // suffix keys already printed in full by a shorter chain
+  const revealed = new Set() // sub-paths recoverable from lines already emitted
   const out = []
   const seen = new Set()
   const push = (line) => {
@@ -213,7 +219,7 @@ function compressChains(chains) {
   }
   for (const c of sorted) {
     // Collapse at the longest proper tail (earliest position, >= 3 nodes so >= 1 is
-    // hidden) that a shorter chain already printed in full.
+    // hidden) that an earlier line already made recoverable.
     let at = -1
     for (let i = 1; c.length - i >= 3; i++) {
       if (revealed.has(suffixKey(c, i))) {
@@ -223,9 +229,10 @@ function compressChains(chains) {
     }
     if (at === -1) {
       push(full(c))
-      for (let i = 0; i < c.length; i++) revealed.add(suffixKey(c, i)) // reveal every tail
+      for (let i = 0; i < c.length; i++) revealed.add(suffixKey(c, i)) // every tail is visible
     } else {
       push(`${c.slice(0, at + 1).join(' -> ')} -> ... -> ${target}`)
+      revealed.add(suffixKey(c, 0)) // this exact chain is now referenceable (transitively)
     }
   }
   return out
