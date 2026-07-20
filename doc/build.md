@@ -112,9 +112,16 @@ to transform later:
 stasis bundle --metro --platforms=ios,android --jsx index.js   # React Native JSX-in-.js
 ```
 
-`--jsx` is off by default and covers only the `.js`/`.cjs`/`.mjs` family; the `.ts`
-family is left JSX-free because its `<T>` generics collide with JSX (put JSX-in-TS
-in a `.tsx` file, as TypeScript itself requires).
+`--jsx` is off by default. For *parsing*, it covers only the `.js`/`.cjs`/`.mjs`
+family; the `.ts` family is left JSX-free because its `<T>` generics collide with
+JSX (put JSX-in-TS in a `.tsx` file, as TypeScript itself requires). It also makes
+`.jsx`/`.tsx` files **carryable**: a dependency reached through them — e.g. a
+package whose React Native entry is `src/index.tsx` — is scanned and bundled (its
+JSX source stored verbatim for `stasis build` to transform), and the `--metro`/
+`--mainFields` resolver probes `.jsx`/`.tsx` for extensionless imports. Off by
+default, a reached `.jsx`/`.tsx` file instead fails closed as a target *"a source
+bundle can't carry"*, so a bundle whose toolchain can't build JSX never silently
+ships it.
 
 **Non-code assets** are not emitted yet. Assets (`.png`/`.svg`/… as
 `resource`/`resource:base64`) are recorded as files but not as import *edges*, so
@@ -122,9 +129,10 @@ a code-only entry builds fine even when the artifact carries assets for other
 entries, while an entry that imports an asset fails at build time.
 
 > [!NOTE]
-> The static `stasis bundle` command does not accept `.jsx`/`.tsx` entries, but a
-> bundle/lockfile captured by the esbuild or webpack plugins can carry them — and
-> `stasis build` builds those.
+> The static `stasis bundle` command does not accept `.jsx`/`.tsx` *entries* (it
+> carries them only as reached dependencies, under `--jsx`). A bundle/lockfile
+> captured by the esbuild or webpack plugins can carry `.jsx`/`.tsx` entries too —
+> and `stasis build` builds those.
 
 ## Known limitation: CommonJS default-import interop
 

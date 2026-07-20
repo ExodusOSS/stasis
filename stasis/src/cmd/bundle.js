@@ -409,10 +409,22 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
   }).withReason('bundle')
 }
 
+// Render a scanned file URL for diagnostics: project-relative when inside `baseDir`, else absolute.
+// The scan issue checks run on the LIVE scan, whose files/imports are keyed by absolute file: URLs
+// (the resolver returns absolute paths); relativizing here matches the project-relative paths the
+// bundle itself stores (toRel), rather than leaking the machine's absolute paths into the message.
+function displayPath(url, baseDir) {
+  const abs = fileURLToPath(url)
+  if (!baseDir) return abs
+  const rel = relative(baseDir, abs)
+  return rel && !rel.startsWith('..') && !isAbsolute(rel) ? rel : abs
+}
+
 // Classify scanner unresolved edges + parse errors into fatal (broken/divergent at load)
 // vs tolerated (a catchable runtime miss). Shared so the plain and --mainFields JS paths
-// gate identically.
-function analyzeScanner(scanner) {
+// gate identically. `baseDir` relativizes the paths in the emitted messages (see displayPath).
+function analyzeScanner(scanner, { baseDir } = {}) {
+  const show = (url) => displayPath(url, baseDir)
   // Static ESM import/export-from edges load eagerly before user code, so a failure there is
   // uncatchable (fatal); misses below a require()/dynamic-import() boundary are catchable (warn).
   const staticKinds = new Set(['import', 'export-from'])
@@ -429,11 +441,11 @@ function analyzeScanner(scanner) {
   const fatalUnresolved = (u) => staticKinds.has(u.kind) && staticReachable.has(u.parentURL)
   const fatal = scanner.unresolved
     .filter((u) => fatalUnresolved(u))
-    .map((u) => `unresolved ${u.kind} ${u.spec} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
+    .map((u) => `unresolved ${u.kind} ${u.spec} from ${show(u.parentURL)} (${u.reason})`)
   // Fatal parse: an eagerly-linked module-family file, or any file the parser couldn't process.
   const fatalParse = (p) => staticReachable.has(p.url) && (p.format?.startsWith('module') === true || !p.recovered)
   for (const p of scanner.parseErrors) {
-    if (fatalParse(p)) fatal.push(`parse error in ${fileURLToPath(p.url)}: ${p.message}`)
+    if (fatalParse(p)) fatal.push(`parse error in ${show(p.url)}: ${p.message}`)
   }
   // Edge resolving to a file a source bundle can't carry (.node/.wasm/extensionless): scan
   // records it but never queues the child, so load would die.
@@ -441,7 +453,7 @@ function analyzeScanner(scanner) {
     for (const [parentURL, specMap] of byParent) {
       for (const [spec, childURL] of specMap) {
         if (!scanner.files.has(childURL)) {
-          fatal.push(`${spec} from ${fileURLToPath(parentURL)} resolves to ${fileURLToPath(childURL)}, which a source bundle can't carry`)
+          fatal.push(`${spec} from ${show(parentURL)} resolves to ${show(childURL)}, which a source bundle can't carry`)
         }
       }
     }
@@ -451,9 +463,11 @@ function analyzeScanner(scanner) {
   return { fatal, tolerated, toleratedParse }
 }
 
-// Throw on fatal scan issues; warn on tolerated ones. `label` tags the scan pass.
-function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '' } = {}) {
+// Throw on fatal scan issues; warn on tolerated ones. `label` tags the scan pass; `baseDir`
+// relativizes the paths in the warnings (see displayPath), matching analyzeScanner's messages.
+function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '', baseDir } = {}) {
   const where = label ? ` (${label})` : ''
+  const show = (url) => displayPath(url, baseDir)
   if (fatal.length > 0) {
     const shown = fatal.slice(0, 10).map((s) => `  ${s}`).join('\n')
     const more = fatal.length > 10 ? `\n  ... and ${fatal.length - 10} more` : ''
@@ -462,7 +476,7 @@ function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '' } =
   if (tolerated.length > 0) {
     const summary = tolerated
       .slice(0, 10)
-      .map((u) => `  ${u.kind} ${u.spec ?? '<dynamic>'} from ${fileURLToPath(u.parentURL)} (${u.reason})`)
+      .map((u) => `  ${u.kind} ${u.spec ?? '<dynamic>'} from ${show(u.parentURL)} (${u.reason})`)
       .join('\n')
     const more = tolerated.length > 10 ? `\n  ... and ${tolerated.length - 10} more` : ''
     console.warn(`[stasis] Bundle has ${tolerated.length} unresolved import(s)${where}; they will fall through at load time:\n${summary}${more}`)
@@ -470,7 +484,7 @@ function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '' } =
   if (toleratedParse.length > 0) {
     const summary = toleratedParse
       .slice(0, 10)
-      .map((p) => `  ${fileURLToPath(p.url)}: ${p.message}`)
+      .map((p) => `  ${show(p.url)}: ${p.message}`)
       .join('\n')
     const more = toleratedParse.length > 10 ? `\n  ... and ${toleratedParse.length - 10} more` : ''
     console.warn(`[stasis] Bundle has ${toleratedParse.length} file(s) with parse errors${where}; their recorded imports may be incomplete:\n${summary}${more}`)
@@ -500,7 +514,7 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   const scanner = scan(absEntries, { conditions: scanConditions, jsx, flow })
 
   // Fail closed where the bundle is guaranteed broken at load; warn on catchable misses (see analyzeScanner).
-  reportScanIssues(analyzeScanner(scanner))
+  reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir })
 
   // Materialise via a non-preload State: addFile bucketizes + records sources/formats,
   // addImport replays the edge map; serialize emits the runtime loader's v1 layout.
@@ -543,7 +557,12 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
 
 // Extensions probed when a resolved target names none. Limited to what a source bundle can
 // carry (scan's RESOLVABLE_EXTS) so the resolver never resolves a file the bundle would reject.
+// --jsx widens this to the JSX/TSX extensions (mirroring scan's jsx-gated RESOLVABLE_EXTS) so an
+// extensionless `import './Foo'` can land on Foo.jsx/Foo.tsx, as Metro's sourceExts do. `.js`/`.ts`
+// keep their existing precedence (base order preserved as a subsequence); collisions across the
+// added extensions are rare and, like the base list, don't track the project's real Metro order.
 const SOURCE_EXTS = ['js', 'json', 'ts']
+const SOURCE_EXTS_JSX = ['js', 'jsx', 'json', 'ts', 'tsx']
 // React Native preset mainFields for `--metro` (which also sets the RN conditions + platform suffixes).
 const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
 // Synthetic path for the empty module a browser/react-native `false` redirect resolves to,
@@ -629,6 +648,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // Normalize conditions (drop stray ''/whitespace) so a sloppy caller can't push a bogus token into the resolver.
   const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
 
+  // Under --jsx the resolver probes .jsx/.tsx too, matching scan's jsx-widened carryable set.
+  const sourceExts = jsx ? SOURCE_EXTS_JSX : SOURCE_EXTS
+
   const formatsByRel = new Map()
   // parentRel -> specifier -> Map<platformKey, targetRel>; collapsed after all platforms scanned.
   const edges = new Map()
@@ -643,18 +665,18 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     // metro-resolver derives default/require|import/platform conditions itself, so it takes only the
     // extra `react-native` condition (browser comes from its per-platform map, keyed on `web`).
     const resolver = metroResolver
-      ? createMetroResolver({ projectDir: baseDir, platform, sourceExts: SOURCE_EXTS, mainFields, conditionNames: ['react-native'] })
+      ? createMetroResolver({ projectDir: baseDir, platform, sourceExts, mainFields, conditionNames: ['react-native'] })
       : createFieldResolver({
           mainFields,
           platform,
           preferNative: platform !== null && platform !== 'web',
-          sourceExts: SOURCE_EXTS,
+          sourceExts,
           conditions: resolveConditions('commonjs', extras),
           // Opt into Metro's package-entry browser-field quirks only on the --metro path.
           metro,
         })
     const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx, flow })
-    reportScanIssues(analyzeScanner(scanner), { label: platform ?? 'mainFields' })
+    reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir, label: platform ?? 'mainFields' })
 
     const platformKey = platform ?? '*' // '*' is a private placeholder for the single mainFields pass; it never unflattens
     for (const [url, info] of scanner.files) {
