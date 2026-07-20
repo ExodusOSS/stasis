@@ -281,6 +281,40 @@ test('Bundle.withReason unions with an existing attribution instead of replacing
   t.assert.deepEqual(stamped.reason, { run: ['src/a.js'], bundle: ['src/a.js'] })
 })
 
+// --- Bundle.parse -----------------------------------------------------------
+
+test('Bundle.parse rejects flat-key collisions across buckets', (t) => {
+  // node_modules/a + 'b/c' and node_modules/a/b + 'c' both flatten to node_modules/a/b/c; the
+  // last-wins `sources` getter would otherwise serve one of two payloads for the same path.
+  const colliding = JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: [],
+    sources: {},
+    modules: {
+      'node_modules/a': { name: 'a', version: '1.0.0', files: { 'b/c': 'PAYLOAD-1' } },
+      'node_modules/a/b': { name: 'b', version: '1.0.0', files: { c: 'PAYLOAD-2' } },
+    },
+    formats: { 'node_modules/a/b/c': 'commonjs' },
+    imports: {},
+  })
+  t.assert.throws(() => Bundle.parse(colliding), /duplicate file key 'node_modules\/a\/b\/c' across bundle buckets/)
+})
+
+test('Bundle.parse accepts distinct flat keys from nested buckets', (t) => {
+  const legit = JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['src/entry.js'],
+    sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/entry.js': 'x' } } },
+    modules: { 'node_modules/a': { name: 'a', version: '1.0.0', files: { 'index.js': 'y', 'b/c.js': 'z' } } },
+    formats: { 'src/entry.js': 'module', 'node_modules/a/index.js': 'commonjs', 'node_modules/a/b/c.js': 'commonjs' },
+    imports: {},
+  })
+  t.assert.deepEqual([...Bundle.parse(legit).sources.keys()].toSorted(),
+    ['node_modules/a/b/c.js', 'node_modules/a/index.js', 'src/entry.js'])
+})
+
 // --- Lockfile.merge ---------------------------------------------------------
 
 const lock = ({ scope = 'full', entries, modules, imports = null, formats = null } = {}) =>

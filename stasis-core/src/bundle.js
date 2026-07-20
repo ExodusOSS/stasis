@@ -159,6 +159,17 @@ export class Bundle {
       }
     }
 
+    // Flat keys must be unique across buckets: `node_modules/a`+`b/c` and `node_modules/a/b`+`c` both
+    // flatten to `node_modules/a/b/c`, and the last-wins `sources` getter would serve one of two payloads.
+    const flatKeys = new Set()
+    for (const [dir, { files }] of modules) {
+      for (const rel of Object.keys(files)) {
+        const key = moduleFileKey(dir, rel)
+        assert(!flatKeys.has(key), `duplicate file key '${key}' across bundle buckets`)
+        flatKeys.add(key)
+      }
+    }
+
     // Reject paths escaping the root here (incl. mid-path `a/../../x`): getImport resolves against the root at load.
     const imports = objectToMaps(json.imports)
     // Target is a file string or a {platform: file} map (--metro); reject anything else (fail closed).

@@ -312,9 +312,10 @@ test('extractCommand extracts an empty bundle to just a lockfile', withTmp((t, t
 }))
 
 test('extractCommand refuses duplicate paths from overlapping buckets', withTmp((t, tmp) => {
-  // Two buckets that collapse to the same project-relative path: the
-  // flattening `sources` getter would silently last-win, writing one file
-  // while the lockfile records two buckets with different hashes for it.
+  // Two buckets that collapse to the same project-relative path: the flattening `sources` getter
+  // would silently last-win, writing one file while the lockfile records two buckets with different
+  // hashes for it. Bundle.parse now rejects the collision at the schema boundary (protecting every
+  // consumer, not just extract), so extractCommand surfaces it as an invalid-bundle parse failure.
   const evil = {
     version: 1,
     config: { scope: 'node_modules' },
@@ -330,7 +331,8 @@ test('extractCommand refuses duplicate paths from overlapping buckets', withTmp(
   const outDir = join(tmp, 'out')
   t.assert.throws(
     () => extractCommand({ bundleFile: bundlePath, output: outDir }),
-    /duplicate bundle path: node_modules\/foo\/bar\/x\.js/,
+    (err) => /extract: not a valid stasis bundle/.test(err.message) &&
+      /duplicate file key 'node_modules\/foo\/bar\/x\.js' across bundle buckets/.test(err.cause?.message),
   )
   t.assert.ok(!existsSync(outDir), 'nothing may be written for a refused bundle')
 }))
