@@ -8,6 +8,7 @@ import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { scan } from '../scan.js'
 import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
+import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
@@ -612,7 +613,7 @@ function nativeModuleFiles(pkgAbs) {
 // Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
 // `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
 // have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, jsx = false, flow = false }) {
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -637,15 +638,21 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   for (const platform of platforms) {
     // --metro asserts the RN conditions (+ browser on web); --mainFields (platform null) carries the user's --conditions.
     const extras = metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : scanConditions
-    const resolver = createFieldResolver({
-      mainFields,
-      platform,
-      preferNative: platform !== null && platform !== 'web',
-      sourceExts: SOURCE_EXTS,
-      conditions: resolveConditions('commonjs', extras),
-      // Opt into Metro's package-entry browser-field quirks only on the --metro path.
-      metro,
-    })
+    // --metro --metro-resolver delegates to the project's own metro-resolver for byte-for-byte Metro
+    // fidelity; otherwise the built-in field/suffix resolver (resolve-fields.js) reproduces it.
+    // metro-resolver derives default/require|import/platform conditions itself, so it takes only the
+    // extra `react-native` condition (browser comes from its per-platform map, keyed on `web`).
+    const resolver = metroResolver
+      ? createMetroResolver({ projectDir: baseDir, platform, sourceExts: SOURCE_EXTS, mainFields, conditionNames: ['react-native'] })
+      : createFieldResolver({
+          mainFields,
+          platform,
+          preferNative: platform !== null && platform !== 'web',
+          sourceExts: SOURCE_EXTS,
+          conditions: resolveConditions('commonjs', extras),
+          // Opt into Metro's package-entry browser-field quirks only on the --metro path.
+          metro,
+        })
     const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx, flow })
     reportScanIssues(analyzeScanner(scanner), { label: platform ?? 'mainFields' })
 
@@ -781,7 +788,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, jsx, flow }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -844,6 +851,10 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   } else if (Array.isArray(platforms) && platforms.length > 0) {
     throw new Error(`${name}: --platforms is only valid with --metro`)
   }
+  // --metro-resolver swaps in the project's real metro-resolver; it only means something under --metro.
+  if (metroResolver && !metro) {
+    throw new Error(`${name}: --metro-resolver is only valid with --metro`)
+  }
   // The field resolver always emits full-scope, so --scope with --mainFields/--metro would be silently ignored -- reject it.
   if (scope !== undefined && (mainFields !== undefined || metro)) {
     throw new Error(`${name}: --scope is not supported with --mainFields or --metro`)
@@ -854,8 +865,8 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
 // (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, jsx = false, flow = false } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, jsx, flow })
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
@@ -868,6 +879,7 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
+      metroResolver: Boolean(metroResolver),
       jsx,
       flow,
     })
@@ -888,8 +900,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, jsx = false, flow = false, brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, jsx, flow })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, brotliQuality, add = false } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -909,6 +921,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
+      metroResolver: Boolean(metroResolver),
       jsx,
       flow,
     })

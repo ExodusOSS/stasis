@@ -41,6 +41,7 @@
     "src/loaders/php.js",
     "src/lockfile.js",
     "src/metro.js",
+    "src/metro-resolver.js",
     "src/metro-transformer.js",
     "src/mock.js",
     "src/parse.js",
@@ -73,13 +74,17 @@
   },
   "peerDependencies": {
     "esbuild": "*",
-    "flow-remove-types": "*"
+    "flow-remove-types": "*",
+    "metro-resolver": "*"
   },
   "peerDependenciesMeta": {
     "esbuild": {
       "optional": true
     },
     "flow-remove-types": {
+      "optional": true
+    },
+    "metro-resolver": {
       "optional": true
     }
   }

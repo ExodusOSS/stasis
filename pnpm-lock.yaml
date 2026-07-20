@@ -35,6 +35,9 @@ importers:
       flow-remove-types:
         specifier: ^2.322.0
         version: 2.322.0
+      metro-resolver:
+        specifier: ^0.87.0
+        version: 0.87.0
       oxlint:
         specifier: ^1.52.0
         version: 1.52.0
@@ -62,6 +65,9 @@ importers:
       flow-remove-types:
         specifier: '*'
         version: 2.322.0
+      metro-resolver:
+        specifier: '*'
+        version: 0.87.0
       oxc-parser:
         specifier: ^0.94.0
         version: 0.94.0(@emnapi/core@1.11.0)(@emnapi/runtime@1.11.0)
@@ -1161,6 +1167,9 @@ packages:
     resolution: {integrity: sha512-1yD6RmLI1XBfxugvORwlck6f75tYL+iR0jqwsOrOxMZyGYqUuDhJ0l4AXdO1iX/FTs9cBAMEk1gWSEx1kSbylg==, tarball: https://registry.npmjs.org/find-up/-/find-up-3.0.0.tgz}
     engines: {node: '>=6'}
 
+  flow-enums-runtime@0.0.6:
+    resolution: {integrity: sha512-3PYnM29RFXwvAN6Pc/scUfkI7RwhQ/xqyLUyPNlXUp9S40zI8nup9tUSrTLSVnWGBN38FNiGWbwZOB6uR4OGdw==, tarball: https://registry.npmjs.org/flow-enums-runtime/-/flow-enums-runtime-0.0.6.tgz}
+
   flow-remove-types@2.322.0:
     resolution: {integrity: sha512-BJtMTIx7j+sUgMzhFWQpgVdUnpW4q0823zxany4UzlTS5jrTU9tbHLMAbg1k/VebHEhjJbgd/nEjbdoo9AqQtg==, tarball: https://registry.npmjs.org/flow-remove-types/-/flow-remove-types-2.322.0.tgz}
     engines: {node: '>=4'}
@@ -1517,6 +1526,10 @@ packages:
 
   merge-stream@2.0.0:
     resolution: {integrity: sha512-abv/qOcuPfk3URPfDzmZU1LKmuw8kT+0nIHvKrKgFrwifol/doWcdA4ZqsWQ8ENrFKkd67Mfpo/LovbIUsbt3w==, tarball: https://registry.npmjs.org/merge-stream/-/merge-stream-2.0.0.tgz}
+
+  metro-resolver@0.87.0:
+    resolution: {integrity: sha512-Xl3M9R3KToaHJvXlI2lSOxtYHitzxite+195DSi00HL9PcS7Xik5+3xlRjfkKb3FA86SZxYPj+WJwlcfgaZoxg==, tarball: https://registry.npmjs.org/metro-resolver/-/metro-resolver-0.87.0.tgz}
+    engines: {node: ^22.13.0 || ^24.3.0 || >= 26.0.0}
 
   micromatch@3.1.10:
     resolution: {integrity: sha512-MWikgl9n9M3w+bpsY3He8L+w9eF9338xRl8IAO5viDizwSzziFEyUzo2xrrloB64ADbTf8uA8vRqqttDTOmccg==, tarball: https://registry.npmjs.org/micromatch/-/micromatch-3.1.10.tgz}
@@ -3366,6 +3379,8 @@ snapshots:
     dependencies:
       locate-path: 3.0.0
 
+  flow-enums-runtime@0.0.6: {}
+
   flow-remove-types@2.322.0:
     dependencies:
       hermes-parser: 0.36.1
@@ -3723,6 +3738,10 @@ snapshots:
       readable-stream: 2.3.8
 
   merge-stream@2.0.0: {}
+
+  metro-resolver@0.87.0:
+    dependencies:
+      flow-enums-runtime: 0.0.6
 
   micromatch@3.1.10:
     dependencies:
