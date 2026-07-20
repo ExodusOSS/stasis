@@ -1146,6 +1146,20 @@ test('buildBundle --metro with a single platform never unflattens (stays flat)',
   t.assert.equal(importTarget(bundle, 'src/entry.js', './Button'), 'src/Button.ios.js')
 })
 
+test('buildBundle --metro applies Metro package-entry browser semantics END TO END', async (t) => {
+  // Guards the `metro` wiring through bundleCommand -> buildResolvedJsBundle ->
+  // createFieldResolver: without it this build resolves streampkg to stream.js and empties
+  // entryfalse, so the assertions below discriminate the wiring, not just the unit behavior.
+  const bundle = await buildBundle({ cwd: fieldsFixture, entries: ['src/entry-browser-quirks.js'], metro: true, platforms: ['ios', 'android'] })
+  const files = new Set(bundle.sources.keys())
+  // Bare browser-map key redirects the package entry under --metro (Metro semantics).
+  t.assert.equal(importTarget(bundle, 'src/entry-browser-quirks.js', 'streampkg'), 'node_modules/streampkg/vendor/sb.js')
+  t.assert.ok(files.has('node_modules/streampkg/vendor/sb.js') && !files.has('node_modules/streampkg/stream.js'))
+  // A browser-map false on the entry keeps main under --metro (no empty module involved).
+  t.assert.equal(importTarget(bundle, 'src/entry-browser-quirks.js', 'entryfalse'), 'node_modules/entryfalse/fe.js')
+  t.assert.ok(files.has('node_modules/entryfalse/fe.js') && !files.has('.stasis/empty-module.js'))
+})
+
 test('buildBundle --metro: a base .js can appear when one platform resolves to it', async (t) => {
   // ios resolves Button.ios.js; web has no Button.web.js and excludes .native, so it
   // resolves the base Button.js -- the edge unflattens and the base file is carried.

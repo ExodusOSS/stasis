@@ -14,11 +14,15 @@ import { pathToFileURL } from 'node:url'
 //   { builtin }  a Node builtin
 //   null         unresolved
 
-// Metro divergence toggle. When a package's browser map redirects its OWN entry to `false`,
-// esbuild/webpack empty that entry, but Metro's `getPackageEntryPoint` ignores a non-string
-// replacement and keeps `main`. The `--metro` resolver matches Metro by default; flip this to
-// `false` to fall back to the empty-module behavior. This only affects the `--metro` path -- the
-// `--mainFields` path always empties (matching esbuild), regardless of this const.
+// Metro divergence toggle. When a package's browser map maps its OWN entry to `false` (under
+// Metro's matching rules, which include bare keys like {"buf": false} for main "./buf.js"),
+// Metro's `getPackageEntryPoint` ignores the non-string replacement and keeps `main`. The
+// `--metro` resolver matches that by default; flip this to `false` to fail closed instead:
+// a `false` match on the entry then yields an EMPTY module. Note the off state is deliberately
+// stricter than both tools -- for a bare-key `false`, Metro keeps `main` and esbuild would not
+// match the entry at all -- it exists as an escape hatch, not an esbuild-parity mode. This only
+// affects the `--metro` path; the `--mainFields` path always empties (matching esbuild).
+// Tests can override per-resolver via createFieldResolver's `metroKeepEntryOnBrowserFalse`.
 const METRO_KEEP_ENTRY_ON_BROWSER_FALSE = true
 
 function readJson(file) {
@@ -111,28 +115,50 @@ function mergeRedirectMap(pkg, mainFields) {
   return map
 }
 
-// Match the package ENTRY against the browser map (string redirects, `false` = empty module).
-// Probe with/without leading `./` and with ext stripped or `.js`/`.json` appended. The bare
-// extension-less spelling is a BARE MODULE name, not the entry file, so esbuild/webpack (the
-// `--mainFields` target) never match it against the entry -- but Metro's getPackageEntryPoint
-// does, so `--metro` (metro=true) tries it last, after the path-shaped candidates.
-function entryRedirect(map, entry, metro = false) {
-  if (map.size === 0) return undefined
-  const bare = entry.replace(/^\.\//u, '')
-  const stripped = bare.replace(/\.(?:js|json)$/u, '')
-  const cands = [
-    `./${bare}`, bare,
-    `./${stripped}`,
-    `./${stripped}.js`, `${stripped}.js`,
-    `./${stripped}.json`, `${stripped}.json`,
-    // Metro-only: e.g. browser { "stream": "./x" } redirects a `main: "./stream.js"` entry.
-    ...(metro ? [stripped] : []),
-  ]
+// Metro's entry-variant list for `main` (getPackageEntryPoint, metro-resolver
+// PackageResolve.js): the main spelling and its ./-toggled twin, each expanded to
+// [self, +'.js', +'.json', ext-stripped]. ORDER MATTERS -- the first variant with ANY mapping
+// (string or false) decides, so this must reproduce Metro's list exactly, duplicates included.
+function metroEntryVariants(main) {
+  const toggled = main.startsWith('./') ? main.slice(2) : `./${main}`
+  return [main, toggled].flatMap((v) => [v, `${v}.js`, `${v}.json`, v.replace(/\.(?:js|json)$/u, '')])
+}
+
+// Resolve the package ENTRY (from mainFields) through the package's own redirect map.
+// Returns { entry } (the redirected or original entry to resolve) or { empty: true }.
+// Both halves of the entry semantics -- WHICH keys match, and what `false` means -- live here
+// so no caller can get one without the other:
+// - metro: Metro's getPackageEntryPoint. First matching variant (Metro's order) wins; a string
+//   redirects; `false` (any non-string) keeps `main`, unless the keep-on-false toggle is off,
+//   in which case it fails closed to an empty module (see METRO_KEEP_ENTRY_ON_BROWSER_FALSE).
+// - default (--mainFields): esbuild-shaped candidates; `false` empties the entry, matching
+//   esbuild. The extension-STRIPPED bare spelling is not probed: for an extensioned main,
+//   esbuild treats it as a bare module name, not the entry. (For an extensionless main the
+//   `bare` candidate covers it -- esbuild does match that spelling; verified empirically.)
+function resolveEntryThroughMap(map, main, opts) {
+  if (map.size === 0) return { entry: main }
+  let cands
+  if (opts.metro) {
+    cands = metroEntryVariants(main)
+  } else {
+    const bare = main.replace(/^\.\//u, '')
+    const stripped = bare.replace(/\.(?:js|json)$/u, '')
+    cands = [
+      `./${bare}`, bare,
+      `./${stripped}`,
+      `./${stripped}.js`, `${stripped}.js`,
+      `./${stripped}.json`, `${stripped}.json`,
+    ]
+  }
   for (const cand of cands) {
     const v = map.get(cand)
-    if (v === false || typeof v === 'string') return v
+    if (typeof v === 'string') return { entry: v }
+    if (v === false) {
+      if (opts.metro && opts.metroKeepEntryOnBrowserFalse) return { entry: main }
+      return { empty: true }
+    }
   }
-  return undefined
+  return { entry: main }
 }
 
 // Match a package-relative path (`./x`) against the redirect map, trying `.js`/`.json` appended.
@@ -150,23 +176,51 @@ function matchBareRedirect(map, spec) {
 }
 
 // Probe `base` for a source file in platform order: bare name first, then per ext
-// `base.<platform>.<ext>`, `base.native.<ext>` (native only), `base.<ext>`. `platform: null` disables suffixes.
-function resolveSourceFile(base, { platform, preferNative, sourceExts }) {
+// `base.<platform>.<ext>`, `base.native.<ext>` (native only), `base.<ext>`. `platform: null`
+// disables suffixes. Under metro, every SUFFIXED candidate first passes through the candidate's
+// own package redirect map -- mirroring Metro's resolveSourceFileForExt, which runs
+// redirectModulePath on each non-bare candidate: `false` short-circuits the whole probe to an
+// empty module (e.g. browser { "./index.ios.js": false }), and a string redirect re-lands the
+// candidate package-root-relative. Returns a path, { empty: true } (metro only), or null.
+function resolveSourceFile(base, opts) {
+  // Candidates share base's directory, hence its package scope; resolve it lazily, once.
+  let scope
+  const redirectCandidate = (p) => {
+    if (scope === undefined) {
+      const pkg = nearestPackage(base)
+      scope = pkg ? { pkgDir: pkg.pkgDir, map: mergeRedirectMap(pkg.pkg, opts.mainFields) } : null
+    }
+    if (!scope || scope.map.size === 0) return p
+    const rel = `./${relative(scope.pkgDir, p).split(/[\\/]/u).join('/')}`
+    const r = matchRedirect(scope.map, rel)
+    if (r === false) return false
+    if (typeof r === 'string') return isAbsolute(r) ? r : resolvePath(scope.pkgDir, r)
+    return p
+  }
+  // `suffix` is everything appended to `base`; Metro redirect-checks suffixed candidates only.
+  const probe = (suffix) => {
+    let p = `${base}${suffix}`
+    if (opts.metro && suffix !== '') {
+      const r = redirectCandidate(p)
+      if (r === false) return { empty: true }
+      p = r
+    }
+    return isFile(p) ? p : null
+  }
   const tryExt = (sourceExt) => {
-    if (platform) {
-      const p = `${base}.${platform}${sourceExt}`
-      if (isFile(p)) return p
+    if (opts.platform) {
+      const hit = probe(`.${opts.platform}${sourceExt}`)
+      if (hit) return hit
     }
-    if (preferNative && sourceExt !== '') {
-      const n = `${base}.native${sourceExt}`
-      if (isFile(n)) return n
+    if (opts.preferNative && sourceExt !== '') {
+      const hit = probe(`.native${sourceExt}`)
+      if (hit) return hit
     }
-    const b = `${base}${sourceExt}`
-    return isFile(b) ? b : null
+    return probe(sourceExt)
   }
   const bare = tryExt('')
   if (bare) return bare
-  for (const ext of sourceExts) {
+  for (const ext of opts.sourceExts) {
     const hit = tryExt(`.${ext}`)
     if (hit) return hit
   }
@@ -177,33 +231,33 @@ function resolveSourceFile(base, { platform, preferNative, sourceExts }) {
 // mainFields + entry redirect, else `index`). `exports` is NOT consulted — Node applies it only to
 // bare package-name imports, not to a path landing on a directory.
 function resolveFileOrDir(base, opts) {
-  const file = resolveSourceFile(base, opts)
-  if (file) return { url: pathToFileURL(file).toString() }
+  // resolveSourceFile yields a path, { empty: true } (a metro candidate-redirect hit), or null.
+  const asResolution = (hit) => (hit == null ? null : typeof hit === 'string' ? { url: pathToFileURL(hit).toString() } : hit)
+  const file = asResolution(resolveSourceFile(base, opts))
+  if (file) return file
   if (isDir(base)) {
     const dpkg = readJson(join(base, 'package.json'))
     if (dpkg) {
-      let entry = packageEntry(dpkg, opts.mainFields)
-      const redirect = entryRedirect(mergeRedirectMap(dpkg, opts.mainFields), entry, opts.metro)
-      // A browser-map `false` on the entry empties it (esbuild); under --metro we instead keep
-      // `main` (Metro's behavior), unless METRO_KEEP_ENTRY_ON_BROWSER_FALSE is flipped off.
-      if (redirect === false && !(opts.metro && METRO_KEEP_ENTRY_ON_BROWSER_FALSE)) return { empty: true }
-      if (typeof redirect === 'string') entry = redirect
+      const r = resolveEntryThroughMap(mergeRedirectMap(dpkg, opts.mainFields), packageEntry(dpkg, opts.mainFields), opts)
+      if (r.empty) return { empty: true }
       // Node's LOAD_AS_DIRECTORY resolves `main` as a file, else as a directory index
       // (`main: "./lib/"` -> lib/index.js); a broken `main` falls back to the package index below.
-      const entryBase = join(base, entry)
-      const inner = resolveSourceFile(entryBase, opts) ?? resolveSourceFile(join(entryBase, 'index'), opts)
-      if (inner) return { url: pathToFileURL(inner).toString() }
+      const entryBase = join(base, r.entry)
+      const inner = asResolution(resolveSourceFile(entryBase, opts) ?? resolveSourceFile(join(entryBase, 'index'), opts))
+      if (inner) return inner
     }
-    const index = resolveSourceFile(join(base, 'index'), opts)
-    if (index) return { url: pathToFileURL(index).toString() }
+    const index = asResolution(resolveSourceFile(join(base, 'index'), opts))
+    if (index) return index
   }
   return null
 }
 
 // Build a resolver bound to options: `conditions` gates `exports` packages (delegated to Node),
 // `mainFields`/`platform`/`preferNative`/`sourceExts` drive the legacy-field + suffix probing.
-// `metro` opts into Metro's package-entry browser-field quirks (see entryRedirect and
-// METRO_KEEP_ENTRY_ON_BROWSER_FALSE); leave it off for the esbuild-parity `--mainFields` path.
+// `metro` opts into Metro's package-entry + candidate-redirect semantics (see
+// resolveEntryThroughMap and resolveSourceFile); leave it off for the esbuild-parity
+// `--mainFields` path. `metroKeepEntryOnBrowserFalse` overrides the module-level toggle
+// (METRO_KEEP_ENTRY_ON_BROWSER_FALSE) per resolver -- primarily so tests can cover both branches.
 export function createFieldResolver({
   conditions = [],
   mainFields = ['main'],
@@ -211,8 +265,9 @@ export function createFieldResolver({
   preferNative = false,
   sourceExts = ['js', 'json', 'ts'],
   metro = false,
+  metroKeepEntryOnBrowserFalse = METRO_KEEP_ENTRY_ON_BROWSER_FALSE,
 } = {}) {
-  const opts = { platform, preferNative, sourceExts, mainFields, metro }
+  const opts = { platform, preferNative, sourceExts, mainFields, metro, metroKeepEntryOnBrowserFalse }
   // `callConditions` (from scan) is the parent's format-driven condition set, so `exports`
   // delegation matches Node resolving from THAT file; falls back to configured `conditions`.
   return function resolve(parentFile, specifier, callConditions) {

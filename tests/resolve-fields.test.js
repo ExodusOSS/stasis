@@ -21,13 +21,14 @@ const rel = (r) => {
 // the target `platform` and native-suffix preference, and any extra `exports`
 // conditions). `platform: null` (the default, the `--mainFields` case) disables
 // platform-suffix probing; for a real platform, web alone excludes `.native`.
-const mk = ({ mainFields = ['react-native', 'browser', 'main'], extras = [], platform = null, preferNative = platform !== null && platform !== 'web', metro = false } = {}) =>
+const mk = ({ mainFields = ['react-native', 'browser', 'main'], extras = [], platform = null, preferNative = platform !== null && platform !== 'web', metro = false, keepEntryOnFalse } = {}) =>
   createFieldResolver({
     conditions: resolveConditions('module', extras),
     mainFields,
     platform,
     preferNative,
     metro,
+    ...(keepEntryOnFalse === undefined ? {} : { metroKeepEntryOnBrowserFalse: keepEntryOnFalse }),
   })
 
 test('a relative import resolves with extension probing', (t) => {
@@ -109,9 +110,61 @@ test('--metro: a browser-map false on the package entry keeps main (Metro ignore
   // `main`, so under `metro` entryfalse resolves to fe.js -- NOT an empty module (verified
   // against the real metro-resolver). Gated by METRO_KEEP_ENTRY_ON_BROWSER_FALSE.
   t.assert.equal(rel(mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })(entry, 'entryfalse')), 'node_modules/entryfalse/fe.js')
-  // barefalse (main "./buf.js", browser { "buf": false }): the bare key now matches the entry
-  // under metro, but a `false` still keeps main -- so it stays buf.js either way.
+})
+
+test('--metro: a bare browser-map false also keeps main', (t) => {
+  // barefalse (main "./buf.js", browser { "buf": false }): under metro the bare "buf" key DOES
+  // match the entry (Metro's variant list), but `false` keeps main -- so buf.js. NOTE: this
+  // outcome is identical whether or not the bare variant matched (no match would also leave
+  // buf.js), so it does NOT discriminate the bare-key matching itself -- the streampkg test
+  // above covers that. What it pins is Metro parity for the combined case (verified against
+  // the real metro-resolver), and the toggle-off test below pins the branch actually taken.
   t.assert.equal(rel(mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })(entry, 'barefalse')), 'node_modules/barefalse/buf.js')
+})
+
+test('--metro: with the keep-on-false toggle off, a false entry match fails closed to empty', (t) => {
+  // metroKeepEntryOnBrowserFalse: false (the METRO_KEEP_ENTRY_ON_BROWSER_FALSE=false state):
+  // any `false` match on the entry -- under Metro's MATCHING rules, bare keys included --
+  // yields an empty module. Deliberately stricter than both tools for bare keys (Metro keeps
+  // main; esbuild wouldn't match the entry): it's a fail-closed escape hatch, not esbuild parity.
+  const off = mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true, keepEntryOnFalse: false })
+  t.assert.equal(rel(off(entry, 'entryfalse')), '<empty>')
+  t.assert.equal(rel(off(entry, 'barefalse')), '<empty>')
+  // A plain string redirect is unaffected by the toggle.
+  t.assert.equal(rel(off(entry, 'streampkg')), 'node_modules/streampkg/vendor/sb.js')
+})
+
+// --- Metro entry-variant fidelity (each expectation verified against the real metro-resolver) ---
+
+test('--metro: entry redirect follows Metro variant ORDER on competing keys', (t) => {
+  const metro = mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })
+  // dualkey: main "./stream.js", browser { "stream.js": "./a.js", "./stream": "./b.js" }.
+  // Metro probes ./-prefixed variants of the main spelling before bare ones: ./stream wins -> b.js.
+  t.assert.equal(rel(metro(entry, 'dualkey')), 'node_modules/dualkey/b.js')
+  // strfalse: main "./x.js", browser { "x.js": "./A.js", "./x": false }. Metro hits ./x (false)
+  // first and keeps main -- the later string key must NOT redirect.
+  t.assert.equal(rel(metro(entry, 'strfalse')), 'node_modules/strfalse/x.js')
+})
+
+test('--metro: entry redirect matches Metro variant SET (no stripped .json probe, honors double-extension)', (t) => {
+  const metro = mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })
+  // jsonkey: browser { "stream.json": "./x.js" } for main "./stream.js" -- Metro never generates
+  // a stripped+.json variant, so the entry must stay stream.js (no over-match).
+  t.assert.equal(rel(metro(entry, 'jsonkey')), 'node_modules/jsonkey/stream.js')
+  // dblext: browser { "./stream.js.js": "./x.js" } -- Metro generates main+'.js', so it redirects.
+  t.assert.equal(rel(metro(entry, 'dblext')), 'node_modules/dblext/x.js')
+})
+
+test('--metro: the redirect map applies to platform-suffixed file candidates (Metro resolveSourceFileForExt)', (t) => {
+  // sfxfalse: main "./index" with only index.ios.js on disk and browser { "./index.ios.js": false }.
+  // Metro redirect-checks each suffixed candidate; the false short-circuits to an empty module.
+  t.assert.equal(rel(mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })(entry, 'sfxfalse')), '<empty>')
+})
+
+test('--metro: an object-valued react-native field participates in entry redirection under the real preset', (t) => {
+  // rnbare: main "./crypto.js", react-native { "crypto": "./crypto-rn.js" } -- exercised with the
+  // shipped --metro mainFields preset (react-native,browser,main), not just browser,main.
+  t.assert.equal(rel(mk({ platform: 'ios', metro: true })(entry, 'rnbare')), 'node_modules/rnbare/crypto-rn.js')
 })
 
 test('a bare browser-map false does not empty a same-basename package entry', (t) => {
