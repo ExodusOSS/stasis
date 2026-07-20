@@ -11,6 +11,9 @@ import { classifyFormat } from '@exodus/stasis-core/util'
 
 const SCRIPT_EXTS = new Set(['.js', '.cjs', '.mjs', '.ts', '.cts', '.mts'])
 const RESOLVABLE_EXTS = new Set([...SCRIPT_EXTS, '.json'])
+// Under `jsx`, these get parsed with JSX enabled. Excludes the .ts family: TypeScript's `<T>`
+// generics collide with JSX, so tsc/oxc reserve JSX for .tsx — JSX-in-TS belongs in a .tsx file.
+const JSX_EXTS = new Set(['.js', '.cjs', '.mjs'])
 
 // Required lazily so non-JS bundlers don't load the native oxc parser.
 let _parser
@@ -92,9 +95,12 @@ export class Scan {
   // `conditions` is additive on top of the edge-context base set. `resolve` optionally
   // replaces Node's resolver (resolve-fields.js): returns `{ url } | { empty } | { builtin } | null`
   // (`empty` = a browser/react-native `false` redirect) and owns builtin handling when set.
-  constructor({ conditions = [], resolve = null } = {}) {
+  // `jsx` opts the .js/.cjs/.mjs family into JSX syntax (React Native's JSX-in-.js convention);
+  // off by default because oxc, like tsc, only auto-enables JSX for .jsx/.tsx by extension.
+  constructor({ conditions = [], resolve = null, jsx = false } = {}) {
     this.extraConditions = [...conditions]
     this.customResolve = resolve
+    this.jsx = jsx
   }
 
   walk(entries) {
@@ -149,12 +155,16 @@ export class Scan {
     // Resolve the parser outside the try: a missing oxc-parser is an env error, not this
     // file's — it must not be swallowed into a silent zero-edge leaf.
     const parser = getParser()
+    // oxc picks JS/TS + JSX from the filename; the .js family lands on plain JS (no JSX), so
+    // force the JSX variant when opted in (`--jsx`) to parse React Native's JSX-in-.js source.
+    const lang = this.jsx && JSX_EXTS.has(ext) ? 'jsx' : undefined
+    const parseOptions = (sourceType) => (lang ? { sourceType, lang } : { sourceType })
     let parsed
     try {
-      parsed = parser.parseSync(file, src, {
-        sourceType: declared === null ? 'unambiguous'
-          : declared.startsWith('module') ? 'module' : 'script',
-      })
+      parsed = parser.parseSync(file, src, parseOptions(
+        declared === null ? 'unambiguous'
+          : declared.startsWith('module') ? 'module' : 'script'
+      ))
     } catch (cause) {
       this.#recordParseError(url, declared, cause.message, false)
       return
@@ -174,7 +184,7 @@ export class Scan {
     // broken script; mirror Node by retrying as module and preferring a clean module parse.
     if (errors.length > 0 && declared === null && !format.startsWith('module')) {
       try {
-        const asModule = parser.parseSync(file, src, { sourceType: 'module' })
+        const asModule = parser.parseSync(file, src, parseOptions('module'))
         if (nonWarning(asModule).length === 0) {
           parsed = asModule
           format = `module${ext === '.ts' ? '-typescript' : ''}`

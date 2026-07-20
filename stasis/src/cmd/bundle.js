@@ -481,7 +481,7 @@ function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '' } =
 // from stasis.config.json / `EXODUS_STASIS_SCOPE` unless `scope` overrides. `conditions` are
 // extra `exports`/`imports` conditions; on their own they don't honour legacy mainFields or
 // platform suffixes (see `--mainFields` / buildResolvedJsBundle).
-export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [] } = {}) {
+export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [], jsx = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
@@ -496,7 +496,7 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   // bogus token into the resolver.
   const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
 
-  const scanner = scan(absEntries, { conditions: scanConditions })
+  const scanner = scan(absEntries, { conditions: scanConditions, jsx })
 
   // Fail closed where the bundle is guaranteed broken at load; warn on catchable misses (see analyzeScanner).
   reportScanIssues(analyzeScanner(scanner))
@@ -612,7 +612,7 @@ function nativeModuleFiles(pkgAbs) {
 // Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
 // `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
 // have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false }) {
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, jsx = false }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -646,7 +646,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       // Opt into Metro's package-entry browser-field quirks only on the --metro path.
       metro,
     })
-    const scanner = scan(absEntries, { conditions: extras, resolve: resolver })
+    const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx })
     reportScanIssues(analyzeScanner(scanner), { label: platform ?? 'mainFields' })
 
     const platformKey = platform ?? '*' // '*' is a private placeholder for the single mainFields pass; it never unflattens
@@ -781,7 +781,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, jsx }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -810,6 +810,10 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   // --mainFields and --metro/--platforms are legacy-/platform-resolution knobs; JS-only.
   if (mainFields !== undefined && kind !== 'js') {
     throw new Error(`${name}: --mainFields is only valid for JS bundles`)
+  }
+  // --jsx toggles the scanner's JSX parsing for the .js family; only JS entries are scanned.
+  if (jsx && kind !== 'js') {
+    throw new Error(`${name}: --jsx is only valid for JS bundles`)
   }
   if ((metro || (Array.isArray(platforms) && platforms.length > 0)) && kind !== 'js') {
     throw new Error(`${name}: --metro is only valid for JS bundles`)
@@ -846,8 +850,8 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
 // (--mapping/.sol, --scope|--conditions|--mainFields|--metro/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro })
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, jsx = false } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, jsx })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
@@ -860,10 +864,11 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
+      jsx,
     })
     return bundle
   }
-  const state = await buildJsBundle({ cwd, entries, scope, conditions })
+  const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx })
   // Stamp the `bundle` consumer (the static build carries none).
   return state.sourceBundle.withReason('bundle')
 }
@@ -878,8 +883,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, jsx = false, brotliQuality, add = false } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, jsx })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -899,17 +904,18 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
+      jsx,
     })
     bundle = built.bundle
     if (lockfile) lockData = built.lockfile.serialize()
   } else if (kind === 'js' && lockfile) {
     // Keep the State: only it carries the file hashes the companion lockfile needs (a Bundle holds sources, not digests).
-    const state = await buildJsBundle({ cwd, entries, scope, conditions })
+    const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx })
     // Stamp the `bundle` consumer (this branch bypasses buildBundle to keep the State).
     bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
-    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions })
+    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx })
   }
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.

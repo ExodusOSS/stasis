@@ -186,6 +186,38 @@ test('scan applies Node module-syntax detection to ambiguous .js (no "type" in s
   t.assert.deepEqual(r3.parseErrors, [])
 }))
 
+test('scan records a parse error for JSX in a .js file, and js:true parses past it', withTmp((t, tmp) => {
+  // oxc (like tsc) only auto-enables JSX for .jsx/.tsx by extension, so JSX in a .js file is an
+  // "Unexpected token" parse error by default. `jsx: true` opts the .js family into JSX parsing.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'jsx', version: '0.0.0', type: 'module' }))
+  const entry = join(tmp, 'App.js')
+  writeFileSync(entry, "import { greet } from './greet.js'\nexport const App = () => <Text>{greet}</Text>\n")
+  writeFileSync(join(tmp, 'greet.js'), "export const greet = 'hi'\n")
+
+  const def = scan([entry])
+  t.assert.equal(def.parseErrors.length, 1, 'JSX in .js is a parse error by default')
+  t.assert.ok(def.parseErrors[0].url.endsWith('/App.js'))
+  // The parse failed, so the module edge to greet.js was never enumerated.
+  t.assert.ok(![...def.files].some(([url]) => url.endsWith('/greet.js')), 'edge behind the JSX is unreachable by default')
+
+  const withJsx = scan([entry], { jsx: true })
+  t.assert.deepEqual(withJsx.parseErrors, [], 'jsx:true parses the JSX cleanly')
+  t.assert.ok([...withJsx.files].some(([url]) => url.endsWith('/greet.js')), 'the import past the JSX is now walked')
+}))
+
+test('scan jsx:true does not enable JSX for the .ts family (its <T> generics collide with JSX)', withTmp((t, tmp) => {
+  // TypeScript reserves JSX for .tsx; a .ts file uses `<T>` for generics. jsx:true leaves .ts
+  // JSX-free: a generic .ts still parses, and JSX in a .ts is still a parse error.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'jsxts', version: '0.0.0', type: 'module' }))
+  const generic = join(tmp, 'ok.ts')
+  writeFileSync(generic, 'export function id<T>(x: T): T {\n  return x\n}\n')
+  t.assert.deepEqual(scan([generic], { jsx: true }).parseErrors, [], 'a generic .ts still parses under jsx:true')
+
+  const jsxTs = join(tmp, 'bad.ts')
+  writeFileSync(jsxTs, 'export const App = () => <Text>hi</Text>\n')
+  t.assert.equal(scan([jsxTs], { jsx: true }).parseErrors.length, 1, 'JSX in a .ts stays a parse error even with jsx:true')
+}))
+
 test('scan reports dynamic require() as unresolved', withTmp((t, tmp) => {
   const file = join(tmp, 'dyn.cjs')
   writeFileSync(file, `const name = process.env.MOD\nmodule.exports = require(name)\n`)
