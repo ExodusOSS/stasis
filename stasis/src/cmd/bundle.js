@@ -510,12 +510,30 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
     const isEntry = scanner.entries.has(url)
     state.addFile(url, { format: info.format, isEntry })
   }
-  // Store every edge under the wildcard '*' key: static bundles can't anticipate Node's
-  // runtime conditions, and getImport falls back to '*' when a condition lookup misses.
-  for (const [, byParent] of scanner.imports) {
-    for (const [parentURL, specs] of byParent) {
+  // Edges where every context agrees keep the wildcard '*' key (getImport's fallback when a
+  // condition lookup misses). Where the require()- and import()-context resolutions of one
+  // (parent, specifier) DIVERGE, each target keeps its real condition key -- one '*' entry
+  // would serve one context the other's file; an unmatched set fails closed via resolveBundled.
+  const byParent = new Map()
+  for (const [key, parents] of scanner.imports) {
+    for (const [parentURL, specs] of parents) {
+      if (!byParent.has(parentURL)) byParent.set(parentURL, new Map())
+      const bySpec = byParent.get(parentURL)
       for (const [spec, childURL] of specs) {
-        state.addImport(parentURL, spec, childURL, { conditions: '*' })
+        if (!bySpec.has(spec)) bySpec.set(spec, new Map())
+        bySpec.get(spec).set(key, childURL)
+      }
+    }
+  }
+  for (const [parentURL, bySpec] of byParent) {
+    for (const [spec, byKey] of bySpec) {
+      const targets = new Set(byKey.values())
+      if (targets.size === 1) {
+        state.addImport(parentURL, spec, [...targets][0], { conditions: '*' })
+      } else {
+        for (const [key, childURL] of byKey) {
+          state.addImport(parentURL, spec, childURL, { conditions: key.split(', ') })
+        }
       }
     }
   }

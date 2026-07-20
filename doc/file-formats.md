@@ -199,6 +199,9 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
 - `imports`: conditions → parent file → specifier → resolved project-relative
   path. The conditions key is `"*"`, a comma-joined list (e.g. `"node, import"`),
   or — for source-language bundles — the language tag (`solidity`/`php`/`shell`/`rust`).
+  Statically built JS bundles use `"*"` per edge, except that a
+  `(parent, specifier)` resolving differently under the require() and import()
+  contexts keeps each target under its real condition key.
 - When a `stasis.lock.json` is loaded alongside, the bundle's `entries`,
   module/source dirs, `name`/`version`, and per-module file lists must match; each
   loaded source is hash-verified against the lockfile.
