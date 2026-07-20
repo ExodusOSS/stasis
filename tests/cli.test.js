@@ -71,7 +71,30 @@ const withTmp = (fn) => async (t) => {
 // total concurrent-subprocess count bounded while capturing most of the speedup.
 const CONCURRENCY = 4 // matches CI runner cores; higher barely helps here (see commit msg)
 
+// Many tests only need a canonical clean bundle of runFixture as *setup* before they
+// tamper/load it -- they don't assert on the capture itself. Capturing it once here
+// (lock=add is idempotent on the committed lockfile, so the fixture's lockfile is
+// unchanged) and reusing the bytes saves ~30 `stasis run` spawns. Tests write these
+// bytes into their own tmp, so the shared buffer stays read-only. Built at module load
+// via top-level await so it's ready before any test registers.
+const cleanBundle = await (async () => {
+  const gen = mkdtempSync(join(tmpdir(), 'stasis-cli-gen-'))
+  try {
+    cpSync(runFixture, gen, { recursive: true })
+    const bundlePath = join(gen, 'snapshot.br')
+    const r = await run(
+      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
+      { cwd: gen }
+    )
+    if (r.status !== 0) throw new Error(`failed to generate shared clean bundle: ${r.stderr}`)
+    return readFileSync(bundlePath)
+  } finally {
+    rmSync(gen, { recursive: true, force: true })
+  }
+})()
+
 describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, () => {
+
   test('no command prints usage and exits 1', async (t) => {
     const r = await run([])
     t.assert.equal(r.status, 1)
@@ -215,11 +238,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load detects a tampered source in the bundle', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     // tamper with the bundle: swap hello.js source for an attacker-controlled payload
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     decoded.sources['.'].files['src/hello.js'] = 'export const greet = (n) => `pwned, ${n}`\n'
@@ -471,11 +490,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
     // seed the bundle with the original sources
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     // change disk: even though the lockfile is being replaced, --bundle=add pre-loads
     // the bundle's sources and addFile must noupsert the on-disk bytes against them
     writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
@@ -491,11 +506,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=add --bundle=replace still enforces the lockfile when rebuilding the bundle', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     // change disk: lockfile is preserved (lock=add). bundle is being rebuilt (bundle=replace).
     // The lockfile's hash for hello.js no longer matches disk -- addFile must reject this.
     writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
@@ -550,11 +561,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
     // create the bundle with the original content
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     // now change a source file -- re-running --bundle=add must refuse to overwrite
     writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
     const r = await run(
@@ -567,11 +574,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=replace rewrites the bundle from scratch when a source file changed', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     const beforeBundle = readFileSync(bundlePath)
     writeFileSync(join(tmp, 'src', 'hello.js'), 'export const greet = (n) => `bonjour, ${n}`\n')
 
@@ -592,11 +595,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=replace ignores stale sources in the existing bundle', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     // forge a stale entry by re-saving a tampered bundle
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     decoded.sources['.'].files['src/orphan.js'] = 'export const x = 0\n'
@@ -839,11 +838,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
     // Build the bundle while keeping the committed lockfile (lock=add round-trips it).
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
     const bundleBefore = readFileSync(bundlePath)
 
@@ -1120,11 +1115,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=ignore --bundle=frozen ignores the lockfile and verifies against the bundle', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true }) // keeps the committed stasis.lock.json
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     const lockBefore = readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')
 
     const r = await run(
@@ -1183,11 +1174,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
 
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Remove every source file -- bundle=load must run entirely from the bundle.
     rmSync(join(tmp, 'src'), { recursive: true })
@@ -1204,11 +1191,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
 
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Keep the imported hello.js on disk, but make the entry missing.
     rmSync(join(tmp, 'src', 'entry.js'))
@@ -1411,11 +1394,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
 
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     rmSync(join(tmp, 'src'), { recursive: true })
 
     const load = await run(
@@ -1457,11 +1436,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     const bundlePath = join(tmp, 'snapshot.br')
 
     // create a bundle in full scope
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // forge a mismatching scope in the bundle metadata
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
@@ -1479,11 +1454,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=add --bundle=add rejects a bundle with mismatching scope (not only frozen)', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     decoded.config.scope = 'node_modules'
@@ -1544,11 +1515,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
     // Build a fresh v1 bundle, then downgrade it to the v0 legacy shape on disk
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     const flatSources = {}
@@ -1578,11 +1545,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=load rejects a bundle whose entries disagree with the lockfile', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     decoded.entries = ['src/hello.js'] // disagrees with lockfile entry "src/entry.js"
@@ -1599,11 +1562,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=load rejects a bundle whose module name disagrees with the lockfile', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     decoded.sources['.'].name = 'someone-else'
@@ -1620,11 +1579,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=load rejects an entry not listed in the bundle entries', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     rmSync(join(tmp, 'stasis.lock.json'))
 
     const load = await run(
@@ -1681,11 +1636,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load rejects a bundle that flips a hash-valid file format', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Flip hello.js's format module -> commonjs in the bundle. Bytes still match
     // the lockfile hash; only the loader format the file runs under changes.
@@ -1707,11 +1658,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load rejects a bundle that flips a .js file to module-typescript', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // The scariest flip: module -> module-typescript makes Node strip
     // type-shaped syntax from the SAME bytes (`f<string>('x')` becomes a call,
@@ -1767,11 +1714,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load rejects a bundle resolution redirected to another attested file', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Redirect './hello.js' to the entry itself: every served byte still matches
     // a lockfile hash, only the resolution differs -- the hash checks alone
@@ -1799,11 +1742,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load rejects a bundle resolution not attested by the lockfile', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Inject an edge for a (parent, specifier) the lockfile has never seen.
     // Even an edge the run never follows must be attested.
@@ -1822,11 +1761,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load rejects a redirected resolution under a foreign conditions key', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Same (parent, specifier) the lockfile attests, but redirected AND moved to
     // a conditions key the lockfile doesn't have: the cross-key fallback must
@@ -1866,11 +1801,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load rejects a wildcard resolution over a condition-divergent attestation', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Lockfile attests two different targets for the same (parent, specifier)
     // under different condition sets (dual-package style). A wildcard edge
@@ -1960,11 +1891,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --lock=frozen --bundle=load tolerates a legacy lockfile without imports, with a warning', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Strip `imports` to simulate a lockfile that predates resolution attestation.
     const lockPath = join(tmp, 'stasis.lock.json')
@@ -1985,11 +1912,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('Bundle.parse rejects a bundle with an import edge escaping the project root', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     for (const byParent of Object.values(decoded.imports)) {
@@ -2010,11 +1933,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     // a full-scope code bundle that declares no entry, so `--bundle=load` fails closed.
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
     rmSync(join(tmp, 'stasis.lock.json'))
 
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
@@ -2038,11 +1957,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=load refuses to serve a resource-tagged file as code', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     // Tamper hello.js's format to a resource tag. Bytes still match the lockfile
     // hash; the loader must refuse to execute it as JavaScript.
@@ -2065,11 +1980,7 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=load refuses to serve a solidity-tagged file', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    writeFileSync(bundlePath, cleanBundle)
 
     const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)))
     decoded.formats['src/hello.js'] = 'solidity'
@@ -2092,12 +2003,8 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     // resource-direction inverse loop catches it as a clean schema-level mismatch.
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
-    // Build a fresh v1 lockfile + bundle pair.
-    const save = await run(
-      ['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, 'src/entry.js'],
-      { cwd: tmp }
-    )
-    t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+    // Canonical bundle + the fixture's committed lockfile (a matching v1 pair).
+    writeFileSync(bundlePath, cleanBundle)
 
     // Lockfile: rewrite hello.js's format to 'resource:base64' (its hash is bytes-
     // over-raw which we don't touch -- the cross-check fires before any hash work).
