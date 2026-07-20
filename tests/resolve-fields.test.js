@@ -21,12 +21,13 @@ const rel = (r) => {
 // the target `platform` and native-suffix preference, and any extra `exports`
 // conditions). `platform: null` (the default, the `--mainFields` case) disables
 // platform-suffix probing; for a real platform, web alone excludes `.native`.
-const mk = ({ mainFields = ['react-native', 'browser', 'main'], extras = [], platform = null, preferNative = platform !== null && platform !== 'web' } = {}) =>
+const mk = ({ mainFields = ['react-native', 'browser', 'main'], extras = [], platform = null, preferNative = platform !== null && platform !== 'web', metro = false } = {}) =>
   createFieldResolver({
     conditions: resolveConditions('module', extras),
     mainFields,
     platform,
     preferNative,
+    metro,
   })
 
 test('a relative import resolves with extension probing', (t) => {
@@ -83,17 +84,34 @@ test('an entry browser-map redirect matches a key written without a leading ./',
   t.assert.equal(rel(mk({ mainFields: ['browser', 'main'] })(entry, 'noslash')), 'node_modules/noslash/client.js')
 })
 
-test('a bare browser-map key does not hijack a same-basename package entry', (t) => {
+test('a bare browser-map key does not hijack a same-basename package entry (--mainFields)', (t) => {
   // streampkg: main "./stream.js", browser { "stream": "./vendor/sb.js" }. The bare
   // "stream" key remaps the `stream` MODULE used inside the package, not the entry, so
   // the entry stays stream.js (esbuild + browser-resolve agree; verified end-to-end).
   t.assert.equal(rel(mk({ mainFields: ['browser', 'main'] })(entry, 'streampkg')), 'node_modules/streampkg/stream.js')
 })
 
-test('a browser-map false on the package entry disables it (empty module)', (t) => {
+test('--metro: a bare browser-map key DOES redirect the resolved package entry', (t) => {
+  // Real Metro's getPackageEntryPoint matches the bare "stream" key against the entry and
+  // redirects it -- so under `metro`, streampkg resolves to vendor/sb.js (verified against
+  // the real metro-resolver). This is the intended divergence from esbuild/--mainFields above.
+  t.assert.equal(rel(mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })(entry, 'streampkg')), 'node_modules/streampkg/vendor/sb.js')
+})
+
+test('a browser-map false on the package entry disables it (empty module) (--mainFields)', (t) => {
   // entryfalse: main "./fe.js", browser { "./fe.js": false } -- a relative key matching
   // the entry disables it to an empty module, matching esbuild.
   t.assert.equal(rel(mk({ mainFields: ['browser', 'main'] })(entry, 'entryfalse')), '<empty>')
+})
+
+test('--metro: a browser-map false on the package entry keeps main (Metro ignores it)', (t) => {
+  // Metro's getPackageEntryPoint ignores a non-string (false) entry replacement and keeps
+  // `main`, so under `metro` entryfalse resolves to fe.js -- NOT an empty module (verified
+  // against the real metro-resolver). Gated by METRO_KEEP_ENTRY_ON_BROWSER_FALSE.
+  t.assert.equal(rel(mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })(entry, 'entryfalse')), 'node_modules/entryfalse/fe.js')
+  // barefalse (main "./buf.js", browser { "buf": false }): the bare key now matches the entry
+  // under metro, but a `false` still keeps main -- so it stays buf.js either way.
+  t.assert.equal(rel(mk({ mainFields: ['browser', 'main'], platform: 'ios', metro: true })(entry, 'barefalse')), 'node_modules/barefalse/buf.js')
 })
 
 test('a bare browser-map false does not empty a same-basename package entry', (t) => {

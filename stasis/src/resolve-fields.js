@@ -14,6 +14,13 @@ import { pathToFileURL } from 'node:url'
 //   { builtin }  a Node builtin
 //   null         unresolved
 
+// Metro divergence toggle. When a package's browser map redirects its OWN entry to `false`,
+// esbuild/webpack empty that entry, but Metro's `getPackageEntryPoint` ignores a non-string
+// replacement and keeps `main`. The `--metro` resolver matches Metro by default; flip this to
+// `false` to fall back to the empty-module behavior. This only affects the `--metro` path -- the
+// `--mainFields` path always empties (matching esbuild), regardless of this const.
+const METRO_KEEP_ENTRY_ON_BROWSER_FALSE = true
+
 function readJson(file) {
   let text
   try {
@@ -105,9 +112,11 @@ function mergeRedirectMap(pkg, mainFields) {
 }
 
 // Match the package ENTRY against the browser map (string redirects, `false` = empty module).
-// Probe with/without leading `./` and with ext stripped or `.js`/`.json` appended — but NOT the
-// bare extension-less form: that spelling is a BARE MODULE name, not the entry file.
-function entryRedirect(map, entry) {
+// Probe with/without leading `./` and with ext stripped or `.js`/`.json` appended. The bare
+// extension-less spelling is a BARE MODULE name, not the entry file, so esbuild/webpack (the
+// `--mainFields` target) never match it against the entry -- but Metro's getPackageEntryPoint
+// does, so `--metro` (metro=true) tries it last, after the path-shaped candidates.
+function entryRedirect(map, entry, metro = false) {
   if (map.size === 0) return undefined
   const bare = entry.replace(/^\.\//u, '')
   const stripped = bare.replace(/\.(?:js|json)$/u, '')
@@ -116,6 +125,8 @@ function entryRedirect(map, entry) {
     `./${stripped}`,
     `./${stripped}.js`, `${stripped}.js`,
     `./${stripped}.json`, `${stripped}.json`,
+    // Metro-only: e.g. browser { "stream": "./x" } redirects a `main: "./stream.js"` entry.
+    ...(metro ? [stripped] : []),
   ]
   for (const cand of cands) {
     const v = map.get(cand)
@@ -172,8 +183,10 @@ function resolveFileOrDir(base, opts) {
     const dpkg = readJson(join(base, 'package.json'))
     if (dpkg) {
       let entry = packageEntry(dpkg, opts.mainFields)
-      const redirect = entryRedirect(mergeRedirectMap(dpkg, opts.mainFields), entry)
-      if (redirect === false) return { empty: true }
+      const redirect = entryRedirect(mergeRedirectMap(dpkg, opts.mainFields), entry, opts.metro)
+      // A browser-map `false` on the entry empties it (esbuild); under --metro we instead keep
+      // `main` (Metro's behavior), unless METRO_KEEP_ENTRY_ON_BROWSER_FALSE is flipped off.
+      if (redirect === false && !(opts.metro && METRO_KEEP_ENTRY_ON_BROWSER_FALSE)) return { empty: true }
       if (typeof redirect === 'string') entry = redirect
       // Node's LOAD_AS_DIRECTORY resolves `main` as a file, else as a directory index
       // (`main: "./lib/"` -> lib/index.js); a broken `main` falls back to the package index below.
@@ -189,14 +202,17 @@ function resolveFileOrDir(base, opts) {
 
 // Build a resolver bound to options: `conditions` gates `exports` packages (delegated to Node),
 // `mainFields`/`platform`/`preferNative`/`sourceExts` drive the legacy-field + suffix probing.
+// `metro` opts into Metro's package-entry browser-field quirks (see entryRedirect and
+// METRO_KEEP_ENTRY_ON_BROWSER_FALSE); leave it off for the esbuild-parity `--mainFields` path.
 export function createFieldResolver({
   conditions = [],
   mainFields = ['main'],
   platform = null,
   preferNative = false,
   sourceExts = ['js', 'json', 'ts'],
+  metro = false,
 } = {}) {
-  const opts = { platform, preferNative, sourceExts, mainFields }
+  const opts = { platform, preferNative, sourceExts, mainFields, metro }
   // `callConditions` (from scan) is the parent's format-driven condition set, so `exports`
   // delegation matches Node resolving from THAT file; falls back to configured `conditions`.
   return function resolve(parentFile, specifier, callConditions) {
