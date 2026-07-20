@@ -100,6 +100,22 @@ loader, e.g. `--loader=.mjs:jsx`):
 stasis build --output=out.js --loader=.js:jsx app.code.br   # parse JSX in .js
 ```
 
+The static `stasis bundle` scanner has the same blind spot for the same reason:
+JSX in a `.js`/`.cjs`/`.mjs` file is an *"Unexpected token"* parse error, which is
+fatal for an ESM file whose static import graph can't be enumerated from the
+partial parse (`JS bundle would be broken at load time`). Pass `--jsx` (its
+counterpart to `build`'s `--loader`) so the scanner parses past the JSX to the
+import graph and stores the JSX source verbatim for `stasis build --loader=.js:jsx`
+to transform later:
+
+```sh
+stasis bundle --metro --platforms=ios,android --jsx index.js   # React Native JSX-in-.js
+```
+
+`--jsx` is off by default and covers only the `.js`/`.cjs`/`.mjs` family; the `.ts`
+family is left JSX-free because its `<T>` generics collide with JSX (put JSX-in-TS
+in a `.tsx` file, as TypeScript itself requires).
+
 **Non-code assets** are not emitted yet. Assets (`.png`/`.svg`/… as
 `resource`/`resource:base64`) are recorded as files but not as import *edges*, so
 a code-only entry builds fine even when the artifact carries assets for other

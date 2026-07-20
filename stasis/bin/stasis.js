@@ -24,12 +24,13 @@ function usage(prefix = '') {
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro --platforms=ios,android [--platforms=web] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro --platforms=ios,android [--platforms=web] [--jsx] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
-  existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9)
+  existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
+  --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file))
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -180,6 +181,7 @@ if (command === '-v' || command === '--version') {
     mainFields: { type: 'string' },
     metro: { type: 'boolean' },
     platforms: { type: 'string', multiple: true },
+    jsx: { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
@@ -234,6 +236,11 @@ if (command === '-v' || command === '--version') {
     if (p === '*' || p.includes('/')) usage(`Error: invalid --platforms value '${p}' (a platform name can't contain '/' or be '*')`)
   }
   if ((metro || platforms.length > 0) && !allJs) usage('Error: --metro is only valid for JS bundles')
+  // --jsx: parse React Native's JSX-in-.js source in the static scanner (off by default; oxc,
+  // like tsc, only auto-enables JSX for .jsx/.tsx). Orthogonal to the resolver, so it pairs with
+  // plain/--mainFields/--metro alike -- JS-only, since no other entry language is scanned.
+  const jsx = Boolean(values.jsx)
+  if (jsx && !allJs) usage('Error: --jsx is only valid for JS bundles')
   if (metro) {
     if (conditions.length > 0) usage("Error: --conditions can't be combined with --metro (it sets its own conditions)")
     if (mainFields !== undefined) usage("Error: --mainFields can't be combined with --metro (it sets its own mainFields)")
@@ -265,6 +272,7 @@ if (command === '-v' || command === '--version') {
     mainFields,
     metro,
     platforms,
+    jsx,
     brotliQuality,
     add,
   })

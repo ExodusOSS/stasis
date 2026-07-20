@@ -1711,6 +1711,134 @@ test('CLI: bundle (JS) fails closed when an edge resolves to a file a source bun
   t.assert.ok(!existsSync(outPath))
 }))
 
+// --- JSX in .js source (`--jsx`) ------------------------------------------------------
+//
+// oxc, like tsc, only auto-enables JSX for .jsx/.tsx by extension, so JSX in a .js file (the
+// React Native convention) is an "Unexpected token" parse error -- fatal for an ESM file whose
+// static edges can't be enumerated from the partial parse. `--jsx` opts the .js/.cjs/.mjs family
+// into JSX parsing so the scanner can walk past the JSX to the import graph.
+
+test('CLI: bundle (JS) fails closed on JSX in a .js file without --jsx', withTmp((t, tmp) => {
+  jsProject(tmp, { 'entry.js': "import { greet } from './greet.js'\nexport const App = () => <Text>{greet}</Text>\n", 'greet.js': "export const greet = 'hi'\n" })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', `--output=${outPath}`, 'entry.js'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0, 'JSX in a .js file must fail closed by default (parser rejects it)')
+  t.assert.match(r.stderr, /JS bundle would be broken at load time/)
+  t.assert.match(r.stderr, /parse error in .*entry\.js/)
+  t.assert.ok(!existsSync(outPath))
+}))
+
+test('CLI: bundle --jsx parses JSX in a .js file and walks its import graph', withTmp((t, tmp) => {
+  jsProject(tmp, { 'entry.js': "import { greet } from './greet.js'\nexport const App = () => <Text>{greet}</Text>\n", 'greet.js': "export const greet = 'hi'\n" })
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', '--jsx', `--output=${outPath}`, 'entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  // The JSX file parsed cleanly and the edge behind it was followed.
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['entry.js', 'greet.js'],
+    'the import edge past the JSX must be discovered and bundled')
+  // JSX source is stored verbatim (untransformed) -- `stasis build --loader=.js:jsx` transforms it later.
+  t.assert.match(decoded.sources['.'].files['entry.js'], /<Text>\{greet\}<\/Text>/u)
+}))
+
+test('CLI: bundle --metro --jsx bundles a React Native JSX-in-.js entry (the reported scenario)', withTmp((t, tmp) => {
+  // Modern RN source is ESM with JSX in .js files; under --metro the parse error was fatal
+  // ("JS bundle would be broken at load time"). --jsx makes the scanner parse past the JSX.
+  jsProject(tmp, {
+    'index.js': "import { Component } from './Component.js'\nexport const App = () => <Component />\n",
+    'Component.js': "export const Component = () => <View>hi</View>\n",
+  })
+  const outPath = join(tmp, 'out.br')
+  const noJsx = runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.notEqual(noJsx.status, 0, 'without --jsx, --metro must still fail closed on JSX-in-.js')
+  t.assert.match(noJsx.stderr, /JS bundle would be broken at load time/)
+
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['Component.js', 'index.js'],
+    'the whole JSX chain must be walked on every platform')
+}))
+
+test('CLI: bundle --metro --jsx handles a typeless package (RN convention: no "type"), still detecting ESM', withTmp((t, tmp) => {
+  // A React Native app's package.json usually has NO "type" field, so its .js files hit oxc's
+  // `unambiguous` sourceType (declared === null) -- the primary --jsx path. It must parse the JSX
+  // *and* keep detecting the ESM syntax, or the file lands in the wrong module format. (The other
+  // --jsx tests all use "type": "module", exercising only the `module` sourceType branch.)
+  jsProject(tmp, {
+    'index.js': "import { Component } from './Component.js'\nexport const App = () => <Component />\n",
+    'Component.js': "export const Component = () => <View>hi</View>\n",
+  }, { name: 'rn-typeless', version: '0.0.0' }) // deliberately no "type" -> typeless package
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['Component.js', 'index.js'],
+    'the whole JSX chain must be walked in a typeless package')
+  // ESM syntax must still be detected under lang:jsx -> module format, not commonjs.
+  t.assert.equal(decoded.formats['index.js'], 'module', 'import/export syntax must resolve to module even with JSX enabled')
+}))
+
+test('CLI: bundle --jsx parses JSX in a CommonJS .js file cleanly (no salvaged-parse warning)', withTmp((t, tmp) => {
+  // JSX in a CJS file is only a *recovered* (tolerated) parse error without --jsx: the CLI warns
+  // and salvages the require() edges but exits 0. With --jsx the file parses cleanly, so the
+  // parse-error warning must disappear entirely while the graph is still walked. (Typeless
+  // package so `require`/`module.exports` keeps the file CommonJS.)
+  jsProject(tmp, {
+    'index.js': "const { Row } = require('./Row.js')\nmodule.exports = () => <Row>hi</Row>\n",
+    'Row.js': "exports.Row = () => null\n",
+  }, { name: 'rn-cjs', version: '0.0.0' })
+  const outPath = join(tmp, 'out.br')
+
+  const noJsx = runCli(['bundle', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(noJsx.status, 0, `CJS JSX is tolerated (recovered) without --jsx; stderr: ${noJsx.stderr}`)
+  t.assert.match(noJsx.stderr, /file\(s\) with parse errors/, 'without --jsx the CJS JSX must warn as a salvaged parse error')
+
+  const r = runCli(['bundle', '--jsx', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.doesNotMatch(r.stderr, /parse error/, '--jsx must parse the CJS JSX cleanly (no salvaged-parse warning)')
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf-8'))
+  t.assert.deepEqual(Object.keys(decoded.sources['.'].files).toSorted(), ['Row.js', 'index.js'])
+  t.assert.equal(decoded.formats['index.js'], 'commonjs', 'the require/module.exports file stays CommonJS')
+}))
+
+test('CLI: bundle --jsx does not enable JSX for .ts files (its <T> generics collide with JSX)', withTmp((t, tmp) => {
+  // TypeScript reserves JSX for .tsx; a .ts file uses `<T>` for generics, so --jsx deliberately
+  // leaves the .ts family JSX-free. A plain generic .ts still parses; JSX in a .ts still fails.
+  jsProject(tmp, {
+    'ok.ts': 'export function id<T>(x: T): T {\n  return x\n}\nexport const two = id(2)\n',
+    'bad.ts': 'export const App = () => <Text>hi</Text>\n',
+  })
+  const okOut = join(tmp, 'ok.br')
+  const ok = runCli(['bundle', '--jsx', `--output=${okOut}`, 'ok.ts'], { cwd: tmp })
+  t.assert.equal(ok.status, 0, `a generic .ts must still parse under --jsx; stderr: ${ok.stderr}`)
+
+  const badOut = join(tmp, 'bad.br')
+  const bad = runCli(['bundle', '--jsx', `--output=${badOut}`, 'bad.ts'], { cwd: tmp })
+  t.assert.notEqual(bad.status, 0, 'JSX in a .ts file must still fail closed even with --jsx')
+  t.assert.match(bad.stderr, /JS bundle would be broken at load time/)
+  t.assert.ok(!existsSync(badOut))
+}))
+
+test('CLI: bundle --jsx is rejected for non-JS entries', (t) => {
+  const r = runCli(['bundle', '--jsx', 'a.sol'])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--jsx is only valid for JS bundles/)
+})
+
+test('buildBundle threads jsx through to the scanner (programmatic API)', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'jsx-prog', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.js'), "import { x } from './x.js'\nexport const App = () => <A>{x}</A>\n")
+  writeFileSync(join(tmp, 'x.js'), 'export const x = 1\n')
+  await t.assert.rejects(
+    () => buildBundle({ cwd: tmp, entries: ['entry.js'] }),
+    /JS bundle would be broken at load time/,
+    'default (no jsx) must fail closed on JSX-in-.js',
+  )
+  const bundle = await buildBundle({ cwd: tmp, entries: ['entry.js'], jsx: true })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['entry.js', 'x.js'])
+}))
+
 test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', withTmp((t, tmp) => {
   // The original bug report's root cause: stasis installed without oxc-parser.
   // getParser()'s throw was caught by the per-file parse handler, so every file
