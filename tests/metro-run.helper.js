@@ -1,7 +1,7 @@
 // Test harness: drives the StasisMetro plugin against the cwd as the project root,
-// then writes stasis state. Driven by tests/metro.test.js via spawnSync, so each
-// test gets a fresh State per process (which keeps the preload-singleton invariant
-// happy across cases).
+// then writes stasis state. Driven by tests/metro.test.js via spawn (one child per
+// test), so each test gets a fresh State per process (which keeps the
+// preload-singleton invariant happy across cases).
 //
 // Metro is not a dependency of this repo, and -- like webpack/esbuild -- the plugin
 // never imports its bundler; it only consumes the module graph Metro hands a
