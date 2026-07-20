@@ -8,7 +8,7 @@ import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, isBrotliQuality, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBrotliQuality, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
@@ -82,11 +82,11 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     const inNodeModules = splitNodeModulesPath(rel) !== null
     if (meta) {
       // A node_modules file whose nearest package.json is the workspace root is a misconfigured dep -- refuse (matches the deep path).
-      if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
+      if (inNodeModules && !hasNodeModulesSegment(meta.pkgDir)) {
         throw new Error(`add: no package.json with name+version found for ${rel}`)
       }
       const relInBucket = meta.pkgDir === '.' ? rel : rel.slice(meta.pkgDir.length + 1)
-      const ecosystem = meta.pkgDir.includes('node_modules') ? 'npm' : undefined
+      const ecosystem = hasNodeModulesSegment(meta.pkgDir) ? 'npm' : undefined
       ensureBucket(meta.pkgDir, meta.name, meta.version, ecosystem).files[relInBucket] = content
     } else {
       if (inNodeModules) throw new Error(`add: no package.json with name+version found for ${rel}`)

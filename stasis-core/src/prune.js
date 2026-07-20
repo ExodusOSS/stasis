@@ -13,7 +13,7 @@ import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } fr
 
 import { Lockfile } from './lockfile.js'
 import { sha512integrity } from './state-util.js' // also runs the posix-sep assertion
-import { isPlainObject, moduleFileKey, posixPathEscapes, splitNodeModulesPath } from './util.js'
+import { hasNodeModulesSegment, isPlainObject, moduleFileKey, posixPathEscapes, splitNodeModulesPath } from './util.js'
 
 const LOCKFILE = 'stasis.lock.json'
 
@@ -57,7 +57,7 @@ function buildExpected(lockfile) {
   const expected = new Map()
   const knownDirs = new Set()
   for (const [dir, { files }] of lockfile.modules) {
-    if (!dir.includes('node_modules')) continue // workspace sources, not pnpm-managed
+    if (!hasNodeModulesSegment(dir)) continue // workspace sources, not pnpm-managed
     knownDirs.add(dir)
     for (const [rel, hash] of Object.entries(files)) {
       // moduleFileKey (not `${dir}/${rel}`): a package ROOT readdir records rel === '', whose

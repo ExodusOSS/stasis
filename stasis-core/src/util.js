@@ -442,9 +442,29 @@ export function mergeModuleMaps(a, b, label) {
   return out
 }
 
+// True when `node_modules` appears as a full path SEGMENT in `path` -- at the start or right after
+// a `/`, and terminated by a `/` or the end -- NOT as a bare substring (`foo_node_modules/dep` is
+// a source dir, not a dependency bucket). Shared segment-aware gate for the module-bucket
+// classification across state/bundle/lockfile/prune/add; paths here are always POSIX ('/'-joined).
+export function hasNodeModulesSegment(path) {
+  return path.split('/').includes('node_modules')
+}
+
+// Locate the LAST (deepest) segment-aligned `node_modules/` marker in `path`. Returns its start
+// index, or -1. `lastIndexOf` alone would also match a bare substring (`foo_node_modules/`), so a
+// candidate only counts when it starts the path or follows a `/`.
+function lastNodeModulesMarker(path) {
+  const marker = 'node_modules/'
+  let idx = path.length
+  while ((idx = path.lastIndexOf(marker, idx - 1)) !== -1) {
+    if (idx === 0 || path[idx - 1] === '/') return idx
+  }
+  return -1
+}
+
 export function splitNodeModulesPath(path) {
   const marker = 'node_modules/'
-  const idx = path.lastIndexOf(marker)
+  const idx = lastNodeModulesMarker(path)
   if (idx === -1) return null
   const after = idx + marker.length
   const parts = path.slice(after).split('/')

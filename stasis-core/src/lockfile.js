@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -41,7 +41,7 @@ export class Lockfile {
 
     const modules = new Map()
     for (const [dir, info] of Object.entries(json.modules)) {
-      assert(dir.includes('node_modules'))
+      assert(hasNodeModulesSegment(dir))
       assert(info?.name && info.version && info.files)
       modules.set(dir, normalize(info))
     }
@@ -51,7 +51,7 @@ export class Lockfile {
       assert(Array.isArray(json.entries))
       entries = new Set(json.entries)
       for (const [dir, info] of Object.entries(json.sources)) {
-        assert(!dir.includes('node_modules'))
+        assert(!hasNodeModulesSegment(dir))
         modules.set(dir, normalize(info))
       }
     }
@@ -122,7 +122,7 @@ export class Lockfile {
     const modules = []
     const sources = []
     for (const [dir, { name, version, ecosystem, files }] of this.modules) {
-      const inNodeModules = dir.includes('node_modules')
+      const inNodeModules = hasNodeModulesSegment(dir)
       if (inNodeModules) assert(name && version && files)
       const type = inNodeModules ? modules : sources
       const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
