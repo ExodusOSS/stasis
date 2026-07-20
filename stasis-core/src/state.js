@@ -394,13 +394,23 @@ export class State {
     }
     this.#lockImports = lockfile.imports
     this.#lockFormats = lockfile.formats
-    // A lockfile predating resolution/format attestation can only vouch for bytes; that metadata
-    // goes unchecked until it's regenerated.
-    if (this.config.frozen && this.#lockImports === null) {
-      console.warn('[stasis] Warning: lockfile does not attest resolutions; they are trusted as-is. Regenerate the lockfile to enable this check.')
-    }
-    if (this.config.frozen && this.#lockFormats === null) {
-      console.warn('[stasis] Warning: lockfile does not attest formats; they are trusted as-is. Regenerate the lockfile to enable this check.')
+    // A lockfile predating resolution/format attestation can only vouch for bytes: a null facet
+    // means "does not attest" (distinct from an empty Map = "attests none"). Under lock=frozen we
+    // must fail closed rather than trust that metadata unchecked -- otherwise a redirected
+    // resolution or a flipped loader format could ride hash-valid bytes past a frozen run. Refuse
+    // at absorb (construction) time, before any capture/verification. Non-frozen modes
+    // (add/replace/ignore/none) are unaffected: lock=add regenerates full attestation on write.
+    if (this.config.frozen) {
+      const missing = []
+      if (this.#lockImports === null) missing.push('resolutions')
+      if (this.#lockFormats === null) missing.push('formats')
+      if (missing.length > 0) {
+        throw new Error(
+          `[stasis] lock=frozen: ${lockPath} does not attest ${missing.join(' or ')} ` +
+          `(it predates resolution/format attestation, so frozen mode cannot verify that metadata). ` +
+          `Regenerate the lockfile with --lock=replace before running frozen.`
+        )
+      }
     }
     this.#lockfileLoaded = true
     return true

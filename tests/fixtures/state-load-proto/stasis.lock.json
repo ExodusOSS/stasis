@@ -21,5 +21,7 @@
         "__proto__": "sha512-evil-mod"
       }
     }
-  }
+  },
+  "formats": {},
+  "imports": {}
 }
