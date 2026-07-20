@@ -89,7 +89,7 @@ export class Scan {
   parseErrors = []
   entries = new Set()
 
-  // `conditions` is additive on top of the format-derived base set. `resolve` optionally
+  // `conditions` is additive on top of the edge-context base set. `resolve` optionally
   // replaces Node's resolver (resolve-fields.js): returns `{ url } | { empty } | { builtin } | null`
   // (`empty` = a browser/react-native `false` redirect) and owns builtin handling when set.
   constructor({ conditions = [], resolve = null } = {}) {
@@ -114,13 +114,16 @@ export class Scan {
     return this
   }
 
-  // Must match the runtime resolver's full condition set (Node 22: node, import|require,
+  // Must match the runtime resolver's full condition set (Node 24/26: node, import|require,
   // module-sync, node-addons); omitting any resolves `exports`-gated packages to a different file.
-  #conditionsFor(format) {
-    const base = ['module', 'module-typescript'].includes(format)
-      ? ['node', 'import', 'module-sync', 'node-addons']
-      : ['node', 'require', 'module-sync', 'node-addons']
-    return new Set([...base, ...this.extraConditions])
+  // Order mirrors what the runtime resolve hooks report -- irrelevant for resolution (`exports`/
+  // `imports` matching follows the map's key order), but the recorded condition KEY must equal the
+  // runtime's string for exact lockfile/bundle lookups. Extras land where Node puts user
+  // conditions: appended for import, before the trailing module-sync for require.
+  #conditionSet(context) {
+    return context === 'import'
+      ? new Set(['node', 'import', 'module-sync', 'node-addons', ...this.extraConditions])
+      : new Set(['require', 'node', 'node-addons', ...this.extraConditions, 'module-sync'])
   }
 
   // `recovered`: false = parser crashed, nothing salvaged; true = oxc returned but we
@@ -213,11 +216,20 @@ export class Scan {
     }
     findCallSpecifiers(parsed.program, (s) => specs.push(s))
 
-    const conditions = this.#conditionsFor(format)
-    const key = condKey(conditions)
+    // The edge KIND picks the resolution context, not the parent's format: a createRequire()d
+    // require() inside ESM resolves under Node's REQUIRE conditions, and a literal import()
+    // inside CJS under its IMPORT conditions -- resolving both with the parent-format set baked
+    // the wrong `exports` branch into the bundle (and dropped the right branch's file). The
+    // custom (legacy-field) resolver keeps the parent-format set: bundlers compile import to
+    // require and don't split resolution context per edge.
+    const formatContext = ['module', 'module-typescript'].includes(format) ? 'import' : 'require'
     const req = createRequire(file)
     const edges = []
-    const specMap = new Map()
+    const specMaps = new Map() // condition key -> specifier -> child URL
+    const record = (key, spec, childURL) => {
+      if (!specMaps.has(key)) specMaps.set(key, new Map())
+      specMaps.get(key).set(spec, childURL)
+    }
 
     for (const s of specs) {
       if (s.dynamic) {
@@ -225,6 +237,9 @@ export class Scan {
         this.unresolved.push({ parentURL: url, kind: s.kind, reason: 'dynamic' })
         continue
       }
+      const context = this.customResolve ? formatContext : (s.kind === 'require' ? 'require' : 'import')
+      const conditions = this.#conditionSet(context)
+      const key = condKey(conditions)
       // Custom (legacy-field) resolver owns builtin handling and the `empty` outcome (browser/RN
       // `false` redirect): an empty edge is recorded but neither queued nor counted as unresolved.
       if (this.customResolve) {
@@ -235,7 +250,7 @@ export class Scan {
           edges.push({ ...s, empty: true })
         } else if (r?.url) {
           edges.push({ ...s, child: r.url })
-          specMap.set(s.spec, r.url)
+          record(key, s.spec, r.url)
           if (RESOLVABLE_EXTS.has(extname(fileURLToPath(r.url)))) queue.push(r.url)
         } else {
           edges.push({ ...s, error: 'MODULE_NOT_FOUND' })
@@ -251,7 +266,7 @@ export class Scan {
         const childPath = req.resolve(s.spec, { conditions })
         const childURL = pathToFileURL(childPath).toString()
         edges.push({ ...s, child: childURL })
-        specMap.set(s.spec, childURL)
+        record(key, s.spec, childURL)
         const childExt = extname(childPath)
         if (RESOLVABLE_EXTS.has(childExt)) queue.push(childURL)
       } catch (cause) {
@@ -260,7 +275,7 @@ export class Scan {
       }
     }
 
-    if (specMap.size > 0) {
+    for (const [key, specMap] of specMaps) {
       if (!this.imports.has(key)) this.imports.set(key, new Map())
       this.imports.get(key).set(url, specMap)
     }

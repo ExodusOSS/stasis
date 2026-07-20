@@ -7,10 +7,12 @@
 //
 //   A. Silent wrong-file: both artifacts build and plain node runs fine, but the static
 //      graph attests a DIFFERENT file than the one Node loads, and --bundle=load executes
-//      that wrong file. Causes: the condition set is picked per file, not per edge kind
-//      (a createRequire() require() inside ESM gets `import` conditions; a literal
-//      import() inside CJS gets `require` conditions), and CJS path-string resolution vs
-//      ESM URL semantics (percent-decoding).
+//      that wrong file. A1 (createRequire() require() inside ESM resolved with `import`
+//      conditions) and A2 (literal import() inside CJS resolved with `require` conditions)
+//      are FIXED: scan now picks the condition set per edge KIND, and buildJsBundle keeps
+//      divergent (parent, specifier) targets under their real condition keys instead of
+//      collapsing them onto one '*' entry. A3 (CJS path-string resolution vs ESM URL
+//      semantics: percent-decoding) remains.
 //   B. Over-resolution: CJS-only features (extension probing, directory index, nested
 //      package.json main, subpath probing) leak into ESM import edges, so the bundle
 //      builds -- and --bundle=load runs -- graphs plain node refuses to load.
@@ -27,9 +29,9 @@
 // under --lock=frozen / --bundle=frozen against the static artifact -- which these tests
 // also assert. --bundle=load alone executes the misresolution silently.
 //
-// These tests pin CURRENT behavior. If you fix scan.js (e.g. per-edge-kind condition
-// sets, ESM-semantics validation for module parents), the DIVERGENCE assertions below
-// are supposed to fail -- update them to the new, converged expectations.
+// These tests pin CURRENT behavior. If you fix another class (e.g. ESM-semantics
+// validation for module parents), its DIVERGENCE assertions below are supposed to fail --
+// update them to the new, converged expectations, as was done for A1/A2.
 
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
@@ -179,12 +181,18 @@ function scenario(tmp, entry, source) {
 const installStaticLock = (dirs) =>
   cpSync(join(dirs.bundle, 'static.lock.json'), join(dirs.frozen, 'stasis.lock.json'))
 
-// --- Class A: silent wrong-file misresolutions ---
+// --- Class A: silent wrong-file misresolutions (A1/A2 fixed, now pinned as controls) ---
 
-test('DIVERGENCE A1: require() via createRequire inside ESM statically resolves to the import branch', withTmp((t, tmp) => {
-  // Runtime: the createRequire()d require() resolves `dual` with the REQUIRE condition set
-  // (cjs.cjs). Static scan picks ONE condition set per file (parent is ESM -> import
-  // conditions), so it records esm.mjs for that edge and never reaches cjs.cjs at all.
+// The exact condition keys Node's runtime resolve hooks report on 24/26; scan emits the
+// same strings so the runtime's exact-conditions lookup hits the right divergent bucket.
+const IMPORT_KEY = 'node, import, module-sync, node-addons'
+const REQUIRE_KEY = 'require, node, node-addons, module-sync'
+
+test('FIXED A1: require() via createRequire inside ESM resolves with require conditions', withTmp((t, tmp) => {
+  // The createRequire()d require() resolves `dual` with the REQUIRE condition set (cjs.cjs)
+  // while the import edge of the SAME (parent, specifier) takes the import branch. Scan
+  // resolves per edge kind, and the divergent targets are recorded under their real
+  // condition keys (a single '*' entry can only hold one target).
   const entry = 'main.mjs'
   const dirs = scenario(tmp, entry, `import { createRequire } from 'node:module'
 import { which as viaImport } from 'dual'
@@ -209,27 +217,30 @@ console.log('require', require('dual').which)
 
   t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
   const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  // DIVERGENCE: static graph has only the import branch; the file Node actually require()s
-  // is absent from the attested artifact.
-  t.assert.equal(soleTarget(t, staticLock, 'main.mjs :: dual'), 'node_modules/dual/esm.mjs')
-  t.assert.ok(!staticLock.files.has('node_modules/dual/cjs.cjs'), 'cjs branch missing from static artifact')
+  // The static graph carries both branches under the runtime's condition keys, and both files.
+  t.assert.deepEqual(staticLock.edges.get('main.mjs :: dual'), {
+    [IMPORT_KEY]: 'node_modules/dual/esm.mjs',
+    [REQUIRE_KEY]: 'node_modules/dual/cjs.cjs',
+  })
+  t.assert.ok(staticLock.files.has('node_modules/dual/cjs.cjs'))
+  t.assert.ok(staticLock.files.has('node_modules/dual/esm.mjs'))
 
-  // DIVERGENCE: --bundle=load serves the recorded edge, silently executing the WRONG branch.
+  // --bundle=load executes the same branches as plain node.
   const load = bundleLoad(dirs.bundle, entry)
   t.assert.equal(load.status, 0, load.stderr)
-  t.assert.equal(load.stdout, 'import dual:ESM\nrequire dual:ESM\n')
+  t.assert.equal(load.stdout, plain.stdout)
 
-  // Safety net: a real execution against the static lockfile fails closed.
+  // A real (disk) execution verifies cleanly against the static lockfile.
   installStaticLock(dirs)
   const frozen = frozenRun(dirs.frozen, entry)
-  t.assert.notEqual(frozen.status, 0)
-  t.assert.match(frozen.stderr, /not attested|mismatches the lockfile/u)
+  t.assert.equal(frozen.status, 0, frozen.stderr)
+  t.assert.equal(frozen.stdout, plain.stdout)
 }))
 
-test('DIVERGENCE A2: literal import() inside CJS statically resolves to the require branch', withTmp((t, tmp) => {
-  // The dynamic-import OPERATOR with a static specifier: runtime resolves it with the
-  // IMPORT condition set; scan resolves every spec in a commonjs file with require
-  // conditions. (Filed under dynamic import, but the specifier itself is static.)
+test('FIXED A2: literal import() inside CJS resolves with import conditions', withTmp((t, tmp) => {
+  // The dynamic-import OPERATOR with a static specifier resolves under the IMPORT condition
+  // set even from a commonjs parent; the require edge of the same specifier keeps the
+  // require branch. (The specifier is static; only the operator is "dynamic".)
   const entry = 'main.cjs'
   const dirs = scenario(tmp, entry, `const viaRequire = require('dual').which
 import('dual').then((m) => {
@@ -244,17 +255,20 @@ import('dual').then((m) => {
 
   t.assert.equal(stasisBundle(dirs.bundle, entry).status, 0)
   const staticLock = flattenLock(join(dirs.bundle, 'static.lock.json'))
-  // DIVERGENCE: one target for both consumers; the import() branch file is absent.
-  t.assert.equal(soleTarget(t, staticLock, 'main.cjs :: dual'), 'node_modules/dual/cjs.cjs')
-  t.assert.ok(!staticLock.files.has('node_modules/dual/esm.mjs'))
+  t.assert.deepEqual(staticLock.edges.get('main.cjs :: dual'), {
+    [IMPORT_KEY]: 'node_modules/dual/esm.mjs',
+    [REQUIRE_KEY]: 'node_modules/dual/cjs.cjs',
+  })
+  t.assert.ok(staticLock.files.has('node_modules/dual/esm.mjs'))
 
   const load = bundleLoad(dirs.bundle, entry)
   t.assert.equal(load.status, 0, load.stderr)
-  // DIVERGENCE: import() falls back to the '*' edge and executes the require branch.
-  t.assert.equal(load.stdout, 'require dual:CJS\nimport() dual:CJS\n')
+  t.assert.equal(load.stdout, plain.stdout)
 
   installStaticLock(dirs)
-  t.assert.notEqual(frozenRun(dirs.frozen, entry).status, 0)
+  const frozen = frozenRun(dirs.frozen, entry)
+  t.assert.equal(frozen.status, 0, frozen.stderr)
+  t.assert.equal(frozen.stdout, plain.stdout)
 }))
 
 test('DIVERGENCE A3: percent-encoded relative import resolves literally in the static scan, decoded by Node', withTmp((t, tmp) => {
