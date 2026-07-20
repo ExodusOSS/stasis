@@ -76,26 +76,63 @@ function resolveGlobalEsbuild() {
   return undefined
 }
 
-function assertBuildable(artifact, label) {
+// Artifact-wide preconditions, independent of which entry we build: full scope (a
+// node_modules-scope artifact omits the entry + workspace code) and at least one recorded
+// entry (so selectEntry has something to choose). The per-entry / per-file language checks
+// are deferred to assertBuildableEntry, once the entry to build is known.
+function assertBuildableArtifact(artifact, label) {
   if (artifact.config.scope !== 'full') {
     throw new Error(
       `stasis build requires a full-scope artifact; ${label} is scope='${artifact.config.scope}'. ` +
       `node_modules-scope artifacts omit the entry and workspace code, so there is nothing to build.`
     )
   }
-  const entries = [...artifact.entries]
-  if (entries.length === 0) {
+  if (artifact.entries.size === 0) {
     throw new Error(`stasis build: ${label} declares no entries to build`)
   }
-  for (const entry of entries) {
-    if (!JS_EXTS.has(extname(entry))) {
-      throw new Error(`stasis build only builds JavaScript/TypeScript entries (esbuild); got non-JS entry '${entry}' in ${label}`)
+}
+
+// The set of files the build will actually touch: the entry plus everything reachable from
+// it through the artifact's recorded import graph (walked across every conditions bucket; a
+// --metro edge's per-platform targets are all followed). esbuild follows this same graph, so
+// nothing outside it reaches the build -- which is why the language checks below scope to it.
+function reachableFiles(entry, imports) {
+  const seen = new Set([entry])
+  const stack = [entry]
+  while (stack.length > 0) {
+    const parent = stack.pop()
+    for (const [, byParent] of imports) {
+      const specifiers = byParent.get(parent)
+      if (specifiers === undefined) continue
+      for (const [, target] of specifiers) {
+        // A plain edge records a file string; a --metro edge records a {platform: file} Map.
+        const targets = typeof target === 'string' ? [target] : [...target.values()]
+        for (const file of targets) {
+          if (!seen.has(file)) {
+            seen.add(file)
+            stack.push(file)
+          }
+        }
+      }
     }
   }
-  // formats may be null on a legacy lockfile (nothing to check). Resource formats stay in
-  // the allowlist deliberately: they're files, never edges, so a code-only entry must still
-  // build; an entry that imports one fails at build time.
+  return seen
+}
+
+// Language checks scoped to the ONE entry we build: the entry itself must be JS/TS, and every
+// file reachable from it must have a buildable format. An unrelated non-JS file elsewhere in
+// the artifact -- a second entry's subtree, or a file attested with `stasis add` -- is never
+// reached from this entry, so it does not block the build. `imports`/`formats` may be null on
+// a legacy lockfile (an empty graph; bundleFromLockfile then fails closed on the missing graph).
+function assertBuildableEntry(artifact, entry, label) {
+  if (!JS_EXTS.has(extname(entry))) {
+    throw new Error(`stasis build only builds JavaScript/TypeScript entries (esbuild); got non-JS entry '${entry}' in ${label}`)
+  }
+  const reachable = reachableFiles(entry, artifact.imports ?? new Map())
+  // Resource formats stay in the allowlist deliberately: assets are files, never import edges,
+  // so a reachable-only check never even sees them (an entry that imports one fails at build time).
   for (const [file, format] of artifact.formats ?? new Map()) {
+    if (!reachable.has(file)) continue
     if (!BUILDABLE_FORMATS.has(format)) {
       throw new Error(`stasis build only supports JavaScript/TypeScript bundles (esbuild); ${label} carries a '${format}' file (${file})`)
     }
@@ -109,7 +146,7 @@ function selectEntry(entryArg, entries, { cwd, root, label }) {
   const list = recorded.map((e) => `  ${e}`).join('\n')
   if (entryArg === undefined) {
     if (recorded.length === 1) return recorded[0]
-    // length === 0 is impossible here (assertBuildable required >= 1 entry).
+    // length === 0 is impossible here (assertBuildableArtifact required >= 1 entry).
     throw new Error(`stasis build: ${label} has ${recorded.length} entry points; pass one as the second argument:\n${list}`)
   }
   const candidates = new Set([
@@ -164,12 +201,15 @@ export async function buildCommand({
   if (!Array.isArray(external)) throw new Error('stasis build: external must be an array of esbuild patterns')
   const artifactAbs = resolve(cwd, artifact)
   const { kind, artifact: parsed } = parseFileWithKind(artifactAbs)
-  assertBuildable(parsed, artifact)
+  assertBuildableArtifact(parsed, artifact)
 
   // Anchor artifact-relative paths at the artifact's own directory; a lockfile's sources
   // are read + verified from there.
   const root = dirname(artifactAbs)
   const selectedEntry = selectEntry(entry, parsed.entries, { cwd, root, label: artifact })
+  // Language checks run against the SELECTED entry only: other entries (and their non-JS
+  // subtrees) are not our concern when building this one.
+  assertBuildableEntry(parsed, selectedEntry, artifact)
 
   const bundle = kind === 'lockfile' ? bundleFromLockfile(parsed, { root }) : parsed
   const state = loadStateForBundle(root, bundle)

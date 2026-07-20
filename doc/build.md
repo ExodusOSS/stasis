@@ -82,12 +82,20 @@ bytes and a lockfile fails the build closed.
 `stasis build` requires a **full-scope** artifact — a `node_modules`-scope one
 omits the entry and the workspace's own code.
 
-Only JavaScript/TypeScript is supported. Entries may be
+Only JavaScript/TypeScript is supported. The entry being built may be
 `.js`/`.cjs`/`.mjs`/`.ts`/`.cts`/`.mts`/`.jsx`/`.tsx`, loader chosen from the
 extension. JSX compiles to esbuild's default classic runtime
 (`React.createElement`), overridable per file with a `/** @jsx ... */` pragma;
 esbuild's `jsx`/`jsxFactory` options are not exposed and `--platform` does not
-affect the JSX runtime. Solidity/PHP/Bash/Rust artifacts are rejected.
+affect the JSX runtime. Solidity/PHP/Bash/Rust entries are rejected.
+
+The language check is scoped to the **entry being built** and the files
+**reachable from it** through the recorded import graph — the same set esbuild
+follows. A non-JS file elsewhere in the artifact (another entry's subtree, or a
+file attested with `stasis add`) is never reached from this entry, so it does
+not block the build; only a non-JS file the built entry actually imports fails
+it. An artifact carrying, say, a JS app *and* an `android/app/build.gradle`
+therefore still builds its JS entry.
 
 ### JSX in `.js`/`.ts`
 
