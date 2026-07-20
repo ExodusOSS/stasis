@@ -123,10 +123,30 @@ default, a reached `.jsx`/`.tsx` file instead fails closed as a target *"a sourc
 bundle can't carry"*, so a bundle whose toolchain can't build JSX never silently
 ships it.
 
-**Non-code assets** are not emitted yet. Assets (`.png`/`.svg`/… as
-`resource`/`resource:base64`) are recorded as files but not as import *edges*, so
-a code-only entry builds fine even when the artifact carries assets for other
-entries, while an entry that imports an asset fails at build time.
+### Non-code assets (`--resources`)
+
+Not every import graph is loadable purely in JS: a React Native entry may
+`import logo from './logo.png'`, and Metro consumes such assets from the bundle.
+By default a reached non-code file is fatal — it *"a source bundle can't carry"*.
+Pass `--resources=<ext-or-name>[,…]` to carry the allowlisted files as resources
+instead, with their import edges recorded:
+
+```sh
+stasis bundle --metro --platforms=ios,android --resources=png,svg,ttf index.js
+```
+
+Each carried file is stored by content — `resource` for UTF-8 (e.g. `.svg`),
+`resource:base64` for binary (e.g. `.png`) — the same formats the `--metro` native
+capture and the esbuild/webpack plugins use. The allowlist entries are bare
+extensions (`png`) or extensionless filenames (`LICENSE`); code extensions are
+rejected (they're always tracked as code). Only files *reached through the import
+graph* are carried — an allowlisted extension that nothing imports adds nothing.
+`--resources` is JS-only and pairs with plain, `--mainFields`, and `--metro` alike.
+
+A resource is carried, not built: `stasis build` (esbuild) still needs a matching
+`--loader` (e.g. `--loader=.png:dataurl`) to emit one, so an entry that imports an
+asset without a configured loader fails at build time — the bundle/lockfile carries
+the bytes for attestation and for Metro regardless.
 
 > [!NOTE]
 > The static `stasis bundle` command does not accept `.jsx`/`.tsx` *entries* (it

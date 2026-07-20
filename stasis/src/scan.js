@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire, isBuiltin } from 'node:module'
 import assert from 'node:assert/strict'
 import { packageType } from '@exodus/stasis-core/bundle-util'
-import { classifyFormat } from '@exodus/stasis-core/util'
+import { classifyExtension, classifyFormat } from '@exodus/stasis-core/util'
 
 // Static require/import graph walker: parses source, never loads or executes user code.
 // Dynamic specifiers (`require(name)`, `import('./'+x)`) are recorded as unresolved.
@@ -127,15 +127,27 @@ export class Scan {
   // `jsx` opts the .js/.cjs/.mjs family into JSX syntax (React Native's JSX-in-.js convention);
   // off by default because oxc, like tsc, only auto-enables JSX for .jsx/.tsx by extension.
   // `flow`: strip Flow type syntax from JS-family sources before parsing (see #scanFile).
-  constructor({ conditions = [], resolve = null, jsx = false, flow = false } = {}) {
+  // `resources` (a `parseResourcesOption` Set of extensions/filenames): reached files matching it
+  // are carried as opaque resources (bytes only) rather than rejected as un-carryable -- for graphs
+  // that aren't fully loadable in JS (e.g. Metro consuming .png/.svg assets).
+  constructor({ conditions = [], resolve = null, jsx = false, flow = false, resources = new Set() } = {}) {
     this.extraConditions = [...conditions]
     this.customResolve = resolve
     this.jsx = jsx
     this.flow = flow
+    this.resources = resources
     // --jsx widens the script/resolvable extension sets to include .jsx/.tsx, so those files are
     // parsed (not left as opaque leaves) and queued when reached. Off by default the base sets apply.
     this.scriptExts = jsx ? new Set([...SCRIPT_EXTS, ...JSX_FILE_EXTS]) : SCRIPT_EXTS
     this.resolvableExts = jsx ? new Set([...RESOLVABLE_EXTS, ...JSX_FILE_EXTS]) : RESOLVABLE_EXTS
+  }
+
+  // A reached file whose extension/filename is in the --resources allowlist: carried as an opaque
+  // resource (bytes only, no parse, no edges), not rejected as "a source bundle can't carry".
+  // classifyExtension returns 'resource' only for non-code names in the allowlist, so this never
+  // shadows a script/json extension (parseResourcesOption rejects code extensions).
+  #isResource(file) {
+    return this.resources.size > 0 && classifyExtension(file, this.resources) === 'resource'
   }
 
   walk(entries) {
@@ -192,6 +204,12 @@ export class Scan {
     const ext = extname(file)
     if (ext === '.json') {
       this.files.set(url, { format: 'json', edges: [] })
+      return
+    }
+    if (this.#isResource(file)) {
+      // Allowlisted asset: carry it as a resource with no parse and no edges. `format: 'resource'`
+      // is a placeholder; the bundle builder reads the bytes and derives resource vs resource:base64.
+      this.files.set(url, { format: 'resource', edges: [], resource: true })
       return
     }
     if (!this.scriptExts.has(ext)) {
@@ -329,7 +347,8 @@ export class Scan {
         } else if (r?.url) {
           edges.push({ ...s, child: r.url })
           record(key, s.spec, r.url)
-          if (this.resolvableExts.has(extname(fileURLToPath(r.url)))) queue.push(r.url)
+          const childPath = fileURLToPath(r.url)
+          if (this.resolvableExts.has(extname(childPath)) || this.#isResource(childPath)) queue.push(r.url)
         } else {
           edges.push({ ...s, error: 'MODULE_NOT_FOUND' })
           this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: 'MODULE_NOT_FOUND' })
@@ -346,7 +365,7 @@ export class Scan {
         edges.push({ ...s, child: childURL })
         record(key, s.spec, childURL)
         const childExt = extname(childPath)
-        if (this.resolvableExts.has(childExt)) queue.push(childURL)
+        if (this.resolvableExts.has(childExt) || this.#isResource(childPath)) queue.push(childURL)
       } catch (cause) {
         edges.push({ ...s, error: cause.code ?? cause.message })
         this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: cause.code ?? cause.message })

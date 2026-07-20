@@ -8,7 +8,7 @@ import { basename, dirname, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
-import { parseBrotliQuality } from '@exodus/stasis-core/util'
+import { parseBrotliQuality, parseResourcesOption } from '@exodus/stasis-core/util'
 import pkg from '../package.json' with { type: 'json' }
 
 const argv = [...process.argv]
@@ -24,14 +24,15 @@ function usage(prefix = '') {
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--resources=ext,ext] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--resources=ext,ext] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
-  --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep))
+  --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep);
+  --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them))
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -169,7 +170,7 @@ if (command === '-v' || command === '--version') {
   process.exitCode = code ?? 128 + (osConstants.signals[signal] ?? 0)
 } else if (command === 'bundle') {
   const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--brotli-quality', '-o'])
+  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--brotli-quality', '-o'])
   while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
     flags.push(argv.shift())
   }
@@ -185,6 +186,7 @@ if (command === '-v' || command === '--version') {
     platforms: { type: 'string', multiple: true },
     jsx: { type: 'boolean' },
     flow: { type: 'boolean' },
+    resources: { type: 'string' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
@@ -250,6 +252,21 @@ if (command === '-v' || command === '--version') {
   // plain/--mainFields/--metro alike -- JS-only, since no other entry language is scanned.
   const jsx = Boolean(values.jsx)
   if (jsx && !allJs) usage('Error: --jsx is only valid for JS bundles')
+  // --resources: comma-separated extension/filename allowlist for assets reached through the graph
+  // (e.g. --resources=png,svg). They're carried as resources instead of failing "can't carry" --
+  // for graphs that aren't fully loadable in JS (Metro consumes such assets). JS-only.
+  if (values.resources !== undefined && !allJs) usage('Error: --resources is only valid for JS bundles')
+  const resources = values.resources === undefined
+    ? []
+    : values.resources.split(',').map((s) => s.trim()).filter(Boolean)
+  if (values.resources !== undefined && resources.length === 0) {
+    usage('Error: --resources must list at least one extension or filename (e.g. --resources=png,svg)')
+  }
+  try {
+    parseResourcesOption('--resources', resources) // validate early for a clean usage error (code exts / bad chars rejected)
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
   if (metro) {
     if (conditions.length > 0) usage("Error: --conditions can't be combined with --metro (it sets its own conditions)")
     if (mainFields !== undefined) usage("Error: --mainFields can't be combined with --metro (it sets its own mainFields)")
@@ -285,6 +302,7 @@ if (command === '-v' || command === '--version') {
     platforms,
     jsx,
     flow,
+    resources,
     brotliQuality,
     add,
   })
