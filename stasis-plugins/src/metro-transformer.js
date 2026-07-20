@@ -27,15 +27,24 @@ function getBase() {
 }
 
 // Per-worker load State, built once from the usual env + stasis.config.json. Non-load mode -> null
-// -> transparent pass-through, so wiring it permanently is safe.
+// -> transparent pass-through, so wiring it permanently is safe. A construction failure is cached
+// and rethrown on every call -- never throw-once-then-silently-pass-through.
 let stateInited = false
 let loadState = null
+let stateError = null
 function getLoadState() {
   if (!stateInited) {
-    stateInited = true
-    const state = new State(process.cwd())
-    loadState = state.config.loadBundle ? state : null
+    try {
+      const state = new State(process.cwd())
+      loadState = state.config.loadBundle ? state : null
+    } catch (err) {
+      stateError = err
+      throw err
+    } finally {
+      stateInited = true
+    }
   }
+  if (stateError) throw stateError
   return loadState
 }
 

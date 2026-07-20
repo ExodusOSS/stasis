@@ -730,18 +730,13 @@ test('addFile throws on a format flip in lock=add (attested format changed, byte
   }
 })
 
-test('lock=frozen fails closed when the loaded lockfile predates resolution/format attestation', (t) => {
-  // A null `imports`/`formats` in the lockfile means "does not attest" (distinct from an empty
-  // Map = "attests none"). Under lock=frozen, stasis must refuse at construction rather than
-  // trust that metadata unchecked -- otherwise a redirected resolution or a flipped loader format
-  // could ride hash-valid bytes past a frozen run. The error names the missing attestation and
-  // points at --lock=replace. Non-frozen modes are unaffected (they regenerate on write).
+test('a lockfile missing imports and/or formats is refused at parse, in every lock mode', (t) => {
+  // Every stasis writer emits both facets; Lockfile.parse requires them, so a stripped facet can't
+  // make lock=add silently regenerate it from partial observations, and frozen never sees one.
   const dir = mkdtempSync(join(tmpdir(), 'stasis-frozen-attest-'))
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fx', version: '0.0.0' }))
     const lockPath = join(dir, 'stasis.lock.json')
-    // A fully-attested v1-shape lockfile: `imports` and `formats` present (empty = "attests none",
-    // which is NOT null). Stripping a key below yields the legacy "does not attest" shape.
     const fullLock = {
       version: 0,
       config: { scope: 'full' },
@@ -753,31 +748,16 @@ test('lock=frozen fails closed when the loaded lockfile predates resolution/form
     }
     const writeLock = (obj) => writeFileSync(lockPath, JSON.stringify(obj, undefined, 2) + '\n')
     const frozen = () => new State(dir, { scope: 'full', lock: 'frozen', bundle: 'none' })
+    const add = () => new State(dir, { scope: 'full', lock: 'add', bundle: 'none' })
 
-    // imports === null (key absent): frozen throws, naming the missing attestation + the fix.
-    const noImports = structuredClone(fullLock)
-    delete noImports.imports
-    writeLock(noImports)
-    t.assert.throws(frozen, /lock=frozen: .* does not attest resolutions[\s\S]*--lock=replace/)
+    for (const strip of [['imports'], ['formats'], ['imports', 'formats']]) {
+      const lock = structuredClone(fullLock)
+      for (const key of strip) delete lock[key]
+      writeLock(lock)
+      t.assert.throws(frozen, /must attest imports and formats/, `frozen refuses without ${strip}`)
+      t.assert.throws(add, /must attest imports and formats/, `add refuses without ${strip}`)
+    }
 
-    // formats === null: frozen throws likewise.
-    const noFormats = structuredClone(fullLock)
-    delete noFormats.formats
-    writeLock(noFormats)
-    t.assert.throws(frozen, /lock=frozen: .* does not attest formats[\s\S]*--lock=replace/)
-
-    // Both absent: one throw naming both facets.
-    const neither = structuredClone(fullLock)
-    delete neither.imports
-    delete neither.formats
-    writeLock(neither)
-    t.assert.throws(frozen, /does not attest resolutions or formats/)
-
-    // Only config.frozen fails closed: a non-frozen mode against the same legacy lockfile still
-    // constructs (lock=add regenerates full attestation on write).
-    t.assert.doesNotThrow(() => new State(dir, { scope: 'full', lock: 'add', bundle: 'none' }))
-
-    // A fully-attested lockfile constructs a frozen run cleanly.
     writeLock(fullLock)
     t.assert.doesNotThrow(frozen)
   } finally {

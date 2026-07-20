@@ -15,9 +15,10 @@ export class Lockfile {
   config
   entries
   modules
-  // conditions -> parent -> specifier -> resolved file. null (not empty Map) = predates attestation ("doesn't attest" vs "attests none").
+  // conditions -> parent -> specifier -> resolved file. parse always yields a Map; null only on
+  // in-memory constructs (diff tooling's "doesn't attest" side).
   imports
-  // file -> format string. null = predates attestation (same "doesn't attest" vs "attests none" as imports).
+  // file -> format string. Same Map/null rule as imports.
   formats
 
   constructor({ config = { scope: 'full' }, entries, modules, imports, formats } = {}) {
@@ -33,6 +34,8 @@ export class Lockfile {
     const json = JSON.parse(text)
     assert(json.version === VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
+    // Every stasis writer emits both facets; a file missing either is not a stasis lockfile.
+    assert(json.imports !== undefined && json.formats !== undefined, 'lockfile must attest imports and formats')
 
     const full = json.config.scope === 'full'
     assert(!!json.entries === full)
@@ -64,54 +67,48 @@ export class Lockfile {
       }
     }
 
-    let imports = null
-    if (json.imports !== undefined) {
-      assert(isPlainObject(json.imports))
-      imports = new Map()
-      for (const [conditions, byParent] of Object.entries(json.imports)) {
-        assert(isPlainObject(byParent))
-        const parents = new Map()
-        for (const [parent, specifiers] of Object.entries(byParent)) {
-          assert(!posixPathEscapes(parent))
-          assert(isPlainObject(specifiers))
-          const specs = new Map()
-          for (const [specifier, target] of Object.entries(specifiers)) {
-            // A file string, or a { platform: file } map (--metro); reject any other shape (fail closed).
-            if (typeof target === 'string') {
-              assert(!posixPathEscapes(target))
-              specs.set(specifier, target)
-            } else {
-              assert(isPlainObject(target) && Object.keys(target).length > 0,
-                'import target must be a file or a non-empty {platform: file} map')
-              const byPlatform = new Map()
-              for (const [platform, file] of Object.entries(target)) {
-                assert(typeof platform === 'string' && platform.length > 0 && !platform.includes('/'), `invalid platform key '${platform}'`)
-                assert(typeof file === 'string')
-                assert(!posixPathEscapes(file))
-                byPlatform.set(platform, file)
-              }
-              specs.set(specifier, byPlatform)
+    assert(isPlainObject(json.imports))
+    const imports = new Map()
+    for (const [conditions, byParent] of Object.entries(json.imports)) {
+      assert(isPlainObject(byParent))
+      const parents = new Map()
+      for (const [parent, specifiers] of Object.entries(byParent)) {
+        assert(!posixPathEscapes(parent))
+        assert(isPlainObject(specifiers))
+        const specs = new Map()
+        for (const [specifier, target] of Object.entries(specifiers)) {
+          // A file string, or a { platform: file } map (--metro); reject any other shape (fail closed).
+          if (typeof target === 'string') {
+            assert(!posixPathEscapes(target))
+            specs.set(specifier, target)
+          } else {
+            assert(isPlainObject(target) && Object.keys(target).length > 0,
+              'import target must be a file or a non-empty {platform: file} map')
+            const byPlatform = new Map()
+            for (const [platform, file] of Object.entries(target)) {
+              assert(typeof platform === 'string' && platform.length > 0 && !platform.includes('/'), `invalid platform key '${platform}'`)
+              assert(typeof file === 'string')
+              assert(!posixPathEscapes(file))
+              byPlatform.set(platform, file)
             }
+            specs.set(specifier, byPlatform)
           }
-          parents.set(parent, specs)
         }
-        imports.set(conditions, parents)
+        parents.set(parent, specs)
       }
+      imports.set(conditions, parents)
     }
 
-    let formats = null
-    if (json.formats !== undefined) {
-      assert(isPlainObject(json.formats))
-      formats = new Map()
-      for (const [file, format] of Object.entries(json.formats)) {
-        assert(!posixPathEscapes(file))
-        // Reject unknown formats at the schema boundary (not downstream) so a tampered lockfile fails closed.
-        assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
-        // '' and '.' alias to the same key (older lockfiles keyed the root listing ''); normalize, fail closed on dupes.
-        const key = file === '' ? '.' : file
-        assert(!formats.has(key), `duplicate format key '${key}'`)
-        formats.set(key, format)
-      }
+    assert(isPlainObject(json.formats))
+    const formats = new Map()
+    for (const [file, format] of Object.entries(json.formats)) {
+      assert(!posixPathEscapes(file))
+      // Reject unknown formats at the schema boundary (not downstream) so a tampered lockfile fails closed.
+      assert(KNOWN_FORMATS.has(format), `unknown format '${format}' for ${file}`)
+      // '' and '.' alias to the same key (older lockfiles keyed the root listing ''); normalize, fail closed on dupes.
+      const key = file === '' ? '.' : file
+      assert(!formats.has(key), `duplicate format key '${key}'`)
+      formats.set(key, format)
     }
 
     return new Lockfile({ config: json.config, entries, modules, imports, formats })
@@ -134,7 +131,7 @@ export class Lockfile {
     const store = { version: this.version, config: this.config }
     if (this.config.scope === 'full') Object.assign(store, { entries, sources: fromEntries(sources) })
     Object.assign(store, { modules: fromEntries(modules) })
-    // Legacy lockfiles (imports/formats null) omit the key so parse-serialize stays byte-stable.
+    // A null facet (in-memory constructs only) omits the key.
     if (this.imports !== null) Object.assign(store, { imports: fileMapToObject(this.imports) })
     if (this.formats !== null) Object.assign(store, { formats: fileMapToObject(this.formats) })
     return JSON.stringify(store, undefined, 2) + '\n'

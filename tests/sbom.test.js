@@ -18,7 +18,7 @@ const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 
 // The `@exodus/stasis/sbom` API operates on already-parsed artifacts, so build
 // Lockfile/Bundle instances straight from JSON — no disk, no brotli.
-const lockOf = (obj) => Lockfile.parse(JSON.stringify(obj))
+const lockOf = (obj) => Lockfile.parse(JSON.stringify({ imports: {}, formats: {}, ...obj })) // parse requires both facets
 const codeOf = (obj) => Bundle.parse(JSON.stringify(obj))
 
 // A scope=full lockfile object: one workspace root + two node_modules deps (one
@@ -329,7 +329,7 @@ const withTmp = (fn) => (t) => {
 
 const writeLockFile = (dir, obj = LOCK, name = 'stasis.lock.json') => {
   const p = join(dir, name)
-  writeFileSync(p, JSON.stringify(obj))
+  writeFileSync(p, JSON.stringify({ imports: {}, formats: {}, ...obj }))
   return p
 }
 

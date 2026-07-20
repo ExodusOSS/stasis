@@ -34,6 +34,8 @@ const writeLock = (dir, name = 'stasis.lock.json', extra = {}) => {
       'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y' } },
       'node_modules/bar': { name: 'bar', version: '4.5.6', files: { 'index.js': 'sha512-z' } },
     },
+    imports: {},
+    formats: {},
     ...extra,
   }
   writeFileSync(path, JSON.stringify(lock))
@@ -297,6 +299,8 @@ test('collectPackages does not collapse different packages at the same version',
       'node_modules/a': { name: 'a', version: '1.0.0', files: { 'i.js': 'sha512-x' } },
       'node_modules/b': { name: 'b', version: '1.0.0', files: { 'i.js': 'sha512-y' } },
     },
+    imports: {},
+    formats: {},
   }))
   t.assert.deepEqual(collectPackages([file]), [
     { name: 'a', version: '1.0.0' },

@@ -31,7 +31,7 @@ function buildProject(t, modules, { workspace = false } = {}) {
   // A pnpm-workspace.yaml marks the root as a workspace; prune detects it by
   // existence (it discovers the package node_modules by walking, not by parsing).
   if (workspace) writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n')
-  const lock = { version: 0, config: { scope: 'node_modules' }, modules: lockModules }
+  const lock = { version: 0, config: { scope: 'node_modules' }, modules: lockModules, imports: {}, formats: {} }
   writeFileSync(join(root, 'stasis.lock.json'), `${JSON.stringify(lock, undefined, 2)}\n`)
   return root
 }

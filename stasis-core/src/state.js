@@ -370,8 +370,9 @@ export class State {
     liveStates().add(this)
   }
 
-  // Absorb a lockfile's attestation (module/hash maps, imports/formats, frozen-mode warnings).
+  // Absorb a lockfile's attestation (module/hash maps, imports/formats).
   // Returns whether it was actually absorbed (the caller's `lockfileLoaded`).
+  // Lockfile.parse requires both imports and formats, so an absorbed lockfile always attests them.
   #absorbLockfile(lock, lockPath) {
     if (lock && !this.config.useLockfile && !this.config.ignoreLockfile) {
       throw new Error(`Unexpected ${lockPath} with config.lock = 'none'`)
@@ -394,24 +395,6 @@ export class State {
     }
     this.#lockImports = lockfile.imports
     this.#lockFormats = lockfile.formats
-    // A lockfile predating resolution/format attestation can only vouch for bytes: a null facet
-    // means "does not attest" (distinct from an empty Map = "attests none"). Under lock=frozen we
-    // must fail closed rather than trust that metadata unchecked -- otherwise a redirected
-    // resolution or a flipped loader format could ride hash-valid bytes past a frozen run. Refuse
-    // at absorb (construction) time, before any capture/verification. Non-frozen modes
-    // (add/replace/ignore/none) are unaffected: lock=add regenerates full attestation on write.
-    if (this.config.frozen) {
-      const missing = []
-      if (this.#lockImports === null) missing.push('resolutions')
-      if (this.#lockFormats === null) missing.push('formats')
-      if (missing.length > 0) {
-        throw new Error(
-          `[stasis] lock=frozen: ${lockPath} does not attest ${missing.join(' or ')} ` +
-          `(it predates resolution/format attestation, so frozen mode cannot verify that metadata). ` +
-          `Regenerate the lockfile with --lock=replace before running frozen.`
-        )
-      }
-    }
     this.#lockfileLoaded = true
     return true
   }
@@ -505,7 +488,7 @@ export class State {
       }
       // Every edge the bundle could serve must match the lockfile's attested target: hashes alone
       // don't stop a redirect to a different hash-valid file. Unknown edges fatal (superset OK);
-      // lockfiles predating resolution attestation (imports === null) skip -- regenerate with lock=replace.
+      // null #lockImports (no lockfile loaded) skips.
       if (this.#lockImports !== null) {
         for (const [conditions, byParent] of bundle.imports) {
           for (const [parent, specifiers] of byParent) {
