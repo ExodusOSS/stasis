@@ -37,10 +37,11 @@ function usage(prefix = '') {
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
- stasis audit [--why|--why-deep] [--reason=consumer] path/to/file ...
+ stasis audit [--why|--why-deep] [--why-full] [--reason=consumer] path/to/file ...
  (--why lists, per advisory, the cross-module import paths that pull the package in,
   prefixed by the bundle consumer that imports each chain at the top level, e.g. "run: a -> b -> c";
   it skips chains whose full tail is already listed as its own chain -- --why-deep keeps them all;
+  --why-full spells every chain out instead of collapsing repeated tails to "a -> b -> ... -> d";
   --reason=consumer shows only advisories related to that consumer, and with --why only its chains)
  stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
  (streams to stdout by default; --output=- is explicit stdout)
@@ -394,14 +395,14 @@ if (command === '-v' || command === '--version') {
   }
   let values
   try {
-    ({ values } = parseArgs({ args: flags, options: { why: { type: 'boolean' }, 'why-deep': { type: 'boolean' }, reason: { type: 'string' } } }))
+    ({ values } = parseArgs({ args: flags, options: { why: { type: 'boolean' }, 'why-deep': { type: 'boolean' }, 'why-full': { type: 'boolean' }, reason: { type: 'string' } } }))
   } catch (cause) {
     usage(`Error: ${cause.message}`)
   }
   if (argv.length === 0) usage('Nothing to audit: no path to file given')
   const { audit, printAuditReport } = await import('../src/audit.js')
   const files = argv.map((f) => resolve(f))
-  const report = await audit(files, { why: Boolean(values.why), whyDeep: Boolean(values['why-deep']), reason: values.reason })
+  const report = await audit(files, { why: Boolean(values.why), whyDeep: Boolean(values['why-deep']), whyFull: Boolean(values['why-full']), reason: values.reason })
   printAuditReport(report)
   process.exitCode = report.rows.length === 0 ? 0 : 1
 } else if (command === 'sbom') {

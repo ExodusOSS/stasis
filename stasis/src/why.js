@@ -262,9 +262,12 @@ function dropSuffixed(chains) {
 // consumer, dropping every other chain (and bare, unattributed chains).
 // By default a chain is dropped when a same-bucket chain is a full suffix of it
 // (see dropSuffixed); `deep` (--why-deep) keeps every chain. Chains are then
-// deduplicated and compressed per reason bucket (see compressChains).
-// Artifacts without a resolution graph (`imports`) contribute nothing.
-export function collectWhy(files, targetKeys, reasonFilter = null, { deep = false } = {}) {
+// deduplicated and compressed per reason bucket (see compressChains), unless
+// `full` (--why-full) -- then every surviving chain is spelled out with no `...`
+// collapse, in the same shortest-first order. The flags compose: deep + full is
+// the complete raw listing. Artifacts without a resolution graph (`imports`)
+// contribute nothing.
+export function collectWhy(files, targetKeys, reasonFilter = null, { deep = false, full = false } = {}) {
   // key -> reason bucket ('' = unattributed) -> Map(chainKey -> node-name array)
   const acc = new Map()
   const truncatedKeys = new Set()
@@ -332,15 +335,22 @@ export function collectWhy(files, targetKeys, reasonFilter = null, { deep = fals
     }
   }
 
-  // Prune (unless deep), compress, and render each bucket (buckets sorted so a
-  // consumer's chains group together; bare '' sorts first).
+  // --why-full: no `...` collapse -- every chain spelled out, same order as
+  // compressChains (shortest-first, then alphabetical).
+  const renderFull = (chains) =>
+    chains
+      .toSorted((a, b) => a.length - b.length || a.join(' -> ').localeCompare(b.join(' -> ')))
+      .map((c) => c.join(' -> '))
+
+  // Prune (unless deep), compress (unless full), and render each bucket (buckets
+  // sorted so a consumer's chains group together; bare '' sorts first).
   const byPkg = new Map()
   for (const [key, buckets] of acc) {
     const lines = []
     for (const bucket of [...buckets.keys()].toSorted((a, b) => a.localeCompare(b))) {
       let chains = [...buckets.get(bucket).values()]
       if (!deep) chains = dropSuffixed(chains)
-      for (const rendered of compressChains(chains)) {
+      for (const rendered of (full ? renderFull(chains) : compressChains(chains))) {
         lines.push(bucket ? `${bucket}: ${rendered}` : rendered)
       }
     }

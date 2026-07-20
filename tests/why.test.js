@@ -445,6 +445,29 @@ test('collectWhy default pruning is per reason bucket', withTmp((t, tmp) => {
   ])
 }))
 
+test('collectWhy full skips the `...` collapse and spells every chain out', withTmp((t, tmp) => {
+  // A funnel that would collapse: with { full: true } every chain is spelled out.
+  // full alone still prunes first (D -> C -> B -> A is a full suffix of the P/Q
+  // chains, dropping them); deep + full is the complete raw listing.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'E', 'P', 'Q'],
+    edges: [
+      ['e', 'P'], ['e', 'Q'], ['e', 'D'],
+      ['P', 'E'], ['Q', 'E'],
+      ['E', 'D'], ['D', 'C'], ['C', 'B'], ['B', 'A'],
+    ],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0']), null, { deep: true, full: true }).get('A@1.0.0'), [
+    'D -> C -> B -> A',
+    'P -> E -> D -> C -> B -> A',
+    'Q -> E -> D -> C -> B -> A',
+  ])
+  // full without deep: the pruning still applies first.
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0']), null, { full: true }).get('A@1.0.0'), [
+    'D -> C -> B -> A',
+  ])
+}))
+
 test('collectWhy by default shows only the bare line for a src-direct flagged package', withTmp((t, tmp) => {
   // The flagged D is itself a direct dependency of src, so its bare chain `D`
   // suppresses every longer chain reaching D through subdeps. --why-deep keeps them.
