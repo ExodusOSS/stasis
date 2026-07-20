@@ -25,7 +25,7 @@ function usage(prefix = '') {
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
@@ -181,6 +181,7 @@ if (command === '-v' || command === '--version') {
     conditions: { type: 'string' },
     mainFields: { type: 'string' },
     metro: { type: 'boolean' },
+    'metro-resolver': { type: 'boolean' },
     platforms: { type: 'string', multiple: true },
     jsx: { type: 'boolean' },
     flow: { type: 'boolean' },
@@ -235,6 +236,9 @@ if (command === '-v' || command === '--version') {
   // --metro: resolve like Metro/RN (its own conditions + mainFields, platform suffixes per
   // --platforms target). --platforms is repeatable and/or comma-separated; the values union.
   const metro = Boolean(values.metro)
+  // --metro-resolver: resolve through the project's own metro-resolver instead of the built-in
+  // approximation. Only meaningful alongside --metro (enforced below and in classifyEntries).
+  const metroResolver = Boolean(values['metro-resolver'])
   const platforms = [...new Set((values.platforms ?? []).flatMap((p) => p.split(',')).map((s) => s.trim()).filter(Boolean))]
   // A platform name becomes an edge key: reject '/' (parsers reject it) and '*' (reserved placeholder).
   for (const p of platforms) {
@@ -253,6 +257,7 @@ if (command === '-v' || command === '--version') {
   } else if (platforms.length > 0) {
     usage('Error: --platforms is only valid with --metro')
   }
+  if (metroResolver && !metro) usage('Error: --metro-resolver is only valid with --metro')
   // --brotli-quality: valid for every entry language (no allJs gate).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
@@ -276,6 +281,7 @@ if (command === '-v' || command === '--version') {
     conditions,
     mainFields,
     metro,
+    metroResolver,
     platforms,
     jsx,
     flow,

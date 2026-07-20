@@ -41,6 +41,7 @@
     "src/loaders/php.js",
     "src/lockfile.js",
     "src/metro.js",
+    "src/metro-resolver.js",
     "src/metro-transformer.js",
     "src/mock.js",
     "src/parse.js",
