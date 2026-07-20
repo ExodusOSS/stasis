@@ -1696,19 +1696,21 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     t.assert.equal(r.stdout, 'hello, world\n')
   }))
 
-  test('run --lock=frozen warns but proceeds when a legacy lockfile lacks formats', withTmp(async (t, tmp) => {
+  test('run --lock=frozen fails closed when a legacy lockfile lacks formats', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
-    // A lockfile with imports but no formats (predating format attestation):
-    // the formats check is skipped, with a warning, and the run still works.
+    // A lockfile with imports but no formats (predating format attestation) cannot
+    // vouch for loader formats: frozen mode must refuse at construction, before any
+    // code runs, and point at --lock=replace -- not trust the metadata with a warning.
     const lockPath = join(tmp, 'stasis.lock.json')
     const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
     delete lock.formats
     writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
 
     const r = await run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
-    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-    t.assert.equal(r.stdout, 'hello, world\n')
-    t.assert.match(r.stderr, /lockfile does not attest formats/)
+    t.assert.notEqual(r.status, 0)
+    t.assert.match(r.stderr, /lock=frozen: .* does not attest formats/)
+    t.assert.match(r.stderr, /--lock=replace/)
+    t.assert.doesNotMatch(r.stdout, /hello/, 'no code may run against an under-attesting frozen lockfile')
   }))
 
   test('run --lock=frozen --bundle=load rejects a bundle resolution redirected to another attested file', withTmp(async (t, tmp) => {
@@ -1875,25 +1877,31 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     t.assert.doesNotMatch(r.stdout, /hello/, 'no module code may execute when an edge is unattested')
   }))
 
-  test('run --lock=frozen warns but proceeds when a legacy lockfile lacks imports (disk run)', withTmp(async (t, tmp) => {
+  test('run --lock=frozen fails closed when a legacy lockfile lacks imports (disk run)', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
+    // A lockfile predating resolution attestation (no `imports`) cannot vouch for
+    // resolution edges: frozen mode must refuse at construction rather than trust
+    // them unchecked, and tell the user to regenerate with --lock=replace.
     const lockPath = join(tmp, 'stasis.lock.json')
     const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
     delete lock.imports
     writeFileSync(lockPath, JSON.stringify(lock, undefined, 2) + '\n')
 
     const r = await run(['run', '--lock=frozen', 'src/entry.js'], { cwd: tmp })
-    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-    t.assert.equal(r.stdout, 'hello, world\n')
-    t.assert.match(r.stderr, /lockfile does not attest resolutions/)
+    t.assert.notEqual(r.status, 0)
+    t.assert.match(r.stderr, /lock=frozen: .* does not attest resolutions/)
+    t.assert.match(r.stderr, /--lock=replace/)
+    t.assert.doesNotMatch(r.stdout, /hello/, 'no code may run against an under-attesting frozen lockfile')
   }))
 
-  test('run --lock=frozen --bundle=load tolerates a legacy lockfile without imports, with a warning', withTmp(async (t, tmp) => {
+  test('run --lock=frozen --bundle=load fails closed on a legacy lockfile without imports', withTmp(async (t, tmp) => {
     cpSync(runFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
     writeFileSync(bundlePath, cleanBundle)
 
     // Strip `imports` to simulate a lockfile that predates resolution attestation.
+    // Even with a self-consistent bundle, a frozen run must refuse a lockfile that
+    // cannot attest resolutions -- the bundle's edges would go cross-unchecked.
     const lockPath = join(tmp, 'stasis.lock.json')
     const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
     delete lock.imports
@@ -1904,9 +1912,10 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
       ['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, 'src/entry.js'],
       { cwd: tmp }
     )
-    t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
-    t.assert.equal(load.stdout, 'hello, world\n')
-    t.assert.match(load.stderr, /lockfile does not attest resolutions/)
+    t.assert.notEqual(load.status, 0)
+    t.assert.match(load.stderr, /lock=frozen: .* does not attest resolutions/)
+    t.assert.match(load.stderr, /--lock=replace/)
+    t.assert.doesNotMatch(load.stdout, /hello/, 'no code may run against an under-attesting frozen lockfile')
   }))
 
   test('Bundle.parse rejects a bundle with an import edge escaping the project root', withTmp(async (t, tmp) => {
