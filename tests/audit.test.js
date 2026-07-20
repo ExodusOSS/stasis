@@ -608,6 +608,45 @@ test('audit(--why) replaces the reason cell with per-consumer import paths', wit
   }
 ))
 
+test('audit(--why-deep) implies --why and keeps chains the default prunes', withFetch(
+  () => new Response(JSON.stringify({
+    foo: [{ id: 1, severity: 'high', title: 'bug', url: 'https://x', vulnerable_versions: '*' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const path = join(tmp, 'stasis.code.br')
+      // src imports foo directly AND via dep: the bare `foo` chain suppresses
+      // `dep -> foo` by default; --why-deep keeps both.
+      writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify({
+        version: 1,
+        config: { scope: 'full' },
+        entries: ['src/entry.js'],
+        sources: { '.': { name: 'top', version: '1.0.0', files: { 'src/entry.js': '// e\n' } } },
+        modules: {
+          'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// foo\n' } },
+          'node_modules/dep': { name: 'dep', version: '1.0.0', files: { 'index.js': '// dep\n' } },
+        },
+        formats: {},
+        imports: {
+          '*': {
+            'src/entry.js': { foo: 'node_modules/foo/index.js', dep: 'node_modules/dep/index.js' },
+            'node_modules/dep/index.js': { foo: 'node_modules/foo/index.js' },
+          },
+        },
+      }))))
+      const pruned = await audit([path], { why: true })
+      t.assert.equal(pruned.rows.find((r) => r.package === 'foo').reason, 'foo')
+
+      const deep = await audit([path], { whyDeep: true })
+      t.assert.equal(deep.why, true) // --why-deep implies --why
+      t.assert.equal(deep.rows.find((r) => r.package === 'foo').reason, 'foo\ndep -> foo')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+))
+
 test('audit() wraps non-2xx npm responses in a helpful error', withFetch(
   () => new Response('boom', { status: 503, statusText: 'Service Unavailable' }),
   async (t) => {

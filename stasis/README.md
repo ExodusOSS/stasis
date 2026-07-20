@@ -65,7 +65,8 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis prune` | trim `node_modules` to the lockfile, verifying the rest |
 | `stasis audit stasis.lock.json` | report npm advisories for a lockfile's dependencies |
 | `stasis audit app.stasis.code.br` | report npm advisories for a bundle's dependencies |
-| `stasis audit --why app.stasis.code.br` | same, with the cross-module import paths that pull each flagged package in (`run: a -> b -> c`), prefixed by the consumer that imports each chain at the top level |
+| `stasis audit --why app.stasis.code.br` | same, with the cross-module import paths that pull each flagged package in (`run: a -> b -> c`), prefixed by the consumer that imports each chain at the top level; a chain is skipped when its full tail is already listed as its own chain |
+| `stasis audit --why-deep app.stasis.code.br` | like `--why`, but keep those longer chains too (every path, shared tails collapsed to `a -> b -> ... -> d`) |
 | `stasis audit --reason=run app.stasis.code.br` | show only advisories related to one consumer (`run`); with `--why`, keep only that consumer's chains |
 | `stasis sbom --format=spdx stasis.lock.json` | export an SPDX SBOM for a lockfile or bundle |
 | `stasis sbom --format=cyclonedx app.stasis.code.br` | export a CycloneDX SBOM for a lockfile or bundle |

@@ -181,7 +181,10 @@ export function formatTable(rows, columns, { multiline = [] } = {}) {
   ].join('\n')
 }
 
-export async function audit(files, { why = false, reason = null } = {}) {
+export async function audit(files, { why = false, whyDeep = false, reason = null } = {}) {
+  // --why-deep implies --why; it keeps every chain instead of the default pruning
+  // of chains whose full suffix is already a chain (see collectWhy/dropSuffixed).
+  why = why || whyDeep
   const packages = collectPackages(files)
   if (packages.length === 0) {
     return { packages, advisories: {}, rows: [], why }
@@ -200,11 +203,11 @@ export async function audit(files, { why = false, reason = null } = {}) {
     const targetKeys = new Set(
       packages.filter((p) => vulnerable.has(p.name)).map((p) => `${p.name}@${p.version}`)
     )
-    rows = flattenAdvisories(result, packages, undefined, collectWhy(files, targetKeys, reason), reason)
+    rows = flattenAdvisories(result, packages, undefined, collectWhy(files, targetKeys, reason, { deep: whyDeep }), reason)
   } else {
     rows = flattenAdvisories(result, packages, collectReasons(files), null, reason)
   }
-  return { packages, advisories: result, rows, why, reason }
+  return { packages, advisories: result, rows, why, whyDeep, reason }
 }
 
 export function printAuditReport({ packages, rows, why = false, reason = null }, { out = process.stdout, err = process.stderr } = {}) {

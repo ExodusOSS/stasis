@@ -74,7 +74,9 @@ test('collectWhy prefixes each chain with its head\'s top-level importer reasons
       webpack: ['wpEntry', 'b', 'x', 'c'],
     },
   })
-  const why = collectWhy([file], new Set(['c@1.0.0']))
+  // deep: default pruning would drop `run: a -> b -> c` (its full suffix b -> c is
+  // its own run chain); this test is about prefix attribution, so keep everything.
+  const why = collectWhy([file], new Set(['c@1.0.0']), null, { deep: true })
   t.assert.deepEqual(linesFor(why, 'c@1.0.0'), [
     'run: a -> b -> c', // a is imported only by runEntry
     'run: b -> c',      // b is imported by both entries -> two lines
@@ -95,7 +97,7 @@ test('collectWhy with a reason filter keeps only that consumer\'s chains', withT
       webpack: ['wpEntry', 'b', 'x', 'c'],
     },
   })
-  const why = collectWhy([file], new Set(['c@1.0.0']), 'run')
+  const why = collectWhy([file], new Set(['c@1.0.0']), 'run', { deep: true })
   // Under --reason the column is all one consumer, so chains render bare (no prefix).
   t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['a -> b -> c', 'b -> c'])
 }))
@@ -115,7 +117,7 @@ test('collectWhy renders bare chains when a bundle has no reason map', withTmp((
     deps: ['a', 'b', 'c', 'x'],
     edges: [['e', 'a'], ['e', 'b'], ['e', 'x'], ['a', 'b'], ['x', 'b'], ['b', 'c']],
   })
-  const why = collectWhy([file], new Set(['c@1.0.0']))
+  const why = collectWhy([file], new Set(['c@1.0.0']), null, { deep: true })
   t.assert.deepEqual(linesFor(why, 'c@1.0.0'), ['a -> b -> c', 'b -> c', 'x -> b -> c'])
 }))
 
@@ -236,6 +238,11 @@ test('collectWhy returns nothing for an artifact without an imports graph', with
 
 // --- chain dedup / compression --------------------------------------------
 
+// The collapse tests below run with { deep: true } (--why-deep): they exercise the
+// collapse rendering over the FULL chain set. Without deep, most of these chains
+// would be pruned first -- a chain whose full suffix is its own same-bucket chain
+// is dropped entirely (see the default-pruning tests further down).
+
 test('collectWhy collapses the shared tail, shortest chain shown in full', withTmp((t, tmp) => {
   // src imports a and b; a -> b -> c -> d, and b (imported directly) -> c -> d.
   // The shared tail `b -> c -> d` shows in full (shortest chain); the longer one
@@ -244,7 +251,7 @@ test('collectWhy collapses the shared tail, shortest chain shown in full', withT
     deps: ['a', 'b', 'c', 'd'],
     edges: [['e', 'a'], ['e', 'b'], ['a', 'b'], ['b', 'c'], ['c', 'd']],
   })
-  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
+  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0']), null, { deep: true }).get('d@1.0.0'), [
     'b -> c -> d',        // shortest -> full, first
     'a -> b -> ... -> d', // collapse the shared `b -> c -> d` tail
   ])
@@ -256,7 +263,7 @@ test('collectWhy orders shortest-first, then alphabetically', withTmp((t, tmp) =
     deps: ['a', 'x', 'b', 'c', 'd'],
     edges: [['e', 'a'], ['e', 'x'], ['e', 'b'], ['a', 'b'], ['x', 'b'], ['b', 'c'], ['c', 'd']],
   })
-  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
+  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0']), null, { deep: true }).get('d@1.0.0'), [
     'b -> c -> d',        // shortest -> full canonical, first
     'a -> b -> ... -> d', // len 4, alpha before x
     'x -> b -> ... -> d',
@@ -271,7 +278,7 @@ test('collectWhy collapses through a branch hub once both sub-paths are shown', 
     deps: ['a', 'b', 'c', 'f', 'd'],
     edges: [['e', 'a'], ['e', 'b'], ['a', 'b'], ['b', 'c'], ['b', 'f'], ['c', 'd'], ['f', 'd']],
   })
-  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
+  t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0']), null, { deep: true }).get('d@1.0.0'), [
     'b -> c -> d',
     'b -> f -> d',
     'a -> b -> ... -> d',
@@ -289,7 +296,7 @@ test('collectWhy collapses every importer of a hub to one line per importer', wi
       ['B', 'C'], ['C', 'A'], ['B', 'D'], ['D', 'A'], ['P', 'B'], ['Q', 'B'],
     ],
   })
-  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0']), null, { deep: true }).get('A@1.0.0'), [
     'B -> C -> A',
     'B -> D -> A',
     'P -> B -> ... -> A',
@@ -308,7 +315,7 @@ test('collectWhy collapses transitively onto an already-collapsed line', withTmp
       ['s', 'E'], ['E', 'B'], ['s', 'F'], ['F', 'E'], ['s', 'G'], ['G', 'E'],
     ],
   })
-  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0']), null, { deep: true }).get('A@1.0.0'), [
     'B -> C -> A',
     'B -> D -> A',
     'E -> B -> ... -> A',
@@ -330,7 +337,7 @@ test('collectWhy collapses each chain at the first already-shown sub-path', with
       ['E', 'D'], ['D', 'C'], ['C', 'B'], ['B', 'A'],
     ],
   })
-  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0']), null, { deep: true }).get('A@1.0.0'), [
     'D -> C -> B -> A',         // shared tail, shown once, first
     'P -> E -> D -> ... -> A',  // D's tail is in the full line
     'Q -> E -> ... -> A',       // E's tail is now visible in P's line
@@ -351,7 +358,7 @@ test('collectWhy collapses against a standalone sub-family tail, not just the bu
       ['C', 'B'], ['D', 'B'], ['E', 'C'], ['F', 'C'], ['B', 'A'],
     ],
   })
-  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0']), null, { deep: true }).get('A@1.0.0'), [
     'C -> B -> A',
     'D -> B -> A',
     'E -> C -> ... -> A',
@@ -388,6 +395,67 @@ test('collectWhy compresses only within a single reason bucket', withTmp((t, tmp
   t.assert.deepEqual(collectWhy([file], new Set(['d@1.0.0'])).get('d@1.0.0'), [
     'run: a -> b -> c -> d',
     'webpack: b -> c -> d',
+  ])
+}))
+
+// --- default pruning (no --why-deep): drop chains with a recorded full suffix ---
+
+test('collectWhy by default drops a chain whose full suffix is its own chain', withTmp((t, tmp) => {
+  // src imports A and B; A -> B -> C -> D. B is a direct dependency of src, so
+  // `B -> C -> D` is its own chain -- the longer `A -> B -> C -> D` (reaching B
+  // through subdeps) is dropped by default, and kept only under --why-deep.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D'],
+    edges: [['e', 'A'], ['e', 'B'], ['A', 'B'], ['B', 'C'], ['C', 'D']],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['D@1.0.0'])).get('D@1.0.0'), [
+    'B -> C -> D',
+  ])
+}))
+
+test('collectWhy default pruning requires a FULL suffix, not a shared sub-path', withTmp((t, tmp) => {
+  // D -> C -> B -> A and E -> C -> B -> A share the tail C -> B -> A, but neither
+  // chain is a full suffix of the other (and `C -> B -> A` is not its own chain, C
+  // is no head) -- so nothing is dropped; the shared tail is left to the collapse.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'E'],
+    edges: [['e', 'D'], ['e', 'E'], ['D', 'C'], ['E', 'C'], ['C', 'B'], ['B', 'A']],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['A@1.0.0'])).get('A@1.0.0'), [
+    'D -> C -> B -> A',
+    'E -> C -> ... -> A',
+  ])
+}))
+
+test('collectWhy default pruning is per reason bucket', withTmp((t, tmp) => {
+  // run's chain B -> C -> D must not prune metro's A -> B -> C -> D: the full
+  // suffix has to be a chain of the SAME reason. (metro's B is not a head in
+  // metro's own subgraph -- only run imports B directly.)
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D'],
+    edges: [['metroEntry', 'A'], ['runEntry', 'B'], ['A', 'B'], ['B', 'C'], ['C', 'D']],
+    reason: {
+      metro: ['metroEntry', 'A', 'B', 'C', 'D'],
+      run: ['runEntry', 'B', 'C', 'D'],
+    },
+  })
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['D@1.0.0'])), 'D@1.0.0'), [
+    'metro: A -> B -> C -> D',
+    'run: B -> C -> D',
+  ])
+}))
+
+test('collectWhy by default shows only the bare line for a src-direct flagged package', withTmp((t, tmp) => {
+  // The flagged D is itself a direct dependency of src, so its bare chain `D`
+  // suppresses every longer chain reaching D through subdeps. --why-deep keeps them.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'D'],
+    edges: [['e', 'D'], ['e', 'A'], ['A', 'B'], ['B', 'D']],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['D@1.0.0'])).get('D@1.0.0'), ['D'])
+  t.assert.deepEqual(collectWhy([file], new Set(['D@1.0.0']), null, { deep: true }).get('D@1.0.0'), [
+    'D',
+    'A -> B -> D',
   ])
 }))
 

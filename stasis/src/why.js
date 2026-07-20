@@ -237,14 +237,34 @@ function compressChains(chains) {
   return out
 }
 
+// Default (non `--why-deep`) pruning: drop a chain when another chain in the SAME
+// bucket is a full proper suffix of it. Those longer chains only tell how the
+// suffix's head is reached through further subdeps -- when that head is itself a
+// direct dependency of src (or the flagged target itself), its own line already
+// explains the pull-in, so `A -> B -> C -> D` is noise next to `B -> C -> D` (and
+// everything is noise next to a bare `D`). Only a FULL suffix counts: chains that
+// merely share a tail (`E -> C -> B -> A` vs `D -> C -> B -> A`) both survive and
+// are left to compressChains. The shortest chain always survives.
+function dropSuffixed(chains) {
+  const keys = new Set(chains.map((c) => c.join('\0')))
+  return chains.filter((c) => {
+    for (let i = 1; i < c.length; i++) {
+      if (keys.has(c.slice(i).join('\0'))) return false
+    }
+    return true
+  })
+}
+
 // Map each targeted package (`name@version`) to its ordered `--why` lines.
 // `targetKeys` (optional) restricts work to the packages that matter (the ones
 // carrying advisories); omit it to compute for every node_modules package.
 // `reasonFilter` (optional, from --reason) keeps only chains attributed to that
 // consumer, dropping every other chain (and bare, unattributed chains).
-// Chains are deduplicated and compressed per reason bucket (see compressChains).
+// By default a chain is dropped when a same-bucket chain is a full suffix of it
+// (see dropSuffixed); `deep` (--why-deep) keeps every chain. Chains are then
+// deduplicated and compressed per reason bucket (see compressChains).
 // Artifacts without a resolution graph (`imports`) contribute nothing.
-export function collectWhy(files, targetKeys, reasonFilter = null) {
+export function collectWhy(files, targetKeys, reasonFilter = null, { deep = false } = {}) {
   // key -> reason bucket ('' = unattributed) -> Map(chainKey -> node-name array)
   const acc = new Map()
   const truncatedKeys = new Set()
@@ -312,13 +332,15 @@ export function collectWhy(files, targetKeys, reasonFilter = null) {
     }
   }
 
-  // Compress each bucket and render, bucket by bucket (buckets sorted so a
+  // Prune (unless deep), compress, and render each bucket (buckets sorted so a
   // consumer's chains group together; bare '' sorts first).
   const byPkg = new Map()
   for (const [key, buckets] of acc) {
     const lines = []
     for (const bucket of [...buckets.keys()].toSorted((a, b) => a.localeCompare(b))) {
-      for (const rendered of compressChains([...buckets.get(bucket).values()])) {
+      let chains = [...buckets.get(bucket).values()]
+      if (!deep) chains = dropSuffixed(chains)
+      for (const rendered of compressChains(chains)) {
         lines.push(bucket ? `${bucket}: ${rendered}` : rendered)
       }
     }
