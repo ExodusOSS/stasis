@@ -202,6 +202,109 @@ describe('stasis build (spawned, concurrent)', { concurrency: CONCURRENCY }, () 
     t.assert.equal(runNode(t, join(tmp, 'out.js')).trim(), 'hello, world')
   }))
 
+  test('build a JS entry from an artifact that also carries a non-JS file attested via `stasis add`', withTmp(async (t, tmp) => {
+    // A JS/TS app whose artifact also attests an unrelated non-JS file (android/app/build.gradle,
+    // format 'gradle') -- the shape `stasis add` produces: the file is a recorded source but neither
+    // an entry nor an import edge, so it's never reached from src/entry.js. It must not block the build
+    // (the previous artifact-wide format check rejected the whole bundle for carrying a 'gradle' file).
+    writeFileSync(join(tmp, 'package.json'), '{ "name": "x", "version": "0.0.0", "private": true, "type": "module" }')
+    const bundleObj = {
+      version: 1,
+      config: { scope: 'full' },
+      entries: ['src/entry.js'],
+      sources: {
+        '.': {
+          name: 'x',
+          version: '0.0.0',
+          files: {
+            'src/entry.js': "import { greet } from './greet.js'\nconsole.log(greet('world'))\n",
+            'src/greet.js': 'export const greet = (n) => `hello, ${n}`\n',
+            'android/app/build.gradle': "apply plugin: 'com.android.application'\n",
+          },
+        },
+      },
+      modules: {},
+      // The gradle file is attested but is not an import edge; only entry -> greet is recorded.
+      formats: { 'src/entry.js': 'module', 'src/greet.js': 'module', 'android/app/build.gradle': 'gradle' },
+      imports: { '*': { 'src/entry.js': { './greet.js': 'src/greet.js' } } },
+    }
+    writeFileSync(join(tmp, 'app.code.br'), brotliCompressSync(JSON.stringify(bundleObj)))
+
+    const r = await runCli(['build', '--output=out.js', 'app.code.br'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    t.assert.equal(runNode(t, join(tmp, 'out.js')).trim(), 'hello, world')
+  }))
+
+  test('build a JS entry from a multi-entry artifact whose OTHER entry is a non-JS (gradle) subtree', withTmp(async (t, tmp) => {
+    // Two entry points: a JS app (src/entry.js) and a gradle file (android/app/build.gradle).
+    // Only the entry we build is language-checked: building the JS entry succeeds even though a
+    // sibling entry is non-JS, and building the gradle entry is the one that's rejected.
+    writeFileSync(join(tmp, 'package.json'), '{ "name": "x", "version": "0.0.0", "private": true, "type": "module" }')
+    const bundleObj = {
+      version: 1,
+      config: { scope: 'full' },
+      entries: ['src/entry.js', 'android/app/build.gradle'],
+      sources: {
+        '.': {
+          name: 'x',
+          version: '0.0.0',
+          files: {
+            'src/entry.js': "import { greet } from './greet.js'\nconsole.log(greet('world'))\n",
+            'src/greet.js': 'export const greet = (n) => `hello, ${n}`\n',
+            'android/app/build.gradle': "apply plugin: 'com.android.application'\n",
+          },
+        },
+      },
+      modules: {},
+      formats: { 'src/entry.js': 'module', 'src/greet.js': 'module', 'android/app/build.gradle': 'gradle' },
+      imports: { '*': { 'src/entry.js': { './greet.js': 'src/greet.js' } } },
+    }
+    writeFileSync(join(tmp, 'app.code.br'), brotliCompressSync(JSON.stringify(bundleObj)))
+
+    // The JS entry builds fine -- the sibling gradle entry is not our concern here.
+    const ok = await runCli(['build', '--output=out.js', 'app.code.br', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(ok.status, 0, ok.stderr)
+    t.assert.equal(runNode(t, join(tmp, 'out.js')).trim(), 'hello, world')
+
+    // Building the gradle entry itself is rejected (that IS a non-JS entry).
+    const fail = await runCli(['build', '--output=out2.js', 'app.code.br', 'android/app/build.gradle'], { cwd: tmp })
+    t.assert.notEqual(fail.status, 0)
+    t.assert.match(fail.stderr, /JavaScript\/TypeScript/)
+    t.assert.ok(!existsSync(join(tmp, 'out2.js')), 'no output on a rejected entry')
+  }))
+
+  test('build still rejects a non-JS file that IS reachable from the built entry', withTmp(async (t, tmp) => {
+    // The scoping is by REACHABILITY, not a blanket skip: if the built entry actually pulls in a
+    // non-buildable file (recorded as an import edge), that still fails closed.
+    writeFileSync(join(tmp, 'package.json'), '{ "name": "x", "version": "0.0.0", "private": true, "type": "module" }')
+    const bundleObj = {
+      version: 1,
+      config: { scope: 'full' },
+      entries: ['src/entry.js'],
+      sources: {
+        '.': {
+          name: 'x',
+          version: '0.0.0',
+          files: {
+            'src/entry.js': "import './config.gradle'\nconsole.log('hi')\n",
+            'src/config.gradle': "apply plugin: 'x'\n",
+          },
+        },
+      },
+      modules: {},
+      formats: { 'src/entry.js': 'module', 'src/config.gradle': 'gradle' },
+      // The gradle file is recorded as an edge reachable from the entry.
+      imports: { '*': { 'src/entry.js': { './config.gradle': 'src/config.gradle' } } },
+    }
+    writeFileSync(join(tmp, 'app.code.br'), brotliCompressSync(JSON.stringify(bundleObj)))
+
+    const r = await runCli(['build', '--output=out.js', 'app.code.br'], { cwd: tmp })
+    t.assert.notEqual(r.status, 0)
+    t.assert.match(r.stderr, /JavaScript\/TypeScript/)
+    t.assert.match(r.stderr, /config\.gradle/)
+    t.assert.ok(!existsSync(join(tmp, 'out.js')), 'no output on a rejected build')
+  }))
+
   test('build is artifact-driven: a conflicting project stasis.config.json is ignored', withTmp(async (t, tmp) => {
     // The fixture ships a full-scope lockfile. A node_modules-scoped (and frozen) run config
     // must NOT make build reject it -- the build is governed by the artifact, not the config.
