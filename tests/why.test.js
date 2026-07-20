@@ -398,6 +398,72 @@ test('collectWhy compresses only within a single reason bucket', withTmp((t, tmp
   ])
 }))
 
+// --- display order: prefix groups stay contiguous, shortest-max group first ---
+
+test('collectWhy keeps head groups contiguous, shortest-max group first', withTmp((t, tmp) => {
+  // Group A holds chains of length 3 and 5; group K one of length 4. Groups are
+  // never interleaved (no K line between the A lines -- plain shortest-first
+  // would put K's 4-chain between them), and the group whose LONGEST chain is
+  // shorter renders first, so K's line precedes the whole A group.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'E', 'F', 'K', 'L', 'M'],
+    edges: [
+      ['e', 'A'], ['e', 'K'],
+      ['A', 'B'], ['B', 'D'], ['A', 'C'], ['C', 'E'], ['E', 'F'], ['F', 'D'],
+      ['K', 'L'], ['L', 'M'], ['M', 'D'],
+    ],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['D@1.0.0'])).get('D@1.0.0'), [
+    'K -> L -> M -> D',
+    'A -> B -> D',
+    'A -> C -> E -> F -> D',
+  ])
+}))
+
+test('collectWhy keeps subpath groups contiguous too, shortest-max first', withTmp((t, tmp) => {
+  // The same rule one level down: within head Z, the two chains through A stay
+  // together (not interrupted by Z -> K -> L -> M -> D), and the K subgroup
+  // (longest 5) renders before the A subgroup (longest 6).
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'E', 'F', 'K', 'L', 'M', 'Z'],
+    edges: [
+      ['e', 'Z'],
+      ['Z', 'A'], ['A', 'B'], ['B', 'D'], ['A', 'C'], ['C', 'E'], ['E', 'F'], ['F', 'D'],
+      ['Z', 'K'], ['K', 'L'], ['L', 'M'], ['M', 'D'],
+    ],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['D@1.0.0'])).get('D@1.0.0'), [
+    'Z -> K -> L -> M -> D',
+    'Z -> A -> B -> D',
+    'Z -> A -> C -> E -> F -> D',
+  ])
+}))
+
+test('collectWhy orders sibling subpaths shortest-first', withTmp((t, tmp) => {
+  // Z -> A -> D (the shorter route out of Z) renders before Z -> B -> C -> D.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D', 'Z'],
+    edges: [['e', 'Z'], ['Z', 'A'], ['A', 'D'], ['Z', 'B'], ['B', 'C'], ['C', 'D']],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['D@1.0.0'])).get('D@1.0.0'), [
+    'Z -> A -> D',
+    'Z -> B -> C -> D',
+  ])
+}))
+
+test('collectWhy always renders a full-suffix chain before its extensions', withTmp((t, tmp) => {
+  // Deep mode keeps both `B -> C -> D` and its extension `A -> B -> C -> D`; the
+  // suffix chain's group must come first regardless of group sizes.
+  const file = writeGraphBundle(tmp, {
+    deps: ['A', 'B', 'C', 'D'],
+    edges: [['e', 'A'], ['e', 'B'], ['A', 'B'], ['B', 'C'], ['C', 'D']],
+  })
+  t.assert.deepEqual(collectWhy([file], new Set(['D@1.0.0']), null, { deep: true }).get('D@1.0.0'), [
+    'B -> C -> D',
+    'A -> B -> ... -> D',
+  ])
+}))
+
 // --- default pruning (no --why-deep): drop chains with a recorded full suffix ---
 
 test('collectWhy by default drops a chain whose full suffix is its own chain', withTmp((t, tmp) => {

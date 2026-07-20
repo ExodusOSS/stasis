@@ -182,8 +182,78 @@ function pathsTo(adjRev, isHead, isTerminal, targetDir) {
   return { results, truncated }
 }
 
+// Display order for one bucket's (deduped) chains:
+//   1. a chain that is a full proper suffix of another always renders before it
+//      (`B -> C` before `A -> B -> C`) -- a hard constraint;
+//   2. chains sharing a head stay contiguous, and recursively chains sharing a
+//      longer prefix stay contiguous within their group -- never interleaved
+//      with other groups;
+//   3. among sibling groups (at every level), the group whose LONGEST chain is
+//      shortest renders first; ties alphabetically.
+// All chains end at the same target, so a full suffix always has a DIFFERENT
+// head: rule 1 only ever orders head groups against each other, never members of
+// one group, and is enforced with a topological pass over the head groups. In
+// the rare cyclic case (mutual suffix constraints through an import cycle) the
+// preferred group order wins and one constraint is dropped.
+function orderChains(chains) {
+  if (chains.length <= 1) return chains
+
+  // Recursive contiguous grouping: `list` shares its first `depth` nodes; group
+  // by the node AT `depth` and order sibling groups shortest-max first.
+  const arrange = (list, depth) => {
+    if (list.length <= 1) return list
+    const groups = new Map()
+    for (const c of list) {
+      let g = groups.get(c[depth])
+      if (g === undefined) groups.set(c[depth], (g = []))
+      g.push(c)
+    }
+    return [...groups.entries()]
+      .map(([node, g]) => ({ node, g, max: Math.max(...g.map((c) => c.length)) }))
+      .toSorted((a, b) => a.max - b.max || a.node.localeCompare(b.node))
+      .flatMap(({ g }) => arrange(g, depth + 1))
+  }
+
+  const byHead = new Map()
+  for (const c of chains) {
+    let g = byHead.get(c[0])
+    if (g === undefined) byHead.set(c[0], (g = []))
+    g.push(c)
+  }
+
+  // Rule 1: whenever a chain is a full suffix of another, its head group must
+  // render before the extension's head group.
+  const keys = new Set(chains.map((c) => c.join('\0')))
+  const succ = new Map([...byHead.keys()].map((h) => [h, new Set()]))
+  const indeg = new Map([...byHead.keys()].map((h) => [h, 0]))
+  for (const c of chains) {
+    for (let i = 1; i < c.length; i++) {
+      if (!keys.has(c.slice(i).join('\0'))) continue
+      const suffixHead = c[i]
+      if (suffixHead === c[0] || succ.get(suffixHead).has(c[0])) continue
+      succ.get(suffixHead).add(c[0])
+      indeg.set(c[0], indeg.get(c[0]) + 1)
+    }
+  }
+
+  const maxLen = new Map([...byHead].map(([h, g]) => [h, Math.max(...g.map((c) => c.length))]))
+  const prefer = (a, b) => maxLen.get(a) - maxLen.get(b) || a.localeCompare(b)
+  const remaining = new Set(byHead.keys())
+  const out = []
+  while (remaining.size > 0) {
+    const free = [...remaining].filter((h) => indeg.get(h) === 0)
+    // No free head means a constraint cycle -- break it by preference.
+    const head = (free.length > 0 ? free : [...remaining]).toSorted(prefer)[0]
+    remaining.delete(head)
+    for (const s of succ.get(head)) indeg.set(s, indeg.get(s) - 1)
+    out.push(...arrange(byHead.get(head), 1))
+  }
+  return out
+}
+
 // Compress one reason bucket's chains (node-name arrays, all ending at the same
-// target). Chains are emitted shortest-first (then alphabetically); each collapses
+// target). Chains are emitted in display order (orderChains -- prefix groups
+// kept contiguous, a full-suffix chain always before its extensions); each collapses
 // at the earliest node whose remaining sub-path to the target is already
 // recoverable from the lines above it, rendering `prefix -> node -> ... -> target`.
 // A sub-path is recoverable once ANY emitted line shows its head node in the
@@ -204,7 +274,7 @@ function compressChains(chains) {
   const suffixKey = (c, i) => c.slice(i).join('\0')
   const uniq = [...new Map(chains.map((c) => [full(c), c])).values()]
   if (uniq.length <= 1) return uniq.map(full)
-  const sorted = uniq.toSorted((a, b) => a.length - b.length || full(a).localeCompare(full(b)))
+  const sorted = orderChains(uniq)
   const target = sorted[0][sorted[0].length - 1]
 
   const revealed = new Set() // sub-paths recoverable from lines already emitted
@@ -335,12 +405,9 @@ export function collectWhy(files, targetKeys, reasonFilter = null, { deep = fals
     }
   }
 
-  // --why-full: no `...` collapse -- every chain spelled out, same order as
-  // compressChains (shortest-first, then alphabetical).
-  const renderFull = (chains) =>
-    chains
-      .toSorted((a, b) => a.length - b.length || a.join(' -> ').localeCompare(b.join(' -> ')))
-      .map((c) => c.join(' -> '))
+  // --why-full: no `...` collapse -- every chain spelled out, in the same display
+  // order as the collapsed rendering (see orderChains).
+  const renderFull = (chains) => orderChains(chains).map((c) => c.join(' -> '))
 
   // Prune (unless deep), compress (unless full), and render each bucket (buckets
   // sorted so a consumer's chains group together; bare '' sorts first).
