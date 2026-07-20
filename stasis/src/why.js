@@ -1,9 +1,16 @@
 import { moduleFileKey } from '@exodus/stasis-core/util'
+import { isEvidenceFile } from './audit-corrections.js'
 import { parseFile } from './parse.js'
 
 // `stasis audit --why` support: from an artifact's resolution graph (`imports`)
 // and its per-consumer provenance (`reason`), explain WHY a vulnerable module is
 // present by listing the cross-module import chains that reach it.
+//
+// Corrections apply at the EDGE level (see audit-corrections.js): an edge whose
+// target file is not evidence of the module's real code -- a package.json
+// manifest read, or a corrected file like ws's noop browser.js stub -- never
+// enters the graph, so no displayed chain ends with (or passes through) one, and
+// a consumer that recorded only such files of a package is not one of its reasons.
 //
 // A "path" is a chain of node_modules packages ending at the target module, e.g.
 // `a -> b -> c`. The first-party (`src`) node is never shown: a chain is walked
@@ -43,7 +50,11 @@ const TERMINAL_PACKAGES = new Set(['@babel/core', 'react-native', 'metro'])
 
 // Index one parsed artifact: map every project-relative file to its owning module
 // dir, record each dir's package identity + whether it's a node_modules dep, and
-// keep each dir's file list (for the head's-own-reason fallback).
+// keep each dir's EVIDENCE file list (for the target's-own-reason lookup).
+// `fileToDir` is complete; `dirFiles` only holds files that count as real code of
+// the dir (see audit-corrections.js) -- a consumer that recorded nothing of a
+// package but a corrected file / its package.json manifest is not one of its
+// reasons, exactly as in collectReasons.
 function moduleIndex(artifact) {
   const fileToDir = new Map()
   const dirInfo = new Map()
@@ -54,7 +65,7 @@ function moduleIndex(artifact) {
     for (const rel of Object.keys(files)) {
       const f = moduleFileKey(dir, rel)
       fileToDir.set(f, dir)
-      list.push(f)
+      if (isEvidenceFile(name ?? null, version ?? null, rel)) list.push(f)
     }
     dirFiles.set(dir, list)
   }
@@ -104,11 +115,14 @@ function bucketGraphs(edges, fileToDir, dirInfo, fileReasons) {
     const pd = fileToDir.get(pf)
     const td = fileToDir.get(tf)
     if (pd === undefined || td === undefined || pd === td) continue
-    // `react-native` reads sibling packages' `package.json` manifests for metadata
-    // (Haste/asset resolution), not as real dependencies -- don't let those edges
-    // pull unrelated packages into the --why graph.
-    if (dirInfo.get(pd).name === 'react-native' && tf.endsWith('/package.json')) continue
-    if (!dirInfo.get(td).dep) continue
+    const tdi = dirInfo.get(td)
+    if (!tdi.dep) continue
+    // An edge counts only when it targets the module's real code (see
+    // audit-corrections.js): a `package.json` manifest read (react-native scans
+    // sibling packages' manifests for Haste/asset resolution) or a corrected file
+    // (ws's noop browser.js stub) is not a dependency on the module and must not
+    // pull it into the --why graph -- no chain may end (or pass) through one.
+    if (!isEvidenceFile(tdi.name, tdi.version, tf.slice(td.length + 1))) continue
     // The consumers this edge belongs to: those that recorded its parent file.
     const buckets = fileReasons === null ? [''] : (fileReasons.get(pf) ?? [])
     const dep = dirInfo.get(pd).dep
@@ -139,9 +153,11 @@ function invertReason(reason) {
   return byFile
 }
 
-// dir -> Set(consumer): the consumers that recorded any of the dir's own files.
-// null when the artifact has no reason map. Used to decide whether a bare target
-// belongs to a reason that never imports it (a flagged package a bundler shipped).
+// dir -> Set(consumer): the consumers that recorded any of the dir's own EVIDENCE
+// files (dirFiles is pre-filtered -- a consumer that recorded only a corrected
+// file / manifest of the dir doesn't count; see moduleIndex). null when the
+// artifact has no reason map. Used to decide whether a bare target belongs to a
+// reason that never imports it (a flagged package a bundler shipped).
 function dirReasonsIndex(dirFiles, fileReasons) {
   if (fileReasons === null) return null
   const byDir = new Map()

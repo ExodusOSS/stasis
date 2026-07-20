@@ -1,6 +1,6 @@
 import { moduleFileKey } from '@exodus/stasis-core/util'
 import { advisories } from './apis/npm/index.js'
-import { isCorrectedFile } from './audit-corrections.js'
+import { isEvidenceFile } from './audit-corrections.js'
 import semver from './apis/npm/semver.cjs'
 import { parseFile } from './parse.js'
 import { collectWhy } from './why.js'
@@ -8,58 +8,25 @@ import { collectWhy } from './why.js'
 // Only audit installed dependencies; first-party packages live under non-`node_modules` keys and
 // must not be sent to the public registry (leaks names, adds noise).
 //
-// A package counts as present only when its REAL code is. Evidence is the
-// resolution graph, which both bundles and lockfiles carry (a lockfile only
-// omits `reason`): an edge whose target is a corrected file (e.g. ws's noop
-// browser.js stub) is not evidence, so ws pulled in only via `-> ws/browser.js`
-// is skipped, while `-> ws/lib.js` keeps ws (see audit-corrections.js). This also
-// ignores files that are recorded but never imported as code (a resolver-read
-// package.json). Only a legacy artifact with no graph falls back to its recorded
-// files -- every one except inert metadata counts.
+// A package counts as present only when its REAL code is, and recorded = present:
+// an artifact records exactly the files it ships or attested -- imported, entry,
+// or `add`-ed (the last two have no in-edge in the resolution graph, so presence
+// must NOT be derived from edges). The package is audited only if some recorded
+// file is code evidence (see audit-corrections.js) -- not a corrected file (ws's
+// noop browser.js stub), not a package.json manifest (recorded for resolver /
+// metadata reads). So a ws shipped only as browser.js (+ manifest) is skipped,
+// while one whose real code was bundled stays. Which consumers and import EDGES
+// reach that code is the reason column's concern -- collectReasons and why.js
+// apply the same evidence rule per file/edge there.
 export function collectPackagesFromFile(file) {
-  const { modules, imports } = parseFile(file)
-
-  const deps = new Map() // dir -> { name, version, files }
-  const fileToModule = new Map() // project-relative file -> { dir, rel }
-  for (const [dir, info] of modules) {
-    if (!dir.includes('node_modules') || !info.name || !info.version) continue
-    deps.set(dir, info)
-    for (const rel of Object.keys(info.files)) fileToModule.set(moduleFileKey(dir, rel), { dir, rel })
+  const out = []
+  for (const [dir, { name, version, files }] of parseFile(file).modules) {
+    if (!dir.includes('node_modules')) continue
+    if (!name || !version) continue
+    if (!Object.keys(files).some((rel) => isEvidenceFile(name, version, rel))) continue
+    out.push({ name, version })
   }
-
-  const present = new Set() // module dirs with real (non-corrected) code present
-  const mark = (dir, rel) => {
-    const info = deps.get(dir)
-    if (info && !isCorrectedFile(info.name, info.version, rel)) present.add(dir)
-  }
-
-  if (imports && imports.size > 0) {
-    // Evidence is the graph: a module is present when an edge targets one of its
-    // non-corrected files. (`--metro` targets may be a {platform: file} map.)
-    for (const [, byParent] of imports) {
-      for (const [, specifiers] of byParent) {
-        for (const [, target] of specifiers) {
-          for (const t of target instanceof Map ? target.values() : [target]) {
-            const owner = fileToModule.get(t)
-            if (owner) mark(owner.dir, owner.rel)
-          }
-        }
-      }
-    }
-  } else {
-    // No graph (a legacy artifact): fall back to the recorded files -- every one
-    // except inert metadata counts.
-    for (const [dir, info] of deps) {
-      for (const rel of Object.keys(info.files)) {
-        if (rel !== 'package.json') mark(dir, rel)
-      }
-    }
-  }
-
-  return [...present].map((dir) => {
-    const { name, version } = deps.get(dir)
-    return { name, version }
-  })
+  return out
 }
 
 export function collectPackages(files) {
@@ -78,7 +45,10 @@ export function collectPackages(files) {
 
 // Map each audited node_modules package (`name@version`) to the bundle consumers ("reasons") that
 // recorded its files. Only bundles carry a reason map ({ consumer: [file, ...] }); lockfiles omit
-// it. Each file is resolved back to its owning package via the module file listing.
+// it. Each file is resolved back to its owning package via the module file listing. Only evidence
+// files attribute (see audit-corrections.js): a consumer that recorded nothing of a package but a
+// corrected file or its package.json manifest carries none of its real code and is NOT a reason --
+// e.g. webpack shipping only ws's noop browser.js stub, while `run` bundles the real ws.
 export function collectReasons(files) {
   const byPkg = new Map()
   for (const file of files) {
@@ -89,6 +59,7 @@ export function collectReasons(files) {
     for (const [dir, { name, version, files: modFiles }] of artifact.modules) {
       if (!dir.includes('node_modules') || !name || !version) continue
       for (const rel of Object.keys(modFiles)) {
+        if (!isEvidenceFile(name, version, rel)) continue
         fileToPkg.set(moduleFileKey(dir, rel), `${name}@${version}`)
       }
     }

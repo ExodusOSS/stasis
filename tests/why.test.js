@@ -587,6 +587,86 @@ test('collectWhy ignores react-native edges into another package\'s package.json
   t.assert.deepEqual(linesFor(why, 'bar@1.0.0'), ['react-native -> bar'])
 }))
 
+// --- corrections: an edge into a corrected file is not a dependency ---
+
+// File-level bundle: ws is reachable through its corrected noop browser.js stub
+// (a -> ws/browser.js) and through its real code (b -> ws/index.js).
+const writeWsBundle = (dir, { reason } = {}) => {
+  const path = join(dir, 'stasis.code.br')
+  const bundle = {
+    version: 1,
+    config: { scope: 'full' },
+    formats: {},
+    entries: ['src/wp.js', 'src/run.js'],
+    sources: { '.': { name: 'top', version: '1.0.0', files: { 'src/wp.js': '// w\n', 'src/run.js': '// r\n' } } },
+    modules: {
+      'node_modules/a': { name: 'a', version: '1.0.0', files: { 'index.js': '// a\n' } },
+      'node_modules/b': { name: 'b', version: '1.0.0', files: { 'index.js': '// b\n' } },
+      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'index.js': '// real\n', 'package.json': '{}' } },
+    },
+    imports: {
+      '*': {
+        'src/wp.js': { a: 'node_modules/a/index.js' },
+        'src/run.js': { b: 'node_modules/b/index.js' },
+        'node_modules/a/index.js': { ws: 'node_modules/ws/browser.js' },
+        'node_modules/b/index.js': { ws: 'node_modules/ws/index.js' },
+      },
+    },
+  }
+  if (reason) bundle.reason = reason
+  writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify(bundle))))
+  return path
+}
+
+test('collectWhy drops chains that reach the target through a corrected file', withTmp((t, tmp) => {
+  const file = writeWsBundle(tmp)
+  // a -> ws targets only the noop browser.js stub -- not a dependency on ws, so
+  // no `a -> ws` chain; the b -> ws edge targets real code and is the one shown.
+  t.assert.deepEqual(linesFor(collectWhy([file], new Set(['ws@7.5.9'])), 'ws@7.5.9'), ['b -> ws'])
+}))
+
+test('collectWhy reasons exclude a consumer that recorded only corrected files', withTmp((t, tmp) => {
+  const file = writeWsBundle(tmp, {
+    reason: {
+      webpack: ['src/wp.js', 'node_modules/a/index.js', 'node_modules/ws/browser.js', 'node_modules/ws/package.json'],
+      run: ['src/run.js', 'node_modules/b/index.js', 'node_modules/ws/index.js'],
+    },
+  })
+  // webpack shipped nothing of ws but the stub (+ manifest): it is NOT one of
+  // ws's reasons, in --why nor in the plain column -- the two must match.
+  const why = collectWhy([file], new Set(['ws@7.5.9']))
+  t.assert.deepEqual(linesFor(why, 'ws@7.5.9'), ['run: b -> ws'])
+  t.assert.deepEqual([...collectReasons([file]).get('ws@7.5.9')], ['run'])
+}))
+
+test('collectWhy keeps a bare line for a reason whose only paths are corrected edges', withTmp((t, tmp) => {
+  // run DID bundle ws's real code (it recorded index.js), so run is one of ws's
+  // reasons -- but its only graph edge into ws targets the corrected stub, so no
+  // path survives and the line falls back to the bare target.
+  const path = join(tmp, 'stasis.code.br')
+  writeFileSync(path, brotliCompressSync(Buffer.from(JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    formats: {},
+    entries: ['src/run.js'],
+    sources: { '.': { name: 'top', version: '1.0.0', files: { 'src/run.js': '// r\n' } } },
+    modules: {
+      'node_modules/a': { name: 'a', version: '1.0.0', files: { 'index.js': '// a\n' } },
+      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'index.js': '// real\n' } },
+    },
+    imports: {
+      '*': {
+        'src/run.js': { a: 'node_modules/a/index.js' },
+        'node_modules/a/index.js': { ws: 'node_modules/ws/browser.js' },
+      },
+    },
+    reason: {
+      run: ['src/run.js', 'node_modules/a/index.js', 'node_modules/ws/browser.js', 'node_modules/ws/index.js'],
+    },
+  }))))
+  t.assert.deepEqual(linesFor(collectWhy([path], new Set(['ws@7.5.9'])), 'ws@7.5.9'), ['run: ws'])
+}))
+
 // --- terminal packages: never walk past @babel/core / react-native / metro ---
 
 test('collectWhy stops a chain at a terminal package, keeping its reason prefix', withTmp((t, tmp) => {

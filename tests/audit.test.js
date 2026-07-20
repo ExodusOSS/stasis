@@ -125,96 +125,102 @@ test('collectPackages dedupes exact name+version duplicates', withTmp((t, tmp) =
   t.assert.equal(pkgs.length, 2)
 }))
 
-// --- audit corrections: import edges to a corrected file don't count ---
+// --- audit corrections: only recorded real-code evidence counts as presence ---
 
-// Build a bundle from module file listings + import edges [parentFile, targetFile].
-// The specifier key is never read (parse/audit iterate only the edge targets), so
-// key by the full target path -- two edges from one parent into the same package
-// (e.g. ws/browser.js and ws/lib.js) then stay distinct instead of colliding.
-const writeAuditBundle = (dir, modules, edges, name = 'audit.br') => {
-  const byParent = {}
-  for (const [from, to] of edges) (byParent[from] ??= {})[to] = to
-  return writeBundle(dir, name, { modules, imports: { '*': byParent } })
-}
-
-test('collectPackages skips ws imported only through its noop browser.js (with package.json)', withTmp((t, tmp) => {
-  // The real shape: ws is recorded as browser.js + package.json, and the only edge
-  // targeting it is `-> ws/browser.js` (a throw-only stub). ws ships no real code,
-  // so it is not audited; foo (imported via its index.js) is.
-  const bundle = writeAuditBundle(tmp, {
-    'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'package.json': '{}' } },
-    'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// f\n' } },
-  }, [
-    ['src/entry.js', 'node_modules/ws/browser.js'],
-    ['src/entry.js', 'node_modules/foo/index.js'],
-  ])
+test('collectPackages skips ws recorded only as its noop browser.js (+ manifest)', withTmp((t, tmp) => {
+  // The real shape: ws bundled only through `-> ws/browser.js` (a throw-only stub)
+  // records browser.js + the resolver-read package.json. None of ws's real code
+  // ships, so it is not audited; foo (real code recorded) is.
+  const bundle = writeBundle(tmp, 'ws.br', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'package.json': '{}' } },
+      'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// f\n' } },
+    },
+  })
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'foo', version: '2.0.0' }])
 }))
 
-test('collectPackages keeps ws when a non-browser.js edge targets it', withTmp((t, tmp) => {
-  // `A -> ws/browser.js` doesn't count, but `B -> ws/lib.js` does -> ws stays.
-  const bundle = writeAuditBundle(tmp, {
-    'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'lib.js': '// real\n', 'package.json': '{}' } },
-  }, [
-    ['src/entry.js', 'node_modules/ws/browser.js'],
-    ['src/entry.js', 'node_modules/ws/lib.js'],
-  ])
+test('collectPackages keeps ws when any real file of it is recorded', withTmp((t, tmp) => {
+  const bundle = writeBundle(tmp, 'ws.br', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'lib.js': '// real\n', 'package.json': '{}' } },
+    },
+  })
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'ws', version: '7.5.9' }])
+}))
+
+test('collectPackages flags recorded code even when no import edge targets it', withTmp((t, tmp) => {
+  // Entry and `add`-consumer files are recorded with NO in-edge in the resolution
+  // graph -- presence is recorded-files-based, never edge-based, so real code
+  // stays audited even when the graph doesn't reach it.
+  const bundle = writeBundle(tmp, 'noedge.br', {
+    modules: {
+      'node_modules/added': { name: 'added', version: '1.0.0', files: { 'index.js': '// preloaded\n' } },
+      'node_modules/foo': { name: 'foo', version: '2.0.0', files: { 'index.js': '// f\n' } },
+    },
+    imports: { '*': { 'src/entry.js': { foo: 'node_modules/foo/index.js' } } },
+  })
+  t.assert.deepEqual(collectPackages([bundle]), [
+    { name: 'added', version: '1.0.0' },
+    { name: 'foo', version: '2.0.0' },
+  ])
 }))
 
 test('collectPackages does not correct ws versions outside the verified range', withTmp((t, tmp) => {
   // The stub is only verified up to the range pinned in audit-corrections.js; a
-  // newer ws stays audited even when reached only through browser.js.
-  const bundle = writeAuditBundle(tmp, {
-    'node_modules/ws': { name: 'ws', version: '9.0.0', files: { 'browser.js': '// ?\n', 'package.json': '{}' } },
-  }, [['src/entry.js', 'node_modules/ws/browser.js']])
+  // newer ws stays audited even when recorded only as browser.js.
+  const bundle = writeBundle(tmp, 'ws9.br', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '9.0.0', files: { 'browser.js': '// ?\n', 'package.json': '{}' } },
+    },
+  })
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'ws', version: '9.0.0' }])
 }))
 
-test('collectPackages skips node-fetch imported only through browser.js (<= 2.7.0)', withTmp((t, tmp) => {
+test('collectPackages skips node-fetch recorded only as browser.js (<= 2.7.0)', withTmp((t, tmp) => {
   // node-fetch's browser.js just re-exports the native fetch; it carries none of
   // the node-fetch implementation. Corrected through 2.7.0 (the last with it).
-  const bundle = writeAuditBundle(tmp, {
-    'node_modules/node-fetch': { name: 'node-fetch', version: '2.7.0', files: { 'browser.js': '// native fetch\n', 'package.json': '{}' } },
-  }, [['src/entry.js', 'node_modules/node-fetch/browser.js']])
+  const bundle = writeBundle(tmp, 'nf.br', {
+    modules: {
+      'node_modules/node-fetch': { name: 'node-fetch', version: '2.7.0', files: { 'browser.js': '// native fetch\n', 'package.json': '{}' } },
+    },
+  })
   t.assert.deepEqual(collectPackages([bundle]), [])
 }))
 
 test('collectPackages keeps node-fetch 3.x (no browser.js correction)', withTmp((t, tmp) => {
-  const bundle = writeAuditBundle(tmp, {
-    'node_modules/node-fetch': { name: 'node-fetch', version: '3.3.2', files: { 'src.js': '// impl\n' } },
-  }, [['src/entry.js', 'node_modules/node-fetch/src.js']])
+  const bundle = writeBundle(tmp, 'nf3.br', {
+    modules: {
+      'node_modules/node-fetch': { name: 'node-fetch', version: '3.3.2', files: { 'src.js': '// impl\n' } },
+    },
+  })
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'node-fetch', version: '3.3.2' }])
 }))
 
 test('collectPackages corrections are package-specific', withTmp((t, tmp) => {
-  // A browser.js edge into any OTHER package still counts as present.
-  const bundle = writeAuditBundle(tmp, {
-    'node_modules/other': { name: 'other', version: '1.0.0', files: { 'browser.js': '// b\n' } },
-  }, [['src/entry.js', 'node_modules/other/browser.js']])
+  // A browser.js recorded in any OTHER package still counts as present.
+  const bundle = writeBundle(tmp, 'other.br', {
+    modules: {
+      'node_modules/other': { name: 'other', version: '1.0.0', files: { 'browser.js': '// b\n' } },
+    },
+  })
   t.assert.deepEqual(collectPackages([bundle]), [{ name: 'other', version: '1.0.0' }])
 }))
 
-test('collectPackages uses a lockfile resolution graph for the ws correction', withTmp((t, tmp) => {
-  // Lockfiles carry a resolution graph too (they only lack `reason`), so the
-  // edge-based correction applies exactly as for a bundle: ws recorded with real
-  // files but reached only via its browser.js stub is skipped; foo stays.
-  const lock = writeLock(tmp, 'ws-graph.lock.json', {
+test('collectPackages never counts a package.json manifest as presence', withTmp((t, tmp) => {
+  // A package recorded only through its manifest (a resolver/metadata read, or a
+  // `require('pkg/package.json')`) ships none of its code -- not audited.
+  const bundle = writeBundle(tmp, 'manifest.br', {
     modules: {
-      'node_modules/ws': { name: 'ws', version: '8.21.1', files: { 'browser.js': 'sha512-w', 'lib.js': 'sha512-l', 'package.json': 'sha512-p' } },
-      'node_modules/foo': { name: 'foo', version: '1.2.3', files: { 'index.js': 'sha512-y' } },
-    },
-    imports: {
-      '*': { 'src/entry.js': { ws: 'node_modules/ws/browser.js', foo: 'node_modules/foo/index.js' } },
+      'node_modules/meta-only': { name: 'meta-only', version: '1.0.0', files: { 'package.json': '{}' } },
     },
   })
-  t.assert.deepEqual(collectPackages([lock]), [{ name: 'foo', version: '1.2.3' }])
+  t.assert.deepEqual(collectPackages([bundle]), [])
 }))
 
-test('collectPackages falls back to recorded files for a graph-less (legacy) lockfile', withTmp((t, tmp) => {
-  // A legacy lockfile records no resolution graph, so every recorded file except
-  // inert metadata counts. A ws recorded as only its browser.js (+package.json) is
-  // still corrected away; foo (real code recorded) stays audited.
+test('collectPackages applies the same evidence rule to lockfiles', withTmp((t, tmp) => {
+  // A ws attested as only its browser.js (+package.json) is corrected away; foo
+  // (real code attested) stays audited.
   const lock = writeLock(tmp, 'ws.lock.json', {
     modules: {
       'node_modules/ws': { name: 'ws', version: '8.21.1', files: { 'browser.js': 'sha512-w', 'package.json': 'sha512-p' } },
@@ -222,6 +228,22 @@ test('collectPackages falls back to recorded files for a graph-less (legacy) loc
     },
   })
   t.assert.deepEqual(collectPackages([lock]), [{ name: 'foo', version: '1.2.3' }])
+}))
+
+test('collectReasons excludes a consumer that recorded only corrected files', withTmp((t, tmp) => {
+  // webpack shipped nothing of ws but the stub (+ manifest): none of ws's real
+  // code is in its bundle, so webpack is not one of ws's reasons; run (which
+  // bundled the real index.js) is.
+  const bundle = writeBundle(tmp, 'wsreason.br', {
+    modules: {
+      'node_modules/ws': { name: 'ws', version: '7.5.9', files: { 'browser.js': '// noop\n', 'index.js': '// real\n', 'package.json': '{}' } },
+    },
+    reason: {
+      webpack: ['node_modules/ws/browser.js', 'node_modules/ws/package.json'],
+      run: ['node_modules/ws/index.js'],
+    },
+  })
+  t.assert.deepEqual([...collectReasons([bundle]).get('ws@7.5.9')], ['run'])
 }))
 
 test('collectPackagesFromFile rejects unknown JSON shape with a lockfile-specific error', withTmp((t, tmp) => {

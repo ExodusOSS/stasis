@@ -34,10 +34,24 @@ const CORRECTIONS = [
 // Is `rel` (a file path relative to the module dir) audit-irrelevant for
 // `name@version`? Unknown or unparsable versions are never corrected (fail
 // closed: the package stays audited).
-export function isCorrectedFile(name, version, rel) {
+function isCorrectedFile(name, version, rel) {
   for (const { name: pkg, files, range } of CORRECTIONS) {
     if (pkg !== name || !files.has(rel)) continue
     if (semver.valid(version) && semver.satisfies(version, range)) return true
   }
   return false
+}
+
+// A `package.json` manifest (top-level or nested) is never code: the resolution
+// graph records resolver/metadata reads of them as edges (react-native scans
+// sibling packages' manifests for Haste/asset resolution) and consumers record
+// them alongside bundled files, but no package code ships through one.
+const isManifest = (rel) => rel === 'package.json' || rel.endsWith('/package.json')
+
+// Is `rel` evidence that `name@version`'s REAL code is present? This is the one
+// rule every audit surface shares -- package presence, the reason column, and
+// the --why chain graph all count a file (or an edge targeting it) only when it
+// passes. Manifests never do; corrected files don't within their verified range.
+export function isEvidenceFile(name, version, rel) {
+  return !isManifest(rel) && !isCorrectedFile(name, version, rel)
 }
