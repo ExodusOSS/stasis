@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 
-import { classifyNativeCapture, isExcludedNativeDir, isExcludedNativeFile } from '@exodus/stasis-core/util'
+import { classifyNativeCapture, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile } from '@exodus/stasis-core/util'
 
 const NOT_WIN = { win32: false }
 const WIN = { win32: true }
@@ -54,6 +54,18 @@ test('classifyNativeCapture: excluded files skip; a .bat is win32-conditional', 
   t.assert.deepEqual(classifyNativeCapture('RNThing.mm', NOT_WIN), { action: 'code', format: 'objcpp' })
   // A .sh script is 'shell' code from the one shared vocab (like gradlew), not a resource.
   t.assert.deepEqual(classifyNativeCapture('build-phase.sh', NOT_WIN), { action: 'code', format: 'shell' })
+})
+
+test('classifyNativeCapture: a `.env`/`.env.*` secrets file is skipped, a `.env`-extension file is kept', (t) => {
+  // Secrets are never swept into an automated native capture, keyed by BASENAME (any depth).
+  for (const name of ['.env', '.env.local', '.env.production', 'ios/.env', 'android/app/.env.staging']) {
+    t.assert.equal(isDotEnvFile(name), true, `${name} is a dotenv file`)
+    t.assert.deepEqual(classifyNativeCapture(name, NOT_WIN), { action: 'skip' }, `${name} skipped`)
+    t.assert.deepEqual(classifyNativeCapture(name, WIN), { action: 'skip' }, `${name} skipped on Windows too`)
+  }
+  // A file that merely USES the `.env` extension is a normal build input, tagged 'env' (pathExt='env').
+  t.assert.equal(isDotEnvFile('ios/config.env'), false)
+  t.assert.deepEqual(classifyNativeCapture('ios/config.env', NOT_WIN), { action: 'code', format: 'env' })
 })
 
 test('classifyNativeCapture: an extensionless shell shebang is shell code (content-based)', (t) => {

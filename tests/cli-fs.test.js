@@ -1029,6 +1029,82 @@ test('run --fs=async --resources=map captures + serves a *.map (async opt-in, me
   t.assert.equal(load.stdout, 'map:{"version":3}\n')
 }))
 
+// ----- `.env` secrets files are skipped under --fs ------------------------------------
+// A program reads its own `.env` (dotenv), but an automated capture must NEVER bake secrets into
+// an artifact. --fs treats `.env`/`.env.*` as non-existent (ENOENT) in BOTH capture and load --
+// never recorded, never aborting a capture -- and (unlike `*.map`) with no opt-in. Detection is by
+// basename, so a file that merely USES the `.env` extension (`config.env`) is captured normally.
+
+test('run --fs treats a .env read as NON-EXISTENT in capture (skipped, never recorded, capture not aborted)', withTmp((t, tmp) => {
+  // The secret EXISTS on disk; stasis still hands the reader ENOENT (never reads + records it),
+  // the capture is not tainted, and nothing about the .env lands in the bundle.
+  writeFileSync(join(tmp, '.env'), 'API_KEY=secret\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'const p = join(process.cwd(), ".env")',
+    'let out',
+    'try { out = `bytes:${readFileSync(p, "utf8").trim()}` } catch (e) { out = `code:${e.code}` }',
+    'console.log(out)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'code:ENOENT\n', 'a .env read returns ENOENT even though the secret is on disk')
+  t.assert.doesNotMatch(r.stderr, /capture aborted/, 'a .env read must not taint the capture')
+  t.assert.ok(existsSync(join(tmp, '.env')), 'precondition: the .env is on disk (so the ENOENT is synthetic)')
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['.env'], undefined, 'the secret is not recorded')
+  t.assert.equal(bundle.sources['.'].files['.env'], undefined)
+}))
+
+test('run --fs=async treats a .env.local read as non-existent (family match, capture + hermetic load)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, '.env.local'), 'TOKEN=xyz\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFile } from 'node:fs/promises'",
+    "import { join } from 'node:path'",
+    'let out',
+    'try { out = `bytes:${(await readFile(join(process.cwd(), ".env.local"), "utf8")).trim()}` } catch (e) { out = `code:${e.code}` }',
+    'console.log(out)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const save = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(save.status, 0, `save stderr: ${save.stderr}`)
+  t.assert.equal(save.stdout, 'code:ENOENT\n')
+  t.assert.equal(decode(bundlePath).formats['.env.local'], undefined, 'the .env.local secret is not recorded')
+
+  // Left on disk: load must STILL report it absent (a hermetic skip, no disk fallback).
+  const load = run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=async', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+  t.assert.equal(load.stdout, 'code:ENOENT\n', 'load returns ENOENT for the skipped .env.local despite it being on disk')
+}))
+
+test('run --fs skips `.env` by basename while a `.env`-extension file is still captured', withTmp((t, tmp) => {
+  // Detection keys on basename: `.env` is a secret (ENOENT), but `config.env` merely uses the
+  // extension and is captured as 'env' code -- pinning the pathExt('.env')==='env' subtlety.
+  writeFileSync(join(tmp, '.env'), 'SECRET=1\n')
+  writeFileSync(join(tmp, 'src', 'config.env'), 'API_URL=https://x\n')
+  writeFileSync(join(tmp, 'src', 'entry.js'), [
+    "import { readFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    'let dot',
+    'try { readFileSync(join(process.cwd(), ".env"), "utf8"); dot = "read" } catch (e) { dot = e.code }',
+    'const cfg = readFileSync(join(import.meta.dirname, "config.env"), "utf8").trim()',
+    'console.log(`dot:${dot} cfg:${cfg}`)',
+    '',
+  ].join('\n'))
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.equal(r.stdout, 'dot:ENOENT cfg:API_URL=https://x\n')
+  const bundle = decode(bundlePath)
+  t.assert.equal(bundle.formats['.env'], undefined, 'the .env secret is skipped')
+  t.assert.equal(bundle.formats['src/config.env'], 'env', 'a .env-extension file is captured as env code')
+  t.assert.equal(bundle.sources['.'].files['src/config.env'], 'API_URL=https://x\n')
+}))
+
 // --- fs settable via stasis.config.json ("fs": "sync" | "async") ------------------
 // fs is a Config field like scope/lock/bundle, so the mode can live in stasis.config.json
 // instead of the --fs CLI flag. The bundle mode still comes from the CLI here (the bundle

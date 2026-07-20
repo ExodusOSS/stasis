@@ -3,7 +3,9 @@
 // program's explicit reads into the bundle (bundle=add|replace) or serve them from it (bundle=load).
 // SECURITY INVARIANT: only paths whose REAL path (symlinks resolved) stays inside the project root are
 // captured/served; anything else falls through to the real fs and is never attested. Source-map
-// sidecars (*.map) are treated as non-existent unless opted in via `map` in the resources allowlist.
+// sidecars (*.map) are treated as non-existent unless opted in via `map` in the resources allowlist;
+// `.env`/`.env.*` secrets files are likewise non-existent (no opt-in -- automated capture must never
+// bake a secret in; `stasis add .env` still can).
 // Mechanism (mirrors mock.js): snapshot the real fns at module-eval before install() patches, so
 // stasis's own reads stay real; on install, replace the readers and syncBuiltinESMExports().
 
@@ -13,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // The genuine sync source reader (snapshotted before any --fs patch), shared via state-util.js.
 import { realReadFileSync } from './state-util.js'
+import { isDotEnvFile } from './util.js'
 
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
@@ -110,6 +113,21 @@ function isSkippedSourceMap(state, abs) {
   return true
 }
 
+// `.env`/`.env.*` secrets files are treated as NON-EXISTENT under --fs (never captured/served,
+// faithful ENOENT in both modes), so an automated capture can never bake a secret into an artifact.
+// Unlike the source-map skip there's no resources opt-in; the ONE way a `.env` serves at load is
+// membership -- a `.env` the bundle actually carries (an explicit `stasis add .env`) wins.
+function isSkippedEnvFile(state, abs) {
+  if (!isDotEnvFile(abs)) return false
+  if (state.config.loadBundle && state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) return false
+  return true
+}
+
+// Paths --fs treats as non-existent in both capture and load: source-map sidecars and `.env` secrets.
+function isSkippedFsPath(state, abs) {
+  return isSkippedSourceMap(state, abs) || isSkippedEnvFile(state, abs)
+}
+
 // A faithful Node-shaped ENOENT (code/errno/syscall/path set), indistinguishable from a real absent file.
 function enoent(syscall, path) {
   const p = typeof path === 'string' ? path : Buffer.isBuffer(path) ? path.toString() : String(path)
@@ -170,8 +188,8 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     if (state) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        // Source-map sidecars are absent in both modes (see isSkippedSourceMap).
-        if (isSkippedSourceMap(state, abs)) throw enoent('open', path)
+        // Source-map sidecars and `.env` secrets are absent in both modes (see isSkippedFsPath).
+        if (isSkippedFsPath(state, abs)) throw enoent('open', path)
         const url = pathToFileURL(abs).toString()
         if (state.config.loadBundle) {
           // Serve the captured bytes (family bundles too); undefined (unrecorded, or a dir) -> disk.
@@ -233,7 +251,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     if (state && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        if (isSkippedSourceMap(state, abs)) throw enoent('lstat', path)
+        if (isSkippedFsPath(state, abs)) throw enoent('lstat', path)
         if (state.config.loadBundle) {
           const kind = state.getFsStatFamily(pathToFileURL(abs).toString())
           if (kind !== undefined) return bundleStats(realLstatSync, path, kind === 'directory')
@@ -254,7 +272,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     if (state && options == null) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        if (isSkippedSourceMap(state, abs)) throw enoent('stat', path)
+        if (isSkippedFsPath(state, abs)) throw enoent('stat', path)
         if (state.config.loadBundle) {
           const kind = state.getFsStatFamily(pathToFileURL(abs).toString())
           if (kind !== undefined) return bundleStats(realStatSync, path, kind === 'directory')
@@ -276,7 +294,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     if (state) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        if (isSkippedSourceMap(state, abs)) return false
+        if (isSkippedFsPath(state, abs)) return false
         if (state.config.loadBundle && state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) return true
       }
     }
@@ -288,7 +306,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     if (state) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        if (isSkippedSourceMap(state, abs)) throw enoent('access', path)
+        if (isSkippedFsPath(state, abs)) throw enoent('access', path)
         // Read-only serve: a carried path satisfies F_OK/R_OK; a W_OK/X_OK probe defers to the real fs.
         if (state.config.loadBundle && isReadOnlyAccessMode(mode) &&
             state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) {
@@ -306,7 +324,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
     if (state) {
       const abs = toAbsPath(path)
       if (abs !== null && withinRoot(state.root, abs)) {
-        if (isSkippedSourceMap(state, abs)) throw enoent('realpath', path)
+        if (isSkippedFsPath(state, abs)) throw enoent('realpath', path)
         if (state.config.loadBundle && state.getFsStatFamily(pathToFileURL(abs).toString()) !== undefined) {
           try { return realFn(path, options) } catch { return encodeRealpath(abs, options) }
         }
@@ -327,7 +345,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       const abs = toAbsPath(path)
       if (abs === null || !withinRoot(state.root, abs)) return null
       // Skipped source map -> 'absent' so the wrappers below hand back ENOENT.
-      if (isSkippedSourceMap(state, abs)) return { mode: 'absent', abs }
+      if (isSkippedFsPath(state, abs)) return { mode: 'absent', abs }
       const url = pathToFileURL(abs).toString()
       if (state.config.loadBundle) return { mode: 'serve', state, url, abs }
       if (state.config.writeBundle && !isLoadingModule()) return { mode: 'capture', state, url, abs }

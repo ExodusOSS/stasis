@@ -879,7 +879,7 @@ process.exit(1)
     writeFileSync(join(root, 'ios', 'RNThing.entitlements'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
     writeFileSync(join(root, 'gradlew'), '#!/usr/bin/env sh\nexec gradle "$@"\n') // the Gradle wrapper (shell)
     writeFileSync(join(root, 'apple-app-site-association'), '{ "applinks": {} }\n') // AASA -> json
-    writeFileSync(join(root, '.env'), 'API_URL=https://example.com\n') // dotenv -> env
+    writeFileSync(join(root, '.env'), 'API_URL=https://example.com\n') // secrets file -> excluded from capture
     writeFileSync(join(root, 'fastlane', 'Appfile'), "app_identifier('com.example.rnthing')\n")
     writeFileSync(join(root, 'fastlane', 'Fastfile'), 'lane :test do\nend\n')
     writeFileSync(join(root, 'android', 'build.gradle'), 'apply plugin: "com.android.library"\n')
@@ -929,7 +929,7 @@ process.exit(1)
     'ios/Podfile', 'ios/Podfile.lock',
     'ios/RNThing-Info.plist', 'ios/PrivacyInfo.xcprivacy', 'ios/RNThing.xcscheme', 'gradlew',
     'ios/Main.storyboard', 'ios/RNThing.entitlements',
-    '.env', 'apple-app-site-association', 'fastlane/Appfile', 'fastlane/Fastfile',
+    'apple-app-site-association', 'fastlane/Appfile', 'fastlane/Fastfile',
     'android/build.gradle', 'android/settings.gradle.kts', 'android/CMakeLists.txt',
     'android/src/main/AndroidManifest.xml',
     'android/src/main/java/com/Thing.java',
@@ -976,11 +976,11 @@ process.exit(1)
     t.assert.equal(mod.files['libs/apple/Skia.xcframework/ios-arm64/Skia.a'], undefined, 'a lib inside an xcframework is excluded')
     t.assert.equal(mod.files['libs/apple/Skia.xcframework/Info.plist'], undefined, 'the whole *.xcframework bundle dir is skipped, not descended into')
     // Non-build-input noise is excluded from the native globbing: docs, editor/lint/CI config, logs,
-    // source maps, Xcode project bundles, and off-platform (windows/, .bat off Windows).
+    // source maps, Xcode project bundles, off-platform (windows/, .bat off Windows), and `.env` secrets.
     for (const f of ['README.md', 'LICENSE', '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore',
       '.releaserc', '.clang-format', '.buckconfig', '.watchmanconfig', 'debug.log', 'ios/RNThing.js.map',
       'install.bat', 'ios/RNThing.xcodeproj/project.pbxproj',
-      'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata', 'windows/RNThing.cpp']) {
+      'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata', 'windows/RNThing.cpp', '.env']) {
       t.assert.equal(mod.files[f], undefined, `expected ${f} to be excluded from native capture`)
     }
     // (Info.plist + Apple's privacy manifest are kept, tagged 'xml' -- asserted below with the
@@ -1016,7 +1016,7 @@ process.exit(1)
     t.assert.equal(nlfmt('ios/RNThing.xcscheme'), 'xml')
     t.assert.equal(nlfmt('ios/Main.storyboard'), 'xml')
     t.assert.equal(nlfmt('ios/RNThing.entitlements'), 'xml')
-    t.assert.equal(nlfmt('.env'), 'env')
+    t.assert.equal(nlfmt('.env'), undefined) // a .env secrets file is never swept into an automated capture
     t.assert.equal(nlfmt('apple-app-site-association'), 'json') // AASA rides the code path as json
     // project.pbxproj lives inside the excluded `.xcodeproj` bundle -> NOT captured (asserted excluded above).
     t.assert.equal(nlfmt('fastlane/Appfile'), 'fastlane') // matched by basename
