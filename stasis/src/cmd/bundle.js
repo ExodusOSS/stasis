@@ -643,6 +643,8 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       preferNative: platform !== null && platform !== 'web',
       sourceExts: SOURCE_EXTS,
       conditions: resolveConditions('commonjs', extras),
+      // Opt into Metro's package-entry browser-field quirks only on the --metro path.
+      metro,
     })
     const scanner = scan(absEntries, { conditions: extras, resolve: resolver })
     reportScanIssues(analyzeScanner(scanner), { label: platform ?? 'mainFields' })
