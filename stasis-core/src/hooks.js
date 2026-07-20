@@ -318,7 +318,12 @@ function initState(root) {
       // Fold in every child's shard before writing, so child-only files/edges are attested too.
       if (createdShardDir) mergeChildShards(createdShardDir)
       state.write()
-      saved = true
+      // Latch `saved` only in write modes -- the only case write() persists an artifact. A read-only
+      // run (lock=frozen / bundle=frozen|load) writes nothing, so a module whose bytes first load
+      // after this (e.g. a lazy import() fired from a beforeExit handler) is still fully attested and
+      // must NOT trip the load hook's assert.equal(saved, false), which guards only against shipping
+      // an unattested module in a written artifact.
+      if (state.config.writeLockfile || state.config.writeBundle) saved = true
     } finally {
       // Always remove the shard dir we minted (sole owner of this cleanup); SIGKILL leaves it for the OS.
       if (createdShardDir) {
