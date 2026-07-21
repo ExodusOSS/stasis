@@ -2070,6 +2070,85 @@ test('CLI: bundle --jsx --flow strips Flow types from a .jsx dependency and walk
   t.assert.match(bundle.sources.get('comp.jsx'), /x: number/u)
 }))
 
+// --- --resources: carry reached assets instead of failing "can't carry" ---------------------
+//
+// Not every import graph is loadable in JS: an RN entry may `import logo from './logo.png'`, and
+// Metro consumes such assets. Without --resources a reached non-code file is fatal ("a source
+// bundle can't carry"). --resources=<ext|name> carries the allowlisted files as resources
+// (resource for UTF-8, resource:base64 for binary) with their edges recorded.
+
+// A binary PNG (0x89 high byte -> not UTF-8) plus a UTF-8 SVG, both imported by the entry.
+const writeAssets = (tmp) => {
+  writeFileSync(join(tmp, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  writeFileSync(join(tmp, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>\n')
+}
+
+test('CLI: bundle --metro carries reached assets only with --resources (binary -> base64, text -> resource)', withTmp((t, tmp) => {
+  jsProject(tmp, { 'index.js': "import logo from './logo.png'\nimport icon from './icon.svg'\nexport const assets = [logo, icon]\n" })
+  writeAssets(tmp)
+  const outPath = join(tmp, 'out.br')
+
+  const noRes = runCli(['bundle', '--metro', '--platforms=ios,android', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.notEqual(noRes.status, 0, 'a reached asset must fail closed without --resources')
+  t.assert.match(noRes.stderr, /\.\/logo\.png from index\.js resolves to logo\.png, which a source bundle can't carry/)
+  t.assert.ok(!existsSync(outPath))
+
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--resources=png,svg', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['icon.svg', 'index.js', 'logo.png'],
+    'both assets must be carried alongside the entry')
+  // Byte-derived formats: binary -> base64, UTF-8 -> verbatim resource.
+  t.assert.equal(bundle.formats.get('logo.png'), 'resource:base64')
+  t.assert.equal(bundle.formats.get('icon.svg'), 'resource')
+  t.assert.equal(bundle.sources.get('logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64'))
+  t.assert.match(bundle.sources.get('icon.svg'), /<svg xmlns/u)
+  // The import edges to the assets are recorded.
+  const edges = [...bundle.imports.values()].map((m) => m.get('index.js')).find(Boolean)
+  t.assert.equal(edges.get('./logo.png'), 'logo.png')
+  t.assert.equal(edges.get('./icon.svg'), 'icon.svg')
+}))
+
+test('CLI: bundle (plain, no --metro) --resources carries a reached asset', withTmp((t, tmp) => {
+  jsProject(tmp, { 'index.js': "import logo from './logo.png'\nexport const app = logo\n" })
+  writeAssets(tmp)
+  const outPath = join(tmp, 'out.br')
+
+  const noRes = runCli(['bundle', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.notEqual(noRes.status, 0, 'plain path must also fail closed on a reached asset without --resources')
+  t.assert.match(noRes.stderr, /which a source bundle can't carry/)
+
+  const r = runCli(['bundle', '--resources=png', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['index.js', 'logo.png'])
+  t.assert.equal(bundle.formats.get('logo.png'), 'resource:base64')
+}))
+
+test('CLI: bundle --resources rejects a code extension and non-JS bundles', (t) => {
+  const code = runCli(['bundle', '--resources=js', 'index.js'])
+  t.assert.notEqual(code.status, 0)
+  t.assert.match(code.stderr, /resources entry 'js' is a code extension/)
+
+  const nonJs = runCli(['bundle', '--resources=png', 'a.sol'])
+  t.assert.notEqual(nonJs.status, 0)
+  t.assert.match(nonJs.stderr, /--resources is only valid for JS bundles/)
+})
+
+test('buildBundle threads resources through to the scanner (programmatic API)', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'res-prog', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'index.js'), "import icon from './icon.svg'\nexport const app = icon\n")
+  writeFileSync(join(tmp, 'icon.svg'), '<svg/>\n')
+  await t.assert.rejects(
+    () => buildBundle({ cwd: tmp, entries: ['index.js'] }),
+    /which a source bundle can't carry/,
+    'default (no resources) must fail closed on a reached asset',
+  )
+  const bundle = await buildBundle({ cwd: tmp, entries: ['index.js'], resources: ['svg'] })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['icon.svg', 'index.js'])
+  t.assert.equal(bundle.formats.get('icon.svg'), 'resource')
+}))
+
 test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', withTmp((t, tmp) => {
   // The original bug report's root cause: stasis installed without oxc-parser.
   // getParser()'s throw was caught by the per-file parse handler, so every file
