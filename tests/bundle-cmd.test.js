@@ -2149,6 +2149,54 @@ test('buildBundle threads resources through to the scanner (programmatic API)', 
   t.assert.equal(bundle.formats.get('icon.svg'), 'resource')
 }))
 
+test('CLI: bundle --metro --resources round-trips through its companion --lockfile (diff clean)', withTmp((t, tmp) => {
+  // The lockfile attests the resource's RAW bytes (not the base64 string); diff of bundle vs
+  // lockfile must report no differences, proving the resource:base64 round-trip is consistent.
+  jsProject(tmp, { 'index.js': "import logo from './logo.png'\nexport const app = logo\n" })
+  writeFileSync(join(tmp, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  const out = join(tmp, 'out.br')
+  const lock = join(tmp, 'out.lock.json')
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--resources=png', `--lockfile=${lock}`, `--output=${out}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, r.stderr)
+  t.assert.ok(existsSync(out) && existsSync(lock))
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(out)).toString('utf8'))
+  t.assert.equal(bundle.formats.get('logo.png'), 'resource:base64')
+  t.assert.equal(runCli(['diff', '--stat', out, lock]).status, 0, 'resource bytes must round-trip through the lockfile')
+}))
+
+test('CLI: bundle --resources carries an extensionless allowlisted filename and ignores unreached extensions', withTmp((t, tmp) => {
+  // classifyExtension falls back to the basename for extensionless files, so --resources=NOTICE
+  // carries a reached `NOTICE` by name. `png` is allowlisted but nothing imports one -> it's a no-op.
+  jsProject(tmp, { 'index.js': "import notice from './NOTICE'\nexport const app = notice\n" })
+  writeFileSync(join(tmp, 'NOTICE'), 'all rights reserved\n')
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', '--resources=NOTICE,png', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['NOTICE', 'index.js'],
+    'the extensionless allowlisted file is carried; the unreached png extension adds nothing')
+  t.assert.equal(bundle.formats.get('NOTICE'), 'resource')
+}))
+
+test('CLI: bundle --metro does not native-capture a package reached only for an asset', withTmp((t, tmp) => {
+  // A node_modules package with a native ios/ file plus an asset; the entry imports ONLY the asset.
+  // Importing an asset does not link a native module, so the package's ios/ surface must NOT be
+  // captured (native capture follows the code/module graph, not --resources reaches).
+  jsProject(tmp, { 'index.js': "import logo from 'asset-pkg/logo.png'\nexport const app = logo\n" })
+  const pkg = join(tmp, 'node_modules', 'asset-pkg')
+  mkdirSync(join(pkg, 'ios'), { recursive: true })
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'asset-pkg', version: '1.0.0' }))
+  writeFileSync(join(pkg, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  writeFileSync(join(pkg, 'ios', 'Native.m'), '// native source\n')
+  const outPath = join(tmp, 'out.br')
+  const r = runCli(['bundle', '--metro', '--platforms=ios,android', '--resources=png', `--output=${outPath}`, 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const files = [...bundle.sources.keys()]
+  t.assert.ok(files.includes('node_modules/asset-pkg/logo.png'), 'the imported asset itself is carried')
+  t.assert.ok(!files.some((f) => f.endsWith('ios/Native.m')), 'the package native surface must not be captured for an asset-only reach')
+}))
+
 test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', withTmp((t, tmp) => {
   // The original bug report's root cause: stasis installed without oxc-parser.
   // getParser()'s throw was caught by the per-file parse handler, so every file

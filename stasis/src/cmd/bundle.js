@@ -749,6 +749,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   if (metro) {
     const pkgDirs = new Set()
     for (const abs of reached) {
+      // Follow the CODE/module graph only: a package reached solely for an asset (--resources) is
+      // not a linked native dependency, so it must not drag in its ios/android surface.
+      if (resourceRels.has(toRel(abs))) continue
       const nm = splitNodeModulesPath(toRel(abs))
       if (nm) pkgDirs.add(nm.dir)
     }
