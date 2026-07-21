@@ -88,6 +88,26 @@ function realContained(root, abs) {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
+// stasis writes its OWN outputs into the project root: the bundle file(s) -- a `*.br` whose name
+// carries `stasis` (the default `stasis.code.br`, a split `*.stasis.*.br`) -- and the
+// `stasis.lock.json` lockfile. They're absent on a first `--bundle=replace` run but present on a
+// later `--bundle=add` run (the earlier run left them on disk), so a readdir of the project root
+// would list them on the second run only. Recording that makes the two runs' root listings diverge
+// and the add run's capture conflicts (the listing's integrity no longer matches the seeded one).
+function isStasisArtifactName(name) {
+  const base = name.toLowerCase()
+  return base === 'stasis.lock.json' || (base.includes('stasis') && base.endsWith('.br'))
+}
+
+// The directory listing to RECORD for a readdir capture. At the project root, drop stasis's own
+// artifacts (see isStasisArtifactName) so the attested listing is independent of whether an earlier
+// run left them behind; every other directory records its names verbatim. The program still receives
+// the true on-disk `names` -- only what we bake into the bundle is filtered.
+function dirCaptureNames(root, abs, names) {
+  if (relative(root, abs) !== '') return names
+  return names.filter((name) => !isStasisArtifactName(name))
+}
+
 // Apply readFileSync's encoding arg to raw bytes: no encoding yields the Buffer, else Buffer.toString
 // (which throws ERR_UNKNOWN_ENCODING for an unknown encoding, matching fs).
 function decode(buf, options) {
@@ -224,7 +244,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
           const names = realReaddirSync(path)
           // As in readFileSync: skip a dir whose real path escapes root, so no external listing is baked in.
           if (realContained(state.root, abs)) {
-            try { state.addFsDir(url, names) } catch (err) { markAborted(err) }
+            try { state.addFsDir(url, dirCaptureNames(state.root, abs, names)) } catch (err) { markAborted(err) }
           }
           return names
         }
@@ -407,7 +427,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
       } else if (t?.mode === 'capture') {
         realReaddir(path, (err, names) => {
           if (err) return cb(err)
-          if (realContained(t.state.root, t.abs)) { try { t.state.addFsDir(t.url, names) } catch (e) { markAborted(e) } }
+          if (realContained(t.state.root, t.abs)) { try { t.state.addFsDir(t.url, dirCaptureNames(t.state.root, t.abs, names)) } catch (e) { markAborted(e) } }
           cb(null, names)
         })
         return
@@ -422,7 +442,7 @@ export function installFsHooks({ async: patchAsync, getState, markAborted, isLoa
         if (names !== undefined) return names
       } else if (t?.mode === 'capture') {
         const names = await realReaddirP(path)
-        if (realContained(t.state.root, t.abs)) { try { t.state.addFsDir(t.url, names) } catch (e) { markAborted(e) } }
+        if (realContained(t.state.root, t.abs)) { try { t.state.addFsDir(t.url, dirCaptureNames(t.state.root, t.abs, names)) } catch (e) { markAborted(e) } }
         return names
       }
       return realReaddirP(path, options)

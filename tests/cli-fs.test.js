@@ -426,6 +426,39 @@ describe('stasis run --fs (spawned, concurrent)', { concurrency: CONCURRENCY }, 
     t.assert.equal(load.stdout, 'root:true\n')
   }))
 
+  test('run --fs excludes stasis\'s own bundle/lockfile from a project-root readdir capture (replace then add)', withTmp(async (t, tmp) => {
+    // Regression: a readdir of the project ROOT must NOT attest stasis's own outputs (the
+    // default stasis.code.br bundle + stasis.lock.json lockfile). They are absent on the first
+    // --bundle=replace run but present on the follow-up --bundle=add run (the replace left them
+    // on disk), so recording them made the two runs' root listings diverge and the add run's
+    // capture conflicted ("Conflict for '.'") -> capture aborted, nothing written.
+    writeFileSync(join(tmp, 'src', 'entry.js'), [
+      "import { readdirSync } from 'node:fs'",
+      'const names = readdirSync(process.cwd())',
+      'console.log(`root:${names.includes("package.json")}`)',
+      '',
+    ].join('\n'))
+    // Default write paths (no --bundle-file / --lockfile): the artifacts land AT the root.
+    const bundlePath = join(tmp, 'stasis.code.br')
+    const lockPath = join(tmp, 'stasis.lock.json')
+
+    const replace = await run(['run', '--lock=replace', '--bundle=replace', '--fs=sync', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(replace.status, 0, `replace stderr: ${replace.stderr}`)
+    t.assert.equal(replace.stdout, 'root:true\n')
+    t.assert.ok(existsSync(bundlePath) && existsSync(lockPath), 'replace writes the default bundle + lockfile')
+    // The recorded root listing omits the (now on-disk) stasis artifacts.
+    const listing1 = decode(bundlePath).sources['.'].files['']
+    t.assert.doesNotMatch(listing1, /stasis\.(?:code\.br|lock\.json)/, 'root listing must exclude stasis artifacts')
+
+    // The root now contains stasis.code.br + stasis.lock.json; the add capture must NOT conflict.
+    const add = await run(['run', '--lock=add', '--bundle=add', '--fs=sync', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(add.status, 0, `add stderr: ${add.stderr}`)
+    t.assert.equal(add.stdout, 'root:true\n')
+    t.assert.doesNotMatch(add.stderr, /capture aborted/, 'the add run must not abort on a listing conflict')
+    // Both runs record the identical filtered listing, so the seeded integrity still matches.
+    t.assert.equal(decode(bundlePath).sources['.'].files[''], listing1)
+  }))
+
   test('run --fs handles a type-less .js that is both imported and readFileSync-read', withTmp(async (t, tmp) => {
     // Regression: the loader records 'module' (syntax detection) for a type-less .js,
     // while the fs read used to impose the legacy 'commonjs' default -> noupsert
