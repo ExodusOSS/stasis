@@ -29,6 +29,7 @@ const {
   EXODUS_STASIS_DEBUG: _d,
   EXODUS_STASIS_PID: _pid,
   EXODUS_STASIS_CHILD_PROCESS: _cp,
+  EXODUS_STASIS_PACKAGE_JSON: _pj,
   EXODUS_STASIS_SHARD_DIR: _sd,
   EXODUS_STASIS_SHARD_KEY: _sk,
   EXODUS_STASIS_SHARD_SIGNAL_FLUSH: _ssf,
@@ -191,6 +192,35 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     t.assert.ok(parsed.sources['.'].files['src/entry.js'].startsWith('sha512-'))
     t.assert.ok(parsed.sources['.'].files['src/hello.js'].startsWith('sha512-'))
   }))
+
+  test('run --package-json folds each bundled module package.json into the bundle and lockfile', withTmp(async (t, tmp) => {
+    cpSync(nmFixture, tmp, { recursive: true })
+    const bundlePath = join(tmp, 'stasis.code.br')
+    const lockPath = join(tmp, 'stasis.lock.json')
+    // The fixture's stasis.config.json pins scope=node_modules, so pass --dependencies to match.
+    const r = await run(['run', '--lock=replace', '--dependencies', '--bundle=replace', '--package-json', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stderr, /packageJSON: true/)
+
+    const bundle = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf-8'))
+    const depFiles = Object.keys(bundle.modules['node_modules/fake-esm-pkg'].files)
+    t.assert.ok(depFiles.includes('package.json'), 'dependency package.json is bundled even though the run never imported it')
+    t.assert.equal(bundle.formats['node_modules/fake-esm-pkg/package.json'], 'json')
+
+    // The manifest is attested by the lockfile too, so a later --bundle=frozen verifies it.
+    const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+    t.assert.ok(lock.modules['node_modules/fake-esm-pkg'].files['package.json']?.startsWith('sha512-'))
+
+    // Round-trip: the produced bundle verifies against disk under --bundle=frozen.
+    const frozen = await run(['run', '--lock=frozen', '--dependencies', '--bundle=frozen', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(frozen.status, 0, `frozen stderr: ${frozen.stderr}`)
+  }))
+
+  test('run --package-json without a write bundle mode is rejected', async (t) => {
+    const r = await run(['run', '--lock=add', '--package-json', 'src/entry.js'], { cwd: runFixture })
+    t.assert.equal(r.status, 1)
+    t.assert.match(r.stderr, /--package-json requires --bundle=\(add\|replace\)/)
+  })
 
   test('run --lock=frozen executes the entry using the committed lockfile', async (t) => {
     const r = await run(['run', '--lock=frozen', 'src/entry.js'], { cwd: runFixture })

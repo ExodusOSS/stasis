@@ -28,6 +28,7 @@ holding the lockfile, and may not start with `..`.
 | `lock` | `"ignore"`, `"add"`, `"replace"`, `"frozen"` | `"add"` | `EXODUS_STASIS_LOCK` |
 | `bundle` | `"ignore"`, `"add"`, `"replace"`, `"load"`, `"frozen"` | unset | `EXODUS_STASIS_BUNDLE` |
 | `debug` | boolean | `false` | `EXODUS_STASIS_DEBUG` |
+| `packageJSON` | boolean | `false` | `EXODUS_STASIS_PACKAGE_JSON` |
 | `fs` | `"sync"`, `"async"` | unset | `EXODUS_STASIS_FS` |
 | `brotliQuality` | integer `0`–`11` | `9` | `EXODUS_STASIS_BROTLI_QUALITY` |
 
@@ -57,9 +58,19 @@ lower is faster, higher is smaller; `9` is the default. It affects only the
 artifact's encoding — the decompressed content, and thus every hash, is identical
 at any quality — so it is inert under read-only bundle modes.
 
+`packageJSON` (equivalent to `--package-json` on `stasis run`/`stasis bundle`)
+auto-includes each bundled module's `package.json` when a bundle is written, even
+if the run/scan never reached it — so a `bundle = load` of the artifact, or a
+`prune`, can still read every dependency's manifest. It only takes effect while
+*writing* a bundle (`bundle = add | replace`); its effect is the extra bundled
+files (attested like any other), so the flag itself is not serialized. JS bundles
+only on the `stasis bundle` side (`.sol`/`.php`/`.sh`/`.rs` bundles have no npm
+`package.json`).
+
 Unknown keys are rejected. A key set by both file and env var must match. Only
 `scope` is persisted into the lockfile/bundle `config` block; `debug`,
-`childProcess`, `fs`, and `brotliQuality` are run-time flags, not attested.
+`childProcess`, `packageJSON`, `fs`, and `brotliQuality` are run-time flags, not
+attested.
 
 ## `stasis.lock.json`
 

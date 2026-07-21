@@ -1560,7 +1560,29 @@ export class State {
     }
   }
 
+  // Auto-include each bundled module's package.json (config.packageJSON): for every module bucket,
+  // add its `<dir>/package.json` even if the run/scan never reached it, so a load/prune of the
+  // resulting bundle can read every dependency's manifest. Build-time self-containment like
+  // #backfillBeforeWrite -- reason:null (not a consumer observation), and idempotent (addFile no-ops
+  // a byte-identical re-add, e.g. a manifest the run already `require`d). A bucket whose package.json
+  // isn't on disk (a module carried in from an absorbed bundle over a pruned tree) is skipped, not fatal.
+  includePackageJson() {
+    // Collect the manifests first, then addFile them: addFile mutates this.modules (records the
+    // file into its bucket), so gather the read-only pass before touching the Map.
+    const toAdd = []
+    for (const dir of this.modules.keys()) {
+      const file = moduleFileKey(dir, 'package.json')
+      if (this.hashes.has(file) || this.sources.has(file)) continue // already captured/attested
+      const absolute = resolve(this.root, dir, 'package.json')
+      if (existsSync(absolute)) toAdd.push(absolute)
+    }
+    for (const absolute of toAdd) this.addFile(pathToFileURL(absolute).toString(), { reason: null })
+  }
+
   write() {
+    // Fold each bundled module's package.json in before serialization (config.packageJSON). Gated on
+    // writeBundle: load/frozen modes add no files, and a lockfile-only run has nothing to bundle into.
+    if (this.config.writeBundle && this.config.packageJSON) this.includePackageJson()
     // Backfill observed native resolutions BEFORE the stasis-core BFS: a resolve-only edge to a
     // stasis-core submodule is added only here, and the BFS must see it to seed the file's bytes
     // (else it ships a dangling edge a later lock=frozen replay rejects).

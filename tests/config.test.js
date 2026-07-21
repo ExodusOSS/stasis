@@ -13,6 +13,7 @@ const ENV_KEYS = [
   'EXODUS_STASIS_RESOURCES',
   'EXODUS_STASIS_DEBUG',
   'EXODUS_STASIS_CHILD_PROCESS',
+  'EXODUS_STASIS_PACKAGE_JSON',
   'EXODUS_STASIS_SHARD_SIGNAL_FLUSH',
   'EXODUS_STASIS_FS',
   'EXODUS_STASIS_BROTLI_QUALITY',
@@ -715,6 +716,90 @@ test('Config childProcess=true option conflicts with env childProcess=0', withEn
   { EXODUS_STASIS_CHILD_PROCESS: '0' },
   (t) => {
     t.assert.throws(() => new Config({ childProcess: true }), /Config options can not override stasis env/)
+  }
+))
+
+// packageJSON mirrors childProcess: a boolean, env EXODUS_STASIS_PACKAGE_JSON, NOT serialized (its
+// effect -- the bundled package.json files -- is what lands in the artifact, not the flag itself).
+// It auto-includes each bundled module's package.json when bundling with `run`/`bundle`.
+test('loadConfig rejects non-boolean packageJSON', (t) => {
+  const c = new Config()
+  t.assert.throws(() => c.loadConfig(json({ packageJSON: 1 })), /packageJSON must be a boolean/)
+  t.assert.throws(() => c.loadConfig(json({ packageJSON: 'true' })), /packageJSON must be a boolean/)
+})
+
+test('loadConfig packageJSON=true', (t) => {
+  const c = new Config()
+  c.loadConfig(json({ packageJSON: true }))
+  t.assert.equal(c.packageJSON, true)
+})
+
+test('Config(options) sets packageJSON', (t) => {
+  t.assert.equal(new Config({ packageJSON: true }).packageJSON, true)
+})
+
+test('Config defaults packageJSON to false', (t) => {
+  t.assert.equal(new Config().packageJSON, false)
+})
+
+test('Config(options) rejects non-boolean packageJSON', (t) => {
+  t.assert.throws(() => new Config({ packageJSON: 'yes' }), /packageJSON must be a boolean/)
+})
+
+test('validatePluginOptions rejects non-boolean packageJSON', (t) => {
+  t.assert.throws(() => validatePluginOptions('StasisFoo', { packageJSON: 1 }), /packageJSON must be a boolean/)
+})
+
+test('validatePluginOptions accepts packageJSON', (t) => {
+  t.assert.doesNotThrow(() => validatePluginOptions('StasisFoo', { packageJSON: true }))
+})
+
+test('assertOptionsMatchConfig enforces packageJSON against the active config', (t) => {
+  const c = new Config({ packageJSON: true })
+  t.assert.doesNotThrow(() => assertOptionsMatchConfig(c, { packageJSON: true }))
+  t.assert.throws(() => assertOptionsMatchConfig(c, { packageJSON: false }), /conflict/)
+})
+
+test('packageJSON is not serialized into json (a build-time flag, like debug/childProcess)', (t) => {
+  const c = new Config({ packageJSON: true })
+  t.assert.equal(JSON.parse(c.json).packageJSON, undefined)
+  t.assert.deepEqual(c.values, { scope: 'full' })
+})
+
+test('Config packageJSON env "1" is true', withEnv(
+  { EXODUS_STASIS_PACKAGE_JSON: '1' },
+  (t) => { t.assert.equal(new Config().packageJSON, true) }
+))
+
+test('Config packageJSON env "0"/"false" disable (not truthy-parsed)', withEnv(
+  { EXODUS_STASIS_PACKAGE_JSON: 'false' },
+  (t) => { t.assert.equal(new Config().packageJSON, false) }
+))
+
+test('Config packageJSON env "" is unset and keeps the default (false)', withEnv(
+  { EXODUS_STASIS_PACKAGE_JSON: '' },
+  (t) => { t.assert.equal(new Config().packageJSON, false) }
+))
+
+test('Config packageJSON env rejects unrecognized values', withEnv(
+  { EXODUS_STASIS_PACKAGE_JSON: 'yes' },
+  (t) => {
+    t.assert.throws(() => new Config(), { name: 'RangeError', message: /EXODUS_STASIS_PACKAGE_JSON must be/ })
+  }
+))
+
+test('Config packageJSON=true option conflicts with env packageJSON=0', withEnv(
+  { EXODUS_STASIS_PACKAGE_JSON: '0' },
+  (t) => {
+    t.assert.throws(() => new Config({ packageJSON: true }), /Config options can not override stasis env/)
+  }
+))
+
+test('loadConfig packageJSON conflicts with env', withEnv(
+  { EXODUS_STASIS_PACKAGE_JSON: '1' },
+  (t) => {
+    const c = new Config()
+    t.assert.throws(() => c.loadConfig(json({ packageJSON: false })), /Flags\/env can not override stasis.config.json/)
   }
 ))
 

@@ -21,18 +21,19 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--package-json] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--resources=ext,ext] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--resources=ext,ext] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
   --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep);
-  --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them))
+  --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them;
+  --package-json auto-includes each bundled module's package.json, even ones the scan never reached))
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -81,6 +82,7 @@ if (command === '-v' || command === '--version') {
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
     'child-process': { type: 'boolean' },
+    'package-json': { type: 'boolean' },
     mock: { type: 'boolean' },
     fs: { type: 'string' },
     resources: { type: 'string' },
@@ -125,7 +127,13 @@ if (command === '-v' || command === '--version') {
   }
   // --child-process: forward forked-child (e.g. Metro worker) capture to the root via per-pid shards.
   const childProcess = values['child-process'] ? '1' : ''
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
+  // --package-json: auto-include every bundled module's package.json. Only meaningful while WRITING
+  // a bundle (add|replace) -- there's nothing to fold the manifests into otherwise.
+  if (values['package-json'] && bundle !== 'add' && bundle !== 'replace') {
+    usage('Error: --package-json requires --bundle=(add|replace)')
+  }
+  const packageJSON = values['package-json'] ? '1' : ''
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(packageJSON && { packageJSON: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -134,6 +142,7 @@ if (command === '-v' || command === '--version') {
   setEnv('EXODUS_STASIS_RESOURCES_BUNDLE_FILE', resourcesBundleFile)
   setEnv('EXODUS_STASIS_DEBUG', debug)
   setEnv('EXODUS_STASIS_CHILD_PROCESS', childProcess)
+  setEnv('EXODUS_STASIS_PACKAGE_JSON', packageJSON)
   setEnv('EXODUS_STASIS_FS', captureFs)
   setEnv('EXODUS_STASIS_RESOURCES', resources)
   // Only set when given; an unconditional setEnv('') would conflict with an ambient value.
@@ -190,6 +199,7 @@ if (command === '-v' || command === '--version') {
     jsx: { type: 'boolean' },
     flow: { type: 'boolean' },
     resources: { type: 'string' },
+    'package-json': { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
@@ -255,6 +265,10 @@ if (command === '-v' || command === '--version') {
   // plain/--mainFields/--metro alike -- JS-only, since no other entry language is scanned.
   const jsx = Boolean(values.jsx)
   if (jsx && !allJs) usage('Error: --jsx is only valid for JS bundles')
+  // --package-json: fold each bundled module's package.json into the bundle. JS-only (only JS
+  // modules carry an npm package.json; the sol/php/bash/rust bucketizers have no such manifest).
+  const packageJSON = Boolean(values['package-json'])
+  if (packageJSON && !allJs) usage('Error: --package-json is only valid for JS bundles')
   // --resources: comma-separated extension/filename allowlist for assets reached through the graph
   // (e.g. --resources=png,svg). They're carried as resources instead of failing "can't carry" --
   // for graphs that aren't fully loadable in JS (Metro consumes such assets). JS-only.
@@ -306,6 +320,7 @@ if (command === '-v' || command === '--version') {
     jsx,
     flow,
     resources,
+    packageJSON,
     brotliQuality,
     add,
   })

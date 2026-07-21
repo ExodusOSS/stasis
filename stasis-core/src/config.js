@@ -26,14 +26,14 @@ const envBool = (name, value) => {
 // and ' png , svg ' normalize predictably. Empty/unset means "no allowlist".
 const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
 
-const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources', 'childProcess']
+const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources', 'childProcess', 'packageJSON']
 
 // Plugins validate the same options without constructing a Config (which has side effects).
 export function validatePluginOptions(label, options) {
   const rest = { ...options }
   for (const key of OPTION_KEYS) delete rest[key]
   assert.equal(Object.keys(rest).length, 0, `Unknown ${label} options: ${Object.keys(rest).join(', ')}`)
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, packageJSON } = options
   if (scope !== undefined) assert.ok(VALID_SCOPE.has(scope), `Invalid scope: ${scope}`)
   if (lock !== undefined) assert.ok(VALID_LOCK.has(lock), `Invalid lock: ${lock}`)
   if (bundle !== undefined) assert.ok(VALID_BUNDLE.has(bundle), `Invalid bundle: ${bundle}`)
@@ -41,13 +41,14 @@ export function validatePluginOptions(label, options) {
   if (resourcesBundleFile !== undefined) assert.equal(typeof resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
   if (debug !== undefined) assert.equal(typeof debug, 'boolean', 'debug must be a boolean')
   if (childProcess !== undefined) assert.equal(typeof childProcess, 'boolean', 'childProcess must be a boolean')
+  if (packageJSON !== undefined) assert.equal(typeof packageJSON, 'boolean', 'packageJSON must be a boolean')
   if (resources !== undefined) parseResourcesOption(label, resources)
 }
 
 // When a plugin runs against an existing State (preload path), the active Config is authoritative;
 // any options the plugin was given must agree with it.
 export function assertOptionsMatchConfig(config, options) {
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, childProcess } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, childProcess, packageJSON } = options
   // `resources` is intentionally NOT cross-checked here: it's a Set (coordinated in
   // resolvePluginState) -- don't "fix" the omission with assert.equal(config.resources, ...).
   try {
@@ -58,6 +59,7 @@ export function assertOptionsMatchConfig(config, options) {
     if (resourcesBundleFile !== undefined) assert.equal(config.resourcesBundleFile, resourcesBundleFile)
     if (debug !== undefined) assert.equal(config.debug, debug)
     if (childProcess !== undefined) assert.equal(config.childProcess, childProcess)
+    if (packageJSON !== undefined) assert.equal(config.packageJSON, packageJSON)
   } catch (cause) {
     throw new Error(`Plugin options conflict with active stasis state: ${cause.message}`, { cause })
   }
@@ -75,6 +77,7 @@ export class Config {
   #resources
   #debug
   #childProcess
+  #packageJSON
   #shardSignalFlush
   #fs
   #brotliQuality
@@ -83,9 +86,9 @@ export class Config {
   // constructor options are likewise authoritative: a later `loadConfig` must agree with them
   // rather than silently overwriting (e.g. `--scope=full` vs the file's `"scope":"node_modules"`).
   constructor(options = {}) {
-    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs, brotliQuality, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, packageJSON, fs, brotliQuality, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
-    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, fs, brotliQuality }
+    this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, packageJSON, fs, brotliQuality }
 
     this.#env = {
       scope: process.env.EXODUS_STASIS_SCOPE || undefined,
@@ -97,6 +100,7 @@ export class Config {
       debug: process.env.EXODUS_STASIS_DEBUG || undefined,
       resources: process.env.EXODUS_STASIS_RESOURCES || undefined,
       childProcess: process.env.EXODUS_STASIS_CHILD_PROCESS || undefined,
+      packageJSON: process.env.EXODUS_STASIS_PACKAGE_JSON || undefined,
       shardSignalFlush: process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH || undefined,
       fs: process.env.EXODUS_STASIS_FS || undefined,
       brotliQuality: process.env.EXODUS_STASIS_BROTLI_QUALITY || undefined,
@@ -121,6 +125,9 @@ export class Config {
       if (this.#env.childProcess !== undefined && childProcess !== undefined) {
         assert.equal(envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess), childProcess)
       }
+      if (this.#env.packageJSON !== undefined && packageJSON !== undefined) {
+        assert.equal(envBool('EXODUS_STASIS_PACKAGE_JSON', this.#env.packageJSON), packageJSON)
+      }
       if (this.#env.fs !== undefined && fs !== undefined) assert.equal(this.#env.fs, fs)
       if (this.#env.brotliQuality !== undefined && brotliQuality !== undefined) {
         assert.equal(parseBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality), brotliQuality)
@@ -144,6 +151,10 @@ export class Config {
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envBool('EXODUS_STASIS_DEBUG', this.#env.debug) : (debug ?? false)
     this.#childProcess = this.#env.childProcess !== undefined ? envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess) : (childProcess ?? false)
+    // Auto-include each bundled module's package.json (a build-time inclusion flag, like debug):
+    // env wins over the option, default false. Not attested -- its EFFECT (the package.json files)
+    // is what lands in the artifact, so the flag itself needn't be serialized.
+    this.#packageJSON = this.#env.packageJSON !== undefined ? envBool('EXODUS_STASIS_PACKAGE_JSON', this.#env.packageJSON) : (packageJSON ?? false)
     // Env-only: shard-channel plumbing a parent sets for its descendants, not a user-facing knob.
     this.#shardSignalFlush = this.#env.shardSignalFlush !== undefined
       ? envBool('EXODUS_STASIS_SHARD_SIGNAL_FLUSH', this.#env.shardSignalFlush)
@@ -170,6 +181,7 @@ export class Config {
     assert.ok(VALID_BUNDLE.has(this.#bundle), `Invalid bundle: ${this.#bundle}`)
     assert.equal(typeof this.#debug, 'boolean', 'debug must be a boolean')
     assert.equal(typeof this.#childProcess, 'boolean', 'childProcess must be a boolean')
+    assert.equal(typeof this.#packageJSON, 'boolean', 'packageJSON must be a boolean')
     if (this.#brotliQuality !== undefined && !isBrotliQuality(this.#brotliQuality)) {
       throw new RangeError(`brotliQuality must be an integer 0..11 (got ${JSON.stringify(this.#brotliQuality)})`)
     }
@@ -237,6 +249,7 @@ export class Config {
       resourcesBundleFile = this.#resourcesBundleFile,
       debug = this.#debug,
       childProcess = this.#childProcess,
+      packageJSON = this.#packageJSON,
       fs = this.#fs,
       brotliQuality = this.#brotliQuality,
       resources,
@@ -252,6 +265,7 @@ export class Config {
     this.#resourcesBundleFile = resourcesBundleFile || undefined
     this.#debug = debug
     this.#childProcess = childProcess
+    this.#packageJSON = packageJSON
     this.#fs = fs
     this.#brotliQuality = brotliQuality
     if (resources !== undefined) this.#resources = parseResourcesOption('stasis.config.json', resources)
@@ -265,6 +279,7 @@ export class Config {
       if (this.#env.resourcesBundleFile !== undefined) assert.equal(this.#resourcesBundleFile, this.#env.resourcesBundleFile)
       if (this.#env.debug !== undefined) assert.equal(this.#debug, envBool('EXODUS_STASIS_DEBUG', this.#env.debug))
       if (this.#env.childProcess !== undefined) assert.equal(this.#childProcess, envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess))
+      if (this.#env.packageJSON !== undefined) assert.equal(this.#packageJSON, envBool('EXODUS_STASIS_PACKAGE_JSON', this.#env.packageJSON))
       if (this.#env.fs !== undefined) assert.equal(this.#fs, this.#env.fs)
       if (this.#env.brotliQuality !== undefined) {
         assert.equal(this.#brotliQuality, parseBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality))
@@ -282,6 +297,7 @@ export class Config {
       if (this.#explicit.resourcesBundleFile !== undefined) assert.equal(this.#resourcesBundleFile, this.#explicit.resourcesBundleFile)
       if (this.#explicit.debug !== undefined) assert.equal(this.#debug, this.#explicit.debug)
       if (this.#explicit.childProcess !== undefined) assert.equal(this.#childProcess, this.#explicit.childProcess)
+      if (this.#explicit.packageJSON !== undefined) assert.equal(this.#packageJSON, this.#explicit.packageJSON)
       if (this.#explicit.fs !== undefined) assert.equal(this.#fs, this.#explicit.fs)
       if (this.#explicit.brotliQuality !== undefined) assert.equal(this.#brotliQuality, this.#explicit.brotliQuality)
       if (this.#explicit.resources !== undefined) {
@@ -324,6 +340,13 @@ export class Config {
   // files only a child loads get attested. Off by default. Not attested (not in `values`), like debug.
   get childProcess() {
     return this.#childProcess
+  }
+
+  // Opt-in: when bundling, auto-include every bundled module's package.json (even if the run/scan
+  // never reached it). A build-time inclusion flag; its effect is the extra bundled files, so like
+  // debug it is not attested (not in `values`).
+  get packageJSON() {
+    return this.#packageJSON
   }
 
   // Env-only: a capturing CHILD flushes its shard on SIGTERM, then re-delivers the signal. The
