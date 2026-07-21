@@ -25,6 +25,8 @@
     "src/apis/npm/index.js",
     "src/apis/npm/semver.cjs",
     "src/audit.js",
+    "src/babel.js",
+    "src/babel-worker.cjs",
     "src/bundle.js",
     "src/bundle-from-lockfile.js",
     "src/cmd/bundle.js",

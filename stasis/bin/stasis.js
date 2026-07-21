@@ -36,7 +36,10 @@ function usage(prefix = '') {
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
- stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
+ stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral|hermes)] [--babel] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
+ (--platform=hermes downlevels every file for Hermes (classes, let/const, arrows, ...; via esbuild + Babel)
+  and defaults --format to iife; --babel instead transforms every file with the project's own
+  babel.config.(js|cjs|mjs|json); both resolve @babel/core and plugins from the project's dev deps)
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
@@ -324,6 +327,7 @@ if (command === '-v' || command === '--version') {
     output: { type: 'string', short: 'o' },
     format: { type: 'string' },
     platform: { type: 'string' },
+    babel: { type: 'boolean' },
     minify: { type: 'boolean' },
     sourcemap: { type: 'boolean' },
     // Repeatable esbuild passthroughs (--define=K=V, --external=PATTERN, --loader=.ext:name).
@@ -343,8 +347,12 @@ if (command === '-v' || command === '--version') {
   if (values.format !== undefined && !['esm', 'cjs', 'iife'].includes(values.format)) {
     usage('Error: --format must be esm, cjs, or iife')
   }
-  if (values.platform !== undefined && !['node', 'browser', 'neutral'].includes(values.platform)) {
-    usage('Error: --platform must be node, browser, or neutral')
+  if (values.platform !== undefined && !['node', 'browser', 'neutral', 'hermes'].includes(values.platform)) {
+    usage('Error: --platform must be node, browser, neutral, or hermes')
+  }
+  // Hermes has no import/export; --format defaults to iife under --platform=hermes (see buildCommand).
+  if (values.platform === 'hermes' && values.format === 'esm') {
+    usage('Error: --platform=hermes cannot emit ESM; use --format=iife (the hermes default) or cjs')
   }
   if (!values.output) usage('Error: --output is required (a .js/.cjs/.mjs file, or a directory)')
   // build can't stream to stdout; without this, --output=- would create a dir literally named `-`.
@@ -372,6 +380,7 @@ if (command === '-v' || command === '--version') {
     output: values.output,
     format: values.format,
     platform: values.platform,
+    babel: Boolean(values.babel),
     minify: values.minify,
     sourcemap: values.sourcemap,
     define,

@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { State } from '@exodus/stasis-core/state'
 import { StasisEsbuild } from '@exodus/stasis-plugins/esbuild'
+import { HERMES_UNSUPPORTED, createBabelConfigTransform, createHermesTransform } from '../babel.js'
 import { bundleFromLockfile } from '../bundle-from-lockfile.js'
 import { parseFileWithKind } from '../parse.js'
 
@@ -182,8 +183,9 @@ export async function buildCommand({
   artifact,
   entry,
   output,
-  format = 'esm',
+  format,
   platform = 'node',
+  babel = false,
   minify = false,
   sourcemap = false,
   define = {},
@@ -193,6 +195,14 @@ export async function buildCommand({
   if (!artifact) throw new Error('stasis build: an artifact (bundle or lockfile) is required')
   if (!output) throw new Error('stasis build: --output is required (a .js/.cjs/.mjs file, or a directory)')
   if (!Array.isArray(external)) throw new Error('stasis build: external must be an array of esbuild patterns')
+  // --platform=hermes is a stasis-level target, not an esbuild platform (esbuild gets
+  // 'neutral'): every code file is downleveled to Hermes' dialect before the final bundle,
+  // and the bundle itself must avoid ESM -- Hermes has no import/export.
+  const hermes = platform === 'hermes'
+  format ??= hermes ? 'iife' : 'esm'
+  if (hermes && format === 'esm') {
+    throw new Error('stasis build: --platform=hermes cannot emit ESM (Hermes has no import/export); use --format=iife (the hermes default) or cjs')
+  }
   const artifactAbs = resolve(cwd, artifact)
   const { kind, artifact: parsed } = parseFileWithKind(artifactAbs)
   assertBuildableArtifact(parsed, artifact)
@@ -209,6 +219,14 @@ export async function buildCommand({
   const entryPoint = resolve(state.root, selectedEntry)
 
   const esbuild = await importEsbuild()
+  // Per-file code rewrites the plugin applies before esbuild parses a served file:
+  // --babel runs the project's own babel.config.* over the original source (no esbuild
+  // pre-transform), and otherwise --platform=hermes uses the built-in downlevel pipeline.
+  // Both resolve Babel from the project (cwd), never from stasis's own dependencies.
+  let transform
+  if (babel) transform = createBabelConfigTransform({ projectDir: cwd })
+  else if (hermes) transform = createHermesTransform({ projectDir: cwd, esbuild })
+
   const outAbs = resolve(cwd, output)
   const asFile = /\.[cm]?js$/u.test(output)
   // Never overwrite a file the artifact attests: esbuild's own overwrite check fires only
@@ -223,9 +241,10 @@ export async function buildCommand({
       absWorkingDir: state.root,
       bundle: true,
       write: false,
-      platform,
+      platform: hermes ? 'neutral' : platform,
       format,
       logLevel: 'silent',
+      ...(hermes ? { supported: HERMES_UNSUPPORTED } : {}),
       ...(minify ? { minify: true } : {}),
       ...(sourcemap ? { sourcemap: true } : {}),
       ...(external.length > 0 ? { external } : {}),
@@ -233,7 +252,7 @@ export async function buildCommand({
       ...(asFile ? { outfile: outAbs } : { outdir: outAbs }),
       // Loader overrides go through the plugin: it serves every in-bundle file, so esbuild's
       // own `loader` option never sees them. e.g. { '.js': 'jsx' } to parse JSX in .js files.
-      plugins: [new StasisEsbuild(state, { loaders: new Map(Object.entries(loader)) })],
+      plugins: [new StasisEsbuild(state, { loaders: new Map(Object.entries(loader)), transform })],
     })
   } catch (err) {
     // Under logLevel:'silent' esbuild puts the real errors on err.errors; surface them, then fail.

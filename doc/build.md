@@ -7,7 +7,7 @@ own resolution: every import resolves to the edge stasis attested and every
 module's bytes come from the artifact, not disk.
 
 ```sh
-stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral)] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
+stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|browser|neutral|hermes)] [--babel] [--minify] [--sourcemap] [--define=K=V ...] [--external=pkg ...] [--loader=.ext:name ...] path/to/(stasis.code.br|stasis.lock.json) [entry]
 ```
 
 - First positional (**required**): the `stasis.code.br` bundle or `stasis.lock.json` lockfile to build from.
@@ -16,15 +16,18 @@ stasis build --output=(dir|file.js) [--format=(esm|cjs|iife)] [--platform=(node|
 | Flag | Meaning |
 | - | - |
 | `--output` / `-o` (**required**) | Where to write. A path ending in `.js`/`.cjs`/`.mjs` names a single file; anything else is a directory. |
-| `--format` | esbuild output format `esm`\|`cjs`\|`iife`. Default `esm`. |
-| `--platform` | esbuild target platform `node`\|`browser`\|`neutral`. Default `node`. |
+| `--format` | esbuild output format `esm`\|`cjs`\|`iife`. Default `esm` (`iife` under `--platform=hermes`). |
+| `--platform` | Target platform `node`\|`browser`\|`neutral` (esbuild's), or `hermes`. Default `node`. See [Hermes](#hermes---platformhermes). |
+| `--babel` | Transform every code file with the project's own `babel.config.*` before bundling. See [`--babel`](#the-projects-babel-config---babel). |
 | `--minify`, `--sourcemap` | Forwarded to esbuild. |
 | `--define=KEY=VALUE` (repeatable) | esbuild [define](https://esbuild.github.io/api/#define); value forwarded verbatim, must be valid JS as esbuild's CLI expects (e.g. `--define=process.env.NODE_ENV='"production"'`, `--define=__DEV__=false`). |
 | `--external=PATTERN` (repeatable) | esbuild [external](https://esbuild.github.io/api/#external). See [Externals](#externals). |
 | `--loader=.EXT:NAME` (repeatable) | esbuild [loader](https://esbuild.github.io/api/#loader) override for an extension, e.g. `--loader=.js:jsx`. See [JSX in `.js`/`.ts`](#jsx-in-jsts). |
 
 `--format`/`--platform`/`--minify`/`--sourcemap`/`--define` only steer esbuild's
-output; the import graph is fixed by the artifact.
+output; the import graph is fixed by the artifact. `--platform=hermes` and
+`--babel` additionally transform each file's *content* on its way into the
+bundle — the graph they follow is still exactly the recorded one.
 
 ## Externals
 
@@ -36,6 +39,58 @@ esbuild leaves them as runtime imports; it can't un-inline an attested edge.
 # the captured bundle imported a native module that was external at capture; keep it external
 stasis build --output=out.cjs --format=cjs --external=better-sqlite3 app.code.br
 ```
+
+## Hermes (`--platform=hermes`)
+
+Hermes (React Native's engine) executes a dialect without classes, class fields,
+private members, `let`/`const`, arrow functions, async generators or `for await`.
+`--platform=hermes` downlevels every code file before the final bundle:
+
+1. **esbuild pre-transform** — lowers class fields / private members / static
+   blocks / `using` into plain class syntax (stripping TypeScript and compiling
+   JSX on the way), the shape Babel's class transform can consume.
+2. **Babel worker pool** — applies `@babel/plugin-transform-block-scoping` and
+   `@babel/plugin-transform-classes`, the two lowerings esbuild refuses to do.
+3. **Final esbuild bundle** — lowers arrows, async generators and `for await`,
+   keeps its own helpers off `let`/`const`, and fails closed if a `class` or
+   `let`/`const` somehow survived.
+
+`--format` defaults to `iife` and `esm` is rejected (Hermes has no
+`import`/`export`); `cjs` stays available for post-processing pipelines. esbuild
+itself runs as platform `neutral`.
+
+```sh
+stasis build --platform=hermes --output=out.js app.code.br   # feed out.js to hermesc
+```
+
+Babel is resolved **from the project** (the directory you run `stasis build`
+in), never from stasis's own dependencies — add the deps to the project:
+
+```sh
+npm i -D @babel/core @babel/plugin-transform-block-scoping @babel/plugin-transform-classes
+```
+
+## The project's Babel config (`--babel`)
+
+`--babel` runs every code file through the project's own
+`babel.config.(js|cjs|mjs|json)` — resolved from the project directory, plugins
+and presets included — **instead of** the built-in pipeline, with no esbuild
+pre-transform: Babel sees each file's attested bytes verbatim, exactly as the
+project's own toolchain (e.g. Metro) would hand them over. The config's output
+must be plain JS that esbuild can parse (a config that leaves TS/JSX in place
+fails the build).
+
+Combined with `--platform=hermes`, the project config **replaces** steps 1–2 of
+the built-in downlevel while the final bundle's Hermes feature checks still
+apply — so a config that doesn't lower classes or `let`/`const` fails closed
+rather than shipping a bundle Hermes can't parse.
+
+```sh
+stasis build --babel --platform=hermes --output=out.js app.code.br
+```
+
+`--babel` needs `@babel/core` installed in the project (a dev dependency is
+fine); a missing config or a missing install fails with instructions.
 
 ## esbuild is an optional peer dependency
 

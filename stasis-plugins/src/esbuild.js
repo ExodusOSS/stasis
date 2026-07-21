@@ -17,12 +17,13 @@ export class StasisEsbuild {
   #state
   #resources
   #loaders
+  #transform
 
   // Build starts observed by this instance (across rebuilds and separate build()/context() calls);
   // the second is refused in onStart.
   #captureBuildCount = 0
 
-  constructor(options = {}, { loaders } = {}) {
+  constructor(options = {}, { loaders, transform } = {}) {
     // A caller that owns a State (e.g. `stasis build`) can pass it directly; a foreign-copy State
     // fails closed via the instanceof miss.
     const state = options instanceof State
@@ -34,6 +35,10 @@ export class StasisEsbuild {
     // Per-extension esbuild loader overrides (e.g. { '.js' -> 'jsx' } for RN's JSX-in-.js),
     // keyed by extname with the dot; falls back to #loaderFor.
     this.#loaders = loaders ?? new Map()
+    // Load-mode-only code rewrite hook (e.g. `stasis build --platform=hermes` downleveling):
+    // (source, { path, loader }) => { contents, loader } | undefined, may be async. Never
+    // runs at capture -- capture attests the file's raw bytes.
+    this.#transform = transform
   }
 
   // esbuild loader for a served file: configured override, else derived from extension
@@ -166,7 +171,10 @@ export class StasisEsbuild {
           const loader = initialOptions.loader?.[extname(path)]
           return loader ? { contents: source, loader } : { contents: source }
         }
-        return { contents: source, loader: this.#loaderFor(path) }
+        const loader = this.#loaderFor(path)
+        // A transform that declines (undefined) serves the attested bytes unchanged.
+        const transformed = await this.#transform?.(source, { path, loader })
+        return transformed ?? { contents: source, loader }
       }
 
       const source = await realReadFile(path)
