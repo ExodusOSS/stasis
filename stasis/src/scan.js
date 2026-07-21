@@ -207,9 +207,10 @@ export class Scan {
       return
     }
     if (this.#isResource(file)) {
-      // Allowlisted asset: carry it as a resource with no parse and no edges. `format: 'resource'`
-      // is a placeholder; the bundle builder reads the bytes and derives resource vs resource:base64.
-      this.files.set(url, { format: 'resource', edges: [], resource: true })
+      // Allowlisted asset: carry it as a resource with no parse and no edges. `resource: true` is
+      // the authoritative signal (both bundle builders key off it); the concrete format
+      // (resource vs resource:base64) is byte-derived by the builder, so leave it unset here.
+      this.files.set(url, { format: null, edges: [], resource: true })
       return
     }
     if (!this.scriptExts.has(ext)) {
