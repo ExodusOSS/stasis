@@ -20,6 +20,8 @@
   "license": "MIT",
   "devDependencies": {
     "@babel/core": "^7.29.7",
+    "@babel/plugin-transform-block-scoping": "^7.29.7",
+    "@babel/plugin-transform-classes": "^7.29.7",
     "@exodus/bytes": "^1.15.0",
     "@exodus/stasis": "workspace:*",
     "@exodus/stasis-core": "workspace:*",
