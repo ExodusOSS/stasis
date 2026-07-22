@@ -222,6 +222,43 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     t.assert.match(r.stderr, /--package-json requires --bundle=\(add\|replace\)/)
   })
 
+  test('run --package-json keeps a lockfile-attested manifest when rebuilding with --bundle=replace', withTmp(async (t, tmp) => {
+    // Regression: the skip guard must key on bundle membership (sources/resources), NOT this.hashes --
+    // else a manifest the absorbed lockfile attests but --bundle=replace hasn't re-captured is dropped.
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+    writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+    writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nconsole.log(hi)\n")
+    mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', type: 'module', main: 'main.js' }))
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+    let r = await run(['run', '--lock=add', '--bundle=add', '--package-json', 'index.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    // Rebuild the bundle from scratch: dep/package.json is in this.hashes (from the lockfile) but not re-imported.
+    r = await run(['run', '--lock=add', '--bundle=replace', '--package-json', 'index.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    const b = JSON.parse(brotliDecompressSync(readFileSync(join(tmp, 'stasis.code.br'))).toString())
+    t.assert.ok(Object.keys(b.modules['node_modules/dep'].files).includes('package.json'),
+      'dependency package.json is still bundled under --bundle=replace')
+  }))
+
+  test('run --bundle=add --package-json skips (does not crash on) an absorbed dep whose on-disk version drifted', withTmp(async (t, tmp) => {
+    // Regression: includePackageJson iterates this.modules (which under bundle=add holds absorbed
+    // buckets this run never re-imported); a drifted absorbed dep must be skipped, not identity-asserted.
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+    writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+    writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nconsole.log(hi)\n")
+    mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', type: 'module', main: 'main.js' }))
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+    let r = await run(['run', '--lock=ignore', '--bundle=add', 'index.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    // Drift the dep on disk and stop importing it; the absorbed bucket still records 1.0.0.
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '2.0.0', type: 'module', main: 'main.js' }))
+    writeFileSync(join(tmp, 'entry2.js'), "console.log('standalone')\n")
+    r = await run(['run', '--lock=ignore', '--bundle=add', '--package-json', 'entry2.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `should skip the drifted absorbed dep, not crash: ${r.stderr}`)
+  }))
+
   test('run --lock=frozen executes the entry using the committed lockfile', async (t) => {
     const r = await run(['run', '--lock=frozen', 'src/entry.js'], { cwd: runFixture })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)

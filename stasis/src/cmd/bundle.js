@@ -811,7 +811,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       if (!existsSync(abs)) continue
       assertRealPathWithinBase(realBase, baseDir, rel)
       const buf = readFileSync(abs)
-      if (!isUtf8(buf)) continue // a non-UTF-8 package.json is pathological; skip rather than store bytes as text
+      // A non-UTF-8 manifest aborts (matching the code-source rule above and the State path's
+      // addFile), never silently skipped.
+      if (!isUtf8(buf)) throw new Error(`package.json is not valid UTF-8: ${rel}`)
       sources.set(rel, buf.toString('utf8'))
       formatsByRel.set(rel, 'json')
       integrities.set(rel, sha512integrity(buf))

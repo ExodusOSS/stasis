@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, assertRealPathWithinBase, classifyFormat, fileMapToObject, hasNodeModulesSegment, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import corePackage from './package.cjs'
 
 // Destructure off the namespace (not `import { ... } from 'node:fs'`): captures the real
@@ -1564,19 +1564,38 @@ export class State {
   // add its `<dir>/package.json` even if the run/scan never reached it, so a load/prune of the
   // resulting bundle can read every dependency's manifest. Build-time self-containment like
   // #backfillBeforeWrite -- reason:null (not a consumer observation), and idempotent (addFile no-ops
-  // a byte-identical re-add, e.g. a manifest the run already `require`d). A bucket whose package.json
-  // isn't on disk (a module carried in from an absorbed bundle over a pruned tree) is skipped, not fatal.
+  // a byte-identical re-add, e.g. a manifest the run already `require`d).
   includePackageJson() {
-    // Collect the manifests first, then addFile them: addFile mutates this.modules (records the
-    // file into its bucket), so gather the read-only pass before touching the Map.
+    // Read-only pass first, then addFile: addFile mutates this.modules (records the file into its
+    // bucket), so gather the manifests before touching the Map.
+    const realRoot = realpathSync(this.root)
     const toAdd = []
-    for (const dir of this.modules.keys()) {
-      const file = moduleFileKey(dir, 'package.json')
-      if (this.hashes.has(file) || this.sources.has(file)) continue // already captured/attested
+    for (const [dir, module] of this.modules) {
+      const rel = moduleFileKey(dir, 'package.json')
+      // Skip only when the manifest is ALREADY IN THIS BUNDLE (sources/resources) -- NOT this.hashes,
+      // which also holds lockfile-absorbed entries and is shared by reference across sidecars; keying
+      // the skip on hashes drops the manifest from a bundle (or a sibling sidecar) that lacks it.
+      if (this.sources.has(rel) || this.resources.has(rel)) continue
       const absolute = resolve(this.root, dir, 'package.json')
-      if (existsSync(absolute)) toAdd.push(absolute)
+      if (!existsSync(absolute)) continue // absorbed bucket over a pruned tree: skip, not fatal
+      // Reject a manifest whose real path escapes the root (a node_modules dep symlinked out), the
+      // same fail-closed guard the static --metro path and mergeShard apply.
+      assertRealPathWithinBase(realRoot, this.root, rel)
+      const buf = readFileSync(absolute)
+      // A non-UTF-8 manifest aborts (matching addFile and the code-source rule), never silently skipped.
+      assert.ok(isUtf8(buf), `package.json is not valid UTF-8: ${rel}`)
+      // Only carry a manifest whose on-disk identity still matches the bundled bucket. Under
+      // bundle=add, this.modules holds buckets absorbed from the prior bundle/lockfile this run never
+      // re-imported; a dep that drifted on disk describes different bytes than the bundled code, so
+      // skip it rather than crash in addFile -> #locateModule's identity assert.
+      let pkg
+      try { pkg = JSON.parse(buf.toString()) } catch { continue } // malformed manifest for an untouched bucket: skip
+      if (pkg?.name !== module.name || pkg?.version !== module.version) continue
+      toAdd.push({ absolute, buf })
     }
-    for (const absolute of toAdd) this.addFile(pathToFileURL(absolute).toString(), { reason: null })
+    for (const { absolute, buf } of toAdd) {
+      this.addFile(pathToFileURL(absolute).toString(), { source: buf, reason: null })
+    }
   }
 
   write() {
