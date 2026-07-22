@@ -1,7 +1,10 @@
+import { isUtf8 } from 'node:buffer'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { findPackageJSON } from 'node:module'
 import { pathToFileURL } from 'node:url'
+
+import { assertRealPathWithinBase } from './util.js'
 
 // Module system from the nearest package.json `type`, or null when absent/unrecognized.
 export function packageType(file) {
@@ -43,6 +46,28 @@ export function normalizeEntries(entries, cwd) {
     if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Entry escapes baseDir: ${e}`)
     return rel.replace(/^\.\//u, '')
   })
+}
+
+// Read a bundled module's `package.json` for the `packageJSON` auto-include option, applying the
+// rules shared by the State (`run`/plain `bundle`) and resolved (`--metro`/`--mainFields`) paths:
+// skip (null) when absent on disk; reject a manifest whose real path escapes the root (like every
+// bundled read); ABORT on non-UTF-8 bytes (never silently skipped). When `identity` is given -- the
+// State path, whose module buckets may be ABSORBED from a prior bundle -- skip a manifest whose
+// on-disk name/version has drifted from the bundled bucket rather than bundle a manifest describing
+// different bytes than the bundled code. `rel` is the project-relative manifest path; returns the
+// raw bytes to bundle, or null to skip.
+export function readModuleManifest({ baseDir, realBase, rel, identity } = {}) {
+  const absolute = join(baseDir, rel)
+  if (!existsSync(absolute)) return null
+  assertRealPathWithinBase(realBase, baseDir, rel)
+  const buf = readFileSync(absolute)
+  if (!isUtf8(buf)) throw new Error(`package.json is not valid UTF-8: ${rel}`)
+  if (identity !== undefined) {
+    let pkg
+    try { pkg = JSON.parse(buf.toString()) } catch { return null } // malformed manifest for an untouched bucket: skip
+    if (pkg?.name !== identity.name || pkg?.version !== identity.version) return null
+  }
+  return buf
 }
 
 // Parse a JSON file, returning null on a missing/unreadable/malformed file instead of throwing.

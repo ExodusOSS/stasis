@@ -12,7 +12,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { findPackageMetadata, normalizeEntries, readJson } from '@exodus/stasis-core/bundle-util'
+import { findPackageMetadata, normalizeEntries, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
@@ -792,28 +792,27 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   }
 
   // --package-json: fold each bundled module's package.json into `sources` (and its integrity into
-  // the companion lockfile) even when the scan never reached it. Bucket each reached file the same
-  // way assembleCodeBundle does -- findPackageMetadata -> pkgDir, else the '.' workspace bucket --
-  // then read + hash each dir's manifest once. Skips one already carried (e.g. react-native's, which
-  // its podspecs parse) or absent on disk; a symlink escaping the root is rejected like every read.
+  // the companion lockfile) even when the scan never reached it. Buckets are the same ones
+  // assembleCodeBundle derives (findPackageMetadata -> pkgDir, else the '.' workspace bucket);
+  // findPackageMetadata is memoized per directory so a package's many files don't each re-walk to the
+  // same manifest. readModuleManifest applies the read/validate rules shared with the State path
+  // (containment, UTF-8-aborts); no identity check here -- these buckets are all fresh from disk.
   if (packageJSON) {
+    const metaByDir = new Map()
     const pkgDirs = new Set()
     for (const abs of reached) {
       const rel = toRel(abs)
-      const meta = findPackageMetadata(baseDir, rel)
+      const dir = dirname(rel)
+      if (!metaByDir.has(dir)) metaByDir.set(dir, findPackageMetadata(baseDir, rel))
+      const meta = metaByDir.get(dir)
       if (meta) pkgDirs.add(meta.pkgDir)
       else if (!splitNodeModulesPath(rel)) pkgDirs.add('.')
     }
     for (const pkgDir of pkgDirs) {
-      const rel = pkgDir === '.' ? 'package.json' : `${pkgDir}/package.json`
+      const rel = moduleFileKey(pkgDir, 'package.json')
       if (sources.has(rel)) continue
-      const abs = join(baseDir, rel)
-      if (!existsSync(abs)) continue
-      assertRealPathWithinBase(realBase, baseDir, rel)
-      const buf = readFileSync(abs)
-      // A non-UTF-8 manifest aborts (matching the code-source rule above and the State path's
-      // addFile), never silently skipped.
-      if (!isUtf8(buf)) throw new Error(`package.json is not valid UTF-8: ${rel}`)
+      const buf = readModuleManifest({ baseDir, realBase, rel })
+      if (!buf) continue
       sources.set(rel, buf.toString('utf8'))
       formatsByRel.set(rel, 'json')
       integrities.set(rel, sha512integrity(buf))
