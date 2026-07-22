@@ -12,7 +12,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { findPackageMetadata, normalizeEntries, readJson } from '@exodus/stasis-core/bundle-util'
+import { findPackageMetadata, normalizeEntries, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
@@ -496,7 +496,7 @@ function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '', ba
 // from stasis.config.json / `EXODUS_STASIS_SCOPE` unless `scope` overrides. `conditions` are
 // extra `exports`/`imports` conditions; on their own they don't honour legacy mainFields or
 // platform suffixes (see `--mainFields` / buildResolvedJsBundle).
-export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [], jsx = false, flow = false, resources = [] } = {}) {
+export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [], jsx = false, flow = false, resources = [], packageJSON = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
@@ -560,6 +560,9 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
       }
     }
   }
+  // --package-json: fold each bundled module's package.json into the State's buckets (idempotent --
+  // no-ops any manifest the scan already reached). State's bundle=replace makes writeBundle true, so addFile accepts them.
+  if (packageJSON) state.includePackageJson()
   return state
 }
 
@@ -640,7 +643,7 @@ function nativeModuleFiles(pkgAbs) {
 // Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
 // `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
 // have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false, resources = [] }) {
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false, resources = [], packageJSON = false }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -788,6 +791,34 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     }
   }
 
+  // --package-json: fold each bundled module's package.json into `sources` (and its integrity into
+  // the companion lockfile) even when the scan never reached it. Buckets are the same ones
+  // assembleCodeBundle derives (findPackageMetadata -> pkgDir, else the '.' workspace bucket);
+  // findPackageMetadata is memoized per directory so a package's many files don't each re-walk to the
+  // same manifest. readModuleManifest applies the read/validate rules shared with the State path
+  // (containment, UTF-8-aborts); no identity check here -- these buckets are all fresh from disk.
+  if (packageJSON) {
+    const metaByDir = new Map()
+    const pkgDirs = new Set()
+    for (const abs of reached) {
+      const rel = toRel(abs)
+      const dir = dirname(rel)
+      if (!metaByDir.has(dir)) metaByDir.set(dir, findPackageMetadata(baseDir, rel))
+      const meta = metaByDir.get(dir)
+      if (meta) pkgDirs.add(meta.pkgDir)
+      else if (!splitNodeModulesPath(rel)) pkgDirs.add('.')
+    }
+    for (const pkgDir of pkgDirs) {
+      const rel = moduleFileKey(pkgDir, 'package.json')
+      if (sources.has(rel)) continue
+      const buf = readModuleManifest({ baseDir, realBase, rel })
+      if (!buf) continue
+      sources.set(rel, buf.toString('utf8'))
+      formatsByRel.set(rel, 'json')
+      integrities.set(rel, sha512integrity(buf))
+    }
+  }
+
   // Collapse each edge: one distinct target across platforms -> flat string; else a sorted Map<platform, target>.
   const resolutions = new Map()
   for (const [parent, bySpec] of edges) {
@@ -834,7 +865,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources, packageJSON }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -879,6 +910,11 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (jsx && kind !== 'js') {
     throw new Error(`${name}: --jsx is only valid for JS bundles`)
   }
+  // --package-json folds each bundled module's npm package.json in; JS-only (the sol/php/bash/rust
+  // bucketizers group by their own ecosystems' manifests, not an npm package.json).
+  if (packageJSON && kind !== 'js') {
+    throw new Error(`${name}: --package-json is only valid for JS bundles`)
+  }
   if ((metro || (Array.isArray(platforms) && platforms.length > 0)) && kind !== 'js') {
     throw new Error(`${name}: --metro is only valid for JS bundles`)
   }
@@ -918,8 +954,8 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
 // (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, resources = [] } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources })
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, resources = [], packageJSON = false } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources, packageJSON })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
@@ -936,10 +972,11 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
       jsx,
       flow,
       resources,
+      packageJSON,
     })
     return bundle
   }
-  const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, resources })
+  const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, resources, packageJSON })
   // Stamp the `bundle` consumer (the static build carries none).
   return state.sourceBundle.withReason('bundle')
 }
@@ -954,8 +991,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, resources = [], brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, resources = [], packageJSON = false, brotliQuality, add = false } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources, packageJSON })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -979,17 +1016,18 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
       jsx,
       flow,
       resources,
+      packageJSON,
     })
     bundle = built.bundle
     if (lockfile) lockData = built.lockfile.serialize()
   } else if (kind === 'js' && lockfile) {
     // Keep the State: only it carries the file hashes the companion lockfile needs (a Bundle holds sources, not digests).
-    const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, resources })
+    const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, resources, packageJSON })
     // Stamp the `bundle` consumer (this branch bypasses buildBundle to keep the State).
     bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
-    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, resources })
+    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, resources, packageJSON })
   }
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.

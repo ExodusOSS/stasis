@@ -2973,3 +2973,95 @@ test('bundleCommand --add refuses to write an under-attesting lockfile when the 
   )
   t.assert.ok(!existsSync(lockPath), 'no lockfile is written on refusal')
 }))
+
+// --package-json / packageJSON: fold each bundled module's package.json into the bundle even when
+// the scan never reached it (config option, mirrored by the `--package-json` CLI flag). JS-only.
+test('buildBundle (plain JS) with packageJSON includes each bundled module package.json', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nexport default hi\n")
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.2.3', type: 'module', main: 'main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+
+  const without = await buildBundle({ cwd: tmp, entries: ['index.js'] })
+  t.assert.ok(!new Set(without.sources.keys()).has('node_modules/dep/package.json'), 'off by default')
+  t.assert.ok(!new Set(without.sources.keys()).has('package.json'))
+
+  const bundle = await buildBundle({ cwd: tmp, entries: ['index.js'], packageJSON: true })
+  const files = new Set(bundle.sources.keys())
+  t.assert.ok(files.has('node_modules/dep/package.json'), 'dependency package.json included')
+  t.assert.ok(files.has('package.json'), 'workspace package.json included')
+  t.assert.equal(bundle.formats.get('node_modules/dep/package.json'), 'json')
+  t.assert.equal(bundle.formats.get('package.json'), 'json')
+  // The manifest's real bytes are carried (not a synthetic stub).
+  t.assert.equal(JSON.parse(bundle.sources.get('node_modules/dep/package.json')).version, '1.2.3')
+}))
+
+test('buildBundle (plain JS) packageJSON is idempotent with an already-reached package.json', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+  // index imports the dep's package.json directly, so the scan already reaches it.
+  writeFileSync(join(tmp, 'index.js'), "import pkg from 'dep/package.json' with { type: 'json' }\nexport default pkg\n")
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.2.3' }))
+
+  const bundle = await buildBundle({ cwd: tmp, entries: ['index.js'], packageJSON: true })
+  const keys = [...bundle.sources.keys()].filter((k) => k === 'node_modules/dep/package.json')
+  t.assert.deepEqual(keys, ['node_modules/dep/package.json'], 'no duplicate entry')
+}))
+
+test('bundleCommand (JS + lockfile) with packageJSON attests the added package.json in the lockfile', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+  writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nexport default hi\n")
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.2.3', type: 'module', main: 'main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const lockPath = join(tmp, 'stasis.lock.json')
+  await bundleCommand({ cwd: tmp, entries: ['index.js'], output: outPath, lockfile: lockPath, packageJSON: true })
+
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const lock = Lockfile.parse(readFileSync(lockPath, 'utf8'))
+  // The bundle carries the added manifest, and the companion lockfile attests it (byte-for-byte),
+  // so a later --bundle=load --lock=frozen verifies rather than rejecting an unattested file.
+  t.assert.ok(new Set(bundle.sources.keys()).has('node_modules/dep/package.json'))
+  t.assert.ok(Object.hasOwn(lock.modules.get('node_modules/dep').files, 'package.json'), 'dep package.json in lockfile')
+}))
+
+test('buildBundle (--metro) with packageJSON includes package.json for reached modules', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'rn-app', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nexport default hi\n")
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '2.0.0', main: 'main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+
+  const bundle = await buildBundle({ cwd: tmp, entries: ['index.js'], metro: true, platforms: ['ios'], packageJSON: true })
+  const files = new Set(bundle.sources.keys())
+  t.assert.ok(files.has('node_modules/dep/package.json'), 'dependency package.json included on the metro path')
+  t.assert.equal(bundle.formats.get('node_modules/dep/package.json'), 'json')
+}))
+
+test('buildBundle rejects packageJSON for non-JS entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: fixtures, entries: ['contracts/A.sol'], packageJSON: true }),
+    /--package-json is only valid for JS bundles/,
+  )
+})
+
+test('CLI: stasis bundle --package-json includes module manifests; rejected for .sol', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nexport default hi\n")
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.2.3', type: 'module', main: 'main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+
+  const r = runCli(['bundle', '--package-json', '--output=out.br', 'index.js'], { cwd: tmp })
+  t.assert.equal(r.status, 0, r.stderr)
+  const bundle = Bundle.parse(brotliDecompressSync(readFileSync(join(tmp, 'out.br'))).toString('utf8'))
+  t.assert.ok(new Set(bundle.sources.keys()).has('node_modules/dep/package.json'))
+
+  writeFileSync(join(tmp, 'a.sol'), 'contract A {}\n')
+  const bad = runCli(['bundle', '--package-json', '--output=out2.br', 'a.sol'], { cwd: tmp })
+  t.assert.notEqual(bad.status, 0)
+  t.assert.match(bad.stderr, /--package-json is only valid for JS bundles/)
+}))

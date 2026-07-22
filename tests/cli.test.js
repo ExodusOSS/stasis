@@ -29,6 +29,7 @@ const {
   EXODUS_STASIS_DEBUG: _d,
   EXODUS_STASIS_PID: _pid,
   EXODUS_STASIS_CHILD_PROCESS: _cp,
+  EXODUS_STASIS_PACKAGE_JSON: _pj,
   EXODUS_STASIS_SHARD_DIR: _sd,
   EXODUS_STASIS_SHARD_KEY: _sk,
   EXODUS_STASIS_SHARD_SIGNAL_FLUSH: _ssf,
@@ -190,6 +191,72 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     t.assert.deepEqual(parsed.entries, ['src/entry.js'])
     t.assert.ok(parsed.sources['.'].files['src/entry.js'].startsWith('sha512-'))
     t.assert.ok(parsed.sources['.'].files['src/hello.js'].startsWith('sha512-'))
+  }))
+
+  test('run --package-json folds each bundled module package.json into the bundle and lockfile', withTmp(async (t, tmp) => {
+    cpSync(nmFixture, tmp, { recursive: true })
+    const bundlePath = join(tmp, 'stasis.code.br')
+    const lockPath = join(tmp, 'stasis.lock.json')
+    // The fixture's stasis.config.json pins scope=node_modules, so pass --dependencies to match.
+    const r = await run(['run', '--lock=replace', '--dependencies', '--bundle=replace', '--package-json', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stderr, /packageJSON: true/)
+
+    const bundle = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf-8'))
+    const depFiles = Object.keys(bundle.modules['node_modules/fake-esm-pkg'].files)
+    t.assert.ok(depFiles.includes('package.json'), 'dependency package.json is bundled even though the run never imported it')
+    t.assert.equal(bundle.formats['node_modules/fake-esm-pkg/package.json'], 'json')
+
+    // The manifest is attested by the lockfile too, so a later --bundle=frozen verifies it.
+    const lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+    t.assert.ok(lock.modules['node_modules/fake-esm-pkg'].files['package.json']?.startsWith('sha512-'))
+
+    // Round-trip: the produced bundle verifies against disk under --bundle=frozen.
+    const frozen = await run(['run', '--lock=frozen', '--dependencies', '--bundle=frozen', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(frozen.status, 0, `frozen stderr: ${frozen.stderr}`)
+  }))
+
+  test('run --package-json without a write bundle mode is rejected', async (t) => {
+    const r = await run(['run', '--lock=add', '--package-json', 'src/entry.js'], { cwd: runFixture })
+    t.assert.equal(r.status, 1)
+    t.assert.match(r.stderr, /--package-json requires --bundle=\(add\|replace\)/)
+  })
+
+  test('run --package-json keeps a lockfile-attested manifest when rebuilding with --bundle=replace', withTmp(async (t, tmp) => {
+    // Regression: the skip guard must key on bundle membership (sources/resources), NOT this.hashes --
+    // else a manifest the absorbed lockfile attests but --bundle=replace hasn't re-captured is dropped.
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+    writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+    writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nconsole.log(hi)\n")
+    mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', type: 'module', main: 'main.js' }))
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+    let r = await run(['run', '--lock=add', '--bundle=add', '--package-json', 'index.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    // Rebuild the bundle from scratch: dep/package.json is in this.hashes (from the lockfile) but not re-imported.
+    r = await run(['run', '--lock=add', '--bundle=replace', '--package-json', 'index.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    const b = JSON.parse(brotliDecompressSync(readFileSync(join(tmp, 'stasis.code.br'))).toString())
+    t.assert.ok(Object.keys(b.modules['node_modules/dep'].files).includes('package.json'),
+      'dependency package.json is still bundled under --bundle=replace')
+  }))
+
+  test('run --bundle=add --package-json skips (does not crash on) an absorbed dep whose on-disk version drifted', withTmp(async (t, tmp) => {
+    // Regression: includePackageJson iterates this.modules (which under bundle=add holds absorbed
+    // buckets this run never re-imported); a drifted absorbed dep must be skipped, not identity-asserted.
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+    writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+    writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nconsole.log(hi)\n")
+    mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', type: 'module', main: 'main.js' }))
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+    let r = await run(['run', '--lock=ignore', '--bundle=add', 'index.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    // Drift the dep on disk and stop importing it; the absorbed bucket still records 1.0.0.
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '2.0.0', type: 'module', main: 'main.js' }))
+    writeFileSync(join(tmp, 'entry2.js'), "console.log('standalone')\n")
+    r = await run(['run', '--lock=ignore', '--bundle=add', '--package-json', 'entry2.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `should skip the drifted absorbed dep, not crash: ${r.stderr}`)
   }))
 
   test('run --lock=frozen executes the entry using the committed lockfile', async (t) => {

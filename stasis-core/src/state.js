@@ -12,6 +12,7 @@ import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
 import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
 // Destructure off the namespace (not `import { ... } from 'node:fs'`): captures the real
@@ -1560,12 +1561,47 @@ export class State {
     }
   }
 
+  // Auto-include each bundled module's package.json (config.packageJSON): for every module bucket,
+  // add its `<dir>/package.json` even if the run/scan never reached it, so a load/prune of the
+  // resulting bundle can read every dependency's manifest. Build-time self-containment like
+  // #backfillBeforeWrite -- reason:null (not a consumer observation), and idempotent. The skip keys
+  // on bundle membership (sources/resources), NOT this.hashes, which also holds lockfile-absorbed
+  // entries and is shared by reference across sidecars -- keying on hashes would drop the manifest
+  // from a bundle (or a sibling sidecar) that lacks it.
+  includePackageJson() {
+    // Read-only pass first, then addFile: addFile mutates this.modules (records the file into its
+    // bucket), so gather the manifests before touching the Map.
+    const realRoot = realpathSync(this.root)
+    const toAdd = []
+    for (const [dir, module] of this.modules) {
+      const rel = moduleFileKey(dir, 'package.json')
+      if (this.sources.has(rel) || this.resources.has(rel)) continue // already in this bundle
+      const buf = readModuleManifest({ baseDir: this.root, realBase: realRoot, rel })
+      if (!buf) continue
+      // Only carry a manifest whose on-disk identity still matches the bundled bucket. Under
+      // bundle=add, this.modules holds buckets absorbed from a prior bundle this run never re-imported;
+      // a dep that drifted on disk describes different bytes than the bundled code, so skip it rather
+      // than crash in addFile -> #locateModule's identity assert.
+      let pkg
+      try { pkg = JSON.parse(buf.toString()) } catch { continue } // malformed manifest for an untouched bucket: skip
+      if (pkg?.name !== module.name || pkg?.version !== module.version) continue
+      toAdd.push({ rel, buf })
+    }
+    for (const { rel, buf } of toAdd) {
+      this.addFile(pathToFileURL(resolve(this.root, rel)).toString(), { source: buf, reason: null })
+    }
+  }
+
   write() {
     // Backfill observed native resolutions BEFORE the stasis-core BFS: a resolve-only edge to a
     // stasis-core submodule is added only here, and the BFS must see it to seed the file's bytes
     // (else it ships a dangling edge a later lock=frozen replay rejects).
     this.#backfillObservedResolutions()
     this.#backfillBeforeWrite()
+    // Fold each bundled module's package.json in AFTER the backfills, so buckets they create (e.g.
+    // @exodus/stasis-core's) are covered too. Gated on writeBundle: load/frozen add no files, and a
+    // lockfile-only run has nothing to bundle into.
+    if (this.config.writeBundle && this.config.packageJSON) this.includePackageJson()
     // Sidecars never write the lockfile (parent owns it); they only emit their bundle. Per-artifact
     // compare-and-skip below skips brotli + writeFileSync when serialized text is unchanged (watch-mode).
 

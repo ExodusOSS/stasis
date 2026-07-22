@@ -22,7 +22,7 @@ import { extSetsEqual, parseResourcesOption } from '@exodus/stasis-core/util'
 //  7. lock='none' AND bundle='none' with no preload is a no-op (env-controlled-off framework plugins).
 export function resolvePluginState(label, options, cwd) {
   validatePluginOptions(label, options)
-  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, childProcess, resources } = options
+  const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, childProcess, packageJSON, resources } = options
   // Same-instance fast path: loader installed but lazy initState hasn't fired (webpack builds plugins
   // before user code). Force-init so the plugin lands in the ambient branch. NOT for a separate
   // stasis-core copy -- that would mint a phantom State.preload racing the real loader's write.
@@ -82,6 +82,9 @@ export function resolvePluginState(label, options, cwd) {
   if (childProcess !== undefined && childProcess !== pc.childProcess) {
     throw new Error(`${label}: childProcess=${childProcess} conflicts with active preload childProcess=${pc.childProcess}`)
   }
+  if (packageJSON !== undefined && packageJSON !== pc.packageJSON) {
+    throw new Error(`${label}: packageJSON=${packageJSON} conflicts with active preload packageJSON=${pc.packageJSON}`)
+  }
   // resources is process-wide, so a plugin's allowlist must agree with the preload's -- compare
   // parsed sets (order/dupes/case-insensitive) to prevent one plugin silently widening the asset set.
   if (resources !== undefined) {
@@ -124,6 +127,7 @@ export function resolvePluginState(label, options, cwd) {
       resourcesBundleFile,
       debug: pc.debug,
       childProcess: pc.childProcess,
+      packageJSON: pc.packageJSON,
       resources: [...pc.resources],
       // carried over: sidecars skip stasis.config.json discovery
       brotliQuality: pc.brotliQuality,
@@ -157,6 +161,7 @@ export function resolvePluginState(label, options, cwd) {
     resourcesBundleFile,
     debug: pc.debug,
     childProcess: pc.childProcess,
+    packageJSON: pc.packageJSON,
     resources: [...pc.resources],
     brotliQuality: pc.brotliQuality, // carried over, like the Rule 6 sidecar above
   })
