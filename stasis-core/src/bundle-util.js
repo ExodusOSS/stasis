@@ -49,24 +49,16 @@ export function normalizeEntries(entries, cwd) {
 }
 
 // Read a bundled module's `package.json` for the `packageJSON` auto-include option, applying the
-// rules shared by the State (`run`/plain `bundle`) and resolved (`--metro`/`--mainFields`) paths:
-// skip (null) when absent on disk; reject a manifest whose real path escapes the root (like every
-// bundled read); ABORT on non-UTF-8 bytes (never silently skipped). When `identity` is given -- the
-// State path, whose module buckets may be ABSORBED from a prior bundle -- skip a manifest whose
-// on-disk name/version has drifted from the bundled bucket rather than bundle a manifest describing
-// different bytes than the bundled code. `rel` is the project-relative manifest path; returns the
-// raw bytes to bundle, or null to skip.
-export function readModuleManifest({ baseDir, realBase, rel, identity } = {}) {
+// read/validate rules shared by the State (`run`/plain `bundle`) and resolved (`--metro`/
+// `--mainFields`) paths: skip (null) when absent on disk; reject a manifest whose real path escapes
+// the root (like every bundled read); ABORT on non-UTF-8 bytes (never silently skipped). `rel` is
+// the project-relative manifest path; returns the raw bytes to bundle, or null to skip.
+export function readModuleManifest({ baseDir, realBase, rel } = {}) {
   const absolute = join(baseDir, rel)
   if (!existsSync(absolute)) return null
   assertRealPathWithinBase(realBase, baseDir, rel)
   const buf = readFileSync(absolute)
   if (!isUtf8(buf)) throw new Error(`package.json is not valid UTF-8: ${rel}`)
-  if (identity !== undefined) {
-    let pkg
-    try { pkg = JSON.parse(buf.toString()) } catch { return null } // malformed manifest for an untouched bucket: skip
-    if (pkg?.name !== identity.name || pkg?.version !== identity.version) return null
-  }
   return buf
 }
 

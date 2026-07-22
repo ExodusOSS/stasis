@@ -151,9 +151,6 @@ export class Config {
     this.#resourcesBundleFile = this.#env.resourcesBundleFile || resourcesBundleFile || undefined
     this.#debug = this.#env.debug !== undefined ? envBool('EXODUS_STASIS_DEBUG', this.#env.debug) : (debug ?? false)
     this.#childProcess = this.#env.childProcess !== undefined ? envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess) : (childProcess ?? false)
-    // Auto-include each bundled module's package.json (a build-time inclusion flag, like debug):
-    // env wins over the option, default false. Not attested -- its EFFECT (the package.json files)
-    // is what lands in the artifact, so the flag itself needn't be serialized.
     this.#packageJSON = this.#env.packageJSON !== undefined ? envBool('EXODUS_STASIS_PACKAGE_JSON', this.#env.packageJSON) : (packageJSON ?? false)
     // Env-only: shard-channel plumbing a parent sets for its descendants, not a user-facing knob.
     this.#shardSignalFlush = this.#env.shardSignalFlush !== undefined

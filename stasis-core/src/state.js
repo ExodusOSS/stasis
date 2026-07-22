@@ -1567,8 +1567,7 @@ export class State {
   // #backfillBeforeWrite -- reason:null (not a consumer observation), and idempotent. The skip keys
   // on bundle membership (sources/resources), NOT this.hashes, which also holds lockfile-absorbed
   // entries and is shared by reference across sidecars -- keying on hashes would drop the manifest
-  // from a bundle (or a sibling sidecar) that lacks it. readModuleManifest applies the read/validate
-  // rules shared with the static --metro path (containment, UTF-8-aborts, absorbed-drift skip).
+  // from a bundle (or a sibling sidecar) that lacks it.
   includePackageJson() {
     // Read-only pass first, then addFile: addFile mutates this.modules (records the file into its
     // bucket), so gather the manifests before touching the Map.
@@ -1577,8 +1576,16 @@ export class State {
     for (const [dir, module] of this.modules) {
       const rel = moduleFileKey(dir, 'package.json')
       if (this.sources.has(rel) || this.resources.has(rel)) continue // already in this bundle
-      const buf = readModuleManifest({ baseDir: this.root, realBase: realRoot, rel, identity: { name: module.name, version: module.version } })
-      if (buf) toAdd.push({ rel, buf })
+      const buf = readModuleManifest({ baseDir: this.root, realBase: realRoot, rel })
+      if (!buf) continue
+      // Only carry a manifest whose on-disk identity still matches the bundled bucket. Under
+      // bundle=add, this.modules holds buckets absorbed from a prior bundle this run never re-imported;
+      // a dep that drifted on disk describes different bytes than the bundled code, so skip it rather
+      // than crash in addFile -> #locateModule's identity assert.
+      let pkg
+      try { pkg = JSON.parse(buf.toString()) } catch { continue } // malformed manifest for an untouched bucket: skip
+      if (pkg?.name !== module.name || pkg?.version !== module.version) continue
+      toAdd.push({ rel, buf })
     }
     for (const { rel, buf } of toAdd) {
       this.addFile(pathToFileURL(resolve(this.root, rel)).toString(), { source: buf, reason: null })
