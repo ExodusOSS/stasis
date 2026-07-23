@@ -29,9 +29,11 @@ const AUTO_INCLUDES = [
 ]
 
 // Subtrees skipped (by basename, any depth) when walking a native dep's build-input surface:
-// nested packages (attested separately), VCS/CI metadata, demo apps, and regenerated build output.
+// nested packages (attested separately), VCS/CI metadata, demo apps, JS test/mock scaffolding, and
+// regenerated build output. None contribute to the app's native build.
 const NATIVE_WALK_SKIP_DIRS = new Set([
-  'node_modules', '.git', '.github', '.settings', 'example', 'examples', 'build', '.gradle', '.cxx', 'Pods',
+  'node_modules', '.git', '.github', '.settings', 'example', 'examples', '__tests__', '__mocks__', 'jest',
+  'build', '.gradle', '.cxx', 'Pods',
 ])
 
 // Run `react-native config` (RN's autolinking resolver) for native deps. Null when the RN CLI
