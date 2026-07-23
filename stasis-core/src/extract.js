@@ -47,7 +47,8 @@ export function lockfileFromBundle(bundle) {
 }
 
 // Extract stasis.code.br onto disk (default cwd) + derive a matching stasis.lock.json. v0 bundles extract sources only.
-export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {}) {
+// logLabel prefixes the status lines so each CLI self-identifies (stasis-core -> [stasis-core], stasis -> [stasis]), like addCommand.
+export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLabel = 'stasis-core' } = {}) {
   if (!bundleFile) throw new Error('extract: a bundle file is required')
   const bundleAbs = resolve(cwd, bundleFile)
   if (!existsSync(bundleAbs)) throw new Error(`extract: bundle file not found: ${bundleAbs}`)
@@ -116,9 +117,9 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
   mkdirSync(outDir, { recursive: true }) // for an empty bundle, where no write created it
   if (withLockfile) writeFileSync(lockAbs, lockText)
 
-  console.warn(`[stasis] Extracted ${writes.length} file(s)${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
+  console.warn(`[${logLabel}] Extracted ${writes.length} file(s)${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
   if (!withLockfile) {
-    console.warn(`[stasis] Warning: legacy v0 bundle records no package name/version, so ${FILE_LOCK} can not be restored and was not written`)
+    console.warn(`[${logLabel}] Warning: legacy v0 bundle records no package name/version, so ${FILE_LOCK} can not be restored and was not written`)
   }
   return { dir: outDir, files: writes.length }
 }

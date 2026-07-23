@@ -25,6 +25,8 @@ function usage(prefix = '') {
  stasis-core add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
+ stasis-core extract [--output=path/to/dir] path/to/bundle.stasis.code.br
+ (unpacks a stasis.code.br bundle back onto disk and derives a matching stasis.lock.json.)
  stasis-core prune [path/to/project]
 `.trim())
   process.exit(1)
@@ -128,6 +130,25 @@ if (command === '-v' || command === '--version') {
   const { addCommand } = await import('../src/add.js')
   // Let addCommand's errors propagate as-is (specific, actionable); don't bury them under the usage block.
   addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis-core' })
+} else if (command === 'extract') {
+  const flags = []
+  const valueFlags = new Set(['--output', '-o'])
+  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
+    flags.push(argv.shift())
+  }
+  const options = {
+    output: { type: 'string', short: 'o' },
+  }
+  let values
+  try {
+    ({ values } = parseArgs({ args: flags, options }))
+  } catch (cause) {
+    usage(`Error: ${cause.message}`)
+  }
+  if (argv.length === 0) usage('Nothing to extract: no bundle file given')
+  if (argv.length > 1) usage('Error: extract takes exactly one bundle file')
+  const { extractCommand } = await import('../src/extract.js')
+  extractCommand({ cwd: process.cwd(), bundleFile: argv[0], output: values.output, logLabel: 'stasis-core' })
 } else {
   usage()
 }

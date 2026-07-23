@@ -420,7 +420,7 @@ if (command === '-v' || command === '--version') {
   if (argv.length === 0) usage('Nothing to extract: no bundle file given')
   if (argv.length > 1) usage('Error: extract takes exactly one bundle file')
   const { extractCommand } = await import('@exodus/stasis-core/extract')
-  extractCommand({ cwd: process.cwd(), bundleFile: argv[0], output: values.output })
+  extractCommand({ cwd: process.cwd(), bundleFile: argv[0], output: values.output, logLabel: 'stasis' })
 } else if (command === 'diff') {
   const flags = []
   while (argv.length > 0 && argv[0].startsWith('-')) flags.push(argv.shift())
