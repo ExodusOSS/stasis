@@ -215,12 +215,10 @@ export class StasisMetro {
     this.#captureNativeModules()
   }
 
-  // Shared epilogue for the classify-driven capture paths: UTF-8-guard code (clearer than addFile's
-  // generic error), then record. `format` null/undefined lets addFile pick (loader / byte-derived).
+  // Shared epilogue for the classify-driven capture paths: record under the given format/resource.
+  // `format` null/undefined lets addFile pick (loader format for JS, byte-derived for a resource);
+  // addFile already asserts UTF-8 for a non-resource (code) source, so no guard is needed here.
   #recordCapture(full, source, { format, resource }) {
-    if (!resource) {
-      assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
-    }
     this.#state.addFile(pathToFileURL(full).toString(), { source, format: format ?? undefined, resource, reason: 'metro' })
   }
 

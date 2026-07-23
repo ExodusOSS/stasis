@@ -259,6 +259,25 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     t.assert.equal(r.status, 0, `should skip the drifted absorbed dep, not crash: ${r.stderr}`)
   }))
 
+  test('run --lock=frozen --bundle=add --package-json errors cleanly for a manifest the frozen lockfile never attested', withTmp(async (t, tmp) => {
+    // The CLI permits --package-json with --lock=frozen (its gate checks --bundle only), and
+    // includePackageJson then addFile()s a dependency manifest the frozen lockfile never recorded.
+    // That must surface as a clean, named error -- not a bare, message-less AssertionError.
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '0.0.0', type: 'module' }))
+    writeFileSync(join(tmp, 'pnpm-workspace.yaml'), '')
+    writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nconsole.log(hi)\n")
+    mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0', type: 'module', main: 'main.js' }))
+    writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+    // Capture WITHOUT --package-json: the lockfile attests dep/main.js but not dep/package.json.
+    let r = await run(['run', '--lock=replace', '--bundle=replace', 'index.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, r.stderr)
+    // Enrich the bundle under the frozen lockfile that never attested the manifest.
+    r = await run(['run', '--lock=frozen', '--bundle=add', '--package-json', 'index.js'], { cwd: tmp })
+    t.assert.notEqual(r.status, 0)
+    t.assert.match(r.stderr, /not attested by the frozen lockfile: node_modules\/dep\/package\.json/)
+  }))
+
   test('run --lock=frozen executes the entry using the committed lockfile', async (t) => {
     const r = await run(['run', '--lock=frozen', 'src/entry.js'], { cwd: runFixture })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
