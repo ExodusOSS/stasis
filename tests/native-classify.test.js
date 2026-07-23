@@ -12,7 +12,7 @@ const WIN = { win32: true }
 test('isExcludedNativeFile: docs / config / logs / maps are always excluded', (t) => {
   for (const name of [
     'README.md', 'CHANGELOG.md', 'LICENSE', 'license', 'LICENCE', 'THIRD-PARTY-LICENSES',
-    '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc', '.clang-format',
+    '.prettierrc', '.prettierignore', '.prettierrc.js', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc', '.clang-format',
     '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml',
     'yarn.lock', '.project', 'gradle-wrapper.properties',
     'debug.log', 'bundle.js.map',

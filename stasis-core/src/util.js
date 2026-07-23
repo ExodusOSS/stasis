@@ -207,8 +207,8 @@ function isShellShebang(content) {
 const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map'])
 const NATIVE_EXCLUDE_NAMES = new Set([
   'license', 'licence', 'third-party-licenses', // license / legal text (US + UK spelling)
-  '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc', '.clang-format',
-  '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml', // editor / lint / CI config
+  '.prettierrc', '.prettierignore', '.prettierrc.js', '.gitattributes', '.flowconfig', '.eslintignore',
+  '.releaserc', '.clang-format', '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml', // editor / lint / CI config
   'yarn.lock', // JS dep lockfile (a native build never reads it)
   '.project', // Eclipse IDE project metadata (Gradle doesn't read it)
   'gradle-wrapper.properties', // a module's own Gradle wrapper -- the APP's wrapper drives the build
