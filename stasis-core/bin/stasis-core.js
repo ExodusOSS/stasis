@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
-import { parseArgs } from 'node:util'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { basename, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
-import { parseBrotliQuality } from '../src/util.js'
+import { parseBrotliQuality, parseLeadingOptions } from '../src/util.js'
 import pkg from '../package.json' with { type: 'json' }
 
 const argv = [...process.argv]
@@ -44,12 +43,6 @@ if (command === '-v' || command === '--version') {
   console.log(`v${pkg.version}`)
   process.exit(0)
 } else if (command === 'run') {
-  const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
-
   const options = {
     lock: { type: 'string', default: 'none' },
     bundle: { type: 'string', default: 'none' },
@@ -62,13 +55,10 @@ if (command === '-v' || command === '--version') {
     resources: { type: 'string' },
     'brotli-quality': { type: 'string' },
   }
-
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, {
+    valueFlags: ['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'],
+    onError: usage,
+  })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
   if (!['none', 'ignore', 'add', 'replace', 'frozen'].includes(values.lock)) usage('Error: invalid --lock value')
   const lock = values.lock
@@ -131,20 +121,10 @@ if (command === '-v' || command === '--version') {
   // Let addCommand's errors propagate as-is (specific, actionable); don't bury them under the usage block.
   addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis-core' })
 } else if (command === 'extract') {
-  const flags = []
-  const valueFlags = new Set(['--output', '-o'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
   const options = {
     output: { type: 'string', short: 'o' },
   }
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, { valueFlags: ['--output', '-o'], onError: usage })
   if (argv.length === 0) usage('Nothing to extract: no bundle file given')
   if (argv.length > 1) usage('Error: extract takes exactly one bundle file')
   const { extractCommand } = await import('../src/extract.js')

@@ -1,6 +1,7 @@
 import { isUtf8 } from 'node:buffer'
 import * as fs from 'node:fs'
 import { basename, isAbsolute, join, posix, relative } from 'node:path'
+import { parseArgs } from 'node:util'
 
 // Snapshot realpathSync before `stasis run --fs` patches fs.realpathSync: the patched wrapper
 // doesn't throw ENOENT, which would defeat assertRealPathWithinBase's reliance on that throw.
@@ -110,6 +111,23 @@ export function parseBrotliQuality(name, value) {
     throw new RangeError(`${name} must be an integer 0..11 (got '${value}')`)
   }
   return n
+}
+
+// Shared bin option scan: shift the leading option tokens off `argv` -- stopping at the first
+// positional so `run`'s forwarded child argv survives -- then parseArgs them. `valueFlags` lists
+// options whose separate-token value (`-o dir`) must not be read as the positional.
+export function parseLeadingOptions(argv, options, { valueFlags = [], onError } = {}) {
+  const takesValue = new Set(valueFlags)
+  const flags = []
+  while (argv.length > 0 && (argv[0].startsWith('-') || takesValue.has(flags.at(-1)))) {
+    flags.push(argv.shift())
+  }
+  try {
+    return parseArgs({ args: flags, options }).values
+  } catch (cause) {
+    onError(`Error: ${cause.message}`) // usage(), which exits
+    return undefined
+  }
 }
 
 // The JS-graph bundlers' policy view over classifyFormat. Returns 'code', 'resource' (allowlisted
