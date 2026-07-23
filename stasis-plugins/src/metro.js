@@ -216,6 +216,17 @@ export class StasisMetro {
     this.#captureNativeModules()
   }
 
+  // Shared epilogue for the classify-driven capture paths (auto-includes, RN core files, the
+  // native tree). A code file must be UTF-8 -- assert with a clearer message than addFile's
+  // generic one -- then record it. `format` is a classifier result: a concrete string, or
+  // null/undefined to let addFile pick (loader format for JS, byte-derived for a resource).
+  #recordCapture(full, source, { format, resource }) {
+    if (!resource) {
+      assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
+    }
+    this.#state.addFile(pathToFileURL(full).toString(), { source, format: format ?? undefined, resource, reason: 'metro' })
+  }
+
   // Attest the AUTO_INCLUDES list. Per entry, skip: unresolvable, already-seen, or resolving
   // outside the project root (keys are root-relative). Attested entries ride the normal addFile path.
   #captureAutoIncludes() {
@@ -244,11 +255,7 @@ export class StasisMetro {
       // forced 'resource' -- is what stops a native-walk (or --fs) 'shell' record for the same
       // bytes from tripping the format noupsert with a 'resource' vs 'shell' conflict.
       const format = classifyFormat(modPath, { content: source })
-      const resource = format === undefined
-      if (!resource) {
-        assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${modPath}`)
-      }
-      this.#state.addFile(pathToFileURL(modPath).toString(), { source, format: format ?? undefined, resource, reason: 'metro' })
+      this.#recordCapture(modPath, source, { format, resource: format === undefined })
     }
   }
 
@@ -288,7 +295,10 @@ export class StasisMetro {
     }
   }
 
-  // Attest a single vetted file (RN_CORE_INCLUDE_FILES) as a resource; skipped when absent.
+  // Attest a single vetted file (RN_CORE_INCLUDE_FILES); skipped when absent. Tagged via the shared
+  // classifier like every other capture path: an extensionless version file (sdks/.hermesversion)
+  // is unrecognized -> a raw resource, while a concrete-format entry would be recorded as code,
+  // agreeing with the native walk rather than colliding at the format noupsert.
   #captureNativeFile(full) {
     if (this.#seen.has(full)) return
     let source
@@ -298,7 +308,8 @@ export class StasisMetro {
       return
     }
     this.#seen.add(full)
-    this.#state.addFile(pathToFileURL(full).toString(), { source, resource: true, reason: 'metro' })
+    const format = classifyFormat(full, { content: source })
+    this.#recordCapture(full, source, { format, resource: format === undefined })
   }
 
   // node_modules roots the graph reached that also ship native code (podspec or ios/android dir):
@@ -392,11 +403,7 @@ export class StasisMetro {
       if (action === 'skip') continue
       this.#seen.add(full)
       const source = realReadFileSync(full)
-      const asResource = action === 'resource'
-      if (!asResource) {
-        assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
-      }
-      this.#state.addFile(pathToFileURL(full).toString(), { source, format, resource: asResource, reason: 'metro' })
+      this.#recordCapture(full, source, { format, resource: action === 'resource' })
     }
   }
 
