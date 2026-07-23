@@ -25,7 +25,8 @@ export function lockfileFromBundle(bundle) {
     const hashed = Object.create(null)
     for (const [rel, content] of Object.entries(files)) {
       // Hash each file's raw on-disk bytes; decode 'resource:base64' back first (assertCanonicalBase64 rejects lying tags).
-      const file = dir === '.' ? rel : `${dir}/${rel}`
+      // moduleFileKey (not a bare `${dir}/${rel}`) so a `directory` capture's rel==='' keys the dir, matching the write loop's format lookup.
+      const file = moduleFileKey(dir, rel)
       const bytes = bundle.formats.get(file) === 'resource:base64'
         ? assertCanonicalBase64(content, file)
         : content
@@ -46,7 +47,8 @@ export function lockfileFromBundle(bundle) {
 }
 
 // Extract stasis.code.br onto disk (default cwd) + derive a matching stasis.lock.json. v0 bundles extract sources only.
-export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {}) {
+// logLabel prefixes the status lines so each CLI self-identifies (stasis-core -> [stasis-core], stasis -> [stasis]), like addCommand.
+export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLabel = 'stasis-core' } = {}) {
   if (!bundleFile) throw new Error('extract: a bundle file is required')
   const bundleAbs = resolve(cwd, bundleFile)
   if (!existsSync(bundleAbs)) throw new Error(`extract: bundle file not found: ${bundleAbs}`)
@@ -79,7 +81,10 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
       if (typeof content !== 'string') throw new Error(`extract: bundle file content is not a string: ${file}`)
       const abs = resolve(outDir, file)
       const relToOut = relative(outDir, abs)
-      if (relToOut.startsWith('..') || isAbsolute(relToOut) || !abs.startsWith(outPrefix)) {
+      // Escapes: `..`-relative to outDir, or not lexically under `<outDir>/`. The `..` test is
+      // `../`-aware (matching posixPathEscapes), NOT a bare startsWith('..') -- the latter also
+      // rejects a legit first segment like `..foo` (a real filename resolve keeps safely inside outDir).
+      if (relToOut === '..' || relToOut.startsWith(`..${sep}`) || isAbsolute(relToOut) || !abs.startsWith(outPrefix)) {
         throw new Error(`extract: bundle path escapes output dir: ${file}`)
       }
       // Reject non-canonical paths (they change under the resolve+relative round-trip): writing them desyncs the tree from the lockfile.
@@ -112,9 +117,9 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output } = {})
   mkdirSync(outDir, { recursive: true }) // for an empty bundle, where no write created it
   if (withLockfile) writeFileSync(lockAbs, lockText)
 
-  console.warn(`[stasis] Extracted ${writes.length} file(s)${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
+  console.warn(`[${logLabel}] Extracted ${writes.length} file(s)${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
   if (!withLockfile) {
-    console.warn(`[stasis] Warning: legacy v0 bundle records no package name/version, so ${FILE_LOCK} can not be restored and was not written`)
+    console.warn(`[${logLabel}] Warning: legacy v0 bundle records no package name/version, so ${FILE_LOCK} can not be restored and was not written`)
   }
   return { dir: outDir, files: writes.length }
 }

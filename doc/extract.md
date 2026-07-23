@@ -2,10 +2,13 @@
 
 `stasis extract` unpacks a `stasis.code.br` bundle back onto disk: it writes
 every bundled source to its original project-relative path and drops a matching
-`stasis.lock.json` next to them. It is the inverse of `stasis bundle`.
+`stasis.lock.json` next to them. It is the inverse of `stasis bundle`. Because
+unpacking needs no scanner or loaders, the command also ships on the
+zero-dependency core CLI as `stasis-core extract` (identical flags and behaviour).
 
 ```sh
 stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
+stasis-core extract [--output=path/to/dir] path/to/bundle.stasis.code.br
 ```
 
 | Argument | Meaning |

@@ -1,15 +1,17 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
+import { brotliCompressSync } from 'node:zlib'
 
-// The zero-dependency `stasis-core` CLI exposes `run`, `prune`, and `add` (which packs
-// explicitly listed files into the project's bundles -- no scanner/loaders). Deep
-// bundling, extract/audit, and --mock stay in the @exodus/stasis tooling package. These tests
-// pin that surface; the run-time behaviour itself is the same loader covered by tests/cli.test.js.
+// The zero-dependency `stasis-core` CLI exposes `run`, `prune`, `add` (which packs explicitly
+// listed files into the project's bundles -- no scanner/loaders), and `extract` (which unpacks a
+// bundle back onto disk -- a pure inverse with no tooling deps). Deep (dependency-resolving)
+// bundling, `audit`, and --mock stay in the @exodus/stasis tooling package. These tests pin that
+// surface; the run-time behaviour itself is the same loader covered by tests/cli.test.js.
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis-core', 'bin', 'stasis-core.js')
 const runFixture = join(here, 'fixtures', 'cli-run')
@@ -42,17 +44,18 @@ const withTmp = (fn) => (t) => {
   }
 }
 
-test('no command prints usage limited to run + prune + add', (t) => {
+test('no command prints usage covering run + add + extract + prune', (t) => {
   const r = run([])
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /Usage:/)
   t.assert.match(r.stderr, /stasis-core run/)
-  t.assert.match(r.stderr, /stasis-core prune/)
   // The core CLI's only bundling is the zero-dep add packer (no scanner/loaders).
   t.assert.match(r.stderr, /stasis-core add/)
-  // extract/audit and deep (dependency-resolving) bundling are tooling commands that
-  // stay on the full `stasis` CLI and must not appear here.
-  t.assert.doesNotMatch(r.stderr, /stasis-core (?:extract|audit)/)
+  // extract is a pure inverse of a bundle -- no tooling deps -- so the core CLI carries it too.
+  t.assert.match(r.stderr, /stasis-core extract/)
+  t.assert.match(r.stderr, /stasis-core prune/)
+  // `audit` and deep (dependency-resolving) bundling remain tooling commands on the full `stasis` CLI.
+  t.assert.doesNotMatch(r.stderr, /stasis-core audit/)
 })
 
 test('--version prints the package version', (t) => {
@@ -134,4 +137,57 @@ test('prune validates and removes against the lockfile', withTmp((t, tmp) => {
   const r = run(['prune', tmp])
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   t.assert.match(r.stderr, /validated 3 file\(s\), removed 4 file\(s\)/)
+}))
+
+// A hand-crafted, brotli-wrapped v1 bundle -- no tooling package needed to build one for the core CLI.
+const writeRawBundle = (path, json) => writeFileSync(path, brotliCompressSync(JSON.stringify(json)))
+
+test('extract with no bundle file prints usage', (t) => {
+  const r = run(['extract'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /Nothing to extract/)
+})
+
+test('extract with more than one bundle file prints usage', (t) => {
+  const r = run(['extract', 'a.code.br', 'b.code.br'])
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /extract takes exactly one bundle file/)
+})
+
+test('extract unpacks a bundle to disk with a derived lockfile, labelled [stasis-core]', withTmp((t, tmp) => {
+  const bundlePath = join(tmp, 'out.code.br')
+  writeRawBundle(bundlePath, {
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['src/entry.js'],
+    sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/entry.js': 'export const x = 1\n' } } },
+    modules: {},
+    formats: { 'src/entry.js': 'module' },
+    imports: {},
+  })
+  const outDir = join(tmp, 'extracted')
+  const r = run(['extract', '-o', outDir, bundlePath])
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  // Self-labelled [stasis-core] (like `add`), not the tooling CLI's [stasis].
+  t.assert.match(r.stderr, /\[stasis-core\] Extracted 1 file\(s\) and stasis\.lock\.json to /)
+  t.assert.equal(readFileSync(join(outDir, 'src', 'entry.js'), 'utf8'), 'export const x = 1\n')
+  t.assert.ok(existsSync(join(outDir, 'stasis.lock.json')))
+}))
+
+test('extract accepts the --output= long form', withTmp((t, tmp) => {
+  const bundlePath = join(tmp, 'out.code.br')
+  writeRawBundle(bundlePath, {
+    version: 1,
+    config: { scope: 'full' },
+    entries: ['src/entry.js'],
+    sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/entry.js': 'export const x = 1\n' } } },
+    modules: {},
+    formats: { 'src/entry.js': 'module' },
+    imports: {},
+  })
+  const outDir = join(tmp, 'extracted')
+  const r = run(['extract', `--output=${outDir}`, bundlePath])
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+  t.assert.ok(existsSync(join(outDir, 'src', 'entry.js')))
+  t.assert.ok(existsSync(join(outDir, 'stasis.lock.json')))
 }))

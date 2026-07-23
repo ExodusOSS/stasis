@@ -232,6 +232,51 @@ test('extractCommand rejects a sibling dir that merely shares the output dir nam
   t.assert.ok(!existsSync(join(tmp, 'out-evil', 'pwned.js')), 'must not write into a sibling dir')
 }))
 
+test('extractCommand accepts paths whose first segment begins with ".." (a real name, not a traversal)', withTmp((t, tmp) => {
+  // `..foo.js` / `..cache/x.js` are legitimate names: resolve() keeps them safely inside outDir,
+  // and Bundle.parse accepts them (posixPathEscapes is `../`-aware). A bare startsWith('..')
+  // containment test wrongly flagged them as escaping -- rejecting a valid bundle -- even though the
+  // lexical `<outDir>/` prefix check and the canonical-path check both pass. The fix aligns extract's
+  // own `..`-relative test with posixPathEscapes. Note `src/..bar.js` was never affected (the `..` is
+  // not the first segment), which is exactly the asymmetry that made the bare check a bug, not a policy.
+  const bundle = new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(['src/entry.js']),
+    modules: new Map([
+      ['.', { name: 'app', version: '1.0.0', files: {
+        'src/entry.js': 'export const x = 1\n',
+        '..foo.js': 'leading dotdot in a filename\n',
+        '..cache/x.js': 'leading dotdot in a dir name\n',
+      } }],
+    ]),
+    formats: new Map([
+      ['src/entry.js', 'module'],
+      ['..foo.js', 'resource'],
+      ['..cache/x.js', 'resource'],
+    ]),
+    imports: new Map([['*', new Map([['src/entry.js', new Map()]])]]),
+  })
+  const bundlePath = join(tmp, 'dotdot.br')
+  writeFileSync(bundlePath, brotliCompressSync(bundle.serialize()))
+
+  const outDir = join(tmp, 'out')
+  let res
+  t.assert.doesNotThrow(() => { res = extractCommand({ bundleFile: bundlePath, output: outDir }) })
+  t.assert.equal(res.files, 3)
+
+  // The files land INSIDE outDir with byte fidelity...
+  t.assert.equal(readFileSync(join(outDir, '..foo.js'), 'utf8'), 'leading dotdot in a filename\n')
+  t.assert.ok(statSync(join(outDir, '..foo.js')).isFile())
+  t.assert.equal(readFileSync(join(outDir, '..cache', 'x.js'), 'utf8'), 'leading dotdot in a dir name\n')
+  // ...and nothing escaped to a sibling/parent of outDir.
+  t.assert.ok(!existsSync(join(tmp, '..foo.js')), 'must not write above the output dir')
+
+  // The derived lockfile records the dotdot-named files by their exact keys, hashed over the on-disk bytes.
+  const lock = Lockfile.parse(readFileSync(join(outDir, 'stasis.lock.json'), 'utf8'))
+  t.assert.equal(lock.modules.get('.').files['..foo.js'], sha512integrity(readFileSync(join(outDir, '..foo.js'))))
+  t.assert.equal(lock.modules.get('.').files['..cache/x.js'], sha512integrity(readFileSync(join(outDir, '..cache', 'x.js'))))
+}))
+
 test('extractCommand extracts a legacy v0 bundle but skips the lockfile', withTmp((t, tmp) => {
   // v0 buckets carry no package name/version; a lockfile must attest both for
   // every node_modules bucket, so none can be restored. The sources are still
