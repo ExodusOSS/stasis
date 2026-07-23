@@ -64,6 +64,16 @@ test('classifyNativeCapture: excluded files skip; a .bat is win32-conditional', 
   t.assert.deepEqual(classifyNativeCapture('config.h.in', NOT_WIN), { action: 'resource' })
 })
 
+test('classifyNativeCapture: TypeScript source (.ts/.tsx/.d.ts) is skipped -- Metro owns the JS graph', (t) => {
+  // A native dep's TS is its JS-side implementation, carried by Metro's module graph when reached --
+  // it is never a native build input, so the native capture never emits it (a .ts is not expected to
+  // cross the node_modules boundary as a build input). The type-only .d.ts is skipped too.
+  for (const name of ['index.ts', 'src/index.ts', 'Widget.tsx', 'types/index.d.ts', 'global.d.ts']) {
+    t.assert.deepEqual(classifyNativeCapture(name, NOT_WIN), { action: 'skip' }, `${name} skipped`)
+    t.assert.deepEqual(classifyNativeCapture(name, WIN), { action: 'skip' }, `${name} skipped on Windows too`)
+  }
+})
+
 test('classifyNativeCapture: the whole env family (`.env`, `.env.*`, `*.env`) is skipped', (t) => {
   // Secrets are never swept into an automated native capture: dotenv basenames (any depth) AND
   // any `.env`-extension file (Docker Compose env_file `web.env`, reversed-dotenv `.abc.env`) --
