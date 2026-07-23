@@ -21,9 +21,8 @@ function entrySet(graph) {
   return new Set()
 }
 
-// Files a React Native build requires that Metro's module graph never carries; attested when
-// they resolve from the project. Each is tagged by the shared classifier (see #captureAutoIncludes),
-// so an auto-include is recorded under the SAME format any other capture path would give it.
+// Files a React Native build requires that Metro's module graph never carries; attested (tagged by
+// the shared classifier, see #captureAutoIncludes) when they resolve from the project.
 const AUTO_INCLUDES = [
   'metro-runtime/src/modules/asyncRequire.js',
   '@react-native-community/cli/setup_env.sh',
@@ -216,10 +215,8 @@ export class StasisMetro {
     this.#captureNativeModules()
   }
 
-  // Shared epilogue for the classify-driven capture paths (auto-includes, RN core files, the
-  // native tree). A code file must be UTF-8 -- assert with a clearer message than addFile's
-  // generic one -- then record it. `format` is a classifier result: a concrete string, or
-  // null/undefined to let addFile pick (loader format for JS, byte-derived for a resource).
+  // Shared epilogue for the classify-driven capture paths: UTF-8-guard code (clearer than addFile's
+  // generic error), then record. `format` null/undefined lets addFile pick (loader / byte-derived).
   #recordCapture(full, source, { format, resource }) {
     if (!resource) {
       assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
@@ -246,14 +243,9 @@ export class StasisMetro {
       this.#seen.add(modPath)
       // Real reader: plugin bookkeeping, not a program fs read -- must not be re-recorded by --fs.
       const source = realReadFileSync(modPath)
-      // Tag from the ONE shared classifier, so an auto-include agrees with every OTHER capture
-      // path that meets the same file (the native walk via classifyNativeCapture, --fs via
-      // addFsFile): a concrete name/shebang code format (setup_env.sh -> 'shell'), null for a
-      // JS-family file (let addFile infer commonjs/module), or a raw resource when unrecognized.
-      // The auto-include list is stasis-vetted, so an unrecognized entry still bypasses the
-      // `resources` allowlist. Recording setup_env.sh under its real 'shell' format -- not a
-      // forced 'resource' -- is what stops a native-walk (or --fs) 'shell' record for the same
-      // bytes from tripping the format noupsert with a 'resource' vs 'shell' conflict.
+      // Tag from the ONE shared classifier so an auto-include agrees with any other path meeting
+      // the same file (native walk, --fs): setup_env.sh -> 'shell', not a forced 'resource' that
+      // would collide at the format noupsert. Unrecognized -> resource (vetted list, so no allowlist).
       const format = classifyFormat(modPath, { content: source })
       this.#recordCapture(modPath, source, { format, resource: format === undefined })
     }
@@ -296,9 +288,7 @@ export class StasisMetro {
   }
 
   // Attest a single vetted file (RN_CORE_INCLUDE_FILES); skipped when absent. Tagged via the shared
-  // classifier like every other capture path: an extensionless version file (sdks/.hermesversion)
-  // is unrecognized -> a raw resource, while a concrete-format entry would be recorded as code,
-  // agreeing with the native walk rather than colliding at the format noupsert.
+  // classifier like every other path (sdks/.hermesversion -> resource; a concrete format -> code).
   #captureNativeFile(full) {
     if (this.#seen.has(full)) return
     let source
