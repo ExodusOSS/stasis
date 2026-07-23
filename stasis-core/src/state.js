@@ -935,7 +935,7 @@ export class State {
 
     const inAttestedZone = hasNodeModulesSegment(dir) || this.config.full
     if (this.config.frozen && inAttestedZone) {
-      assert.ok(Object.hasOwn(module.files, rel))
+      assert.ok(Object.hasOwn(module.files, rel), `File not attested by the frozen lockfile: ${file}`)
     }
 
     // Frozen bundle: bytes are checked by the noupsert below; here we close the set, rejecting a
@@ -1026,7 +1026,7 @@ export class State {
     // Frozen attestation (mirrors addFile): in the attested zone the listing must already be recorded and match.
     const inAttestedZone = hasNodeModulesSegment(dir) || this.config.full
     if (this.config.frozen && inAttestedZone) {
-      assert.ok(Object.hasOwn(module.files, rel))
+      assert.ok(Object.hasOwn(module.files, rel), `Directory not attested by the frozen lockfile: ${file}`)
     }
     if (this.config.frozenBundle && inAttestedZone) {
       assert.ok(this.#bundleResources?.has(file), `Directory not attested by the frozen bundle: ${file}`)

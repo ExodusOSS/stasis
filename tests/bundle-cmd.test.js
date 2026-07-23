@@ -3041,6 +3041,29 @@ test('buildBundle (--metro) with packageJSON includes package.json for reached m
   t.assert.equal(bundle.formats.get('node_modules/dep/package.json'), 'json')
 }))
 
+test('buildBundle (--metro) with packageJSON never bakes in an unparseable manifest', withTmp(async (t, tmp) => {
+  // The resolved --package-json fold does not re-parse manifests (unlike the State path), yet can
+  // never bake in unparseable 'json': its fold targets come from findPackageMetadata over *reached*
+  // files, which skips malformed manifests, so a malformed manifest for a package the graph never
+  // reaches is simply never folded. (A malformed manifest for a *reached* package fails earlier,
+  // loudly, at resolution.)
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'rn-app', version: '1.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'index.js'), "import { hi } from 'dep'\nexport default hi\n")
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '2.0.0', main: 'main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'main.js'), "export const hi = 'hi'\n")
+  // A second dependency the graph never imports, whose manifest is valid UTF-8 but not valid JSON.
+  mkdirSync(join(tmp, 'node_modules', 'unused'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'unused', 'package.json'), '{ "name": "unused", ') // truncated
+
+  const bundle = await buildBundle({ cwd: tmp, entries: ['index.js'], metro: true, platforms: ['ios'], packageJSON: true })
+  const files = new Set(bundle.sources.keys())
+  t.assert.ok(files.has('node_modules/dep/package.json'), 'reached dep manifest folded')
+  t.assert.ok(!files.has('node_modules/unused/package.json'), 'unreached malformed manifest not folded')
+  // Every folded manifest is parseable JSON.
+  for (const [rel, content] of bundle.sources) if (rel.endsWith('package.json')) JSON.parse(content)
+}))
+
 test('buildBundle rejects packageJSON for non-JS entries', async (t) => {
   await t.assert.rejects(
     () => buildBundle({ cwd: fixtures, entries: ['contracts/A.sol'], packageJSON: true }),
