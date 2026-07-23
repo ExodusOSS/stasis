@@ -891,6 +891,20 @@ process.exit(1)
     writeFileSync(join(root, 'src', 'index.js'), 'export default {}\n')                 // unused JS -> skipped
     writeFileSync(join(root, 'android', 'build', 'generated.o'), 'BUILDOUTPUT')         // build output -> excluded
     writeFileSync(join(root, 'example', 'ios', 'Example.m'), '// example app source\n') // example app -> excluded
+    // JS test/mock scaffolding: never a native build input. Whole subtrees pruned from the walk, even
+    // though each holds a file (fixture podspec / ObjC) that WOULD otherwise be captured.
+    mkdirSync(join(root, '__tests__'), { recursive: true })
+    mkdirSync(join(root, '__mocks__'), { recursive: true })
+    mkdirSync(join(root, 'jest'), { recursive: true })
+    writeFileSync(join(root, '__tests__', 'Fixture.podspec'), 'Pod::Spec.new do |s|\n  s.name = "Fixture"\nend\n')
+    writeFileSync(join(root, '__tests__', 'RNThingTest.m'), '// test source\n')
+    writeFileSync(join(root, '__mocks__', 'NativeThing.mm'), '// mock native source\n')
+    writeFileSync(join(root, 'jest', 'setup.podspec'), 'Pod::Spec.new do |s|\n  s.name = "Setup"\nend\n')
+    // TypeScript source is the dep's JS-side implementation (Metro's graph carries it when reached),
+    // never a native build input -- the native capture must not emit it (incl. the type-only .d.ts).
+    writeFileSync(join(root, 'src', 'index.ts'), 'export default {}\n')
+    writeFileSync(join(root, 'src', 'widget.tsx'), 'export const W = (): unknown => null\n')
+    writeFileSync(join(root, 'src', 'types.d.ts'), 'export type T = string\n')
     // Prebuilt/installed binary artifacts -- generated output, never captured:
     writeFileSync(join(root, 'android', 'src', 'main', 'jniLibs', 'arm64-v8a', 'librnthing.so'), 'ELF\0\xff')
     writeFileSync(join(root, 'libs', 'android', 'arm64-v8a', 'libskia.a'), '!<arch>\0\xff')
@@ -967,6 +981,15 @@ process.exit(1)
     t.assert.equal(mod.files['src/index.js'], undefined, 'unused JS in a native dep is not attested')
     t.assert.equal(mod.files['example/ios/Example.m'], undefined, 'the example app subtree is excluded')
     t.assert.equal(mod.files['android/build/generated.o'], undefined, 'build output is excluded')
+    // JS test/mock scaffolding subtrees (__tests__/__mocks__/jest) are pruned wholesale -- the fixture
+    // podspec/ObjC inside them would otherwise be captured, which is what proves the dir-level skip:
+    for (const f of ['__tests__/Fixture.podspec', '__tests__/RNThingTest.m', '__mocks__/NativeThing.mm', 'jest/setup.podspec']) {
+      t.assert.equal(mod.files[f], undefined, `expected test-scaffolding ${f} to be excluded`)
+    }
+    // TypeScript source (.ts/.tsx/.d.ts) is never emitted by the native capture (Metro owns the JS graph):
+    for (const f of ['src/index.ts', 'src/widget.tsx', 'src/types.d.ts']) {
+      t.assert.equal(mod.files[f], undefined, `expected TS source ${f} to be excluded from native capture`)
+    }
     // Prebuilt/installed binary artifacts are never captured (react-native-skia's `libs/` case):
     // static libs, jniLibs .so, and everything inside an Apple *.xcframework bundle (incl. its
     // text Info.plist) -- generated output, not source.
