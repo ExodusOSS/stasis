@@ -698,11 +698,12 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
     const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
     t.assert.ok(lock.modules['node_modules/metro-runtime'].files['src/modules/asyncRequire.js'].startsWith('sha512-'))
     t.assert.ok(lock.modules['node_modules/@react-native-community/cli'].files['setup_env.sh'].startsWith('sha512-'))
-    // asyncRequire is code (commonjs -- metro-runtime declares no `type`); setup_env.sh is
-    // attested as a raw-UTF-8 resource WITHOUT 'sh' in the resources allowlist -- the
-    // auto-include list is stasis-vetted, so it bypasses classifyExtension.
+    // asyncRequire is code (commonjs -- metro-runtime declares no `type`); setup_env.sh is a
+    // `.sh` script, so the shared classifier tags it 'shell' code -- the same format the native
+    // walk / --fs would give it, so meeting the same bytes twice can't conflict at noupsert. No
+    // 'sh' in the resources allowlist is needed: the stasis-vetted auto-include bypasses it.
     t.assert.equal(lock.formats[ASYNC_REQUIRE], 'commonjs')
-    t.assert.equal(lock.formats[SETUP_ENV], 'resource')
+    t.assert.equal(lock.formats[SETUP_ENV], 'shell')
     // The app graph is still captured alongside.
     t.assert.ok(lock.sources['.'].files['src/entry.js'].startsWith('sha512-'))
 
@@ -713,7 +714,7 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
     t.assert.equal(decoded.modules['node_modules/@react-native-community/cli'].files['setup_env.sh'],
       readFileSync(join(tmp, SETUP_ENV), 'utf-8'))
     t.assert.equal(decoded.formats[ASYNC_REQUIRE], 'commonjs')
-    t.assert.equal(decoded.formats[SETUP_ENV], 'resource')
+    t.assert.equal(decoded.formats[SETUP_ENV], 'shell')
   }))
 
   test('auto-includes: entries are independent -- a missing one is skipped, the present one attested', withTmp(async (t, tmp) => {
