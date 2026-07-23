@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -21,11 +21,11 @@ function entrySet(graph) {
   return new Set()
 }
 
-// Files a React Native build requires that Metro's module graph never carries; attested when
-// they resolve from the project. `resource: true` bypasses the `resources` allowlist.
+// Files a React Native build requires that Metro's module graph never carries; attested (tagged by
+// the shared classifier, see #captureAutoIncludes) when they resolve from the project.
 const AUTO_INCLUDES = [
-  { specifier: 'metro-runtime/src/modules/asyncRequire.js', resource: false },
-  { specifier: '@react-native-community/cli/setup_env.sh', resource: true },
+  'metro-runtime/src/modules/asyncRequire.js',
+  '@react-native-community/cli/setup_env.sh',
 ]
 
 // Subtrees skipped (by basename, any depth) when walking a native dep's build-input surface:
@@ -215,10 +215,19 @@ export class StasisMetro {
     this.#captureNativeModules()
   }
 
+  // Shared epilogue for the classify-driven capture paths: UTF-8-guard code (clearer than addFile's
+  // generic error), then record. `format` null/undefined lets addFile pick (loader / byte-derived).
+  #recordCapture(full, source, { format, resource }) {
+    if (!resource) {
+      assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
+    }
+    this.#state.addFile(pathToFileURL(full).toString(), { source, format: format ?? undefined, resource, reason: 'metro' })
+  }
+
   // Attest the AUTO_INCLUDES list. Per entry, skip: unresolvable, already-seen, or resolving
   // outside the project root (keys are root-relative). Attested entries ride the normal addFile path.
   #captureAutoIncludes() {
-    for (const { specifier, resource } of AUTO_INCLUDES) {
+    for (const specifier of AUTO_INCLUDES) {
       let modPath
       try {
         modPath = require.resolve(specifier, { paths: [this.#projectDir] })
@@ -234,10 +243,11 @@ export class StasisMetro {
       this.#seen.add(modPath)
       // Real reader: plugin bookkeeping, not a program fs read -- must not be re-recorded by --fs.
       const source = realReadFileSync(modPath)
-      if (!resource) {
-        assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${modPath}`)
-      }
-      this.#state.addFile(pathToFileURL(modPath).toString(), { source, resource, reason: 'metro' })
+      // Tag from the ONE shared classifier so an auto-include agrees with any other path meeting
+      // the same file (native walk, --fs): setup_env.sh -> 'shell', not a forced 'resource' that
+      // would collide at the format noupsert. Unrecognized -> resource (vetted list, so no allowlist).
+      const format = classifyFormat(modPath, { content: source })
+      this.#recordCapture(modPath, source, { format, resource: format === undefined })
     }
   }
 
@@ -277,7 +287,8 @@ export class StasisMetro {
     }
   }
 
-  // Attest a single vetted file (RN_CORE_INCLUDE_FILES) as a resource; skipped when absent.
+  // Attest a single vetted file (RN_CORE_INCLUDE_FILES); skipped when absent. Tagged via the shared
+  // classifier like every other path (sdks/.hermesversion -> resource; a concrete format -> code).
   #captureNativeFile(full) {
     if (this.#seen.has(full)) return
     let source
@@ -287,7 +298,8 @@ export class StasisMetro {
       return
     }
     this.#seen.add(full)
-    this.#state.addFile(pathToFileURL(full).toString(), { source, resource: true, reason: 'metro' })
+    const format = classifyFormat(full, { content: source })
+    this.#recordCapture(full, source, { format, resource: format === undefined })
   }
 
   // node_modules roots the graph reached that also ship native code (podspec or ios/android dir):
@@ -381,11 +393,7 @@ export class StasisMetro {
       if (action === 'skip') continue
       this.#seen.add(full)
       const source = realReadFileSync(full)
-      const asResource = action === 'resource'
-      if (!asResource) {
-        assert.ok(isUtf8(source), `StasisMetro: code-classified file has non-UTF-8 bytes: ${full}`)
-      }
-      this.#state.addFile(pathToFileURL(full).toString(), { source, format, resource: asResource, reason: 'metro' })
+      this.#recordCapture(full, source, { format, resource: action === 'resource' })
     }
   }
 
