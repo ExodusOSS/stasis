@@ -200,12 +200,18 @@ function isShellShebang(content) {
   return SHELL_SHEBANG.test(nl === -1 ? head : head.slice(0, nl))
 }
 
-// Files a native package ships that are NOT build inputs (docs, config, logs), excluded from the
-// Metro native capture. `.bat` (Windows batch) is excluded off Windows.
+// Files a native package ships that are NOT build inputs -- docs/legal, editor/lint/CI/tooling
+// config, logs/maps, JS-tooling lockfiles, IDE project metadata -- excluded from the Metro native
+// capture (a module is built by the APP's Gradle/CocoaPods, so its own wrapper/IDE files are
+// standalone-dev only). `.bat` (Windows batch) is excluded off Windows; `win32` defaults to the host.
 const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map'])
 const NATIVE_EXCLUDE_NAMES = new Set([
-  'license', '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc',
-  '.clang-format', '.buckconfig', '.watchmanconfig',
+  'license', 'licence', 'third-party-licenses', // license / legal text (US + UK spelling)
+  '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc', '.clang-format',
+  '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml', // editor / lint / CI config
+  'yarn.lock', // JS dep lockfile (a native build never reads it)
+  '.project', // Eclipse IDE project metadata (Gradle doesn't read it)
+  'gradle-wrapper.properties', // a module's own Gradle wrapper -- the APP's wrapper drives the build
 ])
 export function isExcludedNativeFile(name, { win32 = process.platform === 'win32' } = {}) {
   const base = basename(name).toLowerCase()
@@ -228,6 +234,9 @@ export function classifyFormat(name, { content } = {}) {
   // package.json / JSON podspecs are 'json' by name, checked before the extension rules so a
   // `*.podspec.json` isn't shadowed.
   if (base === 'package.json' || base.endsWith('.podspec.json')) return 'json'
+  // A `*.cmake.in` is a CMake configure_file template (build input); keyed by its compound suffix
+  // because pathExt only sees the trailing `.in`.
+  if (base.endsWith('.cmake.in')) return 'cmake'
   const byName = CODE_NAME_FORMATS.get(base)
   if (byName !== undefined) return byName
   const ext = pathExt(name)

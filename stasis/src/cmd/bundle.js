@@ -581,8 +581,8 @@ const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
 const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 
 // Build-output subtrees skipped when collecting native ios/android sources (regenerated, never
-// source); binary artifacts are excluded separately via isNativeArtifact.
-const NATIVE_SKIP_DIRS = new Set(['build', '.gradle', '.cxx', 'Pods', 'DerivedData', 'node_modules', '.git'])
+// source); Eclipse `.settings` + binary artifacts (via isNativeArtifact) are excluded too.
+const NATIVE_SKIP_DIRS = new Set(['build', '.gradle', '.cxx', 'Pods', 'DerivedData', 'node_modules', '.git', '.settings'])
 
 // Recursively collect files under a native ios/android dir, skipping build output and symlinks
 // (cycle/escape hazard). Absolute paths into `out`.
