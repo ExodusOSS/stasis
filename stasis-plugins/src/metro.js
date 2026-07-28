@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAppleSliceDir, isExcludedNativeDir, isNativeArtifact, isPodspec, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -363,18 +363,15 @@ export class StasisMetro {
       // Prebuilt binary artifacts are build output, non-deterministic -- never captured.
       if (isNativeArtifact(ent.name)) continue
       if (this.#seen.has(full)) continue // already captured as a graph module or auto-include
-      const { action, format } = classifyNativeCapture(ent.name)
+      const byName = classifyNativeCapture(ent.name)
       // Node-runnable JS/TS is captured via Metro's graph, not here (action==='skip').
-      if (action === 'skip') continue
+      if (byName.action === 'skip') continue
       const source = realReadFileSync(full)
-      // A prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -- skip it.
-      if (isExtensionlessBinary(ent.name, source)) continue
-      // A BINARY plist can't ride the text/code path a `.plist` classifies onto: carry it as an
-      // opaque base64 resource, and only when `.plist` is opted into via the resources allowlist.
-      const binaryPlist = isBinaryPlist(ent.name, source)
-      if (binaryPlist && !this.#resources.has('plist')) continue
+      // Byte-level rules (prebuilt binaries, binary plists) -- see refineNativeCapture.
+      const { action, format } = refineNativeCapture(byName, ent.name, source, this.#resources)
+      if (action === 'skip') continue
       this.#seen.add(full)
-      this.#recordCapture(full, source, { format: binaryPlist ? undefined : format, resource: binaryPlist || action === 'resource' })
+      this.#recordCapture(full, source, { format, resource: action === 'resource' })
     }
   }
 

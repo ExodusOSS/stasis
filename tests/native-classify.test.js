@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 
-import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, stripTypeDeclaration } from '@exodus/stasis-core/util'
+import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, refineNativeCapture, stripTypeDeclaration } from '@exodus/stasis-core/util'
 
 const NOT_WIN = { win32: false }
 const WIN = { win32: true }
@@ -111,6 +111,27 @@ test('isBinaryPlist: a bplist is detected by bytes, so callers can route it off 
   t.assert.equal(isBinaryPlist('logo.png', binary), false)
   // Needs the bytes: a name alone can't tell a binary plist from a text one.
   t.assert.equal(isBinaryPlist('Info.plist', undefined), false)
+})
+
+test('refineNativeCapture: the byte-level half both native walks share', (t) => {
+  const bplist = Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])])
+  const elf = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0xff, 0xfe])
+  const text = Buffer.from('#import <Foundation/Foundation.h>\n')
+  const code = { action: 'code', format: 'xml' }
+
+  // A prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source.
+  t.assert.deepEqual(refineNativeCapture({ action: 'resource' }, 'hermesc', elf), { action: 'skip' })
+  // A binary plist: an opaque resource when `.plist` is declared, else skipped. A 'resource' result
+  // carries NO format -- the storage layer derives resource vs resource:base64 from the bytes.
+  t.assert.deepEqual(refineNativeCapture(code, 'Info.plist', bplist, new Set(['plist'])), { action: 'resource' })
+  t.assert.deepEqual(refineNativeCapture(code, 'Info.plist', bplist, new Set()), { action: 'skip' })
+  t.assert.deepEqual(refineNativeCapture(code, 'Info.plist', bplist), { action: 'skip' }, 'no allowlist -> skip')
+  // A TEXT plist is untouched: still code, still tagged xml.
+  t.assert.deepEqual(refineNativeCapture(code, 'Info.plist', Buffer.from('<plist/>\n'), new Set(['plist'])), code)
+  // Neither rule fires -> the name-derived classification passes through verbatim.
+  t.assert.deepEqual(refineNativeCapture({ action: 'code', format: 'c-header' }, 'RNThing.h', text),
+    { action: 'code', format: 'c-header' })
+  t.assert.deepEqual(refineNativeCapture({ action: 'resource' }, 'logo.png', elf), { action: 'resource' })
 })
 
 test('classifyNativeCapture: TypeScript source (.ts/.tsx/.d.ts) is skipped -- Metro owns the JS graph', (t) => {

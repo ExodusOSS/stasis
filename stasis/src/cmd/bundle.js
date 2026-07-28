@@ -13,7 +13,7 @@ import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isAppleSliceDir, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -777,21 +777,13 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
         if (sources.has(rel)) continue
         assertRealPathWithinBase(realBase, baseDir, rel)
         // classifyNativeCapture (shared with the StasisMetro plugin) returns action skip/code/resource with a format tag.
-        const { action, format } = classifyNativeCapture(rel)
-        if (action === 'skip') continue
+        const byName = classifyNativeCapture(rel)
+        if (byName.action === 'skip') continue
         const buf = readFileSync(abs)
+        // Byte-level rules (prebuilt binaries, binary plists) -- see refineNativeCapture.
+        const { action, format } = refineNativeCapture(byName, rel, buf, resourceSet)
+        if (action === 'skip') continue
         const utf8 = isUtf8(buf)
-        // A prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -- skip it.
-        if (isExtensionlessBinary(rel, buf)) continue
-        // A BINARY plist can't ride the text/code path a `.plist` classifies onto: carry it as an
-        // opaque base64 resource, and only when `.plist` is opted into via --resources.
-        if (isBinaryPlist(rel, buf)) {
-          if (!resourceSet.has('plist')) continue
-          sources.set(rel, buf.toString('base64'))
-          formatsByRel.set(rel, 'resource:base64')
-          integrities.set(rel, sha512integrity(buf))
-          continue
-        }
         if (action === 'code') {
           if (!utf8) throw new Error(`native source is not valid UTF-8: ${rel}`)
           sources.set(rel, buf.toString('utf8'))
