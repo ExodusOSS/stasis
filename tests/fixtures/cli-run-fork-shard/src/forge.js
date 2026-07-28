@@ -19,10 +19,10 @@ if (dir && keyB64) {
   const rootPriv = createPrivateKey({ key: Buffer.from(keyB64, 'base64'), format: 'der', type: 'pkcs8' })
   const pubId = createPublicKey(rootPriv).export({ format: 'jwk' }).x
   // A shard is not a lockfile -- see stasis-core/src/shard.js for the format (keys + formats +
-  // imports; no hashes, since the root re-reads every byte from its own disk). `shard: 1` must track
+  // imports; no hashes, since the root re-reads every byte from its own disk). `version: 1` must track
   // SHARD_VERSION there: the signature gate rejects these payloads before parse, so a stale version
   // would still "pass" the tests, but for the wrong reason.
-  const shardText = (files) => JSON.stringify({ shard: 1, scope: 'full', files, formats: {}, imports: {} })
+  const shardText = (files) => JSON.stringify({ version: 1, scope: 'full', files, formats: {}, imports: {} })
   const shard = shardText(['src/decoy.js'])
   let envelope
   if (mode === 'unsigned') {

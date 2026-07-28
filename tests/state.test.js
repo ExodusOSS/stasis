@@ -8,7 +8,7 @@ import { brotliCompressSync } from 'node:zlib'
 import { State } from '@exodus/stasis-core/state'
 import { Bundle } from '@exodus/stasis-core/bundle'
 // shard.js is internal to stasis-core (no package export), like fs.js in metro-fs.test.js.
-import { serializeShard } from '../stasis-core/src/shard.js'
+import { SHARD_VERSION, serializeShard } from '../stasis-core/src/shard.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'state')
 const fileAbs = join(root, 'src', 'foo.js')
@@ -636,6 +636,36 @@ test('mergeShard carries a child format even when the root already recorded the 
   }
 })
 
+test('mergeShard refuses a shard it cannot trust to mean what it says', (t) => {
+  // The channel is signed, so these are skew/corruption cases, not attacks -- but a shard that parses
+  // LOOSELY is worse than one that fails: mergeShard forwards `format` verbatim (addFile does not
+  // check the vocabulary), so an out-of-universe format would be written into the root's lockfile and
+  // only refused by Lockfile.parse on the NEXT run, once the good copy is gone. Refuse it here, as
+  // Lockfile.parse and Bundle.parse do for the same field. A version mismatch is the skew case: two
+  // stasis-core copies in one build (hooks.js only propagates the shard dir + key, not a version).
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-shard-refuse-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    writeFileSync(join(dir, 'a.js'), 'export const a = 1\n')
+    const rootState = new State(dir, { scope: 'full', lock: 'add' })
+    const shard = (over) => JSON.stringify({
+      version: SHARD_VERSION, scope: 'full', files: ['a.js'], formats: { 'a.js': 'module' }, imports: {}, ...over,
+    })
+
+    t.assert.doesNotThrow(() => rootState.mergeShard(shard()), 'the well-formed shard is the control')
+    t.assert.throws(() => rootState.mergeShard(shard({ version: SHARD_VERSION + 1 })), /shard version/,
+      'a version-skewed copy is refused, not misread')
+    t.assert.throws(() => rootState.mergeShard(shard({ formats: { 'a.js': 'not-a-format' } })), /shard format/,
+      'a format outside KNOWN_FORMATS is refused before it can reach the lockfile')
+    t.assert.throws(() => rootState.mergeShard(shard({ files: ['../outside.js'] })), /shard file/,
+      'an escaping key is refused at parse, not just range-checked downstream')
+    t.assert.throws(() => rootState.mergeShard(shard({ scope: 'nonsense' })), /shard scope/,
+      'scope is a closed set, as in every other parser')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('mergeShard skips a shard key whose on-disk path escapes the root via a symlink', (t) => {
   // A shard carries in-root KEYS, but the root re-reads listings/bytes from ITS OWN disk. An in-root
   // directory key that is a symlink pointing OUTSIDE the root reads an external listing, which
@@ -655,8 +685,8 @@ test('mergeShard skips a shard key whose on-disk path escapes the root via a sym
     const shard = serializeShard({
       scope: 'full',
       files: ['ok', 'leak'],
-      formats: { ok: 'directory', leak: 'directory' },
-      imports: {},
+      formats: new Map([['ok', 'directory'], ['leak', 'directory']]),
+      imports: new Map(),
     })
 
     const rootState = new State(dir, { scope: 'full', lock: 'add' })

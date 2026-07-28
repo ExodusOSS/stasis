@@ -190,7 +190,7 @@ function writeChildShard() {
     // Sign the exact snapshot bytes, stored verbatim in a { shard, signature } envelope (signing the
     // string, not a re-stringify, makes verify independent of JSON key order). Write to a temp then
     // rename so the merge filter never reads a half-written shard.
-    const shard = state.shardSnapshot() // serialized lockfile string
+    const shard = state.shardSnapshot() // serialized shard (see shard.js)
     // Unchanged snapshot: nothing new to forward, skip the duplicate.
     if (shard === lastShardWritten) return
     const privateKey = createPrivateKey({ key: Buffer.from(keyB64, 'base64'), format: 'der', type: 'pkcs8' })
