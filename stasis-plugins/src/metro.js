@@ -172,14 +172,13 @@ export class StasisMetro {
     this.#resources = state?.config.resources ?? new Set()
   }
 
-  // True when this build's guarantees depend on Metro actually TRANSFORMING files: any active
-  // lockfile/bundle mode either records what the workers load (capture) or checks it (frozen).
-  // False when inert, when attesting nothing ('none'/'ignore' -- what useLockfile/bundle exclude),
-  // or under bundle=load, where the transform derives from the bundle's own bytes so a cache hit
-  // costs nothing. Read by withStasis to decide whether Metro's transform cache must be dropped.
+  // True when this build's guarantees depend on Metro actually TRANSFORMING files: a capture records
+  // what the workers load, frozen checks it, and load REPLAYS it -- all three break if a cached
+  // transform skips the work. False only when inert or attesting nothing ('none'/'ignore', what
+  // useLockfile/bundle exclude). Read by withStasis to decide whether to drop the transform cache.
   get needsTransforms() {
     const config = this.#state?.config
-    if (!config || config.loadBundle) return false
+    if (!config) return false
     return config.useLockfile || config.bundle
   }
 
@@ -226,7 +225,7 @@ export class StasisMetro {
         "[stasis] StasisMetro: wired without withStasis(), so Metro's transform cache is outside " +
         `stasis's control -- a cached transform skips the worker and the toolchain it loads ` +
         `(${WORKER_TOOLCHAIN}) goes unattested. Wrap your config in withStasis(), or set ` +
-        '`cacheStores: []` yourself for capture/frozen builds.'
+        '`cacheStores: []` yourself for every stasis build.'
       )
     }
     this.#capture(graph, preModules)
@@ -452,20 +451,29 @@ export class StasisMetro {
 
 // Idiomatic Metro-config wrapper: returns a new config with `serializer.customSerializer` wired
 // so stasis captures the graph + preModules while your existing serializer (or Metro's default)
-// still produces the bundle, and (for a capture/verify) with Metro's transform cache dropped so the
-// workers really run. Pure -- returns a new object, doesn't mutate `config`.
+// still produces the bundle, and with Metro's transform cache dropped so the workers really run.
+// Pure -- returns a new object, doesn't mutate `config`.
 export function withStasis(config = {}, options = {}) {
   const stasis = new StasisMetro(options, { ownsConfig: true })
   const existing = config.serializer?.customSerializer ?? undefined
-  // Metro's transform cache is a CORRECTNESS hazard here, not a speed knob. On a cache hit Metro
-  // returns the stored result WITHOUT calling a worker, so the worker-side toolchain is never loaded
-  // in any process and never reaches the root -- exactly what the constructor's --child-process
-  // assert exists to guarantee. The default store is a FileStore in the OS tmpdir shared with every
-  // other Metro run, so ONE earlier `metro build`/dev server silently decides what gets attested: a
-  // capture over a warm cache drops the toolchain (exit 0, no warning) and a later frozen run
-  // rejects the lockfile it wrote, while a frozen run over a warm cache passes vacuously (it
-  // verifies transforms nobody performed). Drop the stores so every file is transformed for real --
-  // slower, but the attested set stops depending on what ran before. Capture is one-shot anyway.
+  // Metro's transform cache is a CORRECTNESS hazard here, not a speed knob: it decides which modules
+  // Metro itself LOADS. On a cache hit Metro returns the stored result without calling a worker, so
+  // the worker-side toolchain is never loaded in any process and never reaches the root -- exactly
+  // what the constructor's --child-process assert exists to guarantee. The default store is a
+  // FileStore in the OS tmpdir shared with every other Metro run, so ONE earlier `metro build`/dev
+  // server silently decides what gets attested: a capture over a warm cache drops the toolchain
+  // (exit 0, no warning) and a later frozen run rejects the lockfile it wrote, while a frozen run
+  // over a warm cache passes vacuously (it verifies transforms nobody performed).
+  //
+  // Dropped in EVERY active mode, load included, so the module set can't diverge between record and
+  // replay. `new Transformer` calls getTransformCacheKey() only when the cache is enabled
+  // (metro/src/DeltaBundler/Transformer.js: `this._cache.isDisabled ? '' : ...`), and that call tree
+  // resolves the transformer plus its plugins' cache-key files. Disabled during capture, those edges
+  // are never recorded; left enabled under load they resolve for real and getImport fails closed on
+  // a bundle that cannot know them ("Cannot find module 'metro-transform-worker' imported from
+  // .../getTransformCacheKey.js" -- Metro reports it as "Failed to construct transformer").
+  //
+  // Slower, but the loaded set stops depending on what ran before. These builds are one-shot anyway.
   const dropCache = stasis.needsTransforms
   // `undefined` is Metro's own default store, which the user never chose; an array or a
   // `(MetroCache) => stores` factory is theirs, so replacing it is worth saying out loud.
