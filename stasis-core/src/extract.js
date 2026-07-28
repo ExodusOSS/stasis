@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity } from './state-util.js'
-import { moduleFileKey } from './util.js'
+import { EXECUTE_BITS, canObserveExecuteBits, moduleFileKey } from './util.js'
 
 const FILE_LOCK = 'stasis.lock.json'
 
@@ -43,6 +43,9 @@ export function lockfileFromBundle(bundle) {
     modules,
     imports: bundle.imports,
     formats: bundle.formats,
+    // Same file set as the bundle (hashed, not swapped out), so its executable list transfers as-is
+    // -- the extracted tree and the lockfile beside it agree on which files carry the bit.
+    executable: bundle.executable,
   })
 }
 
@@ -72,11 +75,16 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
   // last-wins `sources` getter. Containment is lexical -- symlinks in outDir are followed, so untrusted bundles need a fresh dir (see doc/extract.md).
   const writes = []
   const targets = new Set()
+  let executables = 0
   for (const [dir, { files }] of bundle.modules) {
     for (const [rel, content] of Object.entries(files)) {
+      // Key for the bundle's per-file maps. moduleFileKey handles a bucket-root capture (rel === ''),
+      // which is also how every writer keys `executable`; `file` below is the WRITE path, which keeps
+      // the plain join so a rel === '' entry that isn't a `directory` fails the canonical-path check
+      // rather than materializing a file at the bucket root.
+      const key = moduleFileKey(dir, rel)
       // Skip a `directory` capture: it's a listing at the dir's own path, not a file to write (its children recreate the dir).
-      // Look up format under moduleFileKey (a root listing's rel==='' maps to the dir, not `${dir}/`).
-      if (bundle.formats.get(moduleFileKey(dir, rel)) === 'directory') continue
+      if (bundle.formats.get(key) === 'directory') continue
       const file = dir === '.' ? rel : `${dir}/${rel}`
       if (typeof content !== 'string') throw new Error(`extract: bundle file content is not a string: ${file}`)
       const abs = resolve(outDir, file)
@@ -94,10 +102,13 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
         throw new Error(`extract: bundle contains ${FILE_LOCK}, which would collide with the derived lockfile`)
       }
       targets.add(abs)
-      const data = bundle.formats.get(file) === 'resource:base64'
+      // Executability rides the plan tuple, so the chmod can only ever reach a file we actually wrote.
+      const exec = bundle.executable.has(key)
+      if (exec) executables += 1
+      const data = bundle.formats.get(key) === 'resource:base64'
         ? assertCanonicalBase64(content, file)
         : content
-      writes.push([abs, data])
+      writes.push([abs, data, exec])
     }
   }
   // A planned file must not also be a parent directory of another, else the writes throw halfway through.
@@ -110,16 +121,64 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
   }
   const lockText = withLockfile ? lockfileFromBundle(bundle).serialize() : null
 
-  for (const [abs, content] of writes) {
+  // The bundle attests exactly ONE permission fact per file -- whether it is executable -- so that
+  // is the only bit extract touches. Read/write bits are left exactly as the write produced them
+  // (umask-derived for a new file, the target's own for an overwrite): normalizing the whole mode
+  // would widen a deliberately restricted pre-existing target, turning a 0600 secret into 0644, and
+  // extract has no standing to decide that. Applied to every written file rather than only the
+  // executable ones, so re-extracting over an older tree also DROPS a bit the bundle stopped
+  // attesting. setuid/setgid/sticky are cleared from anything we rewrite: the bytes are the bundle's
+  // now, and a privileged bit a stale target carried must not survive to arm them.
+  //
+  // Skipped wholesale for a v0 bundle, which attests nothing about modes -- there is no list to
+  // honour, so clearing execute bits off the tree would destroy information rather than restore it --
+  // and on Windows, which reports no POSIX execute bits at all (see canObserveExecuteBits).
+  // `withLockfile` is the same v1 test: a v0 bundle attests neither identities nor modes.
+  const withModes = withLockfile && canObserveExecuteBits()
+  let chmodFailures = 0
+  const applyMode = (abs, exec) => {
+    let stats
+    try {
+      stats = lstatSync(abs)
+    } catch {
+      chmodFailures += 1
+      return
+    }
+    // Never chmod through a symlink. The WRITE deliberately follows one (a pnpm-managed
+    // node_modules; see doc/extract.md), but granting +x to a link's target would let an untrusted
+    // bundle make an arbitrary file outside the output tree runnable -- an overwrite alone can't.
+    if (stats.isSymbolicLink()) return
+    const perms = stats.mode & 0o7777
+    const rwx = perms & 0o777
+    // Execute wherever the file is readable, with owner-execute as a floor so an aggressive umask
+    // can't quietly produce a file the bundle calls runnable and isn't.
+    const want = exec ? rwx | ((rwx & 0o444) >> 2) | 0o100 : rwx & ~EXECUTE_BITS
+    if (want === perms) return
+    // Tolerated per file: a filesystem with no POSIX modes (vfat/exFAT/CIFS, a drvfs mount) accepts
+    // the write and rejects the chmod, and losing the whole extraction -- including the lockfile
+    // below -- over metadata it cannot store would be worse than the bytes landing with host modes.
+    try {
+      chmodSync(abs, want)
+    } catch {
+      chmodFailures += 1
+    }
+  }
+
+  for (const [abs, content, exec] of writes) {
     mkdirSync(dirname(abs), { recursive: true })
     writeFileSync(abs, content)
+    if (withModes) applyMode(abs, exec)
   }
   mkdirSync(outDir, { recursive: true }) // for an empty bundle, where no write created it
   if (withLockfile) writeFileSync(lockAbs, lockText)
 
-  console.warn(`[${logLabel}] Extracted ${writes.length} file(s)${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
+  const execNote = executables > 0 ? ` (${executables} executable)` : ''
+  console.warn(`[${logLabel}] Extracted ${writes.length} file(s)${execNote}${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
+  if (chmodFailures > 0) {
+    console.warn(`[${logLabel}] Warning: could not set file modes on ${chmodFailures} file(s) (the filesystem may not support them); contents were written`)
+  }
   if (!withLockfile) {
     console.warn(`[${logLabel}] Warning: legacy v0 bundle records no package name/version, so ${FILE_LOCK} can not be restored and was not written`)
   }
-  return { dir: outDir, files: writes.length }
+  return { dir: outDir, files: writes.length, executable: executables }
 }

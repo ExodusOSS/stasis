@@ -83,7 +83,7 @@ attested.
     ".": {
       "name": "@exodus/stasis",
       "version": "1.0.0-alpha.0",
-      "files": { "src/index.js": "sha512-…" }
+      "files": { "src/index.js": "sha512-…", "scripts/build.sh": "sha512-…" }
     }
   },
   "modules": {
@@ -99,8 +99,10 @@ attested.
   },
   "formats": {
     "src/index.js": "module",
+    "scripts/build.sh": "shell",
     "node_modules/@exodus/bytes/index.js": "commonjs"
-  }
+  },
+  "executable": ["scripts/build.sh"]
 }
 ```
 
@@ -154,6 +156,8 @@ attested.
   value. Checked like `imports`: a mismatch is fatal, and on disk only the attested
   zone is enforced (`node_modules` files in `node_modules` scope, everything in
   `full`).
+- `executable` lists the recorded files carrying a POSIX execute bit (see
+  "Executable files"); the key is omitted when none do.
 - File and module maps are sorted by the project's `sortPaths` rule (files in a
   dir before sub-dirs; `*` first, `node_modules` last).
 
@@ -179,7 +183,7 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
     ".": {
       "name": "@exodus/stasis",
       "version": "1.0.0-alpha.0",
-      "files": { "src/index.js": "export const x = 1\n" }
+      "files": { "src/index.js": "export const x = 1\n", "scripts/build.sh": "#!/bin/sh\n…" }
     }
   },
   "modules": {
@@ -190,11 +194,12 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
       "files": { "index.js": "..." }
     }
   },
-  "formats": { "src/index.js": "module" },
+  "formats": { "src/index.js": "module", "scripts/build.sh": "shell" },
   "imports": {
     "*": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } },
     "node, import": { "node_modules/foo/index.js": { "./impl.js": "node_modules/foo/impl.js" } }
-  }
+  },
+  "executable": ["scripts/build.sh"]
 }
 ```
 
@@ -223,6 +228,8 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   or inconsistently-attested edges are fatal.
 - In `bundle = load` with `scope = full`, entry-point resolutions are checked
   against `entries`.
+- `executable` mirrors the lockfile's (see "Executable files"), restricted to the
+  files that bundle carries — in a split layout each half lists only its own.
 
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-relative
 path, with no `entries`/`modules`/`formats`/`imports` — is still accepted by
@@ -317,6 +324,63 @@ tagged in `formats` by payload encoding:
 In the lockfile a resource is hashed like any other file (sha512 of its raw bytes)
 and carries the same `formats` tag, so a frozen run verifies a copied asset
 byte-for-byte just as it does code.
+
+## Executable files
+
+Both the lockfile and the bundle carry an `executable` array: the project-relative
+paths of the **recorded files** whose on-disk mode had any POSIX execute bit
+(`0o111`) when they were captured. Sorted by the same `sortPaths` rule as
+`entries`, and **omitted entirely when empty**, so an artifact with nothing
+executable is byte-identical to one written before the field existed.
+
+```json
+{ "executable": ["scripts/build.sh", "node_modules/dep/bin/cli.js"] }
+```
+
+Two rules govern the list, enforced on **both** sides — at `serialize`, so a producer
+that gets it wrong fails immediately with the offending path, and at `parse`, so a
+hand-edited or tampered artifact fails closed:
+
+1. **`executable` is a subset of the artifact's files.** Every entry names a file that
+   artifact records. An entry for anything else is malformed — there would be nothing
+   for `extract` to chmod.
+2. **A non-full scope lists only `node_modules` files.** A `scope = node_modules`
+   artifact records only its dependency tree (`sources` is not written), so a workspace
+   path can't be among its files and is rejected outright.
+
+- Files only. A `directory` capture is a listing and a `stat:*` record carries no
+  content — an entry naming either is rejected, as is a duplicate.
+- Ignored on a legacy `version: 0` bundle: v0 has no per-file `formats`, so those
+  guards can't run, and `extract` is an untrusted-input path. Fail-safe — no bit granted.
+- The bit is read from disk at capture, from a **regular file**, following symlinks
+  (a link records its target's mode). A path that can't be stat'd at all is *unknowable*,
+  not "not executable" — a transient failure never refutes a recorded bit.
+- Disk is authoritative on re-capture: re-reading a file under `lock = add` /
+  `bundle = add` refreshes its bit, dropping a stale entry for a file that has since
+  lost the bit — a mode change is not a content change, so it needs no
+  `--lock=replace`. This covers files the run actually re-reads; one absorbed from an
+  existing artifact and never touched is carried forward unverified, like every other
+  `add`-mode fact.
+- **Windows records none and clears none.** Windows exposes no POSIX execute bits
+  (every file stats as `0o666`), so a capture there can neither observe a bit nor
+  refute one: it adds nothing, and — importantly — does *not* read "no bit" as "the bit
+  was removed", so a Windows run can't strip the list a POSIX capture committed.
+- Merging two artifacts (`stasis add`, `stasis bundle --add`) unions the lists, except
+  that the **incoming** artifact wins for the files it records: re-adding a file that
+  lost its bit clears the stale entry instead of resurrecting it.
+- `stasis diff` reports execute-bit changes, so a permission flip on byte-identical
+  files is visible to a review gate rather than reading as "no differences".
+- `stasis extract` restores the bit — this is what the field is *for*; see
+  [extract.md](extract.md). It is metadata carried alongside the bytes, **not** part
+  of what `lock = frozen` / `bundle = frozen` verify: an artifact predating the field
+  lacks it and still loads, and a mode-only drift is not a hash mismatch.
+
+> [!NOTE]
+> The bit reflects the tree on disk, not the recorded bytes, so it depends on how that
+> tree got there. npm/pnpm preserve the modes in a package tarball, but git tracks only
+> `100644`/`100755`, and `core.fileMode=false`, zip/`git archive` round-trips, and
+> `COPY`/`tar` without mode preservation all flatten it — two checkouts of one commit
+> can legitimately produce different `executable` arrays.
 
 ## Filesystem captures (`stasis run --fs=sync` / `--fs=async`)
 

@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { moduleFileKey } from '@exodus/stasis-core/util'
+import { moduleFileKey, narrowExecutable } from '@exodus/stasis-core/util'
 
 // Reconstruct an in-memory Bundle from a lockfile, reading every attested file from disk and
 // verifying each against the lockfile's SRI digest -- fail closed on mismatch, so this is as
@@ -52,5 +52,8 @@ export function bundleFromLockfile(lockfile, { root }) {
     modules,
     imports: lockfile.imports,
     formats,
+    // Narrowed to the files this bundle ended up carrying (a skipped `directory` capture drops out),
+    // keeping Bundle.parse's rules true for a hand-built lockfile too.
+    executable: narrowExecutable(lockfile.executable, { modules, formats, scope: lockfile.config.scope }),
   })
 }

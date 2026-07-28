@@ -8,9 +8,12 @@ import {
   isPlainObject,
   mergeFormatMaps,
   mergeImportMaps,
+  mergeExecutableSets,
   mergeModuleMaps,
   moduleFileKey,
   objectToMaps,
+  parseExecutable,
+  serializeExecutable,
   posixPathEscapes,
   sortPaths,
   splitNodeModulesPath,
@@ -52,10 +55,13 @@ export class Bundle {
   modules
   formats
   imports
+  // Project-relative paths of the bundled files that carry a POSIX execute bit, so `stasis extract`
+  // can restore it. Files only -- a `directory` capture is a listing, never executable.
+  executable
   // Informational only, NOT attested -- never consulted for verification. Present only with >1 consumer.
   reason
 
-  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, reason, version = VERSION } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
     assert(['node_modules', 'full'].includes(config.scope))
     this.version = version
@@ -64,6 +70,7 @@ export class Bundle {
     this.modules = modules ?? new Map()
     this.formats = formats ?? new Map()
     this.imports = imports ?? new Map()
+    this.executable = executable ?? new Set()
     this.reason = reason
   }
 
@@ -202,6 +209,13 @@ export class Bundle {
       modules,
       formats,
       imports,
+      // Checked against flatKeys (built above): every executable must be a file this bundle carries.
+      // v1 only -- a v0 bundle has no per-file `formats`, so the directory/stat guards below would be
+      // vacuous, and honoring the list would let a legacy-shaped untrusted bundle pick a path for
+      // `extract` to chmod +x. A v0 `executable` is ignored (fail-safe: no bit granted).
+      executable: json.version === VERSION
+        ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
+        : new Set(),
       reason: isPlainObject(json.reason) ? json.reason : undefined,
     })
   }
@@ -230,6 +244,10 @@ export class Bundle {
     const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
+    const executable = serializeExecutable(this.executable, {
+      what: 'bundle', modules: this.modules, formats: this.formats, scope: this.config.scope,
+    })
+    if (executable !== undefined) data.executable = executable
     if (this.reason !== undefined) data.reason = this.reason
     return JSON.stringify(data, undefined, 2)
   }
@@ -244,6 +262,7 @@ export class Bundle {
       modules: this.modules,
       formats: this.formats,
       imports: this.imports,
+      executable: this.executable,
       reason: mergeReason(this.reason, { [consumer]: files }),
     })
   }
@@ -258,6 +277,8 @@ export class Bundle {
       modules: mergeModuleMaps(this.modules, other.modules, 'bundle merge'),
       formats: mergeFormatMaps(this.formats, other.formats, 'bundle merge'),
       imports: mergeImportMaps(this.imports, other.imports, 'bundle merge'),
+      // `other` (the incoming, newer build) wins for the files it carries -- see mergeExecutableSets.
+      executable: mergeExecutableSets(this.executable, other.executable, other.modules, this.config.scope),
       reason: mergeReason(this.reason, other.reason),
     })
   }

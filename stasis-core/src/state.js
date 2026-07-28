@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -31,6 +31,10 @@ function readPackageJSON(pkgAbsolute) {
 
 // This copy's own version, via src/package.cjs (bundler-safe re-export of package.json).
 const VERSION = corePackage.version
+
+// Whether this platform reports execute bits at all -- a process-lifetime constant, read once
+// instead of per non-executable file on the capture path. The injectable form stays in util.js.
+const CAN_OBSERVE_EXECUTE_BITS = canObserveExecuteBits()
 
 // Set `format` for `file` via the shared reconcileFormat rule (util.js): a weak 'stat:*'
 // yields to a real format; two real formats or a stat kind flip are fatal.
@@ -56,6 +60,10 @@ export class State {
   formats = new Map()
   modules = new Map()
   imports = new Map()
+  // Project-relative files observed carrying a POSIX execute bit, seeded from the loaded
+  // lockfile/bundle and kept current by addFile (disk is authoritative -- a file that lost the bit
+  // drops out). Emitted as the artifacts' `executable` list; see #mergedExecutable.
+  executable = new Set()
   config
   root
   #parent
@@ -198,6 +206,7 @@ export class State {
           }
           this.formats = bundle.formats
           this.imports = bundle.imports
+          this.#absorbExecutable(bundle)
           // Carry `reason` forward like #absorbCodeBundle (this inlined sidecar absorb is its twin), else
           // a plugin writing its own bundleFile drops every other consumer's attribution on a bundle=add re-run.
           this.#seedReasonFromBundle(bundle)
@@ -396,6 +405,10 @@ export class State {
     }
     this.#lockImports = lockfile.imports
     this.#lockFormats = lockfile.formats
+    // Seeded straight into the live set (unlike imports/formats, which keep a separate lockfile
+    // baseline for frozen verification): re-reading a file this run must be able to CLEAR a stale
+    // exec bit, and #mergedExecutable drops whatever the retained modules no longer record.
+    this.#absorbExecutable(lockfile)
     this.#lockfileLoaded = true
     return true
   }
@@ -451,6 +464,7 @@ export class State {
     }
     this.formats = bundle.formats
     this.imports = bundle.imports
+    this.#absorbExecutable(bundle)
     // Carry the loaded bundle's `reason` attribution forward so bundle=add round-trips it
     // (see #seedReasonFromBundle) rather than dropping every consumer but this run's 'run'.
     this.#seedReasonFromBundle(bundle)
@@ -566,6 +580,7 @@ export class State {
         `format conflict for ${file}: bundleFile declares '${existing}', resourcesBundleFile declares '${format}'`)
       this.formats.set(file, format)
     }
+    this.#absorbExecutable(bundle)
     // Carry this half's `reason` attribution forward too (the resources bundle's reason is
     // restricted to resource files by #bundleReason's inBundle filter, so it stays disjoint
     // from the code half's -- see #seedReasonFromBundle).
@@ -580,6 +595,15 @@ export class State {
       for (const f of bundle.sources.keys()) this.#bundleResources.add(f)
       for (const [f, fmt] of bundle.formats) this.#bundleFormats.set(f, fmt)
     }
+  }
+
+  // Union an absorbed artifact's `executable` list into the live set (never a replace: a lockfile
+  // seed, or the code half of a split layout, may already have contributed). Every seed path goes
+  // through here -- lockfile and all three bundle absorbs -- so a grep finds them all. A file this
+  // run re-reads re-derives its bit from disk (addFile), so a stale entry for it self-corrects; one
+  // for a file the run never touches is carried forward unverified, like every other `add`-mode fact.
+  #absorbExecutable(artifact) {
+    for (const file of artifact.executable) this.executable.add(file)
   }
 
   // Verify one resolution edge against an attestation map. Match the conditions key exactly
@@ -980,6 +1004,46 @@ export class State {
     }
 
     if (format) noupsert(this.formats, file, format)
+
+    // Record the file's POSIX execute bit for the artifacts' `executable` list (`stasis extract`
+    // restores it). Not a noupsert: a mode change is not a content change, so disk simply wins over
+    // whatever a loaded lockfile/bundle seeded -- including clearing a bit the file no longer has.
+    // Only a real observation refutes: `undefined` (unstat-able) and Windows (which reports no exec
+    // bits at all) both mean "unknowable", and neither may strip a list a POSIX capture committed.
+    this.#recordExecutable(file, absolute)
+  }
+
+  // Observe `file` on disk and record or refute its execute bit. The `undefined`-is-not-`false` rule
+  // and the Windows gate live here alone -- every capture site (addFile, the shard replay) calls
+  // this, so neither can be re-derived slightly differently.
+  //
+  // A record touches only this State: a sidecar's bundle must list only the files it carries, and
+  // the parent's lockfile picks the bit up through #mergedExecutable's union. A REFUTATION has to
+  // reach the whole family -- this State, its root, and the root's write-mode sidecars -- because
+  // that same union would otherwise let a sibling's seeded entry resurrect a bit this run just
+  // refuted, leaving it unclearable without --lock=replace.
+  #recordExecutable(file, absolute) {
+    const executable = observeExecutable(absolute)
+    if (executable === true) {
+      this.executable.add(file)
+      return
+    }
+    if (executable !== false || !CAN_OBSERVE_EXECUTE_BITS) return
+    const root = this.#parent ?? this
+    // Cheap common case: nothing anywhere holds a bit, so there is nothing to refute.
+    if (root.executable.size === 0 && root.sidecars().size === 0) {
+      this.executable.delete(file)
+      return
+    }
+    this.executable.delete(file)
+    root.executable.delete(file)
+    for (const sidecar of root.sidecars()) sidecar.executable.delete(file)
+  }
+
+  // This State's write-mode sidecars. Public so #recordExecutable reaches them across the class
+  // brand (a sidecar may come from a duplicate stasis-core copy), like sidecarInheritance.
+  sidecars() {
+    return this.#sidecars
   }
 
   // Record an `fs.readFileSync` capture (--fs). classifyFormat routes the bytes:
@@ -1045,6 +1109,9 @@ export class State {
     assert.equal(module.files[rel], integrity)
     if (this.config.bundle) noupsert(this.resources, file, content)
     noupsert(this.formats, file, format)
+    // A `directory` capture is a listing, never an executable file (and both artifacts' parsers
+    // refuse one in `executable`), so drop any bit a prior content record left on this path.
+    this.executable.delete(file)
   }
 
   // Record an `fs.lstatSync/statSync(path)` capture: a PAYLOAD-FREE stat record
@@ -1385,13 +1452,31 @@ export class State {
     return merged
   }
 
+  // The executable list the LOCKFILE attests: this State's plus its write-mode sidecars' (they
+  // contribute files to the unified lockfile). Narrowed against the keys the lockfile will actually
+  // SERIALIZE -- passing this.config.scope matters, because a non-full-scope lockfile drops its
+  // workspace buckets, and emitting an entry for one writes a lockfile Lockfile.parse then refuses.
+  #mergedExecutable(formats) {
+    const all = new Set(this.executable)
+    for (const sidecar of this.#sidecars) for (const file of sidecar.executable) all.add(file)
+    return narrowExecutable(all, { modules: this.modules, formats, scope: this.config.scope })
+  }
+
+  // The executable list ONE bundle declares, narrowed against the bucket map that bundle will emit
+  // (a split half holds only its own code-vs-resource files) and that half's own formats.
+  #bundleExecutable(modules, formats) {
+    return narrowExecutable(this.executable, { modules, formats, scope: this.config.scope })
+  }
+
   get lockData() {
+    const formats = this.#mergedFormats()
     return new Lockfile({
       config: this.config.values,
       entries: this.entries,
       modules: this.modules,
       imports: this.#mergedImports(),
-      formats: this.#mergedFormats(),
+      formats,
+      executable: this.#mergedExecutable(formats),
     }).serialize()
   }
 
@@ -1492,12 +1577,15 @@ export class State {
       assert.ok(!contents.has(file), `state invariant: file ${file} in both sources and resources`)
       contents.set(file, content)
     }
+    const modules = this.#bundleModules(contents)
+    const formats = this.#formatsForBundle()
     return new Bundle({
       config: this.config.values,
       entries: this.entries,
-      modules: this.#bundleModules(contents),
-      formats: this.#formatsForBundle(),
+      modules,
+      formats,
       imports: this.imports,
+      executable: this.#bundleExecutable(modules, formats),
       reason: this.#bundleReason(contents.keys()),
     })
   }
@@ -1516,12 +1604,14 @@ export class State {
     for (const [file, format] of this.#formatsForBundle()) {
       if (!Bundle.isResourceFormat(format)) codeFormats.set(file, format)
     }
+    const modules = this.#bundleModules(this.sources)
     return new Bundle({
       config: this.config.values,
       entries: this.entries,
-      modules: this.#bundleModules(this.sources),
+      modules,
       formats: codeFormats,
       imports: this.imports,
+      executable: this.#bundleExecutable(modules, codeFormats),
       reason: this.#bundleReason(this.sources.keys()),
     })
   }
@@ -1531,13 +1621,15 @@ export class State {
     for (const [file, format] of this.formats) {
       if (Bundle.isResourceFormat(format)) resourceFormats.set(file, format)
     }
+    const modules = this.#bundleModules(this.resources)
     return new Bundle({
       config: this.config.values,
       // Resources bundle carries no entries/imports (Bundle.parse waives the entries requirement when no code).
       entries: new Set(),
-      modules: this.#bundleModules(this.resources),
+      modules,
       formats: resourceFormats,
       imports: new Map(),
+      executable: this.#bundleExecutable(modules, resourceFormats),
       reason: this.#bundleReason(this.resources.keys()),
     })
   }
@@ -1690,6 +1782,9 @@ export class State {
       modules,
       imports,
       formats,
+      // Narrowed to this shard's own (already #observed-filtered) buckets, else it would name files
+      // the shard doesn't record and Lockfile.parse would reject the whole shard in mergeShard.
+      executable: this.#bundleExecutable(modules, formats),
     }).serialize()
   }
 
@@ -1722,6 +1817,17 @@ export class State {
       for (const rel of Object.keys(info.files)) {
         // moduleFileKey inverts the child's bucketing: yields `dir` for a dir captured AT a bucket root (rel==='').
         const file = moduleFileKey(dir, rel)
+        const absolute = resolve(this.root, file)
+        // Skip a key whose on-disk path escapes the root through a symlink (see realContained), so no
+        // external bytes/listing are attested under an in-root key.
+        if (!realContained(absolute)) continue
+        // Exec bits ride this walk, ABOVE the already-attested fast path below: they must be observed
+        // for every file the shard RECORDS, not just the ones it lists as executable, because a child
+        // that re-read a file and found no bit refutes it by OMISSION. "Already attested" means skip
+        // the expensive byte re-read, not skip looking at the inode. Re-derived from THIS process's
+        // disk, like the stat replay below -- the shard only says which paths to look at, so it
+        // cannot inject a forged bit.
+        this.#recordExecutable(file, absolute)
         // Skip a file the root already attests (its baseline or own capture) -- the byte re-read is
         // the dominant merge cost. EXCEPTION: fall through to carry a concrete code format the root
         // LACKS (root fs-READ a .js with no format, child IMPORTED it as `module`), else a later
@@ -1730,12 +1836,8 @@ export class State {
           const shardFormat = lf.formats?.get(file)
           if (shardFormat === undefined || (this.formats.get(file) ?? this.#lockFormats?.get(file)) !== undefined) continue
         }
-        const absolute = resolve(this.root, file)
         const url = pathToFileURL(absolute).toString()
         const format = lf.formats?.get(file)
-        // Skip a key whose on-disk path escapes the root through a symlink (see realContained), so no
-        // external bytes/listing are attested under an in-root key.
-        if (!realContained(absolute)) continue
         try {
           if (format === 'directory') {
             // A child's readdir capture: replay as a directory listing, re-reading from disk

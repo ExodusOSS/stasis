@@ -5,7 +5,9 @@ import { parseArgs } from 'node:util'
 
 // Snapshot realpathSync before `stasis run --fs` patches fs.realpathSync: the patched wrapper
 // doesn't throw ENOENT, which would defeat assertRealPathWithinBase's reliance on that throw.
-const { realpathSync } = fs
+// statSync likewise -- its patched form answers a bundle-served path with SYNTHETIC Stats, whose
+// `mode` would make isExecutableFile read the bundle's guess instead of the real inode's bits.
+const { realpathSync, statSync } = fs
 
 const sep = '/'
 
@@ -381,6 +383,134 @@ export function moduleFileKey(dir, rel) {
   return dir === '.' ? rel : `${dir}/${rel}`
 }
 
+// The flat project-relative keys a module map records -- the file set an artifact's `executable`
+// list must be a subset of. `scope` MUST be the artifact's own: a non-full-scope artifact serializes
+// only its node_modules buckets (Bundle/Lockfile.serialize drop `sources`), so its workspace files
+// are not keys the WRITTEN artifact records, and listing one produces an artifact its own parser
+// rejects. Parsers may omit it -- what they read back is already scope-filtered.
+export function moduleFileKeys(modules, { scope = 'full' } = {}) {
+  const keys = new Set()
+  for (const [dir, { files }] of modules) {
+    if (scope !== 'full' && !hasNodeModulesSegment(dir)) continue
+    for (const rel of Object.keys(files)) keys.add(moduleFileKey(dir, rel))
+  }
+  return keys
+}
+
+// The POSIX execute bits (user/group/other).
+export const EXECUTE_BITS = 0o111
+
+// Tri-state executability of the REGULAR FILE at absolute path `abs`, following symlinks (the
+// recorded bytes are the target's, so the target's mode is the honest answer). `true`/`false` when
+// the mode was actually observed; `undefined` when it could NOT be -- gone mid-run, an unreadable
+// parent dir, a symlink loop, or a synthetic bundle entry with no file on disk. Callers must not
+// read `undefined` as "not executable": failing to look is not evidence, and treating it as one
+// would let a transient stat error refute a bit the artifact legitimately attests.
+// A directory answers `false`: `executable` holds files only, and the parsers reject a directory
+// entry, so answering true would let a writer emit an artifact it can't read back.
+// Whether an already-obtained fs.Stats describes an executable regular file, for callers that
+// stat the path for their own reasons and shouldn't pay for a second syscall.
+export const isExecutableMode = (stats) => stats.isFile() && (stats.mode & EXECUTE_BITS) !== 0
+
+export function observeExecutable(abs) {
+  let stats
+  try {
+    // throwIfNoEntry covers ENOENT/ENOTDIR; the catch covers the rest (EACCES, ELOOP, EPERM), which
+    // are equally "could not observe" and must not abort a capture.
+    stats = statSync(abs, { throwIfNoEntry: false })
+  } catch {
+    return undefined
+  }
+  if (stats === undefined) return undefined
+  return isExecutableMode(stats)
+}
+
+// Boolean view for callers with nothing to refute (the static builders, `stasis add`): they are
+// recording a fresh set from scratch, so an unobservable path is simply not executable.
+export const isExecutableFile = (abs) => observeExecutable(abs) === true
+
+// Whether this platform reports POSIX execute bits at all. Windows does not (libuv synthesizes
+// 0o666/0o444), so a capture there can neither observe a bit nor honestly refute one: it records
+// none, and must NOT read "no bit" as "the bit was removed" and strip what a POSIX capture attested.
+// Same win32 opt-out shape as isExcludedNativeFile.
+export const canObserveExecuteBits = ({ win32 = process.platform === 'win32' } = {}) => !win32
+
+// THE rule an artifact's `executable` entry must satisfy. Returns a description of the problem, or
+// null when the entry is legal. Every side of the feature goes through this one function --
+// parseExecutable asserts on it (read), assertExecutableSubset asserts on it (write),
+// narrowExecutable filters on it -- so the three cannot drift, which is the only reason to have one.
+//   1. no path escapes;
+//   2. a non-full scope records only its node_modules tree, so only those files may be listed;
+//   3. the entry names a file the artifact RECORDS -- `executable` is a subset of `files`;
+//   4. it is a real file, never a `directory` listing or a payload-free `stat:*` record -- there
+//      would be nothing for `extract` to chmod.
+// `files` is the artifact's recorded key set (moduleFileKeys with its scope) and already implies
+// rule 2; rule 2 is checked separately anyway so the error names the actual problem.
+function executableEntryProblem(file, { what, files, formats, scope }) {
+  if (posixPathEscapes(file)) return 'escapes the root'
+  if (scope !== 'full' && !hasNodeModulesSegment(file)) {
+    return `is outside node_modules, which a '${scope}'-scope ${what} does not record`
+  }
+  if (!files.has(file)) return `names no file the ${what} records`
+  const format = formats.get(file)
+  if (format === 'directory') return 'is a directory capture, not a file'
+  if (isStatFormat(format)) return `is a payload-free '${format}' record, not a file`
+  return null
+}
+
+// Narrow an executable set to the entries an artifact may legally carry, applied at every write site
+// so the in-memory artifact is honest before it is ever serialized. Takes the artifact's own
+// `modules`/`scope` and indexes them only when there is something to test -- on a graph where that
+// index is the size of the whole module map, the common nothing-executable case must cost nothing.
+export function narrowExecutable(executable, { modules, formats, scope }) {
+  const out = new Set()
+  if (executable.size === 0) return out
+  const files = moduleFileKeys(modules, { scope })
+  for (const file of executable) {
+    // `what` is only ever used to build a message, and this path throws none.
+    if (executableEntryProblem(file, { what: 'artifact', files, formats, scope }) === null) out.add(file)
+  }
+  return out
+}
+
+// Assert every entry is legal, applying the SAME rules on both sides of the format.
+function assertExecutable(executable, { what, files, formats, scope }) {
+  for (const file of executable) {
+    const problem = executableEntryProblem(file, { what, files, formats, scope })
+    assert(problem === null, `${what}: executable entry '${file}' ${problem}`)
+  }
+}
+
+// Validate a serialized `executable` array into a Set of project-relative paths.
+export function parseExecutable(list, { what, files, formats, scope = 'full' }) {
+  if (list === undefined) return new Set()
+  const at = `${what}: executable`
+  assert(Array.isArray(list), `${at} must be an array of file paths`)
+  const out = new Set()
+  for (const file of list) {
+    assert(typeof file === 'string' && file !== '', `${at} entry must be a non-empty string`)
+    // Fail closed on a dupe like every sibling parse rule (duplicate file/format keys), rather than
+    // letting out.add() silently collapse it and round-trip to different bytes.
+    assert(!out.has(file), `${at} entry '${file}' is listed twice`)
+    out.add(file)
+  }
+  assertExecutable(out, { what, files, formats, scope })
+  return out
+}
+
+// The `executable` value an artifact serializes, or undefined to omit the key. Called from
+// Bundle/Lockfile.serialize -- the one choke point every producer goes through, applying the same
+// rules parse will. The per-site narrowing (narrowExecutable) keeps the in-memory artifact honest;
+// this makes the invariant unmissable, so a write site that forgets to narrow fails HERE, naming the
+// offending path, instead of emitting an artifact its own parser refuses on the next read (by which
+// point the good copy is overwritten). Omitted when empty: nothing executable is the overwhelmingly
+// common case, and an absent key keeps every pre-`executable` artifact byte-identical when rewritten.
+export function serializeExecutable(executable, { what, modules, formats, scope }) {
+  if (executable.size === 0) return undefined
+  assertExecutable(executable, { what, files: moduleFileKeys(modules, { scope }), formats, scope })
+  return fileSetToObject(executable)
+}
+
 // Resolve `baseDir/relPath` through symlinks and confirm the real target stays within `realBase`.
 // Throws on a symlink escaping the bundle root (a crafted `link.sh -> /etc/passwd` must not pull an
 // external file into an attestable bundle). realpathSync surfaces ENOENT, which loaders treat as "missing".
@@ -510,6 +640,21 @@ export function mergeFormatMaps(a, b, label) {
   }
   absorb(a)
   absorb(b)
+  return out
+}
+
+// Merge two artifacts' `executable` lists. A union, EXCEPT that `b` -- the INCOMING (newer)
+// artifact -- is authoritative for the files it records: a file both sides carry takes b's bit, so
+// re-adding a file that has since lost its execute bit clears the stale entry instead of the union
+// resurrecting it. Without that, `stasis add` / `stasis bundle --add` could only ever grant a bit,
+// never revoke one, and `extract` would keep restoring +x the source tree no longer has. `bFiles`
+// every call site has the newer artifact on the right. Indexing b's files is deferred until there is
+// an `a` entry to test, so the common nothing-executable merge costs nothing.
+export function mergeExecutableSets(a, b, bModules, scope) {
+  if (a.size === 0) return new Set(b)
+  const bFiles = moduleFileKeys(bModules, { scope })
+  const out = new Set(b)
+  for (const file of a) if (!bFiles.has(file)) out.add(file)
   return out
 }
 
