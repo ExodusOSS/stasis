@@ -139,7 +139,8 @@ let createdShardPubId
 // True once the root has written artifacts; the load hook asserts on it so a module whose bytes
 // first load after a write crashes rather than ship unattested.
 let saved = false
-// Serialized shard text a child last wrote, so the exit firing skips an identical re-write.
+// Serialized shard text a child last wrote, so a second flush skips an identical re-write. Still
+// reachable: a SIGTERM flush whose signal user code owns is followed by the child's own `exit`.
 let lastShardWritten
 // Set when stasis's own capture/verification rejects something; distinct from a non-zero exit.
 // When set, nothing is written (a rejected capture must never persist).
@@ -301,9 +302,7 @@ function initState(root) {
 
   // Persist on exit UNLESS `aborted` (an addFile/addImport rejection) -- deliberately NOT gated on
   // exit code, so a clean capture exiting non-zero still persists; writing an aborted one would bake
-  // rejected drift in for a later frozen run. save() runs on EVERY beforeExit/exit firing (not
-  // latched): a late lazy require() resolves after an earlier flush, so re-flushing picks up the
-  // resolution edge beforeExit missed; write() skips unchanged artifacts so re-running is cheap.
+  // rejected drift in for a later frozen run. Fully synchronous, which is what lets `exit` host it.
   const save = () => {
     const writing = state.config.writeLockfile || state.config.writeBundle
     // A child never writes the real artifact (root owns it; a 2nd writer races); it forwards a shard
@@ -322,7 +321,7 @@ function initState(root) {
       // modes (reject a bundle/lockfile missing a referenced file), so it must run in every mode.
       state.write()
       // Latch only in write modes: a read-only run persists nothing, so a module first loaded after
-      // this (e.g. a lazy import() from beforeExit) is still attested and must not trip the load hook.
+      // this (e.g. a require() from another exit handler) is still attested and must not trip the load hook.
       if (writing) saved = true
     } finally {
       // Always remove the shard dir we minted (sole owner of this cleanup); SIGKILL leaves it for the OS.
@@ -332,13 +331,18 @@ function initState(root) {
     }
   }
 
-  process.on('beforeExit', save)
+  // `exit` alone, NOT the beforeExit/exit pair: it runs after every beforeExit handler, so one flush
+  // there sees strictly more (including the lazy require() a user's beforeExit handler triggers,
+  // which is why the pair existed) while the pair paid two full backfill+serialize passes per
+  // process. Nothing is written for a process that never reaches `exit` -- signal deaths were
+  // already uncovered (shardSignalFlush below), newly so are process.abort() and a beforeExit
+  // handler that re-arms the loop forever.
   process.on('exit', save)
 
   // config.shardSignalFlush (opt-in, set by StasisMetro): flush the shard when a capturing CHILD is
-  // ended by SIGTERM (jest-worker's forceExit kills Metro workers that way, bypassing beforeExit/
-  // exit and losing their capture), then re-deliver the signal. If user code owns SIGTERM we only
-  // flush, never re-kill -- detected via `userOwnedSigterm` (registration-time listeners, since a
+  // ended by SIGTERM (jest-worker's forceExit kills Metro workers that way, bypassing `exit` and
+  // losing their capture), then re-deliver the signal. If user code owns SIGTERM we only flush,
+  // never re-kill -- detected via `userOwnedSigterm` (registration-time listeners, since a
   // `once` that ran earlier is invisible to listenerCount) plus still-attached later listeners.
   // Best-effort, fail-closed at verify: must fit forceExit's 500ms window; SIGKILL/other signals uncovered.
   if (isChildProcess && shardForwardingEnabled() && state.config.shardSignalFlush) {
