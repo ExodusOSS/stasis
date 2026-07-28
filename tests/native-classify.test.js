@@ -18,6 +18,7 @@ test('isExcludedNativeFile: docs / config / logs / maps are always excluded', (t
     'yarn.lock', '.project', 'gradle-wrapper.properties',
     'debug.log', 'bundle.js.map',
     'index.js.flow', 'Thing.js.flow', // Flow declaration sidecars (the `.d.ts` analog)
+    'Foo.swiftdoc', 'arm64-apple-ios.swiftdoc', // compiler-emitted doc sidecar (Xcode Quick Help only)
   ]) {
     t.assert.equal(isExcludedNativeFile(name, NOT_WIN), true, `${name} excluded off Windows`)
     t.assert.equal(isExcludedNativeFile(name, WIN), true, `${name} excluded on Windows too`)
@@ -72,12 +73,23 @@ test('isAppleSliceDir: per-arch prebuilt slice dirs are matched; real source dir
   // them LOOSE (outside a `*.xcframework`, which isNativeArtifact already skips) need this.
   for (const dir of [
     'ios-arm64', 'ios-arm64_x86_64-simulator', 'ios-arm64e', 'ios-arm64_x86_64-maccatalyst',
-    'tvos-arm64_x86_64-simulator', 'watchos-arm64_32_armv7k', 'macos-arm64_x86_64', 'xros-arm64',
+    // EVERY Apple platform, not just ios: the `-simulator` slices in particular.
+    'tvos-arm64_x86_64-simulator', 'tvos-arm64', 'watchos-arm64_x86_64-simulator',
+    'watchos-arm64_32_armv7k', 'macos-arm64_x86_64', 'xros-arm64', 'xros-arm64_x86_64-simulator',
+    'visionos-arm64_x86_64-simulator', 'driverkit-x86_64',
+    // ...including the older SDK-style platform names a fixed allowlist would miss.
+    'appletvos-arm64', 'appletvsimulator-x86_64', 'iphoneos-arm64', 'iphonesimulator-x86_64',
+    'watchsimulator-i386',
   ]) {
     t.assert.equal(isAppleSliceDir(dir), true, `${dir} is a slice dir`)
   }
-  // Keyed on `<platform>-<arch>[_<arch>...][-variant]`, so ordinary dirs can't collide.
-  for (const dir of ['ios', 'android', 'src', 'cpp', 'React', 'ios-helpers', 'iossupport', 'arm64', 'ios-']) {
+  // The ARCH segment is what makes this precise -- the platform segment is unconstrained, so only a
+  // trailing `-<arch>[_<arch>...][-variant]` matches and ordinary dirs can't collide.
+  for (const dir of [
+    'ios', 'android', 'src', 'cpp', 'React', 'ios-helpers', 'iossupport', 'arm64', 'ios-',
+    'arm64-v8a', 'armeabi-v7a', // Android ABI dirs: an arch NAME, but not the Apple slice shape
+    'ios-simulator', 'my-x86_64-helpers', // `-simulator`/arch present but not the trailing shape
+  ]) {
     t.assert.equal(isAppleSliceDir(dir), false, `${dir} is NOT a slice dir`)
   }
 })

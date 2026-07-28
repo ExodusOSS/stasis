@@ -936,6 +936,13 @@ process.exit(1)
     // A LOOSE Apple per-arch slice dir (not inside a `*.xcframework`): prebuilt output, pruned whole.
     mkdirSync(join(root, 'ios', 'ios-arm64_x86_64-simulator'), { recursive: true })
     writeFileSync(join(root, 'ios', 'ios-arm64_x86_64-simulator', 'Slice.h'), '// prebuilt slice header\n')
+    // ...for EVERY Apple platform, not just ios (the older SDK-style names included).
+    mkdirSync(join(root, 'ios', 'tvos-arm64_x86_64-simulator'), { recursive: true })
+    writeFileSync(join(root, 'ios', 'tvos-arm64_x86_64-simulator', 'Slice.h'), '// tvos prebuilt slice\n')
+    mkdirSync(join(root, 'ios', 'appletvsimulator-x86_64'), { recursive: true })
+    writeFileSync(join(root, 'ios', 'appletvsimulator-x86_64', 'Slice.h'), '// legacy-named slice\n')
+    // A compiler-emitted `.swiftdoc` sidecar (Xcode Quick Help only, never a build input).
+    writeFileSync(join(root, 'ios', 'RNThing.swiftdoc'), 'SWIFTDOC\0\xff')
     // A BINARY plist (bplist00): non-UTF-8, so it can't ride the `.plist`->xml code path. Opt-in only
     // (via the resources allowlist), which this capture does NOT set -> excluded here.
     writeFileSync(join(root, 'ios', 'Binary.plist'), Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])]))
@@ -1020,6 +1027,9 @@ process.exit(1)
       'documentation.yml', // documentation.js config (NOT all YAML -- only this name)
       'index.js.flow', // Flow declaration sidecar (the `.d.ts` analog)
       'ios/ios-arm64_x86_64-simulator/Slice.h', // a LOOSE Apple per-arch slice dir is pruned whole
+      'ios/tvos-arm64_x86_64-simulator/Slice.h', // ...on non-ios platforms too
+      'ios/appletvsimulator-x86_64/Slice.h', // ...including older SDK-style platform names
+      'ios/RNThing.swiftdoc', // compiler-emitted doc sidecar
       'ios/Binary.plist', // a BINARY plist is opt-in via resources; this capture doesn't opt in
     ]) {
       t.assert.equal(mod.files[f], undefined, `expected ${f} to be excluded from native capture`)

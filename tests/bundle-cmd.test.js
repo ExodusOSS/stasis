@@ -1455,6 +1455,13 @@ const writeRnFixture = (root) => {
   // A LOOSE Apple per-arch slice dir (not inside a `*.xcframework`): prebuilt output, pruned whole.
   mkdirSync(join(dep, 'ios', 'ios-arm64_x86_64-simulator'), { recursive: true })
   writeFileSync(join(dep, 'ios', 'ios-arm64_x86_64-simulator', 'Slice.h'), '// prebuilt slice header\n')
+  // ...for EVERY Apple platform, not just ios (the older SDK-style names included).
+  mkdirSync(join(dep, 'ios', 'tvos-arm64_x86_64-simulator'), { recursive: true })
+  writeFileSync(join(dep, 'ios', 'tvos-arm64_x86_64-simulator', 'Slice.h'), '// tvos prebuilt slice\n')
+  mkdirSync(join(dep, 'ios', 'appletvsimulator-x86_64'), { recursive: true })
+  writeFileSync(join(dep, 'ios', 'appletvsimulator-x86_64', 'Slice.h'), '// legacy-named slice\n')
+  // A compiler-emitted `.swiftdoc` sidecar (Xcode Quick Help only, never a build input).
+  writeFileSync(join(dep, 'ios', 'RNThing.swiftdoc'), 'SWIFTDOC\0\xff')
   // A BINARY plist (bplist00): non-UTF-8, so it can't ride the `.plist`->xml code path. Opt-in via
   // --resources plist; the assertions below cover both the default (excluded) and opted-in cases.
   writeFileSync(join(dep, 'ios', 'Binary.plist'), Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])]))
@@ -1488,6 +1495,9 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
     'ios/documentation.yml', // documentation.js config (NOT all YAML -- only this name)
     'ios/RNThing.js.flow', // Flow declaration sidecar
     'ios/ios-arm64_x86_64-simulator/Slice.h', // a LOOSE Apple per-arch slice dir is pruned whole
+    'ios/tvos-arm64_x86_64-simulator/Slice.h', // ...on non-ios platforms too
+    'ios/appletvsimulator-x86_64/Slice.h', // ...including older SDK-style platform names
+    'ios/RNThing.swiftdoc', // compiler-emitted doc sidecar
     'ios/Binary.plist', // a BINARY plist is opt-in via --resources plist; not set here
   ]) {
     t.assert.ok(!files.has(f), `${f} is excluded`)

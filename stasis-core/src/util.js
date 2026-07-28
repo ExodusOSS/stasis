@@ -242,7 +242,10 @@ function isShellShebang(content) {
 // standalone-dev only). `.bat` (Windows batch) is excluded off Windows; `win32` defaults to the host.
 // `flow` covers the `*.js.flow` type-declaration sidecars (the Flow analog of `.d.ts`): read by the
 // Flow checker, never by Gradle/CocoaPods, and Metro bundles the plain `.js` beside them.
-const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map', 'flow'])
+// `swiftdoc` is a compiler-EMITTED sidecar (written next to a `.swiftmodule`, carrying the module's
+// doc comments for Xcode Quick Help): consumed by IDEs, never read by swiftc/clang/ld during a build,
+// and a binary format that would otherwise be swept in as base64.
+const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map', 'flow', 'swiftdoc'])
 const NATIVE_EXCLUDE_NAMES = new Set([
   'license', 'licence', 'third-party-licenses', // license / legal text (US + UK spelling)
   '.prettierrc', '.prettierignore', '.prettierrc.js', '.gitattributes', '.flowconfig', '.eslintignore',
@@ -265,15 +268,19 @@ export function isExcludedNativeDir(name, { win32 = process.platform === 'win32'
   return !win32 && name === 'windows'
 }
 
-// An Apple prebuilt-slice directory (`ios-arm64`, `ios-arm64_x86_64-simulator`,
-// `tvos-arm64_x86_64-maccatalyst`, ...): the per-architecture payload dirs of a prebuilt binary
-// framework, holding compiled output rather than source. isNativeArtifact already skips the
-// enclosing `*.xcframework` bundle; deps that ship these slices loose (outside a bundle dir) need
-// this too, at ANY depth. Deliberately keyed on `<platform>-<arch>[_<arch>...][-variant]` so a real
-// source dir can't collide.
+// An Apple prebuilt-slice directory (`ios-arm64`, `tvos-arm64_x86_64-simulator`,
+// `watchos-arm64_32_armv7k`, `appletvos-arm64-simulator`, ...): the per-architecture payload dirs of
+// a prebuilt binary framework, holding compiled output rather than source. isNativeArtifact already
+// skips the enclosing `*.xcframework` bundle; deps that ship these slices loose (outside a bundle
+// dir) need this too, at ANY depth.
+// The PLATFORM segment is deliberately unconstrained (`[a-z0-9]+`) rather than an allowlist: the
+// naming spans modern SDK names (ios/tvos/watchos/macos/xros/visionos/driverkit), the older ones
+// (iphoneos/iphonesimulator/appletvos/appletvsimulator/watchsimulator), and whatever Apple adds
+// next. It's the required ARCH segment that makes this precise -- a real source dir doesn't end in
+// `-<arch>[_<arch>...][-simulator|-maccatalyst]`.
 const APPLE_ARCH = String.raw`(?:arm64e|arm64_32|arm64|armv7k|armv7s|armv7|x86_64|i386)`
 const APPLE_SLICE_DIR = new RegExp(
-  String.raw`^(?:ios|tvos|watchos|macos|xros|visionos|driverkit)-${APPLE_ARCH}(?:_${APPLE_ARCH})*(?:-(?:simulator|maccatalyst))?$`,
+  String.raw`^[a-z0-9]+-${APPLE_ARCH}(?:_${APPLE_ARCH})*(?:-(?:simulator|maccatalyst))?$`,
   'u'
 )
 export function isAppleSliceDir(name) {
