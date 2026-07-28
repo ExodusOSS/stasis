@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { gunzipSync, inflateRawSync } from 'node:zlib'
+import { gunzipSync } from 'node:zlib'
 
-// In-memory readers for the two archive formats GitHub serves a repo tree as: gzipped tar
-// (`/tarball`) and zip (`/zipball`). Both take the whole archive as bytes and return a
-// `Map` of entry path -> bytes; nothing touches disk and no external unzip is involved
-// (Node's zlib does the decompression, the container framing is parsed here).
+// In-memory reader for the gzipped tar GitHub serves a repo tree as (`/tarball`, available
+// for every repo). Takes the whole archive as bytes and returns a `Map` of entry path ->
+// bytes; nothing touches disk and no external tar is involved -- Node's zlib decompresses,
+// the ustar framing is parsed here, so the package stays dependency-free.
 //
 // Only regular files are kept. Directories, symlinks, hardlinks and device nodes carry no
 // content a caller can use, and a symlink target is precisely the thing that could point
@@ -13,8 +13,7 @@ import { gunzipSync, inflateRawSync } from 'node:zlib'
 const BLOCK = 512
 
 // An entry must land inside the tree it claims to be part of. Rejected: absolute paths, any
-// `..` segment, a backslash (zip mandates `/`, so a backslash is a separator smuggled past a
-// posix-only check), and NUL.
+// `..` segment, a backslash (a separator that would slip past a posix-only check), and NUL.
 export function isSafePath(path) {
   if (path === '' || path.startsWith('/') || path.includes('\\') || path.includes('\0')) return false
   return !path.split('/').includes('..')
@@ -24,9 +23,6 @@ export function isSafePath(path) {
 // typically keep a subtree and drop the rest, and a subarray would pin the entire archive in
 // memory for as long as any single file is referenced.
 const detach = (bytes) => new Uint8Array(bytes)
-
-// A zlib output buffer is already its own allocation, so it can be re-typed without a copy.
-const asBytes = (buf) => new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
 
 const view = (bytes) =>
   Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -77,7 +73,7 @@ function paxPath(data) {
   return null
 }
 
-export function readTar(bytes) {
+function readTar(bytes) {
   const tar = view(bytes)
   const files = new Map()
   // A pax ('x') or GNU longname ('L') block names the entry that FOLLOWS it.
@@ -102,6 +98,10 @@ export function readTar(bytes) {
       // '0' and NUL both mean a regular file; every other type carries nothing to keep.
       if (type === '0' || type === '\0') {
         assert(isSafePath(name), `Unsafe archive path: ${name}`)
+        // tar can legally hold the same path twice and the reader would keep whichever came
+        // last, so a second entry could shadow the first -- and the shadowed bytes would
+        // never be seen. Refuse the archive instead of silently picking a winner.
+        assert(!files.has(name), `Duplicate archive path: ${name}`)
         files.set(name, detach(tar.subarray(start, end)))
       }
     }
@@ -119,81 +119,4 @@ export function readTarGz(bytes) {
     throw new Error(`Malformed tar.gz archive: ${cause.message}`, { cause })
   }
   return readTar(tar)
-}
-
-const EOCD_SIGNATURE = 0x0605_4b50
-const CENTRAL_SIGNATURE = 0x0201_4b50
-const LOCAL_SIGNATURE = 0x0403_4b50
-const EOCD_SIZE = 22
-const MAX_COMMENT = 0xff_ff
-
-// The end-of-central-directory record sits at the end, after a comment of up to 64 KiB, so it
-// has to be found by scanning backwards for its signature.
-function findEocd(buf) {
-  const floor = Math.max(0, buf.length - MAX_COMMENT - EOCD_SIZE)
-  for (let i = buf.length - EOCD_SIZE; i >= floor; i--) {
-    if (buf.readUInt32LE(i) === EOCD_SIGNATURE) return i
-  }
-  return -1
-}
-
-export function readZip(bytes) {
-  const buf = view(bytes)
-  assert(buf.length >= EOCD_SIZE, 'Malformed zip archive: too short')
-  const eocd = findEocd(buf)
-  assert(eocd !== -1, 'Malformed zip archive: no end-of-central-directory record')
-
-  const count = buf.readUInt16LE(eocd + 10)
-  const size = buf.readUInt32LE(eocd + 12)
-  const offset = buf.readUInt32LE(eocd + 16)
-  // Zip64 saturates these fields and moves the real values into a separate record. A repo
-  // archive never needs it, so fail loudly rather than walk a truncated directory.
-  assert(count !== 0xff_ff && offset !== 0xff_ff_ff_ff, 'Zip64 archives are not supported')
-  assert(offset + size <= buf.length, 'Malformed zip archive: central directory out of range')
-
-  const files = new Map()
-  let p = offset
-  for (let i = 0; i < count; i++) {
-    assert(p + 46 <= buf.length && buf.readUInt32LE(p) === CENTRAL_SIGNATURE,
-      'Malformed zip archive: bad central directory entry')
-    const method = buf.readUInt16LE(p + 10)
-    // Sizes are read from the central directory, which is authoritative even when the local
-    // header defers them to a trailing data descriptor (general-purpose flag bit 3).
-    const compressed = buf.readUInt32LE(p + 20)
-    const uncompressed = buf.readUInt32LE(p + 24)
-    const nameLength = buf.readUInt16LE(p + 28)
-    const extraLength = buf.readUInt16LE(p + 30)
-    const commentLength = buf.readUInt16LE(p + 32)
-    const localOffset = buf.readUInt32LE(p + 42)
-    const name = buf.toString('utf8', p + 46, p + 46 + nameLength)
-    p += 46 + nameLength + extraLength + commentLength
-
-    // A trailing slash is how zip records a directory.
-    if (name.endsWith('/')) continue
-    assert(isSafePath(name), `Unsafe archive path: ${name}`)
-
-    assert(localOffset + 30 <= buf.length && buf.readUInt32LE(localOffset) === LOCAL_SIGNATURE,
-      `Malformed zip archive: bad local header for ${name}`)
-    // The local header repeats the name and extra field with its own lengths, which are the
-    // ones that locate the data.
-    const start = localOffset + 30 + buf.readUInt16LE(localOffset + 26) + buf.readUInt16LE(localOffset + 28)
-    assert(start + compressed <= buf.length, `Malformed zip archive: truncated entry ${name}`)
-    const data = buf.subarray(start, start + compressed)
-
-    let content
-    if (method === 0) {
-      content = detach(data)
-    } else if (method === 8) {
-      try {
-        content = asBytes(inflateRawSync(data))
-      } catch (cause) {
-        throw new Error(`Malformed zip archive: cannot inflate ${name}: ${cause.message}`, { cause })
-      }
-    } else {
-      throw new Error(`Unsupported zip compression method ${method} for ${name}`)
-    }
-    assert.equal(content.length, uncompressed, `Malformed zip archive: size mismatch for ${name}`)
-    files.set(name, content)
-  }
-  return files
 }

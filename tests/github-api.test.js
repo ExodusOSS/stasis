@@ -36,8 +36,9 @@ const RELEASE = {
   published_at: '2026-01-02T00:00:00Z',
   html_url: 'https://github.com/ExodusOSS/stasis/releases/tag/v1.2.3',
   tarball_url: `${API}/repos/ExodusOSS/stasis/tarball/v1.2.3`,
+  // fields the normalized view deliberately drops -- zipball_url among them: the tarball is
+  // available for every repo, so a second archive URL beside it earns nothing
   zipball_url: `${API}/repos/ExodusOSS/stasis/zipball/v1.2.3`,
-  // fields the normalized view deliberately drops
   node_id: 'RE_kwDO',
   upload_url: `${API}/repos/ExodusOSS/stasis/releases/42/assets{?name,label}`,
   author: { login: 'someone' },
@@ -85,7 +86,6 @@ test('releases() lists a repo and normalizes releases and their attachments', wi
       publishedAt: '2026-01-02T00:00:00Z',
       url: 'https://github.com/ExodusOSS/stasis/releases/tag/v1.2.3',
       tarballUrl: `${API}/repos/ExodusOSS/stasis/tarball/v1.2.3`,
-      zipballUrl: `${API}/repos/ExodusOSS/stasis/zipball/v1.2.3`,
       assets: [{
         id: 7,
         name: 'app.stasis.code.br',
@@ -107,7 +107,7 @@ test('releases() fills defaults for a bare release with no assets', withFetch(
     const [only] = await releases('ExodusOSS/stasis')
     t.assert.equal(only.tag, 'v0.0.1')
     t.assert.deepEqual(only.assets, [])
-    for (const key of ['name', 'body', 'commitish', 'createdAt', 'publishedAt', 'url', 'tarballUrl', 'zipballUrl']) {
+    for (const key of ['name', 'body', 'commitish', 'createdAt', 'publishedAt', 'url', 'tarballUrl']) {
       t.assert.equal(only[key], null, `${key} defaults to null`)
     }
     // draft/prerelease are booleans even when the payload omits them

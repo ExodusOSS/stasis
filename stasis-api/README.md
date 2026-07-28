@@ -31,7 +31,7 @@ written to disk. One archive request per call, decompressed and parsed in memory
 ```js
 import { subtree } from '@exodus/stasis-api/github'
 
-// `format` is 'tgz' (default) or 'zip'; omit `path` for the whole tree
+// omit `path` for the whole tree
 const { root, files } = await subtree('ExodusOSS/bytes', 'v1.15.1', { path: 'benchmarks' })
 console.log(root) // 'ExodusOSS-bytes-c33d586' — the commit the ref resolved to
 for (const [path, bytes] of files) console.log(path, bytes.byteLength) // 'benchmarks/…', repo-relative
@@ -39,9 +39,10 @@ for (const [path, bytes] of files) console.log(path, bytes.byteLength) // 'bench
 
 Keys stay repo-relative, so a subtree's paths keep their `path` prefix. Only regular files are
 returned: directories and symlinks carry no usable content, and a symlink target is exactly
-what could point outside the tree. Entries that escape the tree, and archives with more than
-one top-level directory, are rejected rather than sanitized. The whole archive is held in
-memory while it is parsed, bounded by `maxBytes` (256 MiB by default).
+what could point outside the tree. Rejected rather than sanitized: entries that escape the
+tree, a path that appears twice (the second would shadow the first), and archives with more
+than one top-level directory. The whole archive is held in memory while it is parsed, bounded
+by `maxBytes` (256 MiB by default).
 
 Every function takes an optional `signal` (defaulting to a timeout) and, for GitHub, an
 optional `token` — no token is ever read from the environment.
