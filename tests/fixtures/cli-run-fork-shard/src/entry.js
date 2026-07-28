@@ -15,7 +15,10 @@ import { fileURLToPath } from 'node:url'
 // rejects it. Gated so the normal capture/frozen tests above don't see it.
 if (process.env.FORGE_SHARD) await import('./forge.js')
 
-const workerPath = fileURLToPath(new URL('./worker.js', import.meta.url))
+// KILL_WORKER: fork the variant that gets SIGKILLed before it can flush at exit (see killed-worker.js),
+// so the root can only attest what the child forwarded INCREMENTALLY.
+const workerFile = process.env.KILL_WORKER ? './killed-worker.js' : './worker.js'
+const workerPath = fileURLToPath(new URL(workerFile, import.meta.url))
 console.log('PARENT start')
 // Fork WORKER_COUNT workers (default 1). >1 exercises a worker POOL: several children each write a
 // pid-named shard into the root's dir, and a module two workers both load is merged once (dedup).

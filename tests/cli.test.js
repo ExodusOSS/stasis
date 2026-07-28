@@ -2251,6 +2251,34 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   // never imports it, so worker.js and its childdep.js import are loaded ONLY in the child.
   // Forwarding is OPT-IN via --child-process (it stands up a process-coordination channel).
 
+  test('run --child-process: a child SIGKILLed before it can flush still contributes (incremental shards)', withTmp(async (t, tmp) => {
+    // The exit-time flush is a race the child can lose: jest-worker force-exits a Metro worker 500ms
+    // after END and SIGKILLs it 500ms later, and a snapshot (write()'s backfills + hashing every
+    // observed file) does not always fit -- 120-220ms for a ~130-file toolchain, paid twice. When it
+    // is cut short the root loses EVERYTHING that child observed, and a file only it read degrades to
+    // whatever payload-free stat another process happened to take: measured against real Metro 0.87,
+    // dropping the worker shards turns 129 records from content into 'stat:file' (babel.config.js,
+    // the whole @babel/compat-data tree, ...). So a capturing child also flushes PERIODICALLY.
+    // SIGKILL is uncatchable, so this child runs no beforeExit/exit/SIGTERM handler at all -- the only
+    // way killeddep.js reaches the lockfile is a shard written while the child was still working.
+    cpSync(forkShardFixture, tmp, { recursive: true })
+    const r = await run(['run', '--lock=add', '--child-process', 'src/entry.js'], {
+      cwd: tmp,
+      env: { ...cleanEnv, KILL_WORKER: '1', EXODUS_STASIS_SHARD_FLUSH_MS: '50', KILL_AFTER_MS: '400' },
+    })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stdout, /KILLED-WORKER extra=killed-worker-only-dep/, 'the child ran')
+    t.assert.match(r.stdout, /KILLED-WORKER dying/, 'and reached its own SIGKILL')
+    // 128+9: the root reports the signal death, so the child really got no exit handler.
+    t.assert.match(r.stdout, /PARENT child-exit=(?:null|137)/, 'the child died by signal, not gracefully')
+
+    const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+    const files = Object.keys(lock.sources['.'].files)
+    t.assert.ok(files.includes('src/killed-worker.js'), 'the killed child-only entry survived via an incremental shard')
+    t.assert.ok(files.includes('src/killeddep.js'), 'and so did the module only it imported')
+    t.assert.equal(lock.formats['src/killeddep.js'], 'module', 'as real content, not a payload-free stat record')
+  }))
+
   test('run --child-process: a forked child contributes its child-only modules to the lockfile', withTmp(async (t, tmp) => {
     cpSync(forkShardFixture, tmp, { recursive: true })
     const r = await run(['run', '--lock=add', '--child-process', 'src/entry.js'], { cwd: tmp })

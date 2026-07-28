@@ -650,6 +650,13 @@ export class State {
     assert.ok(this.entries.has(file), `Unknown entry point: ${file}`)
   }
 
+  // How many project files THIS process has observed this run (the set shardSnapshot() forwards).
+  // A cheap monotonic change signal: hooks.js's periodic child flush reads it to skip re-snapshotting
+  // when nothing new landed, since the snapshot itself (backfills + hashing) is the expensive part.
+  get observedCount() {
+    return this.#observed.size
+  }
+
   // The one preload (top-level) State, or undefined; scans the process-wide registry.
   static get preload() {
     for (const state of liveStates()) if (state.isPreload) return state

@@ -335,6 +335,27 @@ function initState(root) {
   process.on('beforeExit', save)
   process.on('exit', save)
 
+  // A capturing child's shard is its ONLY channel to the root, and betting all of it on the exit-time
+  // flush is a race the child can lose: jest-worker force-exits a worker 500ms after END and SIGKILLs
+  // it 500ms later, and a snapshot (write()'s backfills + hashing every observed file) does not
+  // always fit -- measured at 120-220ms for a ~130-file toolchain, paid TWICE (beforeExit + exit).
+  // When it is cut short the root loses EVERYTHING that worker observed, and a file only it read
+  // degrades to whatever payload-free stat another process happened to take (content -> 'stat:file').
+  // So forward incrementally: flush periodically as well, so a killed worker has already contributed.
+  // The timer is UNREF'd -- it must never keep a worker alive past its END message -- and skipped
+  // when nothing new was observed, since the snapshot is the expensive part. Env-tunable for tests.
+  if (isChildProcess && shardForwardingEnabled()) {
+    const period = Number(process.env.EXODUS_STASIS_SHARD_FLUSH_MS ?? 2000)
+    if (Number.isFinite(period) && period > 0) {
+      let flushedAt = -1
+      setInterval(() => {
+        if (aborted || state.observedCount === flushedAt) return
+        flushedAt = state.observedCount
+        writeChildShard()
+      }, period).unref()
+    }
+  }
+
   // config.shardSignalFlush (opt-in, set by StasisMetro): flush the shard when a capturing CHILD is
   // ended by SIGTERM (jest-worker's forceExit kills Metro workers that way, bypassing beforeExit/
   // exit and losing their capture), then re-deliver the signal. If user code owns SIGTERM we only
