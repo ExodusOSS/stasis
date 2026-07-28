@@ -9,6 +9,8 @@ import { stripVTControlCharacters } from 'node:util'
 
 import { audit, collectPackages, collectPackagesFromFile, collectReasons, flattenAdvisories, formatTable, printAuditReport } from '../stasis/src/audit.js'
 
+import { withFetch } from './fetch.helper.js'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 
@@ -601,20 +603,6 @@ test('audit --reason consumes its value (space form) then reports no files', (t)
   t.assert.equal(r.status, 1)
   t.assert.match(r.stderr, /Nothing to audit/)
 })
-
-const withFetch = (impl, fn) => async (t) => {
-  const original = globalThis.fetch
-  const calls = []
-  globalThis.fetch = async (url, opts) => {
-    calls.push({ url, opts })
-    return impl({ url, opts })
-  }
-  try {
-    return await fn(t, calls)
-  } finally {
-    globalThis.fetch = original
-  }
-}
 
 test('audit() POSTs grouped versions to the npm bulk endpoint and joins rows', withFetch(
   () => new Response(JSON.stringify({
