@@ -254,6 +254,28 @@ export function stripTypeDeclaration(name) {
   return suffix === undefined ? name : name.slice(0, -suffix.length)
 }
 
+// stasis's own outputs (`stasis.lock.json`, a `*stasis*.br`): absent on a first run but present on a
+// later one, so a listing (`--fs` readdir) or a sweep (`add .`) that records one diverges between runs
+// and the later capture conflicts.
+export function isStasisArtifactName(name) {
+  const base = basename(name).toLowerCase()
+  return base === 'stasis.lock.json' || (base.includes('stasis') && base.endsWith('.br'))
+}
+
+// Generated sidecars: `*.map` (as under --fs) and `*.js.flow`, the Flow analog of `.d.ts`. Neither is
+// code, so an undeclared one would abort a whole sweep -- skipped unless its extension is in `resources`.
+const SIDECAR_EXTS = new Set(['map', 'flow'])
+
+// The auto-excluded set a DIRECTORY SWEEP drops (`add src/`); an EXPLICITLY named file bypasses it
+// (`add .env` still captures). Declarations (types only, erased at runtime -- the resolvers refuse to
+// land on one), the `.env` family (secrets), and stasis's own outputs all classify as CODE, so the
+// `resources` gate would never stop them. Configured target names are the caller's to exclude.
+export function isAutoExcludedFile(name, { resources = new Set() } = {}) {
+  if (isTypeDeclaration(name) || isDotEnvFile(name) || isStasisArtifactName(name)) return true
+  const ext = pathExt(name)
+  return SIDECAR_EXTS.has(ext) && !resources.has(ext)
+}
+
 // The single name->format classifier every capture path is a policy view of. Returns a concrete format
 // when the name determines one; null for a JS-family file (.js/.ts/.jsx/.tsx); undefined if unrecognized.
 export function classifyFormat(name, { content } = {}) {

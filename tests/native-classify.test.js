@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 
-import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, refineNativeCapture, stripTypeDeclaration } from '@exodus/stasis-core/util'
+import { classifyNativeCapture, isAppleSliceDir, isAutoExcludedFile, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isStasisArtifactName, isTypeDeclaration, refineNativeCapture, stripTypeDeclaration } from '@exodus/stasis-core/util'
 
 const NOT_WIN = { win32: false }
 const WIN = { win32: true }
@@ -183,4 +183,48 @@ test('classifyNativeCapture: an extensionless shell shebang is shell code (conte
   const nodeScript = Buffer.from('#!/usr/bin/env node\nconsole.log(1)\n')
   t.assert.deepEqual(classifyNativeCapture('run-node', { win32: false, content: nodeScript }),
     { action: 'resource' })
+})
+
+// --- the directory-sweep exclusions (`stasis add <dir>`) ---------------------
+
+test('isStasisArtifactName: stasis own outputs, at any depth', (t) => {
+  for (const name of ['stasis.lock.json', 'dist/stasis.lock.json', 'stasis.code.br', 'app.stasis.res.br', 'dist/stasis.code.br']) {
+    t.assert.equal(isStasisArtifactName(name), true, `${name} is a stasis artifact`)
+  }
+  // A `.br` without `stasis` in its NAME isn't one (a dir named `stasis-app/` doesn't make it one),
+  // and neither is a same-stem source file.
+  for (const name of ['assets/data.br', 'stasis-app/data.br', 'stasis.config.json', 'stasis.js']) {
+    t.assert.equal(isStasisArtifactName(name), false, `${name} is not a stasis artifact`)
+  }
+})
+
+test('isAutoExcludedFile: a directory sweep drops type declarations, secrets, and stasis own outputs', (t) => {
+  for (const name of [
+    'src/types.d.ts', 'index.d.mts', 'a/b/legacy.d.cts', // types only, erased at runtime
+    '.env', 'src/.env.production', 'src/web.env', // secrets
+    'stasis.lock.json', 'stasis.code.br', // this run own outputs -- would attest themselves
+  ]) {
+    t.assert.equal(isAutoExcludedFile(name), true, `${name} is auto-excluded from a sweep`)
+  }
+  // Real source and declared-resource candidates are NOT auto-excluded: they go on to the
+  // `resources` check, which is what decides them.
+  for (const name of ['src/a.js', 'src/index.ts', 'src/icon.svg', 'ios/Info.plist', 'stasis.config.json']) {
+    t.assert.equal(isAutoExcludedFile(name), false, `${name} is not auto-excluded`)
+  }
+})
+
+test('isAutoExcludedFile: generated sidecars (*.map, *.js.flow) are excluded unless declared in resources', (t) => {
+  // Neither is code, so an undeclared one would otherwise abort the whole sweep; declaring the
+  // extension in `resources` is the opt-in, and it survives the filter.
+  for (const name of ['dist/bundle.js.map', 'src/index.js.flow']) {
+    t.assert.equal(isAutoExcludedFile(name), true, `${name} is auto-excluded by default`)
+  }
+  t.assert.equal(isAutoExcludedFile('dist/bundle.js.map', { resources: new Set(['map']) }), false)
+  t.assert.equal(isAutoExcludedFile('src/index.js.flow', { resources: new Set(['flow']) }), false)
+  // The opt-in is per-extension: declaring one doesn't un-exclude the other.
+  t.assert.equal(isAutoExcludedFile('src/index.js.flow', { resources: new Set(['map']) }), true)
+  // `resources` can never opt into a type declaration or a secrets file (both classify as code, so
+  // parseResourcesOption rejects their extensions outright).
+  t.assert.equal(isAutoExcludedFile('src/types.d.ts', { resources: new Set(['ts', 'map']) }), true)
+  t.assert.equal(isAutoExcludedFile('src/web.env', { resources: new Set(['env']) }), true)
 })

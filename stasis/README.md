@@ -60,6 +60,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis bundle --add src/worker.js` | merge more entries (and their import graph) into an existing `stasis.code.br` instead of replacing it |
 | `stasis add a.js icon.svg` | add the listed files to the project's bundles (config-driven), with no dependency resolution |
+| `stasis add src assets` | same, expanding each directory to every file under it, minus an auto-excluded set (type declarations, `.env` secrets, `*.map`/`*.js.flow` sidecars, stasis's own outputs); everything that survives still has to be recognized source or a declared `resources` extension, and naming a file explicitly overrides the exclusions |
 | `stasis bundle --conditions=react-native,browser app.js` | statically bundle, asserting extra `exports`/`imports` resolution conditions |
 | `stasis bundle --mainFields=react-native,browser,main app.js` | statically bundle, honoring legacy package `mainFields` (incl. browser-field object redirection) |
 | `stasis bundle --metro --platforms=ios,android app.js` | statically bundle the way Metro resolves: RN conditions + mainFields + `.ios`/`.android`/`.native` suffixes, all platforms at once, plus each bundled native dependency's `ios/`/`android/` sources + podspec |
