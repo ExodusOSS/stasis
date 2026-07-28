@@ -428,8 +428,8 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
   // capture's lockfile is then REJECTED by a cold-cache frozen run ("observed resolution
   // '../../../jest-util/build/index.js' from ... processChild.js is not attested by the lockfile").
   // A frozen verify over a warm cache is the mirror image: it passes vacuously, verifying transforms
-  // nobody performed. Hence both modes drop the stores -- a capture to RECORD what the workers load,
-  // a verify to CHECK it.
+  // nobody performed. Hence every active mode drops the stores -- a capture to RECORD what the
+  // workers load, a verify to CHECK it, a load to REPLAY it (see the bundle=load test below).
   for (const [mode, env, dropLock] of [
     ['a CAPTURE', () => withOpts({ lock: 'add' }), true],
     ['a frozen VERIFY', () => ({ EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' }), false],
@@ -472,9 +472,16 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
     t.assert.match(r.stdout, /^CACHE_STORES_INPUT=\["user-store"\]$/m, 'withStasis must not mutate the input config')
   }))
 
-  test('withStasis leaves the Metro transform cache alone under bundle=load', withTmp(async (t, tmp) => {
-    // Load mode derives each transform from the BUNDLE's bytes, so a cache hit costs no attestation
-    // (and load results are keyed apart by the transformer's getCacheKey marker). Nothing to drop.
+  test('withStasis drops the Metro transform cache under bundle=load too', withTmp(async (t, tmp) => {
+    // Load mode used to keep the cache, on the theory that a hit costs no attestation because the
+    // transform derives from the bundle's bytes. It costs something else: the cache decides which
+    // modules METRO loads. `new Transformer` calls getTransformCacheKey() only when the cache is
+    // enabled (Transformer.js: `this._cache.isDisabled ? '' : ...`), and that call tree resolves the
+    // transformer plus its plugins' cache-key files. A capture -- cache dropped -- never runs it, so
+    // those edges are in no lockfile or bundle, and the replay that does run it fails closed:
+    // "Cannot find module 'metro-transform-worker' imported from .../getTransformCacheKey.js",
+    // reported by Metro as "Failed to construct transformer". Confirmed against real Metro 0.87.
+    // Dropped in every active mode so the loaded set cannot diverge between record and replay.
     cpSync(fullFixture, tmp, { recursive: true })
     const bundlePath = join(tmp, 'snapshot.br')
     const cap = await run('src/entry.js', {
@@ -496,8 +503,8 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
       },
     })
     t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-    t.assert.match(r.stdout, /^CACHE_STORES=\["user-store"\]$/m, "load mode must keep the caller's cache")
-    t.assert.doesNotMatch(r.stderr, /ignoring the `cacheStores`/u, 'nothing was overridden, so nothing to warn about')
+    t.assert.match(r.stdout, /^CACHE_STORES=\[\]$/m, 'a replay must load the same modules a capture did')
+    t.assert.match(r.stderr, /ignoring the `cacheStores` in your Metro config/, 'the override must be announced')
   }))
 
   test('a hand-wired capture warns that Metro\'s transform cache is out of stasis\'s hands', withTmp(async (t, tmp) => {
