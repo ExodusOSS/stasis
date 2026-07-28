@@ -7,7 +7,8 @@ import { brotliCompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
 import { Bundle } from '@exodus/stasis-core/bundle'
-import { Lockfile } from '@exodus/stasis-core/lockfile'
+// shard.js is internal to stasis-core (no package export), like fs.js in metro-fs.test.js.
+import { serializeShard } from '../stasis-core/src/shard.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'state')
 const fileAbs = join(root, 'src', 'foo.js')
@@ -602,7 +603,7 @@ test('shardSnapshot forwards only this-session observations, not the seeded lock
     child.addFile(pathToFileURL(join(dir, 'childonly.js')).toString(), { source: Buffer.from('export const b = 2\n'), format: 'module' })
     const shard = JSON.parse(child.shardSnapshot())
 
-    t.assert.deepEqual(Object.keys(shard.sources?.['.']?.files ?? {}), ['childonly.js'],
+    t.assert.deepEqual(shard.files, ['childonly.js'],
       'shard carries only the observed child-only file, not the seeded baseline.js')
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -649,13 +650,14 @@ test('mergeShard skips a shard key whose on-disk path escapes the root via a sym
     writeFileSync(join(external, 'SECRET.txt'), 'secret') // external content
     symlinkSync(external, join(dir, 'leak'), 'dir') // in-root key 'leak' -> external dir
 
-    const shard = new Lockfile({
-      config: { scope: 'full' },
-      entries: new Set(),
-      modules: new Map([['.', { name: 'p', version: '1.0.0', files: { ok: 'sha512-x', leak: 'sha512-y' } }]]),
-      imports: new Map(),
-      formats: new Map([['ok', 'directory'], ['leak', 'directory']]),
-    }).serialize()
+    // Hand-built shard (see src/shard.js): keys + formats only -- a shard carries no hashes, since
+    // the root re-reads every listing/byte from its own disk.
+    const shard = serializeShard({
+      scope: 'full',
+      files: ['ok', 'leak'],
+      formats: { ok: 'directory', leak: 'directory' },
+      imports: {},
+    })
 
     const rootState = new State(dir, { scope: 'full', lock: 'add' })
     rootState.mergeShard(shard)
