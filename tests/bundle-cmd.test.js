@@ -1346,6 +1346,33 @@ test('CLI: a --metro bundle verifies clean against its own companion lockfile at
   t.assert.doesNotMatch(load.stderr, /ERR_ASSERTION|mismatches the lockfile/)
 }))
 
+// --- Type-declaration entries are never resolution targets ---
+//
+// Some packages point an entry field at a `.d.ts` (e.g. `"main": "dist/index.d.ts"`). A declaration
+// is types-only, erased at runtime, so resolving to it would bundle a file that isn't code. The
+// resolvers refuse to land on one and probe the declaration-free stem instead, landing on the real
+// sibling. Covers the field resolver (--metro); the Metro-resolver adapter gates the same way.
+test('bundle --metro: a dep whose entry points at a .d.ts resolves to the real .js sibling', withTmp(async (t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'rn-app', version: '1.0.0' }))
+  mkdirSync(join(tmp, 'src'), { recursive: true })
+  writeFileSync(join(tmp, 'src', 'entry.js'), "import 'react-native-typed'\nconsole.log('ok')\n")
+  const dep = join(tmp, 'node_modules', 'react-native-typed')
+  mkdirSync(join(dep, 'dist'), { recursive: true })
+  // BOTH entry fields name the declaration -- the real module is the `.js` beside it.
+  writeFileSync(join(dep, 'package.json'), JSON.stringify({
+    name: 'react-native-typed', version: '1.0.0', main: 'dist/index.d.ts', 'react-native': 'dist/index.d.ts',
+  }))
+  writeFileSync(join(dep, 'dist', 'index.d.ts'), 'export declare const x: number\n')
+  writeFileSync(join(dep, 'dist', 'index.js'), "module.exports = 'typed'\n")
+
+  const bundle = await buildBundle({ cwd: tmp, entries: ['src/entry.js'], metro: true, platforms: ['ios'] })
+  const files = new Set(Object.keys(bundle.modules.get('node_modules/react-native-typed').files))
+  t.assert.ok(files.has('dist/index.js'), 'the real .js sibling is resolved and carried')
+  t.assert.ok(!files.has('dist/index.d.ts'), 'the type-only declaration is NOT carried')
+  t.assert.equal(bundle.formats.get('node_modules/react-native-typed/dist/index.js'), 'commonjs')
+  t.assert.equal(bundle.formats.get('node_modules/react-native-typed/dist/index.d.ts'), undefined)
+}))
+
 // --- Native modules in a --metro bundle (ios/android sources + podspecs) ---
 //
 // A bundled React Native dependency's native build-input surface -- its podspec and
@@ -1423,6 +1450,14 @@ const writeRnFixture = (root) => {
   writeFileSync(join(dep, 'ios', 'README.md'), '# doc\n')
   writeFileSync(join(dep, 'ios', 'install.bat'), '@echo off\n')
   writeFileSync(join(dep, 'ios', 'RNThing.js.map'), '{"version":3}\n')
+  writeFileSync(join(dep, 'ios', 'documentation.yml'), 'toc:\n  - name: Thing\n') // documentation.js config
+  writeFileSync(join(dep, 'ios', 'RNThing.js.flow'), 'declare module.exports: any\n') // Flow declaration sidecar
+  // A LOOSE Apple per-arch slice dir (not inside a `*.xcframework`): prebuilt output, pruned whole.
+  mkdirSync(join(dep, 'ios', 'ios-arm64_x86_64-simulator'), { recursive: true })
+  writeFileSync(join(dep, 'ios', 'ios-arm64_x86_64-simulator', 'Slice.h'), '// prebuilt slice header\n')
+  // A BINARY plist (bplist00): non-UTF-8, so it can't ride the `.plist`->xml code path. Opt-in via
+  // --resources plist; the assertions below cover both the default (excluded) and opted-in cases.
+  writeFileSync(join(dep, 'ios', 'Binary.plist'), Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])]))
   mkdirSync(join(dep, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace'), { recursive: true })
   writeFileSync(join(dep, 'ios', 'RNThing.xcodeproj', 'project.pbxproj'), '// pbxproj\n')
   writeFileSync(join(dep, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace', 'contents.xcworkspacedata'), '<Workspace/>\n')
@@ -1449,7 +1484,12 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.ok(!files.has('ios/config.env'), 'a *.env-extension file is env-family: skipped by automated capture')
   t.assert.ok(!files.has('android/build/generated.o'), 'build output is excluded')
   // Non-build-input noise + Xcode project bundle excluded; podspec-referenced plist/xcprivacy kept.
-  for (const f of ['ios/README.md', 'ios/install.bat', 'ios/RNThing.js.map', 'ios/RNThing.xcodeproj/project.pbxproj', 'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata']) {
+  for (const f of ['ios/README.md', 'ios/install.bat', 'ios/RNThing.js.map', 'ios/RNThing.xcodeproj/project.pbxproj', 'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata',
+    'ios/documentation.yml', // documentation.js config (NOT all YAML -- only this name)
+    'ios/RNThing.js.flow', // Flow declaration sidecar
+    'ios/ios-arm64_x86_64-simulator/Slice.h', // a LOOSE Apple per-arch slice dir is pruned whole
+    'ios/Binary.plist', // a BINARY plist is opt-in via --resources plist; not set here
+  ]) {
     t.assert.ok(!files.has(f), `${f} is excluded`)
   }
   t.assert.ok(files.has('ios/PrivacyInfo.xcprivacy'), 'Apple privacy manifest is kept')
@@ -1506,6 +1546,21 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.deepEqual(Buffer.from(mod.files['ios/logo.png'], 'base64'), PNG_BYTES)
   // A JS-only bundled dep contributes no native surface (only its reached JS).
   t.assert.deepEqual(Object.keys(bundle.modules.get('node_modules/js-only').files), ['index.js'])
+}))
+
+test('buildBundle --metro --resources plist carries a BINARY plist as base64 (opt-in)', withTmp(async (t, tmp) => {
+  // A bplist can't ride the `.plist` -> 'xml' code path (its bytes aren't UTF-8) -- that combination
+  // used to fail the capture outright. Opting `.plist` into resources carries it as opaque base64.
+  writeRnFixture(tmp)
+  const bundle = await buildBundle({ cwd: tmp, entries: ['src/entry.js'], metro: true, platforms: ['ios'], resources: ['plist'] })
+  const mod = bundle.modules.get('node_modules/rn-native')
+  t.assert.ok(Object.keys(mod.files).includes('ios/Binary.plist'), 'the binary plist is carried when opted in')
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/Binary.plist'), 'resource:base64')
+  // The payload decodes back to the exact bplist bytes.
+  t.assert.deepEqual(Buffer.from(mod.files['ios/Binary.plist'], 'base64'),
+    Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])]))
+  // A TEXT plist stays on the code path as 'xml' regardless of the resources opt-in.
+  t.assert.equal(bundle.formats.get('node_modules/rn-native/ios/RNThing-Info.plist'), 'xml')
 }))
 
 test('buildBundle --mainFields (no --metro) does NOT pull native ios/android sources', withTmp(async (t, tmp) => {

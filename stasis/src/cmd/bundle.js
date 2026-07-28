@@ -13,7 +13,7 @@ import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, nativeBinaryPlistAllowed, parseResourcesOption, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -601,7 +601,8 @@ function walkNativeDir(dirAbs, out) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) walkNativeDir(full, out)
+      // Apple per-arch slice dirs (`ios-arm64_x86_64-simulator`) hold prebuilt output, not source.
+      if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name) && !isAppleSliceDir(ent.name)) walkNativeDir(full, out)
     } else if (ent.isFile() && !isNativeArtifact(ent.name)) {
       out.push(full)
     }
@@ -621,7 +622,8 @@ function collectNativeManifests(dirAbs, out, atRoot = false) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      const skipDir = NATIVE_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
+      const skipDir = NATIVE_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name)
+        || isAppleSliceDir(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
       if (!skipDir) collectNativeManifests(full, out)
     } else if (ent.isFile() && isNativeManifest(ent.name)) {
       out.push(full)
@@ -781,6 +783,15 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
         const utf8 = isUtf8(buf)
         // A prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -- skip it.
         if (isExtensionlessBinary(rel, buf)) continue
+        // A BINARY plist can't ride the text/code path a `.plist` classifies onto: carry it as an
+        // opaque base64 resource, and only when `.plist` is opted into via --resources.
+        if (isBinaryPlist(rel, buf)) {
+          if (!nativeBinaryPlistAllowed(resourceSet)) continue
+          sources.set(rel, buf.toString('base64'))
+          formatsByRel.set(rel, 'resource:base64')
+          integrities.set(rel, sha512integrity(buf))
+          continue
+        }
         if (action === 'code') {
           if (!utf8) throw new Error(`native source is not valid UTF-8: ${rel}`)
           sources.set(rel, buf.toString('utf8'))

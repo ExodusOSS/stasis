@@ -3,6 +3,8 @@ import { createRequire, isBuiltin } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { isTypeDeclaration, stripTypeDeclaration } from '@exodus/stasis-core/util'
+
 // Static module resolver for legacy package fields (`react-native`/`browser`/`main` + browser-spec
 // redirect maps) and platform suffixes (`.ios`/`.android`/`.native`), reproducing Metro/React-Native
 // resolution that Node's own resolver (used by scan.js) can't. `exports`-bearing packages are
@@ -183,6 +185,11 @@ function matchBareRedirect(map, spec) {
 // empty module (e.g. browser { "./index.ios.js": false }), and a string redirect re-lands the
 // candidate package-root-relative. Returns a path, { empty: true } (metro only), or null.
 function resolveSourceFile(base, opts) {
+  // A path that literally names a `.d.ts` names no runtime module (types are erased). Probe its
+  // declaration-free stem instead, so an entry field pointing at `dist/index.d.ts` lands on the real
+  // `dist/index.js` beside it rather than bundling the declaration -- or failing the package
+  // outright by falling back to a different index. The probe below still refuses a literal hit.
+  base = stripTypeDeclaration(base)
   // Candidates share base's directory, hence its package scope; resolve it lazily, once.
   let scope
   const redirectCandidate = (p) => {
@@ -205,6 +212,9 @@ function resolveSourceFile(base, opts) {
       if (r === false) return { empty: true }
       p = r
     }
+    // A `.d.ts` is types-only, erased at runtime: never a resolution target, so a package whose
+    // entry field points at one falls through to its real `.js` instead of bundling the declaration.
+    if (isTypeDeclaration(p)) return null
     return isFile(p) ? p : null
   }
   const tryExt = (sourceExt) => {
