@@ -383,46 +383,71 @@ export function moduleFileKey(dir, rel) {
   return dir === '.' ? rel : `${dir}/${rel}`
 }
 
-// Every flat project-relative key a module map records (bucket dir + per-bucket rel), the file set
-// an artifact's `executable` list must be a subset of.
-export function moduleFileKeys(modules) {
+// The flat project-relative keys a module map records -- the file set an artifact's `executable`
+// list must be a subset of. `scope` MUST be the artifact's own: a non-full-scope artifact serializes
+// only its node_modules buckets (Bundle/Lockfile.serialize drop `sources`), so its workspace files
+// are not keys the WRITTEN artifact records, and listing one produces an artifact its own parser
+// rejects. Parsers may omit it -- what they read back is already scope-filtered.
+export function moduleFileKeys(modules, { scope = 'full' } = {}) {
   const keys = new Set()
   for (const [dir, { files }] of modules) {
+    if (scope !== 'full' && !hasNodeModulesSegment(dir)) continue
     for (const rel of Object.keys(files)) keys.add(moduleFileKey(dir, rel))
   }
   return keys
 }
 
-// The POSIX execute bits (user/group/other). A file carrying any of them is recorded in the
-// artifact's `executable` list so `stasis extract` can restore the bit; Windows reports none, so a
-// capture there records no executables at all.
-export const EXECUTE_BITS = 0o111
-export const isExecutableMode = (mode) => Number.isInteger(mode) && (mode & EXECUTE_BITS) !== 0
+// The POSIX execute bits (user/group/other).
+const EXECUTE_BITS = 0o111
 
-// Executability of the file at absolute path `abs`, following symlinks (the recorded bytes are the
-// target's, so the target's mode is the honest answer). A path that can't be stat'd -- gone mid-run,
-// or a synthetic bundle entry with no file on disk -- is simply not executable.
+// Executability of the REGULAR FILE at absolute path `abs`, following symlinks (the recorded bytes
+// are the target's, so the target's mode is the honest answer). A directory is never executable in
+// this sense whatever its mode -- `executable` holds files only, and the parsers reject a directory
+// entry, so answering true here would let a writer emit an artifact it can't read back. A path that
+// can't be stat'd -- gone mid-run, or a synthetic bundle entry with no file on disk -- is not executable.
 export function isExecutableFile(abs) {
-  try {
-    return isExecutableMode(statSync(abs).mode)
-  } catch {
-    return false
+  const stats = statSync(abs, { throwIfNoEntry: false })
+  return stats !== undefined && stats.isFile() && (stats.mode & EXECUTE_BITS) !== 0
+}
+
+// Whether this platform reports POSIX execute bits at all. Windows does not (libuv synthesizes
+// 0o666/0o444), so a capture there can neither observe a bit nor honestly refute one: it records
+// none, and must NOT read "no bit" as "the bit was removed" and strip what a POSIX capture attested.
+// Same win32 opt-out shape as isExcludedNativeFile.
+export const canObserveExecuteBits = ({ win32 = process.platform === 'win32' } = {}) => !win32
+
+// Narrow an executable set to the files an artifact will actually SERIALIZE -- the invariant
+// parseExecutable enforces on read, applied at every write site so a writer can't emit an artifact
+// its own parser refuses. `files` is the post-scope-filter key set (moduleFileKeys with the
+// artifact's scope); `formats` excludes a `directory` capture, matching parseExecutable exactly.
+export function narrowExecutable(executable, files, formats) {
+  const out = new Set()
+  if (executable.size === 0) return out
+  for (const file of executable) {
+    if (files.has(file) && formats?.get(file) !== 'directory') out.add(file)
   }
+  return out
 }
 
 // Validate a serialized `executable` array into a Set of project-relative paths. Every entry must
-// name a file the artifact itself records, and never a `directory` capture (a listing, not a file):
-// an entry naming anything else is malformed -- there is nothing for `extract` to chmod -- so fail
-// closed rather than carry it. `what` names the artifact ('bundle'/'lockfile') in the messages.
+// name a file the artifact itself records, and never a `directory` capture (a listing) or a
+// payload-free `stat:*` record: an entry naming anything else is malformed -- there is nothing for
+// `extract` to chmod -- so fail closed rather than carry it. `what` names the artifact in the messages.
 export function parseExecutable(list, { what, files, formats }) {
   if (list === undefined) return new Set()
-  assert(Array.isArray(list), `${what}: executable must be an array of file paths`)
+  const at = `${what}: executable`
+  assert(Array.isArray(list), `${at} must be an array of file paths`)
   const out = new Set()
   for (const file of list) {
-    assert(typeof file === 'string' && file !== '', `${what}: executable entry must be a non-empty string`)
-    assert(!posixPathEscapes(file), `${what}: executable entry '${file}' escapes the root`)
-    assert(files.has(file), `${what}: executable entry '${file}' names no file the ${what} records`)
-    assert(formats.get(file) !== 'directory', `${what}: executable entry '${file}' is a directory capture, not a file`)
+    assert(typeof file === 'string' && file !== '', `${at} entry must be a non-empty string`)
+    assert(!posixPathEscapes(file), `${at} entry '${file}' escapes the root`)
+    assert(files.has(file), `${at} entry '${file}' names no file the ${what} records`)
+    // Fail closed on a dupe like every sibling parse rule (duplicate file/format keys), rather than
+    // letting out.add() silently collapse it and round-trip to different bytes.
+    assert(!out.has(file), `${at} entry '${file}' is listed twice`)
+    const format = formats.get(file)
+    assert(format !== 'directory', `${at} entry '${file}' is a directory capture, not a file`)
+    assert(!isStatFormat(format), `${at} entry '${file}' is a payload-free '${format}' record, not a file`)
     out.add(file)
   }
   return out
@@ -557,6 +582,18 @@ export function mergeFormatMaps(a, b, label) {
   }
   absorb(a)
   absorb(b)
+  return out
+}
+
+// Merge two artifacts' `executable` lists. A union, EXCEPT that `b` -- the INCOMING (newer)
+// artifact -- is authoritative for the files it records: a file both sides carry takes b's bit, so
+// re-adding a file that has since lost its execute bit clears the stale entry instead of the union
+// resurrecting it. Without that, `stasis add` / `stasis bundle --add` could only ever grant a bit,
+// never revoke one, and `extract` would keep restoring +x the source tree no longer has. `bFiles`
+// is b's recorded file set (moduleFileKeys); every call site has the newer artifact on the right.
+export function mergeExecutableSets(a, b, bFiles) {
+  const out = new Set(b)
+  for (const file of a) if (!bFiles.has(file)) out.add(file)
   return out
 }
 

@@ -35,17 +35,31 @@ restored: sources are still extracted, the lockfile is skipped with a warning.
 
 Existing files at target paths are overwritten, including a pre-existing `stasis.lock.json`.
 
-## Executable files
+## File modes
 
-Every file the bundle's `executable` array names (see
-[file-formats.md](file-formats.md#executable-files)) is `chmod`ed after it is
-written, so a bundled shell script or CLI comes back runnable. The restored mode is
-derived from the mode the write just produced — execute is added wherever the file
-is readable (`0644` → `0755`, a private `0600` → `0700`) — so it follows the
-caller's umask rather than a hard-coded `0755`. Only files `extract` actually wrote
-are touched, and the derived `stasis.lock.json` carries the same list. A bundle with
-no `executable` array (nothing executable, or a legacy `version: 0` bundle) chmods
-nothing.
+`extract` sets the mode of every file it writes, from the process umask: `0644` for a
+plain file and `0755` for one the bundle's `executable` array names (see
+[file-formats.md](file-formats.md#executable-files)), or `0600`/`0700` under a `077`
+umask, and so on. So a bundled shell script or CLI comes back runnable.
+
+Applying it to *every* written file — not just the executable ones — is what makes the
+extracted tree match the artifact. `writeFileSync` keeps a pre-existing file's mode, so
+deriving from what's already on disk would mean re-extracting could neither drop an
+execute bit the bundle stopped attesting nor avoid arming a stale setuid bit; the mode
+is masked to plain permission bits, so setuid/setgid/sticky are never carried over. An
+executable always keeps at least owner-execute, so an aggressive umask can't quietly
+produce a file the bundle says is runnable and isn't.
+
+Only files `extract` actually wrote are touched, and the derived `stasis.lock.json`
+carries the same list. A bundle with no `executable` array — nothing executable, or a
+legacy `version: 0` bundle, whose list is ignored — leaves everything non-executable.
+A filesystem that can't store modes (vfat/exFAT/CIFS, some bind mounts) is tolerated
+per file: the bytes still land, the lockfile is still written, and the count of files
+whose mode could not be set is reported.
+
+> [!NOTE]
+> Mode setting follows symlinks, just as the writes do — one more reason to extract an
+> untrusted bundle into a fresh, empty directory (see below).
 
 ## Untrusted input
 

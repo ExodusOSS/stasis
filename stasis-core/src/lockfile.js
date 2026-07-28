@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -115,9 +115,12 @@ export class Lockfile {
       formats.set(key, format)
     }
 
-    // Every executable must be a file this lockfile attests (a stat record, which has no `files`
-    // entry, doesn't count -- it carries no content and nothing rebuilds a file from it).
-    const executable = parseExecutable(json.executable, { what: 'lockfile', files: moduleFileKeys(modules), formats })
+    // Every executable must be a file this lockfile attests. The key index is built only when the
+    // (usually absent) key is present -- indexing every attested file on every parse, just to throw
+    // it away, would tax the startup path of every run.
+    const executable = json.executable === undefined
+      ? new Set()
+      : parseExecutable(json.executable, { what: 'lockfile', files: moduleFileKeys(modules), formats })
 
     return new Lockfile({ config: json.config, entries, modules, imports, formats, executable })
   }
@@ -158,8 +161,9 @@ export class Lockfile {
       modules: mergeModuleMaps(this.modules, other.modules, 'lockfile merge'),
       imports: mergeNullable(this.imports, other.imports, (a, b) => mergeImportMaps(a, b, 'lockfile merge'), 'imports'),
       formats: mergeNullable(this.formats, other.formats, (a, b) => mergeFormatMaps(a, b, 'lockfile merge'), 'formats'),
-      // Union, like Bundle.merge: the merged file set is the union, so the exec bits are too.
-      executable: new Set([...this.executable, ...other.executable]),
+      // `other` (the incoming, newer lockfile) wins for the files it records -- see mergeExecutableSets.
+      executable: mergeExecutableSets(this.executable, other.executable,
+        moduleFileKeys(other.modules, { scope: this.config.scope })),
     })
   }
 }

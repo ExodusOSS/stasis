@@ -37,7 +37,9 @@ export function normalizeArtifact(input, { hash } = {}) {
     // v0 bundles record no name/version; normalize undefined -> null for a single "unknown" sentinel.
     modules.set(dir, { name: name ?? null, version: version ?? null, ecosystem: ecosystem ?? null, files: digests })
   }
-  return { scope: artifact.config?.scope ?? 'full', modules }
+  // `executable` decides which files `stasis extract` chmods +x, so a change to it changes the tree
+  // an artifact produces even when every digest matches -- it has to be part of "did these differ?".
+  return { scope: artifact.config?.scope ?? 'full', modules, executable: artifact.executable ?? new Set() }
 }
 
 const projectPath = (dir, rel) => (dir === '.' ? rel : `${dir}/${rel}`)
@@ -99,10 +101,22 @@ export function diffArtifacts(left, right, { imports = false, hash } = {}) {
   filesRemoved.sort(sortPaths)
   filesDiffering.sort(sortPaths)
 
+  // Execute-bit changes, reported for every path either side marks (not just files in shared
+  // modules): gaining or losing +x is a real change to the extracted tree, whatever bucket it sits in.
+  const executableAdded = []
+  const executableRemoved = []
+  for (const file of new Set([...L.executable, ...R.executable])) {
+    if (!L.executable.has(file)) executableAdded.push(file)
+    else if (!R.executable.has(file)) executableRemoved.push(file)
+  }
+  executableAdded.sort(sortPaths)
+  executableRemoved.sort(sortPaths)
+
   const result = {
     scope: { left: L.scope, right: R.scope },
     modules: { added: modulesAdded, removed: modulesRemoved, changed: modulesChanged },
     files: { added: filesAdded, removed: filesRemoved, differing: filesDiffering },
+    executable: { added: executableAdded, removed: executableRemoved },
   }
   if (imports) result.imports = diffImports(left, right)
   return result
@@ -173,10 +187,12 @@ export function diffImports(left, right) {
 // True when the diff records any module-, file-, or import-level change. Scope alone is
 // informational and doesn't count (unattested imports contribute empty lists).
 export function hasDifferences(diff) {
-  const { modules, files, imports } = diff
+  const { modules, files, executable, imports } = diff
   let n =
     modules.added.length + modules.removed.length + modules.changed.length +
     files.added.length + files.removed.length + files.differing.length
+  // Absent on a diff produced before `executable` existed; a missing facet contributes nothing.
+  if (executable) n += executable.added.length + executable.removed.length
   if (imports) n += imports.added.length + imports.removed.length + imports.changed.length
   return n > 0
 }
@@ -210,7 +226,7 @@ const targetList = (files) => files.join(', ')
 // when present); reports what changed, not the text. `labels` is { left, right, leftKind, rightKind }.
 // Returns a string ending in a newline.
 export function formatDiffStat(diff, { left = '(left)', right = '(right)', leftKind, rightKind } = {}) {
-  const { modules: m, files: f, imports: im, scope } = diff
+  const { modules: m, files: f, executable: ex, imports: im, scope } = diff
   const lines = ['stasis diff --stat']
   const label = (kind) => (kind ? `${KIND_LABEL[kind]}, ` : '')
   lines.push(`  ${REMOVED} ${left} (${label(leftKind)}scope=${scope.left})`)
@@ -232,6 +248,15 @@ export function formatDiffStat(diff, { left = '(left)', right = '(right)', leftK
   for (const p of f.removed) lines.push(`  ${REMOVED} ${p}`)
   for (const p of f.added) lines.push(`  ${ADDED} ${p}`)
   for (const p of f.differing) lines.push(`  ${CHANGED} ${p}`)
+
+  // Only rendered when something changed: an unchanged execute-bit set is the overwhelming norm,
+  // and a permanent "0 added, 0 removed" line would be noise in every diff.
+  if (ex && (ex.added.length > 0 || ex.removed.length > 0)) {
+    lines.push('')
+    lines.push(`Executable: ${ex.added.length} added, ${ex.removed.length} removed`)
+    for (const p of ex.removed) lines.push(`  ${REMOVED} ${p}`)
+    for (const p of ex.added) lines.push(`  ${ADDED} ${p}`)
+  }
 
   if (im) {
     lines.push('')

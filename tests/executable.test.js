@@ -12,6 +12,7 @@ import { addCommand } from '@exodus/stasis-core/add'
 import { extractCommand, lockfileFromBundle } from '@exodus/stasis-core/extract'
 import { buildBashBundle, bundleCommand } from '../stasis/src/cmd/bundle.js'
 import { bundleFromLockfile } from '../stasis/src/bundle-from-lockfile.js'
+import { diffArtifacts, formatDiffStat, hasDifferences } from '../stasis/src/diff.js'
 
 // The `executable` array records which of an artifact's files carried a POSIX execute bit when they
 // were captured, so `stasis extract` can put the bit back. It sits at the top level of both the
@@ -27,7 +28,12 @@ const withTmp = (prefix) => (fn) => async (t) => {
   }
 }
 
+// Everything that chmods or reads a mode is POSIX-only: Windows exposes no execute bits (see
+// canObserveExecuteBits), so the seeding chmods are no-ops and the assertions become vacuous there.
+const posixOnly = { skip: process.platform === 'win32' && 'POSIX execute bits' }
+
 const isExec = (path) => (statSync(path).mode & 0o111) !== 0
+const perms = (path) => statSync(path).mode & 0o777
 const decode = (path) => Bundle.parse(brotliDecompressSync(readFileSync(path)).toString('utf8'))
 
 // ── serialized shape ─────────────────────────────────────────────────────────
@@ -128,9 +134,69 @@ test('Lockfile.parse refuses an `executable` entry that names no attested file',
   t.assert.deepEqual([...Lockfile.parse(raw(['run.sh'])).executable], ['run.sh'])
   t.assert.throws(() => Lockfile.parse(raw(['probed.sh'])), /names no file the lockfile records/)
   t.assert.throws(() => Lockfile.parse(raw(['/etc/passwd'])), /escapes the root/)
+  // Duplicates fail closed like every sibling parse rule, rather than silently collapsing and
+  // round-tripping to different bytes than the input.
+  t.assert.throws(() => Lockfile.parse(raw(['run.sh', 'run.sh'])), /is listed twice/)
+})
+
+// A stat record is payload-free -- there is nothing to chmod. It normally can't appear because it
+// has no `files` entry, but a hand-built artifact can supply one, so the format is checked directly.
+test('parse refuses an `executable` entry naming a payload-free stat record', (t) => {
+  const raw = (version, extra) => JSON.stringify({
+    version,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { '.': { name: 'app', version: '1.0.0', files: { 'probed.sh': version === 0 ? 'sha512-a' : '#!/bin/sh\n' } } },
+    modules: {},
+    formats: { 'probed.sh': 'stat:file' },
+    imports: {},
+    executable: ['probed.sh'],
+    ...extra,
+  })
+  t.assert.throws(() => Bundle.parse(raw(1)), /is a payload-free 'stat:file' record, not a file/)
+  t.assert.throws(() => Lockfile.parse(raw(0)), /is a payload-free 'stat:file' record, not a file/)
+})
+
+test('Bundle.parse ignores an `executable` list on a legacy v0 bundle', (t) => {
+  // v0 carries no per-file `formats`, so the directory/stat guards can't run; honoring the list
+  // would let a legacy-shaped untrusted bundle pick a path for `extract` to chmod +x.
+  const raw = JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    sources: { 'run.sh': '#!/bin/sh\n' },
+    formats: {},
+    imports: {},
+    executable: ['run.sh'],
+  })
+  t.assert.deepEqual([...Bundle.parse(raw).executable], [])
 })
 
 // ── merge ────────────────────────────────────────────────────────────────────
+
+test('merge lets the incoming artifact clear a bit for a file it records', (t) => {
+  const bundle = (executable) => new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(),
+    modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'run.sh': '#!/bin/sh\n' } }]]),
+    formats: new Map([['run.sh', 'shell']]),
+    executable: new Set(executable),
+  })
+  // `stasis add` / `stasis bundle --add` re-read the file and put the fresh build on the RIGHT. A
+  // plain union would resurrect the stale bit and `extract` would keep granting +x forever.
+  t.assert.deepEqual([...bundle(['run.sh']).merge(bundle([])).executable], [])
+  // ...and the reverse still grants it.
+  t.assert.deepEqual([...bundle([]).merge(bundle(['run.sh'])).executable], ['run.sh'])
+
+  const lock = (executable) => new Lockfile({
+    config: { scope: 'full' },
+    entries: new Set(),
+    modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'run.sh': 'sha512-x' } }]]),
+    imports: new Map(),
+    formats: new Map([['run.sh', 'shell']]),
+    executable: new Set(executable),
+  })
+  t.assert.deepEqual([...lock(['run.sh']).merge(lock([])).executable], [])
+})
 
 test('merge unions the executable lists of both artifacts', (t) => {
   const bundle = (rel, content, executable) => new Bundle({
@@ -166,7 +232,7 @@ const seedProject = (tmp) => {
   chmodSync(join(tmp, 'run.sh'), 0o755)
 }
 
-test('State records the execute bit of a captured file into both the bundle and the lockfile', withTmp('exec-state')((t, tmp) => {
+test('State records the execute bit of a captured file into both the bundle and the lockfile', posixOnly, withTmp('exec-state')((t, tmp) => {
   seedProject(tmp)
   const state = new State(tmp, { scope: 'full', bundle: 'add' })
   state.addFile(pathToFileURL(join(tmp, 'plain.cjs')).toString(), { format: 'commonjs', isEntry: true })
@@ -177,7 +243,7 @@ test('State records the execute bit of a captured file into both the bundle and 
   t.assert.deepEqual(JSON.parse(state.lockData).executable, ['run.sh'])
 }))
 
-test('State drops a stale execute bit once the file loses it on disk', withTmp('exec-restat')((t, tmp) => {
+test('State drops a stale execute bit once the file loses it on disk', posixOnly, withTmp('exec-restat')((t, tmp) => {
   seedProject(tmp)
 
   // Capture once with the bit set, and persist both artifacts.
@@ -198,18 +264,20 @@ test('State drops a stale execute bit once the file loses it on disk', withTmp('
   t.assert.ok(!Object.hasOwn(JSON.parse(second.sourceData), 'executable'))
 }))
 
-test('a bundle=load State serves the executable list it absorbed', withTmp('exec-load')((t, tmp) => {
+test('a bundle=load State serves the executable list it absorbed', posixOnly, withTmp('exec-load')((t, tmp) => {
   seedProject(tmp)
   const cap = new State(tmp, { scope: 'full', bundle: 'add' })
   cap.addFile(pathToFileURL(join(tmp, 'run.sh')).toString(), { format: 'shell', isEntry: true })
   cap.write()
 
-  // bundle=load can't compose with a writing lock mode, so read the lockfile frozen alongside it.
-  const load = new State(tmp, { scope: 'full', bundle: 'load', lock: 'frozen' })
+  // lock:'ignore', NOT 'frozen': a loaded lockfile would seed `executable` on its own, so the
+  // assertion would pass even if the bundle-absorb path recorded nothing. This isolates the bundle.
+  rmSync(join(tmp, 'stasis.lock.json'))
+  const load = new State(tmp, { scope: 'full', bundle: 'load', lock: 'ignore' })
   t.assert.deepEqual([...load.executable], ['run.sh'])
 }))
 
-test('a split bundle layout lists only its own executables in each half', withTmp('exec-split')((t, tmp) => {
+test('a split bundle layout lists only its own executables in each half', posixOnly, withTmp('exec-split')((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
   writeFileSync(join(tmp, 'run.sh'), '#!/bin/sh\n')
   writeFileSync(join(tmp, 'tool.bin'), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00]))
@@ -239,7 +307,7 @@ test('a split bundle layout lists only its own executables in each half', withTm
   t.assert.deepEqual([...decode(join(tmp, 'res.br')).executable], ['tool.bin'])
 }))
 
-test('a `directory` capture is never listed executable', withTmp('exec-dir')((t, tmp) => {
+test('a `directory` capture drops an execute bit a prior content record left on that path', posixOnly, withTmp('exec-dir')((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
   mkdirSync(join(tmp, 'src'))
   writeFileSync(join(tmp, 'src', 'a.js'), 'export const a = 1\n')
@@ -247,15 +315,79 @@ test('a `directory` capture is never listed executable', withTmp('exec-dir')((t,
   chmodSync(join(tmp, 'src'), 0o755)
 
   const state = new State(tmp, { scope: 'full', bundle: 'add' })
+  // Seed the path as executable the way a prior run's artifact would (when `src` was still a file),
+  // so the delete in addFsDir has something to remove -- otherwise this test can't fail.
+  state.executable.add('src')
   state.addFsDir(pathToFileURL(join(tmp, 'src')).toString(), ['a.js'])
   t.assert.equal(state.formats.get('src'), 'directory')
   t.assert.deepEqual([...state.executable], [])
   t.assert.deepEqual([...state.sourceBundle.executable], [])
+
+  // Belt and braces: even if a stale entry survived on the live set, the narrowing that feeds both
+  // artifacts drops a `directory`-format path, so neither can emit one its own parser would refuse.
+  state.executable.add('src')
+  t.assert.deepEqual([...state.sourceBundle.executable], [])
+  t.assert.ok(!Object.hasOwn(JSON.parse(state.lockData), 'executable'))
+}))
+
+// A non-full-scope artifact drops its workspace buckets at serialize time, so an executable
+// workspace file must not survive into the emitted list -- it would name a file the written
+// artifact no longer records, and both parsers refuse that. Regression: the pair used to write a
+// lockfile AND bundle that the very next run could not read, bricking the project.
+test('scope=node_modules never emits an executable the serialized artifact drops', posixOnly, withTmp('exec-scope')((t, tmp) => {
+  seedProject(tmp)
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '2.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'cli.js'), 'module.exports = 1\n')
+  chmodSync(join(tmp, 'node_modules', 'dep', 'cli.js'), 0o755)
+
+  const state = new State(tmp, { scope: 'node_modules', lock: 'add', bundle: 'add' })
+  state.addFile(pathToFileURL(join(tmp, 'run.sh')).toString(), { format: 'shell' })
+  state.addFile(pathToFileURL(join(tmp, 'node_modules', 'dep', 'cli.js')).toString(), { format: 'commonjs' })
+
+  // The workspace script is dropped with its bucket; the dependency's CLI survives in both.
+  t.assert.deepEqual(JSON.parse(state.lockData).executable, ['node_modules/dep/cli.js'])
+  t.assert.deepEqual(JSON.parse(state.sourceData).executable, ['node_modules/dep/cli.js'])
+  // Both artifacts round-trip through their own parsers -- the property the bug violated.
+  t.assert.doesNotThrow(() => Lockfile.parse(state.lockData))
+  t.assert.doesNotThrow(() => Bundle.parse(state.sourceData))
+
+  // And a second run over what the first wrote constructs cleanly.
+  state.write()
+  t.assert.doesNotThrow(() => new State(tmp, { scope: 'node_modules', lock: 'add', bundle: 'add' }))
+}))
+
+// A write-mode sidecar (the bundler-plugin shape) is the State that re-reads the file, but the
+// PARENT owns the lockfile and seeded the bit from it. Without the parent-side clear, the union in
+// #mergedExecutable resurrects a bit the sidecar just refuted -- forever, on every run.
+test('a sidecar re-read clears the execute bit the parent seeded from the lockfile', posixOnly, withTmp('exec-sidecar')((t, tmp) => {
+  seedProject(tmp)
+  // A distinct sidecar path per pass: the write-target claim registry is process-wide and the first
+  // pass's States stay live for the whole test. The bit under test rides the parent's LOCKFILE seed,
+  // not the sidecar bundle, so this doesn't weaken what's being exercised.
+  const capture = (name) => {
+    const parent = new State(tmp, { scope: 'full', lock: 'add', bundle: 'ignore' })
+    const sidecar = new State(tmp, { parent, bundle: 'add', bundleFile: join(tmp, name) })
+    sidecar.addFile(pathToFileURL(join(tmp, 'run.sh')).toString(), { format: 'shell', isEntry: true })
+    return { parent, sidecar }
+  }
+
+  const first = capture('side-1.br')
+  t.assert.deepEqual(JSON.parse(first.parent.lockData).executable, ['run.sh'])
+  first.parent.write()
+  first.sidecar.write()
+
+  // The bytes are unchanged, so nothing else about the re-capture differs.
+  chmodSync(join(tmp, 'run.sh'), 0o644)
+  const second = capture('side-2.br')
+  t.assert.deepEqual([...second.sidecar.executable], [], 'the sidecar that re-read it drops the bit')
+  t.assert.ok(!Object.hasOwn(JSON.parse(second.parent.lockData), 'executable'),
+    'and the lockfile the parent writes drops it too')
 }))
 
 // ── static builders ──────────────────────────────────────────────────────────
 
-test('the bash bundler records the execute bit of every script it walks', withTmp('exec-bash')(async (t, tmp) => {
+test('the bash bundler records the execute bit of every script it walks', posixOnly, withTmp('exec-bash')(async (t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'scripts', version: '1.0.0' }))
   writeFileSync(join(tmp, 'main.sh'), '#!/bin/bash\nsource ./lib.sh\n')
   writeFileSync(join(tmp, 'lib.sh'), '#!/bin/bash\necho lib\n')
@@ -266,7 +398,7 @@ test('the bash bundler records the execute bit of every script it walks', withTm
   t.assert.deepEqual([...Bundle.parse(bundle.serialize()).executable], ['main.sh'])
 }))
 
-test('`stasis bundle --lockfile` writes the same executable list to both artifacts', withTmp('exec-cmd')(async (t, tmp) => {
+test('`stasis bundle --lockfile` writes the same executable list to both artifacts', posixOnly, withTmp('exec-cmd')(async (t, tmp) => {
   const src = join(tmp, 'src')
   mkdirSync(src)
   writeFileSync(join(src, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0', type: 'module' }))
@@ -288,7 +420,7 @@ test('`stasis bundle --lockfile` writes the same executable list to both artifac
   for (const file of bundle.executable) t.assert.ok(bundle.sources.has(file), `${file} is carried`)
 }))
 
-test('bundleFromLockfile carries the lockfile executable list into the rebuilt bundle', withTmp('exec-from-lock')((t, tmp) => {
+test('bundleFromLockfile carries the lockfile executable list into the rebuilt bundle', posixOnly, withTmp('exec-from-lock')((t, tmp) => {
   seedProject(tmp)
   const state = new State(tmp, { scope: 'full', bundle: 'add' })
   state.addFile(pathToFileURL(join(tmp, 'run.sh')).toString(), { format: 'shell', isEntry: true })
@@ -300,7 +432,7 @@ test('bundleFromLockfile carries the lockfile executable list into the rebuilt b
 
 // ── stasis add ───────────────────────────────────────────────────────────────
 
-test('`stasis add` records the execute bit into the bundle and the companion lockfile', withTmp('exec-add')((t, tmp) => {
+test('`stasis add` records the execute bit into the bundle and the companion lockfile', posixOnly, withTmp('exec-add')((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
   writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ bundleFile: 'code.br' }))
   writeFileSync(join(tmp, 'run.sh'), '#!/bin/sh\n')
@@ -317,9 +449,58 @@ test('`stasis add` records the execute bit into the bundle and the companion loc
   t.assert.deepEqual([...Lockfile.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf8')).executable], ['run.sh'])
 }))
 
+test('a `stasis add` re-run clears a bit the file lost on disk', posixOnly, withTmp('exec-add-clear')((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ bundleFile: 'code.br' }))
+  writeFileSync(join(tmp, 'run.sh'), '#!/bin/sh\n')
+  chmodSync(join(tmp, 'run.sh'), 0o755)
+  writeFileSync(join(tmp, 'stasis.lock.json'), new Lockfile({
+    config: { scope: 'full' }, entries: new Set(), modules: new Map(), imports: new Map(), formats: new Map(),
+  }).serialize())
+
+  addCommand({ cwd: tmp, entries: ['run.sh'] })
+  t.assert.deepEqual([...decode(join(tmp, 'code.br')).executable], ['run.sh'])
+
+  // Bytes unchanged, so the merge into the on-disk artifact raises no conflict -- the stale bit has
+  // to lose to the fresh observation, or `add` could only ever grant +x and never revoke it.
+  chmodSync(join(tmp, 'run.sh'), 0o644)
+  addCommand({ cwd: tmp, entries: ['run.sh'] })
+  t.assert.deepEqual([...decode(join(tmp, 'code.br')).executable], [])
+  t.assert.deepEqual([...Lockfile.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf8')).executable], [])
+}))
+
+// ── diff ─────────────────────────────────────────────────────────────────────
+
+test('stasis diff reports an execute-bit change between otherwise identical artifacts', (t) => {
+  const lock = (executable) => new Lockfile({
+    config: { scope: 'full' },
+    entries: new Set(),
+    modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'run.sh': 'sha512-x' } }]]),
+    imports: new Map(),
+    formats: new Map([['run.sh', 'shell']]),
+    executable: new Set(executable),
+  })
+  const diff = diffArtifacts({ artifact: lock([]), kind: 'lockfile' }, { artifact: lock(['run.sh']), kind: 'lockfile' })
+  // Every digest matches, so without the executable facet this reads as "no differences" -- yet the
+  // two artifacts extract to trees that differ in whether run.sh is runnable.
+  t.assert.deepEqual(diff.files, { added: [], removed: [], differing: [] })
+  t.assert.deepEqual(diff.executable, { added: ['run.sh'], removed: [] })
+  t.assert.ok(hasDifferences(diff))
+  t.assert.match(formatDiffStat(diff), /Executable: 1 added, 0 removed/u)
+
+  const reverse = diffArtifacts({ artifact: lock(['run.sh']), kind: 'lockfile' }, { artifact: lock([]), kind: 'lockfile' })
+  t.assert.deepEqual(reverse.executable, { added: [], removed: ['run.sh'] })
+  t.assert.ok(hasDifferences(reverse))
+
+  // Identical artifacts stay clean, and the section is omitted rather than printing a zero row.
+  const same = diffArtifacts({ artifact: lock(['run.sh']), kind: 'lockfile' }, { artifact: lock(['run.sh']), kind: 'lockfile' })
+  t.assert.ok(!hasDifferences(same))
+  t.assert.doesNotMatch(formatDiffStat(same), /Executable:/u)
+})
+
 // ── extract ──────────────────────────────────────────────────────────────────
 
-test('extract chmods the files the bundle marks executable and leaves the rest alone', withTmp('exec-extract')(async (t, tmp) => {
+test('extract chmods the files the bundle marks executable and leaves the rest alone', posixOnly, withTmp('exec-extract')(async (t, tmp) => {
   const src = join(tmp, 'src')
   mkdirSync(src)
   writeFileSync(join(src, 'package.json'), JSON.stringify({ name: 'scripts', version: '1.0.0' }))
@@ -338,9 +519,12 @@ test('extract chmods the files the bundle marks executable and leaves the rest a
   t.assert.ok(!isExec(join(out, 'lib.sh')), 'a plain file is not made executable')
   // Contents are untouched by the chmod.
   t.assert.equal(readFileSync(join(out, 'main.sh'), 'utf8'), readFileSync(join(src, 'main.sh'), 'utf8'))
-  // The restored mode follows the umask (execute added where readable), not a hard-coded 0o755.
-  const { mode } = statSync(join(out, 'main.sh'))
-  t.assert.equal(mode & 0o111, (mode & 0o444) >> 2)
+  // The restored mode is umask-derived, not hard-coded: assert the concrete modes the CURRENT umask
+  // implies, so a hard-coded 0o755/0o644 would fail under any non-default umask. (`mode & 0o111 ===
+  // (mode & 0o444) >> 2` would NOT catch that -- 0o755 satisfies it identically.)
+  const umask = process.umask()
+  t.assert.equal(perms(join(out, 'main.sh')), ((0o777 & ~umask) | 0o100) & 0o777)
+  t.assert.equal(perms(join(out, 'lib.sh')), 0o666 & ~umask & 0o777)
 
   // The derived lockfile beside the tree agrees with the bundle.
   const lock = Lockfile.parse(readFileSync(join(out, 'stasis.lock.json'), 'utf8'))
@@ -348,7 +532,7 @@ test('extract chmods the files the bundle marks executable and leaves the rest a
   t.assert.deepEqual([...lockfileFromBundle(decode(bundlePath)).executable], ['main.sh'])
 }))
 
-test('extract of a bundle with nothing executable chmods nothing', withTmp('exec-extract-none')(async (t, tmp) => {
+test('extract of a bundle with nothing executable chmods nothing', posixOnly, withTmp('exec-extract-none')(async (t, tmp) => {
   const src = join(tmp, 'src')
   mkdirSync(src)
   writeFileSync(join(src, 'package.json'), JSON.stringify({ name: 'scripts', version: '1.0.0' }))
@@ -363,7 +547,48 @@ test('extract of a bundle with nothing executable chmods nothing', withTmp('exec
   t.assert.ok(!isExec(join(out, 'main.sh')))
 }))
 
-test('extract of a legacy v0 bundle (no executable list) still writes its sources', withTmp('exec-extract-v0')((t, tmp) => {
+// Extract is authoritative over the modes of the files it writes, so re-extracting over an older
+// tree brings it back in line with the artifact instead of leaving whatever was there.
+test('extract into a non-empty directory clears a stale execute bit', posixOnly, withTmp('exec-extract-stale')((t, tmp) => {
+  const out = join(tmp, 'out')
+  mkdirSync(out)
+  writeFileSync(join(out, 'lib.sh'), 'stale\n')
+  chmodSync(join(out, 'lib.sh'), 0o755) // an earlier extract, when the bundle still marked it executable
+
+  const bundlePath = join(tmp, 'b.br')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { '.': { name: 'x', version: '1.0.0', files: { 'lib.sh': '#!/bin/sh\n' } } },
+    modules: {},
+    formats: { 'lib.sh': 'shell' },
+    imports: {},
+  })))
+  extractCommand({ cwd: tmp, bundleFile: bundlePath, output: out })
+  t.assert.ok(!isExec(join(out, 'lib.sh')), 'the bundle no longer attests the bit, so the tree loses it')
+  t.assert.equal(perms(join(out, 'lib.sh')), 0o666 & ~process.umask() & 0o777)
+}))
+
+// A v0 bundle carries no per-file `formats`, so the directory/stat guards that make an `executable`
+// entry trustworthy can't run -- and extract is the untrusted-input path. The list is ignored.
+test('extract ignores an `executable` list on a legacy v0 bundle', posixOnly, withTmp('exec-v0-exec')((t, tmp) => {
+  const bundlePath = join(tmp, 'v0.br')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    sources: { 'run.sh': '#!/bin/sh\n' },
+    formats: {},
+    imports: {},
+    executable: ['run.sh'],
+  })))
+  t.assert.deepEqual([...decode(bundlePath).executable], [])
+  const out = join(tmp, 'out')
+  t.assert.equal(extractCommand({ cwd: tmp, bundleFile: bundlePath, output: out }).executable, 0)
+  t.assert.ok(!isExec(join(out, 'run.sh')))
+}))
+
+test('extract of a legacy v0 bundle (no executable list) still writes its sources', posixOnly, withTmp('exec-extract-v0')((t, tmp) => {
   const bundlePath = join(tmp, 'v0.br')
   writeFileSync(bundlePath, brotliCompressSync(JSON.stringify({
     version: 0,

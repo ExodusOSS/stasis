@@ -337,21 +337,41 @@ executable is byte-identical to one written before the field existed.
 { "executable": ["scripts/build.sh", "node_modules/dep/bin/cli.js"] }
 ```
 
-- Files only. A `directory` capture is a listing, not a file, and a `stat:*` record
-  carries no content — neither can appear, and both parsers reject an `executable`
-  entry that names one, or that names a path the artifact doesn't record at all.
-- The bit is read from disk at capture (following symlinks, so a link records its
-  target's mode). Windows exposes no execute bits, so a capture there lists none.
+- Files only, and only files the artifact itself records. A `directory` capture is a
+  listing and a `stat:*` record carries no content — both parsers reject an entry
+  naming either, a path the artifact doesn't record, or a duplicate. Writers narrow to
+  the set they will actually serialize, so a `scope = node_modules` artifact (which
+  drops its workspace buckets) never lists a workspace file.
+- Ignored on a legacy `version: 0` bundle: v0 has no per-file `formats`, so those
+  guards can't run, and `extract` is an untrusted-input path. Fail-safe — no bit granted.
+- The bit is read from disk at capture, from a **regular file**, following symlinks
+  (a link records its target's mode).
 - Disk is authoritative on re-capture: re-reading a file under `lock = add` /
   `bundle = add` refreshes its bit, dropping a stale entry for a file that has since
   lost the bit — a mode change is not a content change, so it needs no
-  `--lock=replace`.
-- Merging two artifacts (`stasis add`, `stasis bundle --add`) unions the lists, as
-  the merged file set is itself a union.
+  `--lock=replace`. This covers files the run actually re-reads; one absorbed from an
+  existing artifact and never touched is carried forward unverified, like every other
+  `add`-mode fact.
+- **Windows records none and clears none.** Windows exposes no POSIX execute bits
+  (every file stats as `0o666`), so a capture there can neither observe a bit nor
+  refute one: it adds nothing, and — importantly — does *not* read "no bit" as "the bit
+  was removed", so a Windows run can't strip the list a POSIX capture committed.
+- Merging two artifacts (`stasis add`, `stasis bundle --add`) unions the lists, except
+  that the **incoming** artifact wins for the files it records: re-adding a file that
+  lost its bit clears the stale entry instead of resurrecting it.
+- `stasis diff` reports execute-bit changes, so a permission flip on byte-identical
+  files is visible to a review gate rather than reading as "no differences".
 - `stasis extract` restores the bit — this is what the field is *for*; see
   [extract.md](extract.md). It is metadata carried alongside the bytes, **not** part
   of what `lock = frozen` / `bundle = frozen` verify: an artifact predating the field
   lacks it and still loads, and a mode-only drift is not a hash mismatch.
+
+> [!NOTE]
+> The bit reflects the tree on disk, not the recorded bytes, so it depends on how that
+> tree got there. npm/pnpm preserve the modes in a package tarball, but git tracks only
+> `100644`/`100755`, and `core.fileMode=false`, zip/`git archive` round-trips, and
+> `COPY`/`tar` without mode preservation all flatten it — two checkouts of one commit
+> can legitimately produce different `executable` arrays.
 
 ## Filesystem captures (`stasis run --fs=sync` / `--fs=async`)
 

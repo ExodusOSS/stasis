@@ -8,8 +8,10 @@ import {
   isPlainObject,
   mergeFormatMaps,
   mergeImportMaps,
+  mergeExecutableSets,
   mergeModuleMaps,
   moduleFileKey,
+  moduleFileKeys,
   objectToMaps,
   parseExecutable,
   posixPathEscapes,
@@ -208,7 +210,12 @@ export class Bundle {
       formats,
       imports,
       // Checked against flatKeys (built above): every executable must be a file this bundle carries.
-      executable: parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats }),
+      // v1 only -- a v0 bundle has no per-file `formats`, so the directory/stat guards below would be
+      // vacuous, and honoring the list would let a legacy-shaped untrusted bundle pick a path for
+      // `extract` to chmod +x. A v0 `executable` is ignored (fail-safe: no bit granted).
+      executable: json.version === VERSION
+        ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats })
+        : new Set(),
       reason: isPlainObject(json.reason) ? json.reason : undefined,
     })
   }
@@ -269,9 +276,9 @@ export class Bundle {
       modules: mergeModuleMaps(this.modules, other.modules, 'bundle merge'),
       formats: mergeFormatMaps(this.formats, other.formats, 'bundle merge'),
       imports: mergeImportMaps(this.imports, other.imports, 'bundle merge'),
-      // A union, not a conflict check: each side attests only the files it carries, and the merge
-      // keeps every file, so keeping every exec bit is the matching rule.
-      executable: new Set([...this.executable, ...other.executable]),
+      // `other` (the incoming, newer build) wins for the files it carries -- see mergeExecutableSets.
+      executable: mergeExecutableSets(this.executable, other.executable,
+        moduleFileKeys(other.modules, { scope: this.config.scope })),
       reason: mergeReason(this.reason, other.reason),
     })
   }

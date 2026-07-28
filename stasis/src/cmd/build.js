@@ -171,6 +171,7 @@ function loadStateForBundle(root, bundle) {
   state.formats = bundle.formats
   state.imports = bundle.imports
   state.entries = new Set(bundle.entries)
+  state.executable = new Set(bundle.executable)
   // Not state.modules: the load path never reads it (only the capture paths write it).
   return state
 }
