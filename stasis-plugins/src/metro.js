@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -251,10 +251,10 @@ export class StasisMetro {
     }
   }
 
-  // Attest each autolinked native dependency's build-input surface. Discovery is `react-native
-  // config`; each dep root is walked (NATIVE_WALK_SKIP_DIRS pruned) and its native sources are
-  // attested as code, other assets as resources, plus each package.json. Node-runnable JS/TS is
-  // skipped (already in Metro's graph). Skipped when the RN CLI is absent or a root is outside root.
+  // Attest each native dependency's build-input surface. Discovery is `react-native config`; each
+  // dep root is walked (NATIVE_WALK_SKIP_DIRS pruned) and its native sources are attested as code,
+  // other assets as resources, plus each package.json. Node-runnable JS/TS is skipped (already in
+  // Metro's graph). Skipped when the RN CLI is absent or a root is outside root.
   #captureNativeModules() {
     const config = loadReactNativeConfig(this.#projectDir)
     if (!config) return
@@ -265,6 +265,11 @@ export class StasisMetro {
     }
     // Native modules the app imports but autolinking never reports (manually integrated via Podfile).
     for (const root of this.#reachedNativePackageRoots()) roots.add(root)
+    // RN CORE isn't a `dependencies` entry (config reports only reactNativePath) and autolinking
+    // never lists it, but its native source (React/, ReactCommon/, ReactAndroid/, sdks/, ...) is a
+    // build input like any other dep's -- walk it in full, the same way.
+    const rnPath = config.reactNativePath
+    if (typeof rnPath === 'string' && isAbsolute(rnPath)) roots.add(rnPath)
     for (const root of roots) {
       try {
         this.#state.relative(root) // asserts the package lives inside the project root
@@ -273,22 +278,17 @@ export class StasisMetro {
       }
       this.#captureNativeTree(root, true)
     }
-    // RN CORE isn't a `dependencies` entry (config reports only reactNativePath), so its scattered
-    // podspecs would go unattested. Capture them here (podspecs only, not core's full native source).
-    const rnPath = config.reactNativePath
+    // RN core's `.js` build scripts the walk skips (Metro-owned by extension, but never in the graph).
     if (typeof rnPath === 'string' && isAbsolute(rnPath)) {
       try {
         this.#state.relative(rnPath)
-        this.#captureManifestTree(rnPath) // podspec-load surface across all of core
-        // Plus specific core dirs/files (Yoga, hermes-engine, CocoaPods scripts) captured in full.
-        for (const sub of RN_CORE_INCLUDE_DIRS) this.#captureNativeTree(join(rnPath, sub))
         for (const file of RN_CORE_INCLUDE_FILES) this.#captureNativeFile(join(rnPath, file))
       } catch { /* react-native resolved outside the project root -- unattestable */ }
     }
   }
 
-  // Attest a single vetted file (RN_CORE_INCLUDE_FILES); skipped when absent. Tagged via the shared
-  // classifier like every other path (sdks/.hermesversion -> resource; a concrete format -> code).
+  // Attest a single vetted file (RN_CORE_INCLUDE_FILES) the tree walk skips; absent -> skipped.
+  // Tagged via the shared classifier like every other path (a `.js` build script -> code).
   #captureNativeFile(full) {
     if (this.#seen.has(full)) return
     let source
@@ -304,7 +304,7 @@ export class StasisMetro {
 
   // node_modules roots the graph reached that also ship native code (podspec or ios/android dir):
   // the manually-integrated native modules `react-native config` omits. Derived from #seen; RN core
-  // is excluded (handled podspecs-only above).
+  // is skipped here because it's added to the walk explicitly (via reactNativePath).
   #reachedNativePackageRoots() {
     const pkgRoots = new Set()
     for (const abs of this.#seen) {
@@ -339,33 +339,6 @@ export class StasisMetro {
     return false
   }
 
-  // Recursively attest RN core's podspec-load surface under `dir`: podspecs, the Ruby helpers they
-  // require, and package.json -- NOT core's full native source. Prunes the same subtrees as #captureNativeTree.
-  #captureManifestTree(dir) {
-    let entries
-    try {
-      entries = realReaddirSync(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const ent of entries) {
-      if (ent.isSymbolicLink()) continue
-      const full = join(dir, ent.name)
-      if (ent.isDirectory()) {
-        if (!NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) this.#captureManifestTree(full)
-        continue
-      }
-      if (!ent.isFile() || !isNativeManifest(ent.name)) continue
-      if (this.#seen.has(full)) continue
-      this.#seen.add(full)
-      const source = realReadFileSync(full)
-      assert.ok(isUtf8(source), `StasisMetro: native manifest has non-UTF-8 bytes: ${full}`)
-      // isNativeManifest admits only code (package.json/JSON podspecs, Ruby podspecs, .rb helpers).
-      const { format } = classifyNativeCapture(ent.name)
-      this.#state.addFile(pathToFileURL(full).toString(), { source, format, reason: 'metro' })
-    }
-  }
-
   // Recursively attest native build-input files under `dir`. Genuine readers (plugin bookkeeping,
   // not re-recorded by --fs); symlinks not followed (cycle/escape hazard).
   #captureNativeTree(dir, atRoot = false) {
@@ -391,8 +364,10 @@ export class StasisMetro {
       const { action, format } = classifyNativeCapture(ent.name)
       // Node-runnable JS/TS is captured via Metro's graph, not here (action==='skip').
       if (action === 'skip') continue
-      this.#seen.add(full)
       const source = realReadFileSync(full)
+      // A prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -- skip it.
+      if (isExtensionlessBinary(ent.name, source)) continue
+      this.#seen.add(full)
       this.#recordCapture(full, source, { format, resource: action === 'resource' })
     }
   }

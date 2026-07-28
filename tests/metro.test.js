@@ -806,8 +806,9 @@ process.exit(1)
     mkdirSync(join(dir, 'sdks', 'hermesc', 'linux64-bin'), { recursive: true })
     mkdirSync(join(dir, 'ReactCommon', 'yoga', 'yoga'), { recursive: true })
     mkdirSync(join(dir, 'ReactCommon', 'yoga', 'cmake'), { recursive: true })
+    mkdirSync(join(dir, 'sdks', 'hermes-engine', 'utils'), { recursive: true })
     mkdirSync(join(dir, 'scripts'), { recursive: true })
-    mkdirSync(join(dir, 'React'), { recursive: true })
+    mkdirSync(join(dir, 'React', 'Base'), { recursive: true })
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0' }))
     writeFileSync(join(dir, 'cli.js'), RN_CLI_JS)
     // react-native core's own podspecs, in the scattered subdirs config never enumerates:
@@ -816,20 +817,25 @@ process.exit(1)
     // A podspec that `require_relative`s a sibling Ruby helper -- both must be captured:
     writeFileSync(join(dir, 'sdks', 'hermes-engine', 'hermes-engine.podspec'), 'require_relative "./hermes-utils.rb"\nPod::Spec.new { |s| s.name = "hermes-engine" }\n')
     writeFileSync(join(dir, 'sdks', 'hermes-engine', 'hermes-utils.rb'), 'def hermes_tag; "x"; end\n')
-    // Vetted core native dirs/files captured IN FULL (RN_CORE_INCLUDE_DIRS/FILES): Yoga C++ +
-    // cmake, the CocoaPods scripts (.rb/.sh), and the Hermes version marker under sdks/.
+    // react-native core is walked in FULL, like any other native dep: its native SOURCE anywhere in
+    // the tree is captured (Yoga C++/cmake, and the Objective-C headers/impl under React/ every
+    // native module imports), plus the CocoaPods scripts and the Hermes version marker under sdks/.
     writeFileSync(join(dir, 'ReactCommon', 'yoga', 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.13)\n')
     writeFileSync(join(dir, 'ReactCommon', 'yoga', 'yoga', 'Yoga.cpp'), '// yoga\n')
     writeFileSync(join(dir, 'ReactCommon', 'yoga', 'cmake', 'yoga.cmake'), '# yoga cmake\n')
     writeFileSync(join(dir, 'scripts', 'react_native_pods.rb'), 'def use_react_native!; end\n')
     writeFileSync(join(dir, 'scripts', 'react-native-xcode.sh'), '#!/bin/bash\nnode cli.js bundle\n')
-    writeFileSync(join(dir, 'scripts', 'build.js'), 'module.exports = 0\n') // code -> skipped even here
     writeFileSync(join(dir, 'sdks', '.hermesversion'), 'hermes-2024-01-01-RNv0.76\n')
-    // Core files that must NOT be captured: index.js is code, React/RCTBridge.m is native source
-    // OUTSIDE the vetted include dirs, hermesc is a prebuilt binary under sdks/ (not an include dir).
-    writeFileSync(join(dir, 'index.js'), 'module.exports = {}\n')
     writeFileSync(join(dir, 'React', 'RCTBridge.m'), '@implementation RCTBridge @end\n')
-    writeFileSync(join(dir, 'sdks', 'hermesc', 'linux64-bin', 'hermesc'), 'ELF\0\xff') // prebuilt, no ext
+    writeFileSync(join(dir, 'React', 'Base', 'RCTBridgeModule.h'), '#import <Foundation/Foundation.h>\n@protocol RCTBridgeModule\n@end\n')
+    // A `.js` build script RN's Ruby/podspecs invoke at pod-install: the tree walk skips .js, so it's
+    // force-included via RN_CORE_INCLUDE_FILES (resolved rnPath-relative, tagged as code).
+    writeFileSync(join(dir, 'sdks', 'hermes-engine', 'utils', 'replace_hermes_version.js'), 'module.exports = () => {}\n')
+    // Files that must STILL NOT be captured: app-graph JS (index.js), an ordinary `.js` under scripts/
+    // NOT in the force-include list, and the prebuilt EXTENSIONLESS `hermesc` binary under sdks/.
+    writeFileSync(join(dir, 'index.js'), 'module.exports = {}\n')
+    writeFileSync(join(dir, 'scripts', 'build.js'), 'module.exports = 0\n')
+    writeFileSync(join(dir, 'sdks', 'hermesc', 'linux64-bin', 'hermesc'), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0xff, 0xfe])) // prebuilt ELF, no ext -> binary, skipped
   }
 
   // A native dependency package: native sources across ios/ + android/ (build-input source --
@@ -1051,8 +1057,8 @@ process.exit(1)
     // codegenConfig survives in the attested package.json bundle payload (prune keeps it in full).
     const pkg = JSON.parse(readFileSync(join(tmp, 'node_modules', 'react-native-native-lib', 'package.json'), 'utf-8'))
     t.assert.ok(pkg.codegenConfig, 'the attested package.json carries codegenConfig for the native build')
-    // React Native CORE's own podspecs (via reactNativePath, not `dependencies`) are captured from
-    // their scattered subdirs; its non-podspec files (index.js code, prebuilt hermesc) are not.
+    // React Native CORE (via reactNativePath, not `dependencies`) is walked in full like any other
+    // native dep: its scattered podspecs AND its native source across the tree are captured.
     const core = lock.modules['node_modules/react-native']
     t.assert.ok(core.files['third-party-podspecs/DoubleConversion.podspec']?.startsWith('sha512-'), 'core third-party podspec captured')
     t.assert.ok(core.files['Libraries/FBLazyVector/FBLazyVector.podspec']?.startsWith('sha512-'), 'core Libraries podspec captured')
@@ -1063,7 +1069,7 @@ process.exit(1)
     t.assert.equal(lock.formats['node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'], 'ruby') // a .rb helper is code
     t.assert.ok(core.files['package.json']?.startsWith('sha512-'), 'core package.json (parsed by podspecs) captured')
     t.assert.equal(lock.formats['node_modules/react-native/package.json'], 'json')
-    // Vetted core dirs/files are captured IN FULL: Yoga sources + cmake, the CocoaPods scripts,
+    // Native build inputs across the tree are captured: Yoga sources + cmake, the CocoaPods scripts,
     // and the Hermes version marker.
     for (const f of ['ReactCommon/yoga/CMakeLists.txt', 'ReactCommon/yoga/yoga/Yoga.cpp', 'ReactCommon/yoga/cmake/yoga.cmake', 'scripts/react_native_pods.rb', 'scripts/react-native-xcode.sh', 'sdks/.hermesversion']) {
       t.assert.ok(core.files[f]?.startsWith('sha512-'), `expected core include ${f} to be captured`)
@@ -1075,11 +1081,18 @@ process.exit(1)
     t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/CMakeLists.txt'], 'cmake') // matched by basename
     t.assert.equal(lock.formats['node_modules/react-native/ReactCommon/yoga/cmake/yoga.cmake'], 'cmake')
     t.assert.equal(lock.formats['node_modules/react-native/scripts/react-native-xcode.sh'], 'shell') // a .sh script is shell code (unified vocab)
-    // ...but NOT core's JS, native source outside the include dirs, or prebuilt binaries.
-    t.assert.equal(core.files['index.js'], undefined, 'core JS is not captured')
-    t.assert.equal(core.files['scripts/build.js'], undefined, 'a code file inside an include dir is still skipped')
-    t.assert.equal(core.files['React/RCTBridge.m'], undefined, 'core native source outside the include dirs is not captured')
-    t.assert.equal(core.files['sdks/hermesc/linux64-bin/hermesc'], undefined, 'core prebuilt hermesc binary is not captured')
+    // Core native source ANYWHERE in the tree is now captured (previously only vetted dirs were).
+    t.assert.ok(core.files['React/RCTBridge.m']?.startsWith('sha512-'), 'core ObjC source is captured')
+    t.assert.equal(lock.formats['node_modules/react-native/React/RCTBridge.m'], 'objc')
+    t.assert.ok(core.files['React/Base/RCTBridgeModule.h']?.startsWith('sha512-'), 'the core header every native module imports is captured')
+    t.assert.equal(lock.formats['node_modules/react-native/React/Base/RCTBridgeModule.h'], 'c-header')
+    // A `.js` build script the walk skips is force-included as code via RN_CORE_INCLUDE_FILES.
+    t.assert.ok(core.files['sdks/hermes-engine/utils/replace_hermes_version.js']?.startsWith('sha512-'), 'the hermes .js build script is force-included')
+    t.assert.equal(lock.formats['node_modules/react-native/sdks/hermes-engine/utils/replace_hermes_version.js'], 'commonjs')
+    // ...but NOT core's app-graph JS, an ordinary `.js` not on the force-include list, or a prebuilt binary.
+    t.assert.equal(core.files['index.js'], undefined, 'core app-graph JS is not captured')
+    t.assert.equal(core.files['scripts/build.js'], undefined, 'an ordinary .js not on the force-include list is skipped')
+    t.assert.equal(core.files['sdks/hermesc/linux64-bin/hermesc'], undefined, 'core prebuilt extensionless hermesc binary is not captured')
   }))
 
   test('native modules: frozen verifies the native surface and rejects a tampered native source', withTmp(async (t, tmp) => {

@@ -1370,8 +1370,9 @@ const writeRnFixture = (root) => {
   mkdirSync(join(core, 'sdks', 'hermes-engine'), { recursive: true })
   mkdirSync(join(core, 'sdks', 'hermesc', 'osx-bin'), { recursive: true })
   mkdirSync(join(core, 'ReactCommon', 'yoga', 'yoga'), { recursive: true })
+  mkdirSync(join(core, 'sdks', 'hermes-engine', 'utils'), { recursive: true })
   mkdirSync(join(core, 'scripts'), { recursive: true })
-  mkdirSync(join(core, 'React'), { recursive: true })
+  mkdirSync(join(core, 'React', 'Base'), { recursive: true })
   writeFileSync(join(core, 'package.json'), JSON.stringify({ name: 'react-native', version: '0.76.0', main: 'index.js' }))
   writeFileSync(join(core, 'index.js'), "module.exports = 'react-native'\n")
   writeFileSync(join(core, 'third-party-podspecs', 'DoubleConversion.podspec'), "Pod::Spec.new { |s| s.name = 'DoubleConversion' }\n")
@@ -1379,13 +1380,17 @@ const writeRnFixture = (root) => {
   // A podspec that require_relatives a sibling Ruby helper -- both must be captured.
   writeFileSync(join(core, 'sdks', 'hermes-engine', 'hermes-engine.podspec'), 'require_relative "./hermes-utils.rb"\nPod::Spec.new { |s| s.name = "hermes-engine" }\n')
   writeFileSync(join(core, 'sdks', 'hermes-engine', 'hermes-utils.rb'), 'def hermes_tag; "x"; end\n')
-  // Vetted core native dirs/files captured in full; React/*.m + hermesc must stay out.
+  // Core is walked in full like any other native dep: native source anywhere in the tree is captured
+  // (Yoga C++/cmake, the ObjC headers/impl under React/); a `.js` build script is force-included;
+  // core's app JS and the prebuilt extensionless hermesc binary must stay out.
   writeFileSync(join(core, 'ReactCommon', 'yoga', 'yoga', 'Yoga.cpp'), '// yoga\n')
   writeFileSync(join(core, 'ReactCommon', 'yoga', 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.13)\n')
   writeFileSync(join(core, 'scripts', 'react_native_pods.rb'), 'def use_react_native!; end\n')
   writeFileSync(join(core, 'sdks', '.hermesversion'), 'hermes-2024-01-01\n')
   writeFileSync(join(core, 'React', 'RCTBridge.m'), '@implementation RCTBridge @end\n')
-  writeFileSync(join(core, 'sdks', 'hermesc', 'osx-bin', 'hermesc'), 'ELF\0\xff')
+  writeFileSync(join(core, 'React', 'Base', 'RCTBridgeModule.h'), '#import <Foundation/Foundation.h>\n@protocol RCTBridgeModule\n@end\n')
+  writeFileSync(join(core, 'sdks', 'hermes-engine', 'utils', 'replace_hermes_version.js'), 'module.exports = () => {}\n')
+  writeFileSync(join(core, 'sdks', 'hermesc', 'osx-bin', 'hermesc'), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0xff, 0xfe]))
 
   const dep = join(root, 'node_modules', 'rn-native')
   mkdirSync(join(dep, 'ios', 'RNThing.xcframework', 'ios-arm64'), { recursive: true }) // prebuilt bundle -> excluded whole
@@ -1463,13 +1468,19 @@ test('buildBundle --metro carries a bundled native dep\'s ios/android sources + 
   t.assert.equal(bundle.formats.get('node_modules/react-native/third-party-podspecs/DoubleConversion.podspec'), 'podspec')
   t.assert.equal(bundle.formats.get('node_modules/react-native/sdks/hermes-engine/hermes-utils.rb'), 'ruby') // a .rb helper is code
   t.assert.equal(bundle.formats.get('node_modules/react-native/package.json'), 'json')
-  // Vetted core dirs/files captured in full; core native source outside them + binaries stay out.
+  // Native build inputs across the tree captured; core native source ANYWHERE is now included.
   t.assert.ok(core.has('ReactCommon/yoga/yoga/Yoga.cpp'), 'yoga source captured')
   t.assert.ok(core.has('ReactCommon/yoga/CMakeLists.txt'), 'yoga CMakeLists captured')
   t.assert.ok(core.has('scripts/react_native_pods.rb'), 'CocoaPods script captured')
   t.assert.ok(core.has('sdks/.hermesversion'), '.hermesversion captured')
-  t.assert.ok(!core.has('React/RCTBridge.m'), 'core native source outside include dirs stays out')
-  t.assert.ok(!core.has('sdks/hermesc/osx-bin/hermesc'), 'prebuilt hermesc binary stays out')
+  t.assert.ok(core.has('React/RCTBridge.m'), 'core ObjC source is captured')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/React/RCTBridge.m'), 'objc')
+  t.assert.ok(core.has('React/Base/RCTBridgeModule.h'), 'the core header every native module imports is captured')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/React/Base/RCTBridgeModule.h'), 'c-header')
+  // A `.js` build script the walk skips is force-included as code via RN_CORE_INCLUDE_FILES.
+  t.assert.ok(core.has('sdks/hermes-engine/utils/replace_hermes_version.js'), 'the hermes .js build script is force-included')
+  t.assert.equal(bundle.formats.get('node_modules/react-native/sdks/hermes-engine/utils/replace_hermes_version.js'), 'commonjs')
+  t.assert.ok(!core.has('sdks/hermesc/osx-bin/hermesc'), 'prebuilt extensionless hermesc binary stays out')
   // C++ source, the CocoaPods Ruby script, and CMake files are code.
   t.assert.equal(bundle.formats.get('node_modules/react-native/ReactCommon/yoga/yoga/Yoga.cpp'), 'cpp')
   t.assert.equal(bundle.formats.get('node_modules/react-native/scripts/react_native_pods.rb'), 'ruby')
