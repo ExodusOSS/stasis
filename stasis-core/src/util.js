@@ -262,18 +262,25 @@ export function isStasisArtifactName(name) {
   return base === 'stasis.lock.json' || (base.includes('stasis') && base.endsWith('.br'))
 }
 
-// Generated sidecars: `*.map` (as under --fs) and `*.js.flow`, the Flow analog of `.d.ts`. Neither is
-// code, so an undeclared one would abort a whole sweep -- skipped unless its extension is in `resources`.
-const SIDECAR_EXTS = new Set(['map', 'flow'])
+// Dirs a sweep never descends into: VCS/CI/IDE metadata, sample apps, and test scaffolding -- none of
+// it is the code being shipped. Matched by SEGMENT at any depth, plus the Apple prebuilt slice dirs.
+const AUTO_EXCLUDED_DIRS = new Set([
+  '.git', '.github', '.settings', // VCS / CI / IDE metadata
+  'example', 'examples', // sample apps -- they import the package, they aren't it
+  '__tests__', '__mocks__', 'jest', // test scaffolding
+])
+export function isAutoExcludedDir(name) {
+  const base = basename(name).toLowerCase()
+  return AUTO_EXCLUDED_DIRS.has(base) || isAppleSliceDir(base)
+}
 
-// The auto-excluded set a DIRECTORY SWEEP drops (`add src/`); an EXPLICITLY named file bypasses it
-// (`add .env` still captures). Declarations (types only, erased at runtime -- the resolvers refuse to
-// land on one), the `.env` family (secrets), and stasis's own outputs all classify as CODE, so the
-// `resources` gate would never stop them. Configured target names are the caller's to exclude.
-export function isAutoExcludedFile(name, { resources = new Set() } = {}) {
-  if (isTypeDeclaration(name) || isDotEnvFile(name) || isStasisArtifactName(name)) return true
-  const ext = pathExt(name)
-  return SIDECAR_EXTS.has(ext) && !resources.has(ext)
+// Files a sweep drops: type declarations (types only, erased at runtime), the `.env` family (secrets),
+// stasis's own outputs (they'd attest themselves), and everything the native capture excludes as
+// non-build-input noise (docs/legal, editor/lint/CI config, `*.map`/`*.js.flow` sidecars, logs).
+// A path can only reach this via a glob -- an EXPLICITLY named one is added as asked (`add .env` still
+// captures), which is also the only way to attest a file this set covers.
+export function isAutoExcludedFile(name) {
+  return isTypeDeclaration(name) || isDotEnvFile(name) || isStasisArtifactName(name) || isExcludedNativeFile(name)
 }
 
 // The single name->format classifier every capture path is a policy view of. Returns a concrete format

@@ -8,7 +8,7 @@ import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isAutoExcludedFile, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, sortPaths, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isAutoExcludedDir, isAutoExcludedFile, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, sortPaths, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
@@ -156,23 +156,29 @@ function prepareLockfile(lockPath, lockAdd) {
   return { write: () => writeFileSync(lockPath, serialized), summary: { total, added: total - before } }
 }
 
-const toPosix = (path) => path.split(/[\\/]/u).join('/')
+const segments = (path) => path.split(/[\\/]/u)
+const toPosix = (path) => segments(path).join('/')
 
-// GLOB step: expand directories into their files (recursive glob), as rel -> { swept, stats }.
-// `swept` marks what the expansion FOUND -- only those face the auto-exclusion filter; `stats` is the
-// walk's own stat, carried so validation doesn't re-probe the inode (undefined = not on disk, so
-// validation reports it missing). Gotcha: `**/*` skips dotfiles (.env, .git/...) -- name them explicitly.
+// GLOB step: expand directories into their files (recursive glob), as rel -> { swept, stats }. `swept`
+// is the match path relative to the directory the caller NAMED (null for a named path), so the filter
+// sees only the segments the sweep itself descended through; `stats` is the walk's own stat, carried so
+// validation doesn't re-probe the inode (undefined = not on disk, so validation reports it missing).
+// Gotcha: `**/*` skips dotfiles (.env, .git/...) -- name them explicitly.
 function expandDirectories(baseDir, rels) {
   const out = new Map()
-  // First writer wins, EXCEPT that a named path overrides the same path already swept in.
+  // A path reachable more than once keeps its most SPECIFIC provenance -- named beats swept, and a
+  // nearer root beats a farther one -- so `add src src/examples` sweeps the examples dir it names
+  // even though the `src` pass reached it through an excluded segment first.
   const record = (rel, swept, stats) => {
-    if (swept && out.has(rel)) return
+    const prior = out.get(rel)
+    if (prior !== undefined && (prior.swept === null ||
+      (swept !== null && segments(prior.swept).length <= segments(swept).length))) return
     out.set(rel, { swept, stats })
   }
   for (const rel of rels) {
     const stats = statSync(join(baseDir, rel), { throwIfNoEntry: false })
     if (stats === undefined || !stats.isDirectory()) {
-      record(rel, false, stats)
+      record(rel, null, stats)
       continue
     }
     const dirAbs = join(baseDir, rel)
@@ -181,10 +187,10 @@ function expandDirectories(baseDir, rels) {
       const fileAbs = join(dirAbs, match)
       // A dangling symlink stats as undefined -- skipped, not a hard ENOENT out of the walk.
       const fileStats = statSync(fileAbs, { throwIfNoEntry: false })
-      if (fileStats?.isFile()) found.push([toPosix(relative(baseDir, fileAbs)), fileStats])
+      if (fileStats?.isFile()) found.push([toPosix(relative(baseDir, fileAbs)), match, fileStats])
     }
     // Sorted, so neither the packed order nor any message derived from it depends on readdir order.
-    for (const [file, fileStats] of found.toSorted(([a], [b]) => sortPaths(a, b))) record(file, true, fileStats)
+    for (const [file, match, fileStats] of found.toSorted(([a], [b]) => sortPaths(a, b))) record(file, match, fileStats)
   }
   return out
 }
@@ -274,13 +280,17 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     .filter((file) => file !== undefined)
     .map((file) => toPosix(relative(baseDir, resolve(baseDir, file)))))
 
+  // FILTER step: a swept path goes when its own name is auto-excluded, when the sweep descended
+  // through an auto-excluded DIRECTORY to reach it (`swept` is root-relative, so a dir the caller
+  // named itself is never one), or when it's an artifact this run writes. A named path always stays.
+  const isSweptOut = (rel, swept) => outputs.has(rel) || isAutoExcludedFile(rel) ||
+    segments(swept).slice(0, -1).some(isAutoExcludedDir)
+
   const expanded = expandDirectories(baseDir, normalizeEntries(entries, cwd))
-  // FILTER step: drop the auto-excluded set, but only from what the sweep FOUND -- a path the caller
-  // named is added as asked. Counted in the summary below rather than dropped silently.
   const files = []
-  const excluded = []
+  const excluded = [] // counted in the summary below rather than dropped silently
   for (const [rel, { swept, stats }] of expanded) {
-    if (swept && (outputs.has(rel) || isAutoExcludedFile(rel, { resources }))) excluded.push(rel)
+    if (swept !== null && isSweptOut(rel, swept)) excluded.push(rel)
     else files.push([rel, stats])
   }
   if (files.length === 0) {

@@ -254,26 +254,37 @@ test('addCommand refuses an undeclared file swept in by a directory entry', with
   t.assert.throws(() => addCommand({ cwd: tmp, entries: ['src'] }), /src\/data\.txt is neither a recognized source file nor a declared resource/)
 }))
 
-// A sweep is an automated capture, so it drops the auto-excluded set BEFORE the resources check:
-// files that classify as code (so nothing else would stop them) but must never be attested unasked.
+// A sweep is an automated capture, so it drops the auto-excluded set BEFORE the resources check --
+// including files that classify as code, which nothing else would stop.
+const EXCLUDED_COUNT = 11 // what seedExcluded plants under src/, minus the dotfiles glob never offers
 const seedExcluded = (tmp) => {
   rmSync(join(tmp, 'src', 'data.txt')) // undeclared -- would fail the resources check if swept in
   writeFileSync(join(tmp, 'src', 'types.d.ts'), 'export type T = string\n')
   mkdirSync(join(tmp, 'src', 'nested'), { recursive: true })
   writeFileSync(join(tmp, 'src', 'nested', 'legacy.d.mts'), 'declare module "x"\n')
-  writeFileSync(join(tmp, 'src', '.env'), 'API_KEY=secret\n')
+  writeFileSync(join(tmp, 'src', '.env'), 'API_KEY=secret\n') // dotfile: glob skips it outright
   writeFileSync(join(tmp, 'src', 'web.env'), 'PORT=80\n')
   writeFileSync(join(tmp, 'src', 'a.js.map'), '{"version":3}\n')
   writeFileSync(join(tmp, 'src', 'index.js.flow'), 'declare export var x: number\n')
+  writeFileSync(join(tmp, 'src', 'README.md'), '# docs\n') // the native-capture exclusions, too
+  writeFileSync(join(tmp, 'src', 'LICENSE'), 'MIT\n')
+  writeFileSync(join(tmp, 'src', 'build.log'), 'built\n')
+  // Whole subtrees the sweep must not descend into: sample apps and test scaffolding.
+  mkdirSync(join(tmp, 'src', 'examples', '__tests__'), { recursive: true })
+  writeFileSync(join(tmp, 'src', 'examples', 'demo.js'), 'export const demo = 1\n')
+  writeFileSync(join(tmp, 'src', 'examples', '__tests__', 'demo.test.js'), 'test()\n')
+  mkdirSync(join(tmp, 'src', '__mocks__'), { recursive: true })
+  writeFileSync(join(tmp, 'src', '__mocks__', 'fs.js'), 'export default {}\n')
 }
 
-test('addCommand auto-excludes declarations, secrets, and sidecars from a directory sweep', withTmp(async (t, tmp) => {
+test('addCommand auto-excludes declarations, secrets, native noise, and whole dirs from a sweep', withTmp(async (t, tmp) => {
   seed(tmp)
   seedExcluded(tmp)
   addCommand({ cwd: tmp, entries: ['src'] })
 
-  // Only the real source survives the filter; every auto-excluded file is dropped (a `.d.ts` would
-  // otherwise be packed as `module-typescript` code, a `web.env` as `env` code carrying secrets).
+  // Only the real source survives the filter: a `.d.ts` would otherwise be packed as
+  // `module-typescript` code, a `web.env` as `env` code carrying secrets, and the `examples/`,
+  // `examples/__tests__/` and `__mocks__/` trees would come along as ordinary modules.
   t.assert.deepEqual(
     Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
     ['src/a.js', 'src/b.cjs'],
@@ -283,6 +294,35 @@ test('addCommand auto-excludes declarations, secrets, and sidecars from a direct
     Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(),
     ['src/icon.svg', 'src/logo.png'],
   )
+}))
+
+test('addCommand sweeps an excluded directory the caller named itself', withTmp(async (t, tmp) => {
+  // The dir rules describe what a sweep may DESCEND into, so they apply below the named root only:
+  // pointing `add` at `src/examples` is asking for it.
+  seed(tmp)
+  seedExcluded(tmp)
+  addCommand({ cwd: tmp, entries: ['src/examples'] })
+  // Its own files are swept in; a nested excluded dir (`__tests__`) is still not descended into.
+  t.assert.deepEqual(
+    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
+    ['src/examples/demo.js'],
+  )
+}))
+
+test('addCommand honours a named subtree the same run also swept past', withTmp(async (t, tmp) => {
+  // `src` reaches src/examples/demo.js through an excluded segment, `src/examples` reaches it
+  // directly -- the nearer root wins whichever order they're listed in.
+  seed(tmp)
+  seedExcluded(tmp)
+  for (const entries of [['src', 'src/examples'], ['src/examples', 'src']]) {
+    rmSync(join(tmp, 'dist'), { recursive: true, force: true })
+    addCommand({ cwd: tmp, entries })
+    t.assert.deepEqual(
+      Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
+      ['src/a.js', 'src/b.cjs', 'src/examples/demo.js'],
+      `entries: ${entries.join(' ')}`,
+    )
+  }
 }))
 
 test('addCommand still adds an auto-excluded file that is named explicitly', withTmp(async (t, tmp) => {
@@ -307,16 +347,20 @@ test('addCommand keeps an explicitly named file the same run also sweeps', withT
   )
 }))
 
-test('addCommand honours a resources opt-in for a swept sidecar', withTmp(async (t, tmp) => {
-  // `*.map`/`*.js.flow` are skipped by default (neither is code, so an undeclared one would abort the
-  // whole sweep), but declaring the extension in `resources` opts back in -- as it does under --fs.
-  seed(tmp, { bundleFile: 'dist/code.br', resources: ['svg', 'png', 'map'] })
+test('addCommand keeps auto-excluding a swept file whose extension is declared in resources', withTmp(async (t, tmp) => {
+  // `resources` decides what a file IS once the sweep offers it -- it is not an opt-in to the sweep.
+  // Naming the file is the only way in, and then the declaration is what makes it a resource.
+  seed(tmp, { bundleFile: 'dist/code.br', resources: ['svg', 'png', 'map', 'md'] })
   seedExcluded(tmp)
-  rmSync(join(tmp, 'src', 'index.js.flow')) // still undeclared -- would abort the sweep
   addCommand({ cwd: tmp, entries: ['src'] })
-  const bundle = decode(join(tmp, 'dist/code.br'))
-  t.assert.equal(bundle.formats.get('src/a.js.map'), 'resource', 'a declared .map is swept in as a resource')
-  t.assert.equal(bundle.formats.get('src/types.d.ts'), undefined, 'a declaration has no opt-in')
+  const swept = decode(join(tmp, 'dist/code.br'))
+  t.assert.equal(swept.formats.get('src/a.js.map'), undefined, 'a declared .map is still not swept in')
+  t.assert.equal(swept.formats.get('src/README.md'), undefined)
+
+  addCommand({ cwd: tmp, entries: ['src/a.js.map', 'src/README.md'] })
+  const named = decode(join(tmp, 'dist/code.br'))
+  t.assert.equal(named.formats.get('src/a.js.map'), 'resource', 'naming it adds it, as the declared resource')
+  t.assert.equal(named.formats.get('src/README.md'), 'resource')
 }))
 
 test('addCommand never sweeps in its own outputs, so `add .` is repeatable', withTmp(async (t, tmp) => {
@@ -516,7 +560,7 @@ test('CLI (stasis-core): add reports what a directory sweep auto-excluded', with
   const r = runCli(coreCli, ['add', 'src'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   // src/.env is not in the count: glob's dotfile rule never offers it to the filter.
-  t.assert.match(r.stderr, /\+2 source \(2 total\) -> dist\/code\.br; \+2 resource \(2 total\) -> dist\/res\.br; skipped 5 auto-excluded/)
+  t.assert.match(r.stderr, new RegExp(String.raw`\+2 source \(2 total\) -> dist/code\.br; \+2 resource \(2 total\) -> dist/res\.br; skipped ${EXCLUDED_COUNT} auto-excluded`, 'u'))
 }))
 
 test('CLI (stasis-core): add with no file, an option, or no config errors', withTmp(async (t, tmp) => {
