@@ -1,5 +1,5 @@
 import { test } from 'node:test'
-import { deflateRawSync, gzipSync } from 'node:zlib'
+import { gzipSync } from 'node:zlib'
 
 import { subtree } from '@exodus/stasis-api/github'
 
@@ -65,51 +65,6 @@ const paxBlock = (path) => {
   return ['PaxHeaders/entry', `${length}${body}`, 'x']
 }
 
-// entries: [name, content, stored?]
-const zipball = (entries) => {
-  const locals = []
-  const central = []
-  let offset = 0
-  for (const [name, content, stored = false] of entries) {
-    const nameBuf = Buffer.from(name, 'utf8')
-    const raw = Buffer.from(content)
-    const data = stored ? raw : deflateRawSync(raw)
-    const method = stored ? 0 : 8
-
-    const local = Buffer.alloc(30)
-    local.writeUInt32LE(0x0403_4b50, 0)
-    local.writeUInt16LE(20, 4)
-    local.writeUInt16LE(method, 8)
-    // CRC left zero: the reader validates sizes, not CRC.
-    local.writeUInt32LE(data.length, 18)
-    local.writeUInt32LE(raw.length, 22)
-    local.writeUInt16LE(nameBuf.length, 26)
-    locals.push(local, nameBuf, data)
-
-    const cd = Buffer.alloc(46)
-    cd.writeUInt32LE(0x0201_4b50, 0)
-    cd.writeUInt16LE(20, 4)
-    cd.writeUInt16LE(20, 6)
-    cd.writeUInt16LE(method, 10)
-    cd.writeUInt32LE(data.length, 20)
-    cd.writeUInt32LE(raw.length, 24)
-    cd.writeUInt16LE(nameBuf.length, 28)
-    cd.writeUInt32LE(offset, 42)
-    central.push(cd, nameBuf)
-
-    offset += 30 + nameBuf.length + data.length
-  }
-
-  const cdBuf = Buffer.concat(central)
-  const eocd = Buffer.alloc(22)
-  eocd.writeUInt32LE(0x0605_4b50, 0)
-  eocd.writeUInt16LE(entries.length, 8)
-  eocd.writeUInt16LE(entries.length, 10)
-  eocd.writeUInt32LE(cdBuf.length, 12)
-  eocd.writeUInt32LE(offset, 16)
-  return Buffer.concat([...locals, cdBuf, eocd])
-}
-
 const TREE = [
   [`${ROOT}/`, '', '5'],
   [`${ROOT}/package.json`, '{"name":"stasis"}'],
@@ -156,35 +111,20 @@ test('subtree() filters to a path, keeping keys repo-relative', withFetch(
   }
 ))
 
-test('subtree() reads a zipball, both deflated and stored entries', withFetch(
-  () => archive(zipball([
-    [`${ROOT}/src/`, ''],
-    [`${ROOT}/src/entry.js`, 'export const x = 1\n'],
-    [`${ROOT}/src/raw.bin`, 'stored payload', true],
-  ])),
-  async (t, calls) => {
-    const { root, files } = await subtree('ExodusOSS/stasis', 'v1.0.0', { format: 'zip', path: 'src' })
-    t.assert.equal(calls[0].url, `${API}/repos/ExodusOSS/stasis/zipball/v1.0.0`)
-    t.assert.equal(root, ROOT)
-    t.assert.deepEqual([...files.keys()], ['src/entry.js', 'src/raw.bin'])
-    t.assert.equal(text(files.get('src/entry.js')), 'export const x = 1\n')
-    t.assert.equal(text(files.get('src/raw.bin')), 'stored payload')
+test('subtree() round-trips binary content byte-for-byte', withFetch(
+  () => archive(tarball([[`${ROOT}/blob.bin`, Buffer.from([0, 1, 2, 253, 254, 255, 0, 10, 13])]])),
+  async (t) => {
+    const { files } = await subtree('o/r', 'v1')
+    t.assert.deepEqual([...files.get('blob.bin')], [0, 1, 2, 253, 254, 255, 0, 10, 13])
   }
 ))
 
-test('subtree() round-trips binary content byte-for-byte in both formats', withFetch(
-  ({ calls }) => {
-    const bytes = Buffer.from([0, 1, 2, 253, 254, 255, 0, 10, 13])
-    return archive(calls.length === 1
-      ? tarball([[`${ROOT}/blob.bin`, bytes]])
-      : zipball([[`${ROOT}/blob.bin`, bytes]]))
-  },
+test('subtree() rejects an archive that carries the same path twice', withFetch(
+  () => archive(tarball([[`${ROOT}/a.js`, 'first'], [`${ROOT}/a.js`, 'second']])),
   async (t) => {
-    const expected = [0, 1, 2, 253, 254, 255, 0, 10, 13]
-    const tgz = await subtree('o/r', 'v1')
-    t.assert.deepEqual([...tgz.files.get('blob.bin')], expected)
-    const zip = await subtree('o/r', 'v1', { format: 'zip' })
-    t.assert.deepEqual([...zip.files.get('blob.bin')], expected)
+    // tar can legally repeat a path and the later entry would win, hiding the earlier bytes
+    // from every caller. Refuse rather than silently pick one.
+    await t.assert.rejects(() => subtree('o/r', 'v1'), /Duplicate archive path: .*\/a\.js/)
   }
 ))
 
@@ -224,12 +164,9 @@ test('subtree() reads long paths from ustar prefix and pax headers', withFetch(
 ))
 
 test('subtree() refuses an archive entry that escapes the tree', withFetch(
-  ({ calls }) => archive(calls.length === 1
-    ? tarball([[`${ROOT}/ok.js`, 'x'], [`${ROOT}/../../etc/passwd`, 'boom']])
-    : zipball([[`${ROOT}/../../etc/passwd`, 'boom']])),
+  () => archive(tarball([[`${ROOT}/ok.js`, 'x'], [`${ROOT}/../../etc/passwd`, 'boom']])),
   async (t) => {
     await t.assert.rejects(() => subtree('o/r', 'v1'), /Unsafe archive path: .*etc\/passwd/)
-    await t.assert.rejects(() => subtree('o/r', 'v1', { format: 'zip' }), /Unsafe archive path: .*etc\/passwd/)
   }
 ))
 
@@ -278,8 +215,6 @@ test('subtree() validates its arguments before making a request', withFetch(
     await t.assert.rejects(() => subtree('stasis', 'v1'), /Expected an `owner\/repo` slug/)
     await t.assert.rejects(() => subtree('o/r', ''), /Unexpected ref: /)
     await t.assert.rejects(() => subtree('o/r', 'v1..v2'), /Unexpected ref: v1\.\.v2/)
-    await t.assert.rejects(() => subtree('o/r', 'v1', { format: 'tar' }), /Unexpected format: tar/)
-    await t.assert.rejects(() => subtree('o/r', 'v1', { format: 'TGZ' }), /Unexpected format: TGZ/)
     await t.assert.rejects(() => subtree('o/r', 'v1', { path: '../etc' }), /Unexpected path: \.\.\/etc/)
     await t.assert.rejects(() => subtree('o/r', 'v1', { path: 'a/../../b' }), /Unexpected path: a\/\.\.\/\.\.\/b/)
     await t.assert.rejects(() => subtree('o/r', 'v1', { path: 42 }), /Unexpected path: 42/)
@@ -301,30 +236,12 @@ test('subtree() passes a token through and reports HTTP failures like the other 
 ))
 
 test('subtree() surfaces a corrupt archive as a malformed-archive error', withFetch(
-  ({ calls }) => archive(calls.length === 1 ? Buffer.from('not gzip at all') : Buffer.alloc(64, 0x41)),
+  ({ calls }) => archive(calls.length === 1
+    ? Buffer.from('not gzip at all')
+    // Valid gzip whose payload is not a tar: the framing check has to catch it.
+    : gzipSync(Buffer.alloc(600, 0x41))),
   async (t) => {
     await t.assert.rejects(() => subtree('o/r', 'v1'), /Malformed tar.gz archive/)
-    // 64 bytes of garbage is long enough to reach the backwards EOCD scan and fail there.
-    await t.assert.rejects(() => subtree('o/r', 'v1', { format: 'zip' }),
-      /Malformed zip archive: no end-of-central-directory record/)
-  }
-))
-
-test('subtree() rejects a zip too short to hold an EOCD record', withFetch(
-  () => archive(Buffer.from('PK')),
-  async (t) => {
-    await t.assert.rejects(() => subtree('o/r', 'v1', { format: 'zip' }), /Malformed zip archive: too short/)
-  }
-))
-
-test('subtree() rejects a zip64 central directory rather than misreading it', withFetch(
-  () => {
-    const body = zipball([[`${ROOT}/a.js`, 'x']])
-    // Saturate the EOCD entry count, which is how zip64 signals "look in the zip64 record".
-    body.writeUInt16LE(0xff_ff, body.length - 22 + 10)
-    return archive(body)
-  },
-  async (t) => {
-    await t.assert.rejects(() => subtree('o/r', 'v1', { format: 'zip' }), /Zip64 archives are not supported/)
+    await t.assert.rejects(() => subtree('o/r', 'v1'), /Malformed tar archive/)
   }
 ))
