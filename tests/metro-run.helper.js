@@ -34,6 +34,9 @@
 //   transform cache on the input config.
 // STASIS_TEST_REPORT_CACHE_STORES=1 -- 'withStasis' mode only: print the returned + input
 //   cacheStores, so tests can pin that a capture/verify drops them and a load/inert run doesn't.
+// STASIS_TEST_METRO_WIRE_TRANSFORMER=1 -- import the companion transformer first, as a config with
+//   `transformerPath` set would.
+// STASIS_TEST_REPORT_CACHE_NONCE=1 -- print the transform-cache nonce the plugin minted (if any).
 
 import { resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
@@ -70,6 +73,11 @@ const preloadDisabled = process.env.STASIS_TEST_PRELOAD === '0'
 const _preload = preloadDisabled ? undefined : new State(process.cwd(), preloadOptions)
 
 const { StasisMetro, withStasis } = await import('../stasis/src/metro.js')
+
+// STASIS_TEST_METRO_WIRE_TRANSFORMER=1: import the companion transformer first, as Metro does when
+// the config sets `transformerPath` (it loads it in the main process to compute the cache key). Its
+// module-eval marker is what tells the plugin the cache-nonce lever is available.
+if (process.env.STASIS_TEST_METRO_WIRE_TRANSFORMER) await import('../stasis/src/metro-transformer.js')
 
 // Build the Metro-shaped mock modules from the manifest.
 const abs = (rel) => resolve(process.cwd(), rel)
@@ -114,7 +122,6 @@ const baseSerializer = (entryPoint, pre, g, _options) =>
 const entryAbs = abs(entries[0])
 const mode = process.env.STASIS_TEST_METRO_MODE || 'hook'
 const serializeTwice = process.env.STASIS_TEST_METRO_SERIALIZE_TWICE === '1'
-const stasis = new StasisMetro(pluginOptions)
 
 // Invoke a wired customSerializer once, or twice under the TWICE knob (dev-server rebuild).
 const serializeAndPrint = (serialize) => {
@@ -124,8 +131,11 @@ const serializeAndPrint = (serialize) => {
   }
 }
 
+// Construct only the instance the chosen mode actually uses: withStasis builds its own, and a
+// spare instance would resolve a SECOND plugin state (a spare sidecar under rule 6) and take the
+// hand-wired branches -- e.g. minting the transform-cache nonce that withStasis makes unnecessary.
 if (mode === 'customSerializer') {
-  serializeAndPrint(stasis.customSerializer(baseSerializer))
+  serializeAndPrint(new StasisMetro(pluginOptions).customSerializer(baseSerializer))
 } else if (mode === 'withStasis') {
   // withStasis builds its OWN StasisMetro(pluginOptions) (which reuses the preload) and
   // wires it onto the config's customSerializer, wrapping the base we provide.
@@ -144,7 +154,7 @@ if (mode === 'customSerializer') {
   serializeAndPrint(config.serializer.customSerializer)
 } else {
   // experimentalSerializerHook signature: (graph, delta) -- no preModules.
-  stasis.serializerHook(graph, delta)
+  new StasisMetro(pluginOptions).serializerHook(graph, delta)
 }
 
 if (State.preload) State.preload.write()
@@ -155,4 +165,12 @@ if (State.preload) State.preload.write()
 // forks inherit it; non-writing runs (frozen/load/inert) must leave it unset.
 if (process.env.STASIS_TEST_REPORT_SIGNAL_FLUSH) {
   console.log(`SIGNAL_FLUSH=${process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH ?? ''}`)
+}
+
+// Test-only visibility (STASIS_TEST_REPORT_CACHE_NONCE=1): report the per-run transform-cache nonce
+// the plugin mints when it could NOT drop Metro's `cacheStores` itself -- the companion transformer
+// folds it into the cache key so every lookup misses and the workers really run. Must be empty when
+// withStasis owns the config (it drops the stores instead) and for non-attesting runs.
+if (process.env.STASIS_TEST_REPORT_CACHE_NONCE) {
+  console.log(`CACHE_NONCE=${process.env.EXODUS_STASIS_METRO_CACHE_NONCE ?? ''}`)
 }

@@ -500,6 +500,54 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
     t.assert.doesNotMatch(r.stderr, /ignoring the `cacheStores`/u, 'nothing was overridden, so nothing to warn about')
   }))
 
+  // The hand-wired wiring can't have its `cacheStores` dropped (stasis never sees the config), so the
+  // companion transformer is the lever: the plugin mints a per-RUN nonce that getCacheKey folds into
+  // Metro's transform cache key, making every lookup miss so the workers really run. Confirmed
+  // against real Metro 0.87 (26 files flip commonjs -> stat:file across two warm-cache runs without
+  // it -- the worker-side toolchain degrading to payload-free stat records -- and 0 with it).
+  for (const [mode, env, minted] of [
+    ['a hand-wired capture', () => withOpts({ lock: 'add' }), true],
+    ['a hand-wired frozen verify', () => ({ EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' }), true],
+    // withStasis owns the config and drops the stores outright, so there is nothing to force.
+    ['a withStasis capture', () => ({ ...withOpts({ lock: 'add' }), STASIS_TEST_METRO_MODE: 'withStasis' }), false],
+    // Attests nothing, so a cached transform costs nothing.
+    ['an inert plugin', () => ({ STASIS_TEST_PRELOAD: '0' }), false],
+  ]) {
+    test(`${mode} ${minted ? 'mints' : 'does not mint'} a transform-cache nonce`, withTmp(async (t, tmp) => {
+      cpSync(fullFixture, tmp, { recursive: true })
+      if (minted && !String(env().EXODUS_STASIS_LOCK).includes('frozen')) rmSync(join(tmp, 'stasis.lock.json'))
+      const r = await run('src/entry.js', { cwd: tmp, env: { ...env(), STASIS_TEST_REPORT_CACHE_NONCE: '1' } })
+      t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+      const nonce = /^CACHE_NONCE=(.*)$/mu.exec(r.stdout)?.[1]
+      if (minted) t.assert.match(nonce ?? '', /^[0-9a-f]{16}$/u, 'a per-run nonce must be minted for the transformer to fold in')
+      else t.assert.equal(nonce, '', 'nothing to force, so no nonce (and no cache entries nobody will reuse)')
+    }))
+  }
+
+  test('the nonce differs per run, so a warm cache cannot serve a second capture', withTmp(async (t, tmp) => {
+    cpSync(fullFixture, tmp, { recursive: true })
+    const nonceOf = async () => {
+      rmSync(join(tmp, 'stasis.lock.json'), { force: true })
+      const r = await run('src/entry.js', { cwd: tmp, env: { ...withOpts({ lock: 'add' }), STASIS_TEST_REPORT_CACHE_NONCE: '1' } })
+      t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+      return /^CACHE_NONCE=(.*)$/mu.exec(r.stdout)?.[1]
+    }
+    t.assert.notEqual(await nonceOf(), await nonceOf(), 'a stable nonce would let the second run hit the cache again')
+  }))
+
+  test('a wired companion transformer silences the hand-wired cache warning', withTmp(async (t, tmp) => {
+    // With the transformer wired the nonce is doing the job, so there is nothing left to warn about.
+    cpSync(fullFixture, tmp, { recursive: true })
+    rmSync(join(tmp, 'stasis.lock.json'))
+    const r = await run('src/entry.js', {
+      cwd: tmp,
+      env: { ...withOpts({ lock: 'add' }), STASIS_TEST_METRO_WIRE_TRANSFORMER: '1', STASIS_TEST_REPORT_CACHE_NONCE: '1' },
+    })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.doesNotMatch(r.stderr, /wired without withStasis/u, 'the transformer lever is available, so no warning')
+    t.assert.match(r.stdout, /^CACHE_NONCE=[0-9a-f]{16}$/mu, 'and the nonce it folds in is still minted')
+  }))
+
   test('a hand-wired capture warns that Metro\'s transform cache is out of stasis\'s hands', withTmp(async (t, tmp) => {
     // customSerializer()/serializerHook never hand stasis the Metro config, so it cannot drop the
     // stores -- and it cannot detect a cache hit either. Warn once instead of under-attesting quietly.

@@ -16,6 +16,12 @@ import { State } from '@exodus/stasis-core/state'
 
 const require = createRequire(import.meta.url)
 
+// Marker that this transformer is wired, readable by the serializer half IN THE SAME PROCESS (Metro
+// requires transformerPath in the main process to compute the cache key, before the serializer runs).
+// It tells StasisMetro that the cache-nonce lever below is available, so it needn't warn. Symbol.for
+// so it reaches across duplicate stasis-plugins copies, matching stasis-core's live-State registry.
+globalThis[Symbol.for('@exodus/stasis-plugins/metro-transformer')] = true
+
 // The real transformer we wrap (default matches Metro's; override for a custom TS/Babel preset).
 // Required lazily per worker so a non-load build pays nothing.
 const BASE_TRANSFORMER = process.env.EXODUS_STASIS_METRO_BASE_TRANSFORMER || 'metro-transform-worker'
@@ -76,11 +82,23 @@ export function transform(config, projectRoot, filename, data, options) {
 }
 
 export function getCacheKey(config) {
-  // Fold in the base transformer's cache key, then add a stasis-load discriminator so load results
-  // (which can differ from a disk build even when disk == bundle) don't cross-pollinate the cache.
-  // Derive the marker from the resolved load State (not the env) so config.json activation keys too.
+  // Fold in the base transformer's cache key, then add a stasis-mode discriminator so results from
+  // one mode don't cross-pollinate another's cache.
+  //   load:<bundleFile> -- load results can differ from a disk build even when disk == bundle.
+  //   capture:<nonce>   -- a per-RUN value StasisMetro mints for a capture/verify it could not drop
+  //     `cacheStores` for (a hand-wired serializer; withStasis owns the config and drops them
+  //     instead). Metro serves a cache HIT without calling a worker, so the toolchain the workers
+  //     load would never be loaded in any process -- unattested under capture, unchecked under
+  //     frozen, and the file degrades to a payload-free stat record. A value that changes per run
+  //     makes every lookup miss, so the workers really run. Costs single-use entries in Metro's
+  //     store, which is why withStasis prefers dropping the stores outright.
+  // The load marker comes from the resolved State (not the env) so config.json activation keys too;
+  // the nonce's absence is itself the signal that no capture needs forcing.
   const baseKey = typeof getBase().getCacheKey === 'function' ? getBase().getCacheKey(config) : ''
   const state = getLoadState()
-  const marker = state ? `load:${state.config.bundleFile || 'default'}` : 'off'
+  const nonce = process.env.EXODUS_STASIS_METRO_CACHE_NONCE
+  let marker = 'off'
+  if (state) marker = `load:${state.config.bundleFile || 'default'}`
+  else if (nonce) marker = `capture:${nonce}`
   return `${baseKey}$stasis-metro-transformer:${marker}`
 }

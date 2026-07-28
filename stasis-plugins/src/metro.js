@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { isUtf8 } from 'node:buffer'
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { isAbsolute, join } from 'node:path'
@@ -39,6 +40,12 @@ const NATIVE_WALK_SKIP_DIRS = new Set([
 // The worker-side toolchain that only Metro's transform workers load, named in both the
 // --child-process assert and the transform-cache warning so the two can't describe different sets.
 const WORKER_TOOLCHAIN = 'babel.config.js, @babel/core, the RN preset + plugins'
+
+// Whether the companion ./metro-transformer.js is loaded in THIS process, which Metro does (in the
+// main process, to compute the cache key) only when the config wires it as `transformerPath`. It
+// sets the marker at module eval; its presence means the cache nonce is doing its job, so #run's
+// warning can stay quiet. Read late (at serialization), by which point Metro has loaded it.
+const transformerWired = () => globalThis[Symbol.for('@exodus/stasis-plugins/metro-transformer')] === true
 
 // Run `react-native config` (RN's autolinking resolver) for native deps. Null when the RN CLI
 // isn't installed; THROWS when present but failing -- silently under-attesting breaks frozen runs.
@@ -139,15 +146,24 @@ export class StasisMetro {
   // Whether this instance already captured; the dev-server rebuild guard in #run trips on the second.
   #ran = false
 
-  // Set by withStasis, which returns the Metro config and can therefore drop its transform cache;
-  // a hand-wired customSerializer/serializerHook can't, so #run warns instead. Internal wiring, in
-  // the second options bag like StasisEsbuild's -- not a user-facing option.
+  // Set by withStasis, which returns the Metro config and therefore dropped its transform cache;
+  // a hand-wired customSerializer/serializerHook can't, and falls back to the cache nonce below.
+  // Internal wiring, in the second options bag like StasisEsbuild's -- not a user-facing option.
   #ownsConfig
 
   constructor(options = {}, { ownsConfig = false } = {}) {
     const { state } = resolvePluginState('StasisMetro', options, process.cwd())
     this.#state = state // null when the plugin should be inert (Rule 0 or Rule 7)
     this.#ownsConfig = ownsConfig
+    // A capture/verify only holds if Metro really transforms: a cache HIT skips the worker, so the
+    // toolchain the workers load is never loaded in any process (see withStasis). withStasis drops
+    // `cacheStores` for that; when stasis doesn't own the config, the companion transformer is the
+    // only lever, so mint a per-RUN nonce for it to fold into Metro's cache key -- every lookup then
+    // misses and the workers run. Minted HERE (metro.config.js evaluation) so the transform workers
+    // Metro forks later inherit one shared value; `||=` keeps an ambient/outer value authoritative.
+    if (!ownsConfig && this.needsTransforms) {
+      process.env.EXODUS_STASIS_METRO_CACHE_NONCE ||= randomBytes(8).toString('hex')
+    }
     // A capture-that-writes REQUIRES --child-process: the worker toolchain (babel, RN preset) is
     // observed only in workers. Gate on writeLockfile||writeBundle so it's demanded only when
     // forwarding does something (frozen/load verify per-process and need no channel).
@@ -219,13 +235,16 @@ export class StasisMetro {
       )
     }
     this.#ran = true
-    // Keyed on ownership: a withStasis-built instance already dropped the stores (see withStasis).
-    // Nothing here can detect a cache hit, so say it once rather than silently under-attest.
-    if (!this.#ownsConfig && this.needsTransforms) {
+    // Keyed on ownership: a withStasis-built instance already dropped the stores, and a wired
+    // companion transformer forces cache misses via the nonce (see the constructor) -- so warn only
+    // when NEITHER lever was available. Nothing here can detect a cache hit, so this is the last
+    // word: say it once rather than silently under-attest.
+    if (!this.#ownsConfig && !transformerWired() && this.needsTransforms) {
       console.warn(
-        "[stasis] StasisMetro: wired without withStasis(), so Metro's transform cache is outside " +
-        `stasis's control -- a cached transform skips the worker and the toolchain it loads ` +
-        `(${WORKER_TOOLCHAIN}) goes unattested. Wrap your config in withStasis(), or set ` +
+        "[stasis] StasisMetro: wired without withStasis() and without the companion transformer, so " +
+        "Metro's transform cache is outside stasis's control -- a cached transform skips the worker " +
+        `and the toolchain it loads (${WORKER_TOOLCHAIN}) goes unattested. Wrap your config in ` +
+        'withStasis(), set `transformerPath` to @exodus/stasis/metro-transformer, or set ' +
         '`cacheStores: []` yourself for capture/frozen builds.'
       )
     }

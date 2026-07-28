@@ -221,6 +221,31 @@ test('getCacheKey folds in the base transformer key and a load-mode discriminato
   t.assert.match(on.stdout, /load:/, 'load-mode marker present so disk-built results are not reused')
 }))
 
+test('getCacheKey folds in the capture nonce so a warm cache cannot skip the workers', withTmp((t, tmp) => {
+  // StasisMetro mints EXODUS_STASIS_METRO_CACHE_NONCE per RUN when it could not drop Metro's
+  // `cacheStores` itself (a hand-wired serializer). Metro serves a cache HIT without calling a
+  // worker, so the toolchain the workers load would never be loaded in any process -- confirmed
+  // against real Metro 0.87: 26 files degrade from `commonjs` to a payload-free `stat:file` across
+  // two warm-cache runs, and none do once the key carries a per-run component. So the key must
+  // change with the nonce, and must be unaffected when no capture needs forcing.
+  cpSync(fullFixture, tmp, { recursive: true })
+  const key = (env) => {
+    const r = transform(['--cache-key'], { cwd: tmp, env })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    return r.stdout
+  }
+
+  const plain = key({})
+  t.assert.doesNotMatch(plain, /capture:/u, 'no nonce -> no capture marker')
+
+  const first = key({ EXODUS_STASIS_METRO_CACHE_NONCE: 'aaaaaaaaaaaaaaaa' })
+  const second = key({ EXODUS_STASIS_METRO_CACHE_NONCE: 'bbbbbbbbbbbbbbbb' })
+  t.assert.match(first, /capture:aaaaaaaaaaaaaaaa/u, 'the nonce is folded into the key')
+  t.assert.notEqual(first, second, "a new run must not reuse the previous run's entries")
+  t.assert.notEqual(first, plain, "and must not reuse a non-capture build's entries")
+  t.assert.match(first, /mock-base-cache-key/u, 'while still wrapping the base transformer key')
+}))
+
 test('getCacheKey marks load when activated via stasis.config.json, not just env', withTmp((t, tmp) => {
   // Regression guard for the env/config split: the marker must track the same source of
   // truth as transform() (config.loadBundle), not just EXODUS_STASIS_BUNDLE. Before the fix
