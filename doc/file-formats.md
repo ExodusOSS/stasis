@@ -83,7 +83,7 @@ attested.
     ".": {
       "name": "@exodus/stasis",
       "version": "1.0.0-alpha.0",
-      "files": { "src/index.js": "sha512-…" }
+      "files": { "src/index.js": "sha512-…", "scripts/build.sh": "sha512-…" }
     }
   },
   "modules": {
@@ -99,8 +99,10 @@ attested.
   },
   "formats": {
     "src/index.js": "module",
+    "scripts/build.sh": "shell",
     "node_modules/@exodus/bytes/index.js": "commonjs"
-  }
+  },
+  "executable": ["scripts/build.sh"]
 }
 ```
 
@@ -154,6 +156,8 @@ attested.
   value. Checked like `imports`: a mismatch is fatal, and on disk only the attested
   zone is enforced (`node_modules` files in `node_modules` scope, everything in
   `full`).
+- `executable` lists the recorded files carrying a POSIX execute bit (see
+  "Executable files"); the key is omitted when none do.
 - File and module maps are sorted by the project's `sortPaths` rule (files in a
   dir before sub-dirs; `*` first, `node_modules` last).
 
@@ -179,7 +183,7 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
     ".": {
       "name": "@exodus/stasis",
       "version": "1.0.0-alpha.0",
-      "files": { "src/index.js": "export const x = 1\n" }
+      "files": { "src/index.js": "export const x = 1\n", "scripts/build.sh": "#!/bin/sh\n…" }
     }
   },
   "modules": {
@@ -190,11 +194,12 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
       "files": { "index.js": "..." }
     }
   },
-  "formats": { "src/index.js": "module" },
+  "formats": { "src/index.js": "module", "scripts/build.sh": "shell" },
   "imports": {
     "*": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } },
     "node, import": { "node_modules/foo/index.js": { "./impl.js": "node_modules/foo/impl.js" } }
-  }
+  },
+  "executable": ["scripts/build.sh"]
 }
 ```
 
@@ -223,6 +228,8 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   or inconsistently-attested edges are fatal.
 - In `bundle = load` with `scope = full`, entry-point resolutions are checked
   against `entries`.
+- `executable` mirrors the lockfile's (see "Executable files"), restricted to the
+  files that bundle carries — in a split layout each half lists only its own.
 
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-relative
 path, with no `entries`/`modules`/`formats`/`imports` — is still accepted by
@@ -317,6 +324,34 @@ tagged in `formats` by payload encoding:
 In the lockfile a resource is hashed like any other file (sha512 of its raw bytes)
 and carries the same `formats` tag, so a frozen run verifies a copied asset
 byte-for-byte just as it does code.
+
+## Executable files
+
+Both the lockfile and the bundle carry an `executable` array: the project-relative
+paths of the **recorded files** whose on-disk mode had any POSIX execute bit
+(`0o111`) when they were captured. Sorted by the same `sortPaths` rule as
+`entries`, and **omitted entirely when empty**, so an artifact with nothing
+executable is byte-identical to one written before the field existed.
+
+```json
+{ "executable": ["scripts/build.sh", "node_modules/dep/bin/cli.js"] }
+```
+
+- Files only. A `directory` capture is a listing, not a file, and a `stat:*` record
+  carries no content — neither can appear, and both parsers reject an `executable`
+  entry that names one, or that names a path the artifact doesn't record at all.
+- The bit is read from disk at capture (following symlinks, so a link records its
+  target's mode). Windows exposes no execute bits, so a capture there lists none.
+- Disk is authoritative on re-capture: re-reading a file under `lock = add` /
+  `bundle = add` refreshes its bit, dropping a stale entry for a file that has since
+  lost the bit — a mode change is not a content change, so it needs no
+  `--lock=replace`.
+- Merging two artifacts (`stasis add`, `stasis bundle --add`) unions the lists, as
+  the merged file set is itself a union.
+- `stasis extract` restores the bit — this is what the field is *for*; see
+  [extract.md](extract.md). It is metadata carried alongside the bytes, **not** part
+  of what `lock = frozen` / `bundle = frozen` verify: an artifact predating the field
+  lacks it and still loads, and a mode-only drift is not a hash mismatch.
 
 ## Filesystem captures (`stasis run --fs=sync` / `--fs=async`)
 

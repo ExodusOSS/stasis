@@ -5,7 +5,9 @@ import { parseArgs } from 'node:util'
 
 // Snapshot realpathSync before `stasis run --fs` patches fs.realpathSync: the patched wrapper
 // doesn't throw ENOENT, which would defeat assertRealPathWithinBase's reliance on that throw.
-const { realpathSync } = fs
+// statSync likewise -- its patched form answers a bundle-served path with SYNTHETIC Stats, whose
+// `mode` would make isExecutableFile read the bundle's guess instead of the real inode's bits.
+const { realpathSync, statSync } = fs
 
 const sep = '/'
 
@@ -379,6 +381,51 @@ export function extSetsEqual(a, b) {
 export function moduleFileKey(dir, rel) {
   if (rel === '') return dir
   return dir === '.' ? rel : `${dir}/${rel}`
+}
+
+// Every flat project-relative key a module map records (bucket dir + per-bucket rel), the file set
+// an artifact's `executable` list must be a subset of.
+export function moduleFileKeys(modules) {
+  const keys = new Set()
+  for (const [dir, { files }] of modules) {
+    for (const rel of Object.keys(files)) keys.add(moduleFileKey(dir, rel))
+  }
+  return keys
+}
+
+// The POSIX execute bits (user/group/other). A file carrying any of them is recorded in the
+// artifact's `executable` list so `stasis extract` can restore the bit; Windows reports none, so a
+// capture there records no executables at all.
+export const EXECUTE_BITS = 0o111
+export const isExecutableMode = (mode) => Number.isInteger(mode) && (mode & EXECUTE_BITS) !== 0
+
+// Executability of the file at absolute path `abs`, following symlinks (the recorded bytes are the
+// target's, so the target's mode is the honest answer). A path that can't be stat'd -- gone mid-run,
+// or a synthetic bundle entry with no file on disk -- is simply not executable.
+export function isExecutableFile(abs) {
+  try {
+    return isExecutableMode(statSync(abs).mode)
+  } catch {
+    return false
+  }
+}
+
+// Validate a serialized `executable` array into a Set of project-relative paths. Every entry must
+// name a file the artifact itself records, and never a `directory` capture (a listing, not a file):
+// an entry naming anything else is malformed -- there is nothing for `extract` to chmod -- so fail
+// closed rather than carry it. `what` names the artifact ('bundle'/'lockfile') in the messages.
+export function parseExecutable(list, { what, files, formats }) {
+  if (list === undefined) return new Set()
+  assert(Array.isArray(list), `${what}: executable must be an array of file paths`)
+  const out = new Set()
+  for (const file of list) {
+    assert(typeof file === 'string' && file !== '', `${what}: executable entry must be a non-empty string`)
+    assert(!posixPathEscapes(file), `${what}: executable entry '${file}' escapes the root`)
+    assert(files.has(file), `${what}: executable entry '${file}' names no file the ${what} records`)
+    assert(formats.get(file) !== 'directory', `${what}: executable entry '${file}' is a directory capture, not a file`)
+    out.add(file)
+  }
+  return out
 }
 
 // Resolve `baseDir/relPath` through symlinks and confirm the real target stays within `realBase`.

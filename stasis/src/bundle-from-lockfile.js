@@ -14,12 +14,14 @@ export function bundleFromLockfile(lockfile, { root }) {
   if (!lockfile.imports) throw new Error('stasis: lockfile has no recorded import graph')
   const formats = lockfile.formats ?? new Map()
   const modules = new Map()
+  const carried = new Set()
   for (const [dir, { name, version, ecosystem, files }] of lockfile.modules) {
     const out = Object.create(null)
     for (const [rel, integrity] of Object.entries(files)) {
       const file = moduleFileKey(dir, rel)
       const format = formats.get(file)
       if (format === 'directory') continue
+      carried.add(file)
       const abs = resolve(root, file)
       let bytes
       try {
@@ -52,5 +54,9 @@ export function bundleFromLockfile(lockfile, { root }) {
     modules,
     imports: lockfile.imports,
     formats,
+    // Narrowed to the files this bundle ended up carrying: a skipped directory capture is never
+    // executable, but the intersection keeps Bundle.parse's "executable names a carried file" rule
+    // true for any hand-built lockfile too.
+    executable: new Set([...(lockfile.executable ?? [])].filter((file) => carried.has(file))),
   })
 }

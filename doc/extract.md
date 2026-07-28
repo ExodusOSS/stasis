@@ -35,6 +35,18 @@ restored: sources are still extracted, the lockfile is skipped with a warning.
 
 Existing files at target paths are overwritten, including a pre-existing `stasis.lock.json`.
 
+## Executable files
+
+Every file the bundle's `executable` array names (see
+[file-formats.md](file-formats.md#executable-files)) is `chmod`ed after it is
+written, so a bundled shell script or CLI comes back runnable. The restored mode is
+derived from the mode the write just produced — execute is added wherever the file
+is readable (`0644` → `0755`, a private `0600` → `0700`) — so it follows the
+caller's umask rather than a hard-coded `0755`. Only files `extract` actually wrote
+are touched, and the derived `stasis.lock.json` carries the same list. A bundle with
+no `executable` array (nothing executable, or a legacy `version: 0` bundle) chmods
+nothing.
+
 ## Untrusted input
 
 `extract` treats the bundle as untrusted and plans the whole tree before writing

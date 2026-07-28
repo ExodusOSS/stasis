@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isExecutableFile, isStatFormat, moduleFileKey, moduleFileKeys, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -56,6 +56,10 @@ export class State {
   formats = new Map()
   modules = new Map()
   imports = new Map()
+  // Project-relative files observed carrying a POSIX execute bit, seeded from the loaded
+  // lockfile/bundle and kept current by addFile (disk is authoritative -- a file that lost the bit
+  // drops out). Emitted as the artifacts' `executable` list; see #mergedExecutable.
+  executable = new Set()
   config
   root
   #parent
@@ -198,6 +202,7 @@ export class State {
           }
           this.formats = bundle.formats
           this.imports = bundle.imports
+          this.#absorbExecutable(bundle)
           // Carry `reason` forward like #absorbCodeBundle (this inlined sidecar absorb is its twin), else
           // a plugin writing its own bundleFile drops every other consumer's attribution on a bundle=add re-run.
           this.#seedReasonFromBundle(bundle)
@@ -396,6 +401,10 @@ export class State {
     }
     this.#lockImports = lockfile.imports
     this.#lockFormats = lockfile.formats
+    // Seeded straight into the live set (unlike imports/formats, which keep a separate lockfile
+    // baseline for frozen verification): re-reading a file this run must be able to CLEAR a stale
+    // exec bit, and #mergedExecutable drops whatever the retained modules no longer record.
+    for (const file of lockfile.executable) this.executable.add(file)
     this.#lockfileLoaded = true
     return true
   }
@@ -451,6 +460,7 @@ export class State {
     }
     this.formats = bundle.formats
     this.imports = bundle.imports
+    this.#absorbExecutable(bundle)
     // Carry the loaded bundle's `reason` attribution forward so bundle=add round-trips it
     // (see #seedReasonFromBundle) rather than dropping every consumer but this run's 'run'.
     this.#seedReasonFromBundle(bundle)
@@ -566,6 +576,7 @@ export class State {
         `format conflict for ${file}: bundleFile declares '${existing}', resourcesBundleFile declares '${format}'`)
       this.formats.set(file, format)
     }
+    this.#absorbExecutable(bundle)
     // Carry this half's `reason` attribution forward too (the resources bundle's reason is
     // restricted to resource files by #bundleReason's inBundle filter, so it stays disjoint
     // from the code half's -- see #seedReasonFromBundle).
@@ -580,6 +591,13 @@ export class State {
       for (const f of bundle.sources.keys()) this.#bundleResources.add(f)
       for (const [f, fmt] of bundle.formats) this.#bundleFormats.set(f, fmt)
     }
+  }
+
+  // Union an absorbed bundle's `executable` list into the live set (never a replace: a lockfile
+  // seed, or the code half of a split layout, may already have contributed). Re-reading any of
+  // these files this run re-derives its bit from disk, so a stale entry self-corrects.
+  #absorbExecutable(bundle) {
+    for (const file of bundle.executable) this.executable.add(file)
   }
 
   // Verify one resolution edge against an attestation map. Match the conditions key exactly
@@ -980,6 +998,12 @@ export class State {
     }
 
     if (format) noupsert(this.formats, file, format)
+
+    // Record the file's POSIX execute bit for the artifacts' `executable` list (`stasis extract`
+    // restores it). Not a noupsert: a mode change is not a content change, so disk simply wins over
+    // whatever a loaded lockfile/bundle seeded -- including clearing a bit the file no longer has.
+    if (isExecutableFile(absolute)) this.executable.add(file)
+    else this.executable.delete(file)
   }
 
   // Record an `fs.readFileSync` capture (--fs). classifyFormat routes the bytes:
@@ -1045,6 +1069,9 @@ export class State {
     assert.equal(module.files[rel], integrity)
     if (this.config.bundle) noupsert(this.resources, file, content)
     noupsert(this.formats, file, format)
+    // A `directory` capture is a listing, never an executable file (and both artifacts' parsers
+    // refuse one in `executable`), so drop any bit a prior content record left on this path.
+    this.executable.delete(file)
   }
 
   // Record an `fs.lstatSync/statSync(path)` capture: a PAYLOAD-FREE stat record
@@ -1385,6 +1412,32 @@ export class State {
     return merged
   }
 
+  // The executable list the LOCKFILE attests: this State's plus its write-mode sidecars' (they
+  // contribute files to the unified lockfile), restricted to the files the lockfile actually
+  // records -- a seeded entry whose module the scope filter dropped would fail Lockfile.parse.
+  #mergedExecutable() {
+    // Cheap common case: nothing executable anywhere, so don't index every attested file.
+    if (this.executable.size === 0 && [...this.#sidecars].every((s) => s.executable.size === 0)) return new Set()
+    const recorded = moduleFileKeys(this.modules)
+    const merged = new Set()
+    for (const file of this.executable) if (recorded.has(file)) merged.add(file)
+    for (const sidecar of this.#sidecars) {
+      for (const file of sidecar.executable) if (recorded.has(file)) merged.add(file)
+    }
+    return merged
+  }
+
+  // The executable list ONE bundle declares, derived from the bucket map that bundle will emit:
+  // Bundle.parse refuses an entry naming a file the bundle doesn't hold, and a split half holds
+  // only its own (code vs resources).
+  #bundleExecutable(modules) {
+    if (this.executable.size === 0) return new Set()
+    const carried = moduleFileKeys(modules)
+    const out = new Set()
+    for (const file of this.executable) if (carried.has(file)) out.add(file)
+    return out
+  }
+
   get lockData() {
     return new Lockfile({
       config: this.config.values,
@@ -1392,6 +1445,7 @@ export class State {
       modules: this.modules,
       imports: this.#mergedImports(),
       formats: this.#mergedFormats(),
+      executable: this.#mergedExecutable(),
     }).serialize()
   }
 
@@ -1492,12 +1546,14 @@ export class State {
       assert.ok(!contents.has(file), `state invariant: file ${file} in both sources and resources`)
       contents.set(file, content)
     }
+    const modules = this.#bundleModules(contents)
     return new Bundle({
       config: this.config.values,
       entries: this.entries,
-      modules: this.#bundleModules(contents),
+      modules,
       formats: this.#formatsForBundle(),
       imports: this.imports,
+      executable: this.#bundleExecutable(modules),
       reason: this.#bundleReason(contents.keys()),
     })
   }
@@ -1516,12 +1572,14 @@ export class State {
     for (const [file, format] of this.#formatsForBundle()) {
       if (!Bundle.isResourceFormat(format)) codeFormats.set(file, format)
     }
+    const modules = this.#bundleModules(this.sources)
     return new Bundle({
       config: this.config.values,
       entries: this.entries,
-      modules: this.#bundleModules(this.sources),
+      modules,
       formats: codeFormats,
       imports: this.imports,
+      executable: this.#bundleExecutable(modules),
       reason: this.#bundleReason(this.sources.keys()),
     })
   }
@@ -1531,13 +1589,15 @@ export class State {
     for (const [file, format] of this.formats) {
       if (Bundle.isResourceFormat(format)) resourceFormats.set(file, format)
     }
+    const modules = this.#bundleModules(this.resources)
     return new Bundle({
       config: this.config.values,
       // Resources bundle carries no entries/imports (Bundle.parse waives the entries requirement when no code).
       entries: new Set(),
-      modules: this.#bundleModules(this.resources),
+      modules,
       formats: resourceFormats,
       imports: new Map(),
+      executable: this.#bundleExecutable(modules),
       reason: this.#bundleReason(this.resources.keys()),
     })
   }

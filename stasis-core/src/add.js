@@ -8,7 +8,7 @@ import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBinaryPlist, isBrotliQuality, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBinaryPlist, isBrotliQuality, isExecutableFile, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
@@ -61,6 +61,7 @@ function readAddConfig(baseDir) {
 function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
   const modules = new Map()
   const formats = new Map()
+  const executable = new Set()
   const ensureBucket = (dir, name, version, ecosystem) => {
     if (!modules.has(dir)) {
       modules.set(dir, ecosystem === undefined
@@ -77,7 +78,7 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     return metaByDir.get(dir)
   }
 
-  for (const [rel, { content, format }] of files) {
+  for (const [rel, { content, format, executable: isExec }] of files) {
     const meta = metaFor(rel)
     const inNodeModules = splitNodeModulesPath(rel) !== null
     if (meta) {
@@ -93,6 +94,7 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
       ensureBucket('.', workspaceName, workspaceVersion).files[rel] = content
     }
     formats.set(rel, format)
+    if (isExec) executable.add(rel)
   }
 
   // Attribute packed files to the `add` consumer (distinct from the deep bundler's `bundle`).
@@ -103,6 +105,7 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     modules,
     formats,
     imports: new Map(),
+    executable,
   }).withReason('add')
 }
 
@@ -134,7 +137,7 @@ function bundleToLockfile(bundle, integrities) {
     for (const rel of Object.keys(m.files)) files[rel] = integrities.get(moduleFileKey(dir, rel))
     modules.set(dir, { name: m.name, version: m.version, ...(m.ecosystem === undefined ? {} : { ecosystem: m.ecosystem }), files })
   }
-  return new Lockfile({ config: bundle.config, entries: bundle.entries, modules, imports: bundle.imports, formats: bundle.formats })
+  return new Lockfile({ config: bundle.config, entries: bundle.entries, modules, imports: bundle.imports, formats: bundle.formats, executable: bundle.executable })
 }
 
 // Merge the companion lockfile into the project's stasis.lock.json (strict: divergent bytes throw).
@@ -211,6 +214,9 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     assertRealPathWithinBase(realBase, baseDir, rel)
     const buf = readFileSync(abs)
     if (hasLock) integrities.set(rel, sha512integrity(buf))
+    // Recorded alongside the bytes so `stasis extract` restores the bit (a shell script added with
+    // `stasis add scripts/` comes back runnable).
+    const executable = isExecutableFile(abs)
     const format = sourceFormat(abs, buf)
     // A BINARY plist can't be stored as the UTF-8 source string its 'xml' format implies, so it is
     // NOT source here: fall through to the resource branch, which carries it as opaque base64 when
@@ -218,10 +224,10 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     if (format !== null && !isBinaryPlist(rel, buf)) {
       // Source is stored as a UTF-8 string, so non-UTF-8 bytes would lossily diverge from the file on disk.
       if (!isUtf8(buf)) throw new Error(`add: ${rel} is not valid UTF-8 (format '${format}')`)
-      codeFiles.set(rel, { content: buf.toString('utf8'), format })
+      codeFiles.set(rel, { content: buf.toString('utf8'), format, executable })
     } else if (resources.has(pathExt(rel) || basename(rel).toLowerCase())) {
       const utf8 = isUtf8(buf)
-      resourceFiles.set(rel, { content: utf8 ? buf.toString('utf8') : buf.toString('base64'), format: utf8 ? 'resource' : 'resource:base64' })
+      resourceFiles.set(rel, { content: utf8 ? buf.toString('utf8') : buf.toString('base64'), format: utf8 ? 'resource' : 'resource:base64', executable })
     } else {
       throw new Error(`add: ${rel} is neither a recognized source file nor a declared resource; add its extension to "resources" in ${CONFIG_FILE}`)
     }

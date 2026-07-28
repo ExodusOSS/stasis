@@ -11,6 +11,7 @@ import {
   mergeModuleMaps,
   moduleFileKey,
   objectToMaps,
+  parseExecutable,
   posixPathEscapes,
   sortPaths,
   splitNodeModulesPath,
@@ -52,10 +53,13 @@ export class Bundle {
   modules
   formats
   imports
+  // Project-relative paths of the bundled files that carry a POSIX execute bit, so `stasis extract`
+  // can restore it. Files only -- a `directory` capture is a listing, never executable.
+  executable
   // Informational only, NOT attested -- never consulted for verification. Present only with >1 consumer.
   reason
 
-  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, reason, version = VERSION } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
     assert(['node_modules', 'full'].includes(config.scope))
     this.version = version
@@ -64,6 +68,7 @@ export class Bundle {
     this.modules = modules ?? new Map()
     this.formats = formats ?? new Map()
     this.imports = imports ?? new Map()
+    this.executable = executable ?? new Set()
     this.reason = reason
   }
 
@@ -202,6 +207,8 @@ export class Bundle {
       modules,
       formats,
       imports,
+      // Checked against flatKeys (built above): every executable must be a file this bundle carries.
+      executable: parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats }),
       reason: isPlainObject(json.reason) ? json.reason : undefined,
     })
   }
@@ -230,6 +237,9 @@ export class Bundle {
     const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
+    // Omitted when empty: nothing executable is the overwhelmingly common case, and an absent key
+    // keeps every pre-`executable` artifact byte-identical when rewritten.
+    if (this.executable.size > 0) data.executable = fileSetToObject(this.executable)
     if (this.reason !== undefined) data.reason = this.reason
     return JSON.stringify(data, undefined, 2)
   }
@@ -244,6 +254,7 @@ export class Bundle {
       modules: this.modules,
       formats: this.formats,
       imports: this.imports,
+      executable: this.executable,
       reason: mergeReason(this.reason, { [consumer]: files }),
     })
   }
@@ -258,6 +269,9 @@ export class Bundle {
       modules: mergeModuleMaps(this.modules, other.modules, 'bundle merge'),
       formats: mergeFormatMaps(this.formats, other.formats, 'bundle merge'),
       imports: mergeImportMaps(this.imports, other.imports, 'bundle merge'),
+      // A union, not a conflict check: each side attests only the files it carries, and the merge
+      // keeps every file, so keeping every exec bit is the matching rule.
+      executable: new Set([...this.executable, ...other.executable]),
       reason: mergeReason(this.reason, other.reason),
     })
   }

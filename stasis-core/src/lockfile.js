@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -20,14 +20,18 @@ export class Lockfile {
   imports
   // file -> format string. Same Map/null rule as imports.
   formats
+  // Project-relative paths of the attested files that carry a POSIX execute bit, so a tree rebuilt
+  // from this lockfile (`stasis extract`) can restore it. Files only, never a `directory` capture.
+  executable
 
-  constructor({ config = { scope: 'full' }, entries, modules, imports, formats } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, imports, formats, executable } = {}) {
     assert(['node_modules', 'full'].includes(config.scope))
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
     this.imports = imports ?? null
     this.formats = formats ?? null
+    this.executable = executable ?? new Set()
   }
 
   static parse(text) {
@@ -111,7 +115,11 @@ export class Lockfile {
       formats.set(key, format)
     }
 
-    return new Lockfile({ config: json.config, entries, modules, imports, formats })
+    // Every executable must be a file this lockfile attests (a stat record, which has no `files`
+    // entry, doesn't count -- it carries no content and nothing rebuilds a file from it).
+    const executable = parseExecutable(json.executable, { what: 'lockfile', files: moduleFileKeys(modules), formats })
+
+    return new Lockfile({ config: json.config, entries, modules, imports, formats, executable })
   }
 
   serialize() {
@@ -134,6 +142,9 @@ export class Lockfile {
     // A null facet (in-memory constructs only) omits the key.
     if (this.imports !== null) Object.assign(store, { imports: fileMapToObject(this.imports) })
     if (this.formats !== null) Object.assign(store, { formats: fileMapToObject(this.formats) })
+    // Omitted when empty (see Bundle.serialize): a lockfile with nothing executable is unchanged
+    // from one written before the field existed.
+    if (this.executable.size > 0) store.executable = fileSetToObject(this.executable)
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 
@@ -147,6 +158,8 @@ export class Lockfile {
       modules: mergeModuleMaps(this.modules, other.modules, 'lockfile merge'),
       imports: mergeNullable(this.imports, other.imports, (a, b) => mergeImportMaps(a, b, 'lockfile merge'), 'imports'),
       formats: mergeNullable(this.formats, other.formats, (a, b) => mergeFormatMaps(a, b, 'lockfile merge'), 'formats'),
+      // Union, like Bundle.merge: the merged file set is the union, so the exec bits are too.
+      executable: new Set([...this.executable, ...other.executable]),
     })
   }
 }

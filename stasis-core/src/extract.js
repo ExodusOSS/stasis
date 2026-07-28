@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { brotliDecompressSync } from 'node:zlib'
 
@@ -43,6 +43,9 @@ export function lockfileFromBundle(bundle) {
     modules,
     imports: bundle.imports,
     formats: bundle.formats,
+    // Same file set as the bundle (hashed, not swapped out), so its executable list transfers as-is
+    // -- the extracted tree and the lockfile beside it agree on which files carry the bit.
+    executable: bundle.executable,
   })
 }
 
@@ -72,6 +75,9 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
   // last-wins `sources` getter. Containment is lexical -- symlinks in outDir are followed, so untrusted bundles need a fresh dir (see doc/extract.md).
   const writes = []
   const targets = new Set()
+  // Absolute paths of the files the bundle marks executable. Collected from the write plan (never
+  // straight from bundle.executable) so only a file we actually wrote is ever chmod'ed.
+  const executables = []
   for (const [dir, { files }] of bundle.modules) {
     for (const [rel, content] of Object.entries(files)) {
       // Skip a `directory` capture: it's a listing at the dir's own path, not a file to write (its children recreate the dir).
@@ -94,6 +100,7 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
         throw new Error(`extract: bundle contains ${FILE_LOCK}, which would collide with the derived lockfile`)
       }
       targets.add(abs)
+      if (bundle.executable.has(file)) executables.push(abs)
       const data = bundle.formats.get(file) === 'resource:base64'
         ? assertCanonicalBase64(content, file)
         : content
@@ -114,12 +121,20 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
     mkdirSync(dirname(abs), { recursive: true })
     writeFileSync(abs, content)
   }
+  // Restore the execute bit on the files the bundle marks executable. Derived from the mode the
+  // write just produced (add execute wherever the file is readable) rather than a hard-coded 0o755,
+  // so the result follows the caller's umask: 0644 -> 0755, a private 0600 -> 0700.
+  for (const abs of executables) {
+    const { mode } = statSync(abs)
+    chmodSync(abs, mode | ((mode & 0o444) >> 2))
+  }
   mkdirSync(outDir, { recursive: true }) // for an empty bundle, where no write created it
   if (withLockfile) writeFileSync(lockAbs, lockText)
 
-  console.warn(`[${logLabel}] Extracted ${writes.length} file(s)${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
+  const execNote = executables.length > 0 ? ` (${executables.length} executable)` : ''
+  console.warn(`[${logLabel}] Extracted ${writes.length} file(s)${execNote}${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
   if (!withLockfile) {
     console.warn(`[${logLabel}] Warning: legacy v0 bundle records no package name/version, so ${FILE_LOCK} can not be restored and was not written`)
   }
-  return { dir: outDir, files: writes.length }
+  return { dir: outDir, files: writes.length, executable: executables.length }
 }

@@ -13,7 +13,7 @@ import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isAppleSliceDir, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isAppleSliceDir, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -171,6 +171,17 @@ function makeRustClassifier(baseDir) {
   }
 }
 
+// Project-relative paths in `sources` whose on-disk file carries a POSIX execute bit -- the
+// `executable` list both artifacts record. The State-driven path derives this in addFile; the
+// static builders never touch a State, so they stat here.
+function executableSources(baseDir, sources) {
+  const executable = new Set()
+  for (const path of sources.keys()) {
+    if (isExecutableFile(join(baseDir, path))) executable.add(path)
+  }
+  return executable
+}
+
 // Assemble a full-scope code Bundle shared by the non-JS bundlers. Files are bucketed by
 // nearest package.json (node_modules -> `npm`-tagged bucket, workspace -> its dir, none ->
 // "." with the placeholder identity); a node_modules file whose nearest package.json is the
@@ -220,6 +231,10 @@ function assembleCodeBundle({
   for (const [parent, specMap] of resolutions) importsForKey.set(parent, specMap)
   const imports = new Map([[conditionKey, importsForKey]])
 
+  // Executable bits, straight off disk (a synthetic source with no file there is simply not
+  // executable). Shell bundles lean on this most: `stasis extract` puts the +x back on the scripts.
+  const executable = executableSources(baseDir, sources)
+
   // Attribute files to the `bundle` consumer (static builders skip State's per-file tagging).
   return new Bundle({
     config: { scope: 'full' },
@@ -227,6 +242,7 @@ function assembleCodeBundle({
     modules,
     formats: formatsMap,
     imports,
+    executable,
   }).withReason('bundle')
 }
 
@@ -406,6 +422,7 @@ export async function buildPhpBundle({ cwd = process.cwd(), entries } = {}) {
     modules,
     formats,
     imports,
+    executable: executableSources(baseDir, sources),
   }).withReason('bundle')
 }
 
@@ -881,6 +898,8 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     modules: lockModules,
     imports: bundle.imports,
     formats: bundle.formats,
+    // Same file set as the bundle, so the same executable list attests it.
+    executable: bundle.executable,
   })
 
   return { bundle, lockfile }
