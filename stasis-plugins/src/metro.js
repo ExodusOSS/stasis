@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAppleSliceDir, isExcludedNativeDir, isNativeArtifact, isPodspec, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAutoExcludedDir, isExcludedNativeDir, isNativeArtifact, isPodspec, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -28,13 +28,11 @@ const AUTO_INCLUDES = [
   '@react-native-community/cli/setup_env.sh',
 ]
 
-// Subtrees skipped (by basename, any depth) when walking a native dep's build-input surface:
-// nested packages (attested separately), VCS/CI metadata, demo apps, JS test/mock scaffolding, and
-// regenerated build output. None contribute to the app's native build.
-const NATIVE_WALK_SKIP_DIRS = new Set([
-  'node_modules', '.git', '.github', '.settings', 'example', 'examples', '__tests__', '__mocks__', 'jest',
-  'build', '.gradle', '.cxx', 'Pods',
-])
+// Subtrees skipped (by basename, any depth) when walking a native dep's build-input surface, ON TOP
+// of the shared isAutoExcludedDir set (metadata, demo apps, test scaffolding, Apple slice dirs):
+// nested packages, attested separately, and regenerated build output. None contribute to the build.
+const NATIVE_WALK_SKIP_DIRS = new Set(['node_modules', 'build', '.gradle', '.cxx', 'Pods', 'DerivedData'])
+const skipNativeWalkDir = (name) => NATIVE_WALK_SKIP_DIRS.has(name) || isAutoExcludedDir(name) || isNativeArtifact(name)
 
 // The worker-side toolchain that only Metro's transform workers load, named in both the
 // --child-process assert and the transform-cache warning so the two can't describe different sets.
@@ -365,7 +363,7 @@ export class StasisMetro {
       if (ent.isSymbolicLink()) continue
       if (ent.isFile()) {
         if (isPodspec(ent.name)) return true
-      } else if (ent.isDirectory() && !NATIVE_WALK_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name)) {
+      } else if (ent.isDirectory() && !skipNativeWalkDir(ent.name)) {
         if (this.#hasPodspec(join(dir, ent.name))) return true
       }
     }
@@ -387,9 +385,7 @@ export class StasisMetro {
       if (ent.isDirectory()) {
         // Skip build-output subtrees, Apple binary bundles + their loose per-arch slice dirs, and an
         // off-platform toplevel dir.
-        const skipDir = NATIVE_WALK_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name)
-          || isAppleSliceDir(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
-        if (!skipDir) this.#captureNativeTree(full)
+        if (!skipNativeWalkDir(ent.name) && !(atRoot && isExcludedNativeDir(ent.name))) this.#captureNativeTree(full)
         continue
       }
       if (!ent.isFile()) continue // sockets/FIFOs/etc. -- no attestable bytes

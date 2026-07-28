@@ -56,6 +56,9 @@ const seed = (tmp, config = CONFIG) => {
 
 const decode = (path) => Bundle.parse(brotliDecompressSync(readFileSync(path)).toString('utf8'))
 
+// The workspace bucket's file list in `tmp`'s bundle at `rel` -- what almost every assertion here checks.
+const packedFiles = (tmp, rel) => Object.keys(decode(join(tmp, rel)).modules.get('.').files).toSorted()
+
 // Write a modern (imports+formats attesting) stasis.lock.json attesting the given workspace files
 // -- `files` is a list of [rel, format]. Integrities are hashed from disk so `add` can merge in.
 const writeLock = (tmp, files) => {
@@ -208,8 +211,8 @@ test('addCommand is additive across runs (merges into each split bundle)', withT
   seed(tmp)
   addCommand({ cwd: tmp, entries: ['src/a.js', 'src/icon.svg'] })
   addCommand({ cwd: tmp, entries: ['src/b.cjs', 'src/logo.png'] })
-  t.assert.deepEqual(Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(), ['src/a.js', 'src/b.cjs'])
-  t.assert.deepEqual(Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(), ['src/icon.svg', 'src/logo.png'])
+  t.assert.deepEqual(packedFiles(tmp, 'dist/code.br'), ['src/a.js', 'src/b.cjs'])
+  t.assert.deepEqual(packedFiles(tmp, 'dist/res.br'), ['src/icon.svg', 'src/logo.png'])
 }))
 
 test('addCommand preserves an existing bundle’s entries and adds none of its own', withTmp(async (t, tmp) => {
@@ -239,14 +242,8 @@ test('addCommand expands a directory entry to the files under it (recursive glob
   addCommand({ cwd: tmp, entries: ['src'] })
 
   // Every file under src/ is classified and split, at any depth.
-  t.assert.deepEqual(
-    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
-    ['src/a.js', 'src/b.cjs', 'src/nested/c.mjs'],
-  )
-  t.assert.deepEqual(
-    Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(),
-    ['src/icon.svg', 'src/logo.png'],
-  )
+  t.assert.deepEqual(packedFiles(tmp, 'dist/code.br'), ['src/a.js', 'src/b.cjs', 'src/nested/c.mjs'])
+  t.assert.deepEqual(packedFiles(tmp, 'dist/res.br'), ['src/icon.svg', 'src/logo.png'])
 }))
 
 test('addCommand refuses an undeclared file swept in by a directory entry', withTmp(async (t, tmp) => {
@@ -256,25 +253,21 @@ test('addCommand refuses an undeclared file swept in by a directory entry', with
 
 // A sweep is an automated capture, so it drops the auto-excluded set BEFORE the resources check --
 // including files that classify as code, which nothing else would stop.
-const EXCLUDED_COUNT = 11 // what seedExcluded plants under src/, minus the dotfiles glob never offers
+// Every file seedExcluded plants that a sweep of src/ must drop -- by its own name, or because the
+// sweep would have to descend through an excluded dir to reach it. `src/.env` is NOT here: glob's
+// dotfile rule hides it, so it never reaches the filter to be counted.
+const EXCLUDED = [
+  'src/types.d.ts', 'src/nested/legacy.d.mts', // types only, erased at runtime
+  'src/web.env', // secrets
+  'src/a.js.map', 'src/index.js.flow', 'src/README.md', 'src/LICENSE', 'src/build.log', // native-capture noise
+  'src/examples/demo.js', 'src/examples/__tests__/demo.test.js', 'src/__mocks__/fs.js', // excluded subtrees
+]
 const seedExcluded = (tmp) => {
   rmSync(join(tmp, 'src', 'data.txt')) // undeclared -- would fail the resources check if swept in
-  writeFileSync(join(tmp, 'src', 'types.d.ts'), 'export type T = string\n')
   mkdirSync(join(tmp, 'src', 'nested'), { recursive: true })
-  writeFileSync(join(tmp, 'src', 'nested', 'legacy.d.mts'), 'declare module "x"\n')
-  writeFileSync(join(tmp, 'src', '.env'), 'API_KEY=secret\n') // dotfile: glob skips it outright
-  writeFileSync(join(tmp, 'src', 'web.env'), 'PORT=80\n')
-  writeFileSync(join(tmp, 'src', 'a.js.map'), '{"version":3}\n')
-  writeFileSync(join(tmp, 'src', 'index.js.flow'), 'declare export var x: number\n')
-  writeFileSync(join(tmp, 'src', 'README.md'), '# docs\n') // the native-capture exclusions, too
-  writeFileSync(join(tmp, 'src', 'LICENSE'), 'MIT\n')
-  writeFileSync(join(tmp, 'src', 'build.log'), 'built\n')
-  // Whole subtrees the sweep must not descend into: sample apps and test scaffolding.
   mkdirSync(join(tmp, 'src', 'examples', '__tests__'), { recursive: true })
-  writeFileSync(join(tmp, 'src', 'examples', 'demo.js'), 'export const demo = 1\n')
-  writeFileSync(join(tmp, 'src', 'examples', '__tests__', 'demo.test.js'), 'test()\n')
   mkdirSync(join(tmp, 'src', '__mocks__'), { recursive: true })
-  writeFileSync(join(tmp, 'src', '__mocks__', 'fs.js'), 'export default {}\n')
+  for (const rel of [...EXCLUDED, 'src/.env']) writeFileSync(join(tmp, rel), `// ${rel}\n`)
 }
 
 test('addCommand auto-excludes declarations, secrets, native noise, and whole dirs from a sweep', withTmp(async (t, tmp) => {
@@ -285,15 +278,9 @@ test('addCommand auto-excludes declarations, secrets, native noise, and whole di
   // Only the real source survives the filter: a `.d.ts` would otherwise be packed as
   // `module-typescript` code, a `web.env` as `env` code carrying secrets, and the `examples/`,
   // `examples/__tests__/` and `__mocks__/` trees would come along as ordinary modules.
-  t.assert.deepEqual(
-    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
-    ['src/a.js', 'src/b.cjs'],
-  )
+  t.assert.deepEqual(packedFiles(tmp, 'dist/code.br'), ['src/a.js', 'src/b.cjs'])
   // The declared resources are untouched by the filter -- they still go through the resources check.
-  t.assert.deepEqual(
-    Object.keys(decode(join(tmp, 'dist/res.br')).modules.get('.').files).toSorted(),
-    ['src/icon.svg', 'src/logo.png'],
-  )
+  t.assert.deepEqual(packedFiles(tmp, 'dist/res.br'), ['src/icon.svg', 'src/logo.png'])
 }))
 
 test('addCommand sweeps an excluded directory the caller named itself', withTmp(async (t, tmp) => {
@@ -303,10 +290,7 @@ test('addCommand sweeps an excluded directory the caller named itself', withTmp(
   seedExcluded(tmp)
   addCommand({ cwd: tmp, entries: ['src/examples'] })
   // Its own files are swept in; a nested excluded dir (`__tests__`) is still not descended into.
-  t.assert.deepEqual(
-    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
-    ['src/examples/demo.js'],
-  )
+  t.assert.deepEqual(packedFiles(tmp, 'dist/code.br'), ['src/examples/demo.js'])
 }))
 
 test('addCommand honours a named subtree the same run also swept past', withTmp(async (t, tmp) => {
@@ -318,7 +302,7 @@ test('addCommand honours a named subtree the same run also swept past', withTmp(
     rmSync(join(tmp, 'dist'), { recursive: true, force: true })
     addCommand({ cwd: tmp, entries })
     t.assert.deepEqual(
-      Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
+      packedFiles(tmp, 'dist/code.br'),
       ['src/a.js', 'src/b.cjs', 'src/examples/demo.js'],
       `entries: ${entries.join(' ')}`,
     )
@@ -341,10 +325,7 @@ test('addCommand keeps an explicitly named file the same run also sweeps', withT
   seed(tmp)
   seedExcluded(tmp)
   addCommand({ cwd: tmp, entries: ['src', 'src/types.d.ts'] })
-  t.assert.deepEqual(
-    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
-    ['src/a.js', 'src/b.cjs', 'src/types.d.ts'],
-  )
+  t.assert.deepEqual(packedFiles(tmp, 'dist/code.br'), ['src/a.js', 'src/b.cjs', 'src/types.d.ts'])
 }))
 
 test('addCommand keeps auto-excluding a swept file whose extension is declared in resources', withTmp(async (t, tmp) => {
@@ -370,13 +351,13 @@ test('addCommand never sweeps in its own outputs, so `add .` is repeatable', wit
   seedExcluded(tmp)
   writeLock(tmp, [['src/a.js', 'module']])
   addCommand({ cwd: tmp, entries: ['.'] })
-  const files = Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files)
+  const files = packedFiles(tmp, 'dist/code.br')
   t.assert.ok(files.includes('package.json') && files.includes('stasis.config.json'), 'ordinary root files are swept in')
   t.assert.ok(!files.includes('dist/code.br'), 'the configured bundle target is never attested')
   t.assert.ok(!files.includes('stasis.lock.json'), 'the lockfile is never attested')
   // Repeatable: the second run finds the artifacts on disk and still adds nothing new.
   addCommand({ cwd: tmp, entries: ['.'] })
-  t.assert.deepEqual(Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(), files.toSorted())
+  t.assert.deepEqual(packedFiles(tmp, 'dist/code.br'), files)
 }))
 
 test('addCommand errors when a directory matched only auto-excluded files', withTmp(async (t, tmp) => {
@@ -546,10 +527,7 @@ test('CLI (stasis-core): add expands a directory argument', withTmp(async (t, tm
   rmSync(join(tmp, 'src', 'data.txt'))
   const r = runCli(coreCli, ['add', 'src'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
-  t.assert.deepEqual(
-    Object.keys(decode(join(tmp, 'dist/code.br')).modules.get('.').files).toSorted(),
-    ['src/a.js', 'src/b.cjs'],
-  )
+  t.assert.deepEqual(packedFiles(tmp, 'dist/code.br'), ['src/a.js', 'src/b.cjs'])
 }))
 
 test('CLI (stasis-core): add reports what a directory sweep auto-excluded', withTmp(async (t, tmp) => {
@@ -560,7 +538,7 @@ test('CLI (stasis-core): add reports what a directory sweep auto-excluded', with
   const r = runCli(coreCli, ['add', 'src'], { cwd: tmp })
   t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
   // src/.env is not in the count: glob's dotfile rule never offers it to the filter.
-  t.assert.match(r.stderr, new RegExp(String.raw`\+2 source \(2 total\) -> dist/code\.br; \+2 resource \(2 total\) -> dist/res\.br; skipped ${EXCLUDED_COUNT} auto-excluded`, 'u'))
+  t.assert.match(r.stderr, new RegExp(String.raw`\+2 source \(2 total\) -> dist/code\.br; \+2 resource \(2 total\) -> dist/res\.br; skipped ${EXCLUDED.length} auto-excluded`, 'u'))
 }))
 
 test('CLI (stasis-core): add with no file, an option, or no config errors', withTmp(async (t, tmp) => {

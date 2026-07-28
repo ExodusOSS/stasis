@@ -57,6 +57,9 @@ export function pathExt(filePath) {
   return m ? m[1].toLowerCase() : ''
 }
 
+// A native path as the '/'-joined form every artifact key uses (a no-op off Windows).
+export const toPosix = (path) => path.split(/[\\/]/u).join('/')
+
 // Both rules are needed: pathExt('.env.local') is 'local', and the extension rule alone misses `.env.*`.
 export function isDotEnvFile(name) {
   const base = basename(name).toLowerCase()
@@ -262,8 +265,9 @@ export function isStasisArtifactName(name) {
   return base === 'stasis.lock.json' || (base.includes('stasis') && base.endsWith('.br'))
 }
 
-// Dirs a sweep never descends into: VCS/CI/IDE metadata, sample apps, and test scaffolding -- none of
-// it is the code being shipped. Matched by SEGMENT at any depth, plus the Apple prebuilt slice dirs.
+// Dirs no walk descends into: VCS/CI/IDE metadata, sample apps, test scaffolding -- none of it is the
+// code being shipped -- plus the Apple prebuilt slice dirs. Matched by NAME at any depth, so every
+// walk agrees on what "not source" means; each adds its own build-output dirs (`build`, `Pods`, ...).
 const AUTO_EXCLUDED_DIRS = new Set([
   '.git', '.github', '.settings', // VCS / CI / IDE metadata
   'example', 'examples', // sample apps -- they import the package, they aren't it
@@ -444,7 +448,7 @@ export function serializeExecutable(executable, { what, modules, formats, scope 
 // external file into an attestable bundle. realpathSync surfaces ENOENT, which loaders treat as "missing".
 export function assertRealPathWithinBase(realBase, baseDir, relPath) {
   const real = realpathSync(join(baseDir, relPath))
-  const rel = relative(realBase, real).split(/[\\/]/u).join('/')
+  const rel = toPosix(relative(realBase, real))
   if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`Refusing to follow symlink escaping bundle root: ${relPath} -> ${real}`)
   }

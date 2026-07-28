@@ -8,7 +8,7 @@ import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isAutoExcludedDir, isAutoExcludedFile, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, sortPaths, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isAutoExcludedDir, isAutoExcludedFile, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, sortPaths, splitNodeModulesPath, toPosix } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
@@ -104,7 +104,8 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
 
 // Merge add-if-missing into any existing bundle (divergent bytes for an attested path throw -- see
 // mergeModuleMaps), returning the write as a thunk so every target's conflicts surface before the
-// first byte lands and an aborted `add` leaves the project untouched.
+// first byte lands and an aborted `add` leaves the project untouched. Serializing INSIDE the thunk
+// keeps peak memory at one target's bytes rather than every target's at once.
 function prepareBundleFile(baseDir, targetPath, bundle, brotliQuality) {
   const abs = resolve(baseDir, targetPath)
   let mergedFrom
@@ -118,12 +119,11 @@ function prepareBundleFile(baseDir, targetPath, bundle, brotliQuality) {
     mergedFrom = tally(existing).files
     bundle = existing.merge(bundle)
   }
-  const bytes = brotliCompressSync(bundle.serialize(), brotliOptions(brotliQuality))
   const { files, packages } = tally(bundle)
   return {
     write: () => {
       mkdirSync(dirname(abs), { recursive: true })
-      writeFileSync(abs, bytes)
+      writeFileSync(abs, brotliCompressSync(bundle.serialize(), brotliOptions(brotliQuality)))
     },
     summary: { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom },
   }
@@ -151,13 +151,11 @@ function prepareLockfile(lockPath, lockAdd) {
   }
   const before = tally(existing).files
   const merged = existing.merge(lockAdd)
-  const serialized = merged.serialize()
   const total = tally(merged).files
-  return { write: () => writeFileSync(lockPath, serialized), summary: { total, added: total - before } }
+  return { write: () => writeFileSync(lockPath, merged.serialize()), summary: { total, added: total - before } }
 }
 
 const segments = (path) => path.split(/[\\/]/u)
-const toPosix = (path) => segments(path).join('/')
 
 // GLOB step: expand directories into their files (recursive glob), as rel -> { swept, stats }. `swept`
 // is the match path relative to the directory the caller NAMED (null for a named path), so the filter
@@ -198,27 +196,30 @@ function expandDirectories(baseDir, rels) {
 // One error for every file validation rejected, so a directory sweep names all of them at once
 // instead of one per re-run. A lone offender keeps its exact standalone message.
 function validationError({ missing, undeclared, nonUtf8 }) {
-  const parts = []
+  // `one`/`many` per category; empty categories contribute nothing.
+  const phrase = (items, one, many) => (items.length === 1 ? [one(items[0])] : items.length > 1 ? [many(items)] : [])
   const list = (rels) => rels.toSorted(sortPaths).join(', ')
-  if (missing.length === 1) parts.push(`file not found: ${missing[0]}`)
-  else if (missing.length > 1) parts.push(`${missing.length} files not found: ${list(missing)}`)
-  if (undeclared.length === 1) {
-    parts.push(`${undeclared[0]} is neither a recognized source file nor a declared resource; add its extension to "resources" in ${CONFIG_FILE}`)
-  } else if (undeclared.length > 1) {
-    parts.push(`${undeclared.length} files are neither recognized source files nor declared resources; add their extensions to "resources" in ${CONFIG_FILE}: ${list(undeclared)}`)
-  }
-  if (nonUtf8.length === 1) parts.push(`${nonUtf8[0].rel} is not valid UTF-8 (format '${nonUtf8[0].format}')`)
-  else if (nonUtf8.length > 1) {
-    parts.push(`${nonUtf8.length} files are not valid UTF-8: ${nonUtf8.map(({ rel, format }) => `${rel} (format '${format}')`).join(', ')}`)
-  }
+  const named = ({ rel, format }) => `${rel} (format '${format}')`
+  const parts = [
+    ...phrase(missing,
+      (rel) => `file not found: ${rel}`,
+      (rels) => `${rels.length} files not found: ${list(rels)}`),
+    ...phrase(undeclared,
+      (rel) => `${rel} is neither a recognized source file nor a declared resource; add its extension to "resources" in ${CONFIG_FILE}`,
+      (rels) => `${rels.length} files are neither recognized source files nor declared resources; add their extensions to "resources" in ${CONFIG_FILE}: ${list(rels)}`),
+    ...phrase(nonUtf8,
+      ({ rel, format }) => `${rel} is not valid UTF-8 (format '${format}')`,
+      (bad) => `${bad.length} files are not valid UTF-8: ${bad.map(named).join(', ')}`),
+  ]
   return new Error(`add: ${parts.join('; ')}`)
 }
 
 // VALIDATE step: classify the WHOLE set -- each file recognized source or a declared resource --
 // before a single target is touched, collecting every offender into one error. `files` is [rel, stats]
 // pairs from the glob step (stats undefined = not on disk). Containment is the one rule NOT collected:
-// a symlink escaping the root is a security invariant, so it fails closed on the spot.
-function validateFiles({ baseDir, realBase, files, resources, hash }) {
+// a symlink escaping the root is a security invariant, so it fails closed on the spot. Bytes are
+// hashed only when there's a lockfile to receive the integrities (`withIntegrity`).
+function validateFiles({ baseDir, realBase, files, resources, withIntegrity }) {
   const codeFiles = new Map()
   const resourceFiles = new Map()
   const integrities = new Map()
@@ -235,7 +236,7 @@ function validateFiles({ baseDir, realBase, files, resources, hash }) {
     assertRealPathWithinBase(realBase, baseDir, rel)
     const abs = join(baseDir, rel)
     const buf = readFileSync(abs)
-    if (hash) integrities.set(rel, sha512integrity(buf))
+    if (withIntegrity) integrities.set(rel, sha512integrity(buf))
     const format = sourceFormat(abs, buf)
     // A binary plist can't be stored as the UTF-8 string its 'xml' format implies, so it is NOT source: it falls through to the resource branch (opaque base64).
     if (format !== null && !isBinaryPlist(rel, buf)) {
@@ -298,7 +299,7 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
       ? 'nothing' : `only auto-excluded files: ${excluded.toSorted(sortPaths).join(', ')}`})`)
   }
 
-  const { codeFiles, resourceFiles, integrities } = validateFiles({ baseDir, realBase, files, resources, hash: hasLock })
+  const { codeFiles, resourceFiles, integrities } = validateFiles({ baseDir, realBase, files, resources, withIntegrity: hasLock })
 
   // ADD step: every target's merge is computed first, then the writes run -- see prepareBundleFile.
   const summary = []
