@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, moduleFileKeys, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -31,6 +31,10 @@ function readPackageJSON(pkgAbsolute) {
 
 // This copy's own version, via src/package.cjs (bundler-safe re-export of package.json).
 const VERSION = corePackage.version
+
+// Whether this platform reports execute bits at all -- a process-lifetime constant, read once
+// instead of per non-executable file on the capture path. The injectable form stays in util.js.
+const CAN_OBSERVE_EXECUTE_BITS = canObserveExecuteBits()
 
 // Set `format` for `file` via the shared reconcileFormat rule (util.js): a weak 'stat:*'
 // yields to a real format; two real formats or a stat kind flip are fatal.
@@ -1006,34 +1010,40 @@ export class State {
     // whatever a loaded lockfile/bundle seeded -- including clearing a bit the file no longer has.
     // Only a real observation refutes: `undefined` (unstat-able) and Windows (which reports no exec
     // bits at all) both mean "unknowable", and neither may strip a list a POSIX capture committed.
+    this.#recordExecutable(file, absolute)
+  }
+
+  // Observe `file` on disk and record or refute its execute bit. The `undefined`-is-not-`false` rule
+  // and the Windows gate live here alone -- every capture site (addFile, the shard replay) calls
+  // this, so neither can be re-derived slightly differently.
+  //
+  // A record touches only this State: a sidecar's bundle must list only the files it carries, and
+  // the parent's lockfile picks the bit up through #mergedExecutable's union. A REFUTATION has to
+  // reach the whole family -- this State, its root, and the root's write-mode sidecars -- because
+  // that same union would otherwise let a sibling's seeded entry resurrect a bit this run just
+  // refuted, leaving it unclearable without --lock=replace.
+  #recordExecutable(file, absolute) {
     const executable = observeExecutable(absolute)
-    if (executable === true) this.#setExecutable(file)
-    else if (executable === false && canObserveExecuteBits()) this.#clearExecutable(file)
-  }
-
-  // Record/refute `file` across the whole State FAMILY -- this State, its parent, and every
-  // write-mode sidecar. The lockfile the parent writes unions all of their sets (#mergedExecutable),
-  // so an observation that reaches only the State that made it is no observation at all: a sibling's
-  // seeded entry would resurrect a bit this run just refuted, unclearable without --lock=replace.
-  #family() {
+    if (executable === true) {
+      this.executable.add(file)
+      return
+    }
+    if (executable !== false || !CAN_OBSERVE_EXECUTE_BITS) return
     const root = this.#parent ?? this
-    return [root, ...root.sidecars()]
+    // Cheap common case: nothing anywhere holds a bit, so there is nothing to refute.
+    if (root.executable.size === 0 && root.sidecars().size === 0) {
+      this.executable.delete(file)
+      return
+    }
+    this.executable.delete(file)
+    root.executable.delete(file)
+    for (const sidecar of root.sidecars()) sidecar.executable.delete(file)
   }
 
-  #setExecutable(file) {
-    // Only the observer records the bit: a sidecar's bundle must list only the files it carries, and
-    // the parent's lockfile picks it up through the union.
-    this.executable.add(file)
-  }
-
-  #clearExecutable(file) {
-    for (const state of this.#family()) state.executable.delete(file)
-  }
-
-  // This State's write-mode sidecars. Public so #family reaches them across the class brand (a
-  // sidecar may come from a duplicate stasis-core copy), like sidecarInheritance/registerSidecar.
+  // This State's write-mode sidecars. Public so #recordExecutable reaches them across the class
+  // brand (a sidecar may come from a duplicate stasis-core copy), like sidecarInheritance.
   sidecars() {
-    return [...this.#sidecars]
+    return this.#sidecars
   }
 
   // Record an `fs.readFileSync` capture (--fs). classifyFormat routes the bytes:
@@ -1449,22 +1459,13 @@ export class State {
   #mergedExecutable(formats) {
     const all = new Set(this.executable)
     for (const sidecar of this.#sidecars) for (const file of sidecar.executable) all.add(file)
-    return this.#narrowExecutable(all, this.modules, formats, 'lockfile')
+    return narrowExecutable(all, { modules: this.modules, formats, scope: this.config.scope })
   }
 
   // The executable list ONE bundle declares, narrowed against the bucket map that bundle will emit
   // (a split half holds only its own code-vs-resource files) and that half's own formats.
   #bundleExecutable(modules, formats) {
-    return this.#narrowExecutable(this.executable, modules, formats, 'bundle')
-  }
-
-  // Shared narrowing: keep only the entries the artifact built from `modules`/`formats` may legally
-  // carry. Short-circuits before indexing every attested file, which is the common case (nothing
-  // executable) on a graph where that index would be the size of the whole module map.
-  #narrowExecutable(executable, modules, formats, what) {
-    if (executable.size === 0) return new Set()
-    const scope = this.config.scope
-    return narrowExecutable(executable, { what, files: moduleFileKeys(modules, { scope }), formats, scope })
+    return narrowExecutable(this.executable, { modules, formats, scope: this.config.scope })
   }
 
   get lockData() {
@@ -1816,6 +1817,17 @@ export class State {
       for (const rel of Object.keys(info.files)) {
         // moduleFileKey inverts the child's bucketing: yields `dir` for a dir captured AT a bucket root (rel==='').
         const file = moduleFileKey(dir, rel)
+        const absolute = resolve(this.root, file)
+        // Skip a key whose on-disk path escapes the root through a symlink (see realContained), so no
+        // external bytes/listing are attested under an in-root key.
+        if (!realContained(absolute)) continue
+        // Exec bits ride this walk, ABOVE the already-attested fast path below: they must be observed
+        // for every file the shard RECORDS, not just the ones it lists as executable, because a child
+        // that re-read a file and found no bit refutes it by OMISSION. "Already attested" means skip
+        // the expensive byte re-read, not skip looking at the inode. Re-derived from THIS process's
+        // disk, like the stat replay below -- the shard only says which paths to look at, so it
+        // cannot inject a forged bit.
+        this.#recordExecutable(file, absolute)
         // Skip a file the root already attests (its baseline or own capture) -- the byte re-read is
         // the dominant merge cost. EXCEPTION: fall through to carry a concrete code format the root
         // LACKS (root fs-READ a .js with no format, child IMPORTED it as `module`), else a later
@@ -1824,12 +1836,8 @@ export class State {
           const shardFormat = lf.formats?.get(file)
           if (shardFormat === undefined || (this.formats.get(file) ?? this.#lockFormats?.get(file)) !== undefined) continue
         }
-        const absolute = resolve(this.root, file)
         const url = pathToFileURL(absolute).toString()
         const format = lf.formats?.get(file)
-        // Skip a key whose on-disk path escapes the root through a symlink (see realContained), so no
-        // external bytes/listing are attested under an in-root key.
-        if (!realContained(absolute)) continue
         try {
           if (format === 'directory') {
             // A child's readdir capture: replay as a directory listing, re-reading from disk
@@ -1879,24 +1887,6 @@ export class State {
         } catch {
           // Gone/dangling, or a kind conflict with the root's capture: skip.
         }
-      }
-    }
-    // Exec bits for everything the shard RECORDS -- not just what it lists as executable, because a
-    // child that re-read a file and found no bit refutes it by OMISSION, and that refutation has to
-    // land too. (The file replay above fast-paths past anything the root already attests from its
-    // lockfile baseline, so without this the root never looks at those paths at all and a bit can be
-    // granted but never revoked.) As with the stat replay, the answer is re-derived from THIS
-    // process's disk -- the shard only says which paths to look at, so it can't inject a forged bit.
-    for (const [dir, info] of lf.modules) {
-      for (const rel of Object.keys(info.files)) {
-        const file = moduleFileKey(dir, rel)
-        const absolute = resolve(this.root, file)
-        const relFromRoot = relative(this.root, absolute)
-        if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
-        if (!realContained(absolute)) continue
-        const executable = observeExecutable(absolute)
-        if (executable === true) this.#setExecutable(file)
-        else if (executable === false && canObserveExecuteBits()) this.#clearExecutable(file)
       }
     }
     if (lf.imports) {

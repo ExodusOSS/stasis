@@ -5,7 +5,7 @@ import { brotliDecompressSync } from 'node:zlib'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity } from './state-util.js'
-import { canObserveExecuteBits, moduleFileKey } from './util.js'
+import { EXECUTE_BITS, canObserveExecuteBits, moduleFileKey } from './util.js'
 
 const FILE_LOCK = 'stasis.lock.json'
 
@@ -133,7 +133,8 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
   // Skipped wholesale for a v0 bundle, which attests nothing about modes -- there is no list to
   // honour, so clearing execute bits off the tree would destroy information rather than restore it --
   // and on Windows, which reports no POSIX execute bits at all (see canObserveExecuteBits).
-  const withModes = bundle.version === Bundle.VERSION && canObserveExecuteBits()
+  // `withLockfile` is the same v1 test: a v0 bundle attests neither identities nor modes.
+  const withModes = withLockfile && canObserveExecuteBits()
   let chmodFailures = 0
   const applyMode = (abs, exec) => {
     let stats
@@ -151,7 +152,7 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
     const rwx = perms & 0o777
     // Execute wherever the file is readable, with owner-execute as a floor so an aggressive umask
     // can't quietly produce a file the bundle calls runnable and isn't.
-    const want = exec ? rwx | ((rwx & 0o444) >> 2) | 0o100 : rwx & ~0o111
+    const want = exec ? rwx | ((rwx & 0o444) >> 2) | 0o100 : rwx & ~EXECUTE_BITS
     if (want === perms) return
     // Tolerated per file: a filesystem with no POSIX modes (vfat/exFAT/CIFS, a drvfs mount) accepts
     // the write and rejects the chmod, and losing the whole extraction -- including the lockfile

@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, assertExecutableSubset, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -145,20 +145,14 @@ export class Lockfile {
     // A null facet (in-memory constructs only) omits the key.
     if (this.imports !== null) Object.assign(store, { imports: fileMapToObject(this.imports) })
     if (this.formats !== null) Object.assign(store, { formats: fileMapToObject(this.formats) })
-    // Omitted when empty (see Bundle.serialize): a lockfile with nothing executable is unchanged
-    // from one written before the field existed.
-    if (this.executable.size > 0) {
-      // Subset of the files this lockfile emits -- node_modules only under a non-full scope, which
-      // drops the `sources` half above. Same rules Lockfile.parse applies on the way back in.
-      assertExecutableSubset(this.executable, {
-        what: 'lockfile',
-        files: moduleFileKeys(this.modules, { scope: this.config.scope }),
-        // May be null on an in-memory construct; an unrecorded format is simply not a directory/stat.
-        formats: this.formats ?? new Map(),
-        scope: this.config.scope,
-      })
-      store.executable = fileSetToObject(this.executable)
-    }
+    const executable = serializeExecutable(this.executable, {
+      what: 'lockfile',
+      modules: this.modules,
+      // May be null on an in-memory construct; an unrecorded format is simply not a directory/stat.
+      formats: this.formats ?? new Map(),
+      scope: this.config.scope,
+    })
+    if (executable !== undefined) store.executable = executable
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 

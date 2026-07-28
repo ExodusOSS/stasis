@@ -398,7 +398,7 @@ export function moduleFileKeys(modules, { scope = 'full' } = {}) {
 }
 
 // The POSIX execute bits (user/group/other).
-const EXECUTE_BITS = 0o111
+export const EXECUTE_BITS = 0o111
 
 // Tri-state executability of the REGULAR FILE at absolute path `abs`, following symlinks (the
 // recorded bytes are the target's, so the target's mode is the honest answer). `true`/`false` when
@@ -408,6 +408,10 @@ const EXECUTE_BITS = 0o111
 // would let a transient stat error refute a bit the artifact legitimately attests.
 // A directory answers `false`: `executable` holds files only, and the parsers reject a directory
 // entry, so answering true would let a writer emit an artifact it can't read back.
+// Whether an already-obtained fs.Stats describes an executable regular file, for callers that
+// stat the path for their own reasons and shouldn't pay for a second syscall.
+export const isExecutableMode = (stats) => stats.isFile() && (stats.mode & EXECUTE_BITS) !== 0
+
 export function observeExecutable(abs) {
   let stats
   try {
@@ -418,7 +422,7 @@ export function observeExecutable(abs) {
     return undefined
   }
   if (stats === undefined) return undefined
-  return stats.isFile() && (stats.mode & EXECUTE_BITS) !== 0
+  return isExecutableMode(stats)
 }
 
 // Boolean view for callers with nothing to refute (the static builders, `stasis add`): they are
@@ -455,13 +459,26 @@ function executableEntryProblem(file, { what, files, formats, scope }) {
 }
 
 // Narrow an executable set to the entries an artifact may legally carry, applied at every write site
-// so the in-memory artifact is honest before it is ever serialized.
-export function narrowExecutable(executable, { what = 'artifact', files, formats, scope = 'full' }) {
+// so the in-memory artifact is honest before it is ever serialized. Takes the artifact's own
+// `modules`/`scope` and indexes them only when there is something to test -- on a graph where that
+// index is the size of the whole module map, the common nothing-executable case must cost nothing.
+export function narrowExecutable(executable, { modules, formats, scope }) {
   const out = new Set()
+  if (executable.size === 0) return out
+  const files = moduleFileKeys(modules, { scope })
   for (const file of executable) {
-    if (executableEntryProblem(file, { what, files, formats, scope }) === null) out.add(file)
+    // `what` is only ever used to build a message, and this path throws none.
+    if (executableEntryProblem(file, { what: 'artifact', files, formats, scope }) === null) out.add(file)
   }
   return out
+}
+
+// Assert every entry is legal, applying the SAME rules on both sides of the format.
+function assertExecutable(executable, { what, files, formats, scope }) {
+  for (const file of executable) {
+    const problem = executableEntryProblem(file, { what, files, formats, scope })
+    assert(problem === null, `${what}: executable entry '${file}' ${problem}`)
+  }
 }
 
 // Validate a serialized `executable` array into a Set of project-relative paths.
@@ -475,23 +492,23 @@ export function parseExecutable(list, { what, files, formats, scope = 'full' }) 
     // Fail closed on a dupe like every sibling parse rule (duplicate file/format keys), rather than
     // letting out.add() silently collapse it and round-trip to different bytes.
     assert(!out.has(file), `${at} entry '${file}' is listed twice`)
-    const problem = executableEntryProblem(file, { what, files, formats, scope })
-    assert(problem === null, `${at} entry '${file}' ${problem}`)
     out.add(file)
   }
+  assertExecutable(out, { what, files, formats, scope })
   return out
 }
 
-// Write-side twin, called from Bundle/Lockfile.serialize -- the one choke point every producer goes
-// through, applying the SAME rules parse will. The per-site narrowing keeps the in-memory artifact
-// honest; this makes the invariant unmissable, so a write site that forgets to narrow fails HERE,
-// naming the offending path, instead of emitting an artifact its own parser refuses on the next read
-// (by which point the good copy is overwritten).
-export function assertExecutableSubset(executable, { what, files, formats, scope }) {
-  for (const file of executable) {
-    const problem = executableEntryProblem(file, { what, files, formats, scope })
-    assert(problem === null, `${what}: executable entry '${file}' ${problem}`)
-  }
+// The `executable` value an artifact serializes, or undefined to omit the key. Called from
+// Bundle/Lockfile.serialize -- the one choke point every producer goes through, applying the same
+// rules parse will. The per-site narrowing (narrowExecutable) keeps the in-memory artifact honest;
+// this makes the invariant unmissable, so a write site that forgets to narrow fails HERE, naming the
+// offending path, instead of emitting an artifact its own parser refuses on the next read (by which
+// point the good copy is overwritten). Omitted when empty: nothing executable is the overwhelmingly
+// common case, and an absent key keeps every pre-`executable` artifact byte-identical when rewritten.
+export function serializeExecutable(executable, { what, modules, formats, scope }) {
+  if (executable.size === 0) return undefined
+  assertExecutable(executable, { what, files: moduleFileKeys(modules, { scope }), formats, scope })
+  return fileSetToObject(executable)
 }
 
 // Resolve `baseDir/relPath` through symlinks and confirm the real target stays within `realBase`.

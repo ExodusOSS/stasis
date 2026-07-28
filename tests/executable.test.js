@@ -593,6 +593,24 @@ test('`stasis add` records the execute bit into the bundle and the companion loc
   t.assert.deepEqual([...Lockfile.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf8')).executable], ['run.sh'])
 }))
 
+// `stasis-core add` with split targets: each half must list only its own executables, since neither
+// records the other's files (Bundle.parse refuses an entry naming a file the artifact doesn't hold).
+test('`stasis add` with split targets records each half’s own executables', posixOnly, withTmp('exec-add-split')((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({
+    bundleFile: 'code.br', resourcesBundleFile: 'res.br', resources: ['bin'],
+  }))
+  writeFileSync(join(tmp, 'run.sh'), '#!/bin/sh\n')
+  writeFileSync(join(tmp, 'lib.sh'), '#!/bin/sh\n')
+  writeFileSync(join(tmp, 'tool.bin'), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00]))
+  chmodSync(join(tmp, 'run.sh'), 0o755)
+  chmodSync(join(tmp, 'tool.bin'), 0o755)
+
+  addCommand({ cwd: tmp, entries: ['run.sh', 'lib.sh', 'tool.bin'] })
+  t.assert.deepEqual([...decode(join(tmp, 'code.br')).executable], ['run.sh'])
+  t.assert.deepEqual([...decode(join(tmp, 'res.br')).executable], ['tool.bin'])
+}))
+
 test('a `stasis add` re-run clears a bit the file lost on disk', posixOnly, withTmp('exec-add-clear')((t, tmp) => {
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0' }))
   writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ bundleFile: 'code.br' }))

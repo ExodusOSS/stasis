@@ -8,7 +8,7 @@ import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBinaryPlist, isBrotliQuality, isExecutableFile, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
@@ -209,14 +209,16 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   const resourceFiles = new Map()
   for (const rel of files) {
     const abs = join(baseDir, rel)
-    if (!existsSync(abs)) throw new Error(`add: file not found: ${rel}`)
+    // One stat serves both the existence check and the mode read (`stasis add scripts/` would
+    // otherwise probe the same inode twice per file). The execute bit rides alongside the bytes so
+    // `stasis extract` restores it -- an added shell script comes back runnable.
+    const stats = statSync(abs, { throwIfNoEntry: false })
+    if (stats === undefined) throw new Error(`add: file not found: ${rel}`)
+    const executable = isExecutableMode(stats)
     // Refuse a symlink whose realpath escapes the project root -- a bundle carries only in-tree bytes (matches the deep bundler / loaders).
     assertRealPathWithinBase(realBase, baseDir, rel)
     const buf = readFileSync(abs)
     if (hasLock) integrities.set(rel, sha512integrity(buf))
-    // Recorded alongside the bytes so `stasis extract` restores the bit (a shell script added with
-    // `stasis add scripts/` comes back runnable).
-    const executable = isExecutableFile(abs)
     const format = sourceFormat(abs, buf)
     // A BINARY plist can't be stored as the UTF-8 source string its 'xml' format implies, so it is
     // NOT source here: fall through to the resource branch, which carries it as opaque base64 when

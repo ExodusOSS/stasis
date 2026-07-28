@@ -182,12 +182,14 @@ export function diffImports(left, right) {
 // True when the diff records any module-, file-, or import-level change. Scope alone is
 // informational and doesn't count (unattested imports contribute empty lists).
 export function hasDifferences(diff) {
+  // `executable` is unguarded like modules/files -- diffArtifacts always sets it, and a shape guard
+  // here would make a renamed facet read as "no differences" and quietly pass a review gate.
+  // `imports` is genuinely opt-in (the `imports` option), so it keeps its guard.
   const { modules, files, executable, imports } = diff
   let n =
     modules.added.length + modules.removed.length + modules.changed.length +
-    files.added.length + files.removed.length + files.differing.length
-  // Absent on a diff produced before `executable` existed; a missing facet contributes nothing.
-  if (executable) n += executable.added.length + executable.removed.length
+    files.added.length + files.removed.length + files.differing.length +
+    executable.added.length + executable.removed.length
   if (imports) n += imports.added.length + imports.removed.length + imports.changed.length
   return n > 0
 }
@@ -246,7 +248,7 @@ export function formatDiffStat(diff, { left = '(left)', right = '(right)', leftK
 
   // Only rendered when something changed: an unchanged execute-bit set is the overwhelming norm,
   // and a permanent "0 added, 0 removed" line would be noise in every diff.
-  if (ex && (ex.added.length > 0 || ex.removed.length > 0)) {
+  if (ex.added.length > 0 || ex.removed.length > 0) {
     lines.push('')
     lines.push(`Executable: ${ex.added.length} added, ${ex.removed.length} removed`)
     for (const p of ex.removed) lines.push(`  ${REMOVED} ${p}`)

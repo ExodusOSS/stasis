@@ -1,7 +1,6 @@
 import {
   KNOWN_FORMATS,
   assert,
-  assertExecutableSubset,
   fileMapToObject,
   fileSetToObject,
   fromEntries,
@@ -12,9 +11,9 @@ import {
   mergeExecutableSets,
   mergeModuleMaps,
   moduleFileKey,
-  moduleFileKeys,
   objectToMaps,
   parseExecutable,
+  serializeExecutable,
   posixPathEscapes,
   sortPaths,
   splitNodeModulesPath,
@@ -245,19 +244,10 @@ export class Bundle {
     const data = { version: VERSION, config: this.config }
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
-    // Omitted when empty: nothing executable is the overwhelmingly common case, and an absent key
-    // keeps every pre-`executable` artifact byte-identical when rewritten.
-    if (this.executable.size > 0) {
-      // `executable` must be a subset of the files this bundle emits -- which under a non-full scope
-      // is its node_modules files only, since `sources` isn't written. Same rules Bundle.parse applies.
-      assertExecutableSubset(this.executable, {
-        what: 'bundle',
-        files: moduleFileKeys(this.modules, { scope: this.config.scope }),
-        formats: this.formats,
-        scope: this.config.scope,
-      })
-      data.executable = fileSetToObject(this.executable)
-    }
+    const executable = serializeExecutable(this.executable, {
+      what: 'bundle', modules: this.modules, formats: this.formats, scope: this.config.scope,
+    })
+    if (executable !== undefined) data.executable = executable
     if (this.reason !== undefined) data.reason = this.reason
     return JSON.stringify(data, undefined, 2)
   }
