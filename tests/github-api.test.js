@@ -165,7 +165,7 @@ test('releases() ignores a `next` link pointing off the API host', withFetch(
 ))
 
 test('releases() rejects a malformed repo slug before making a request', withFetch(
-  () => json([]),
+  () => { throw new Error('fetch must not be called') },
   async (t, calls) => {
     await t.assert.rejects(() => releases('stasis'), /Expected an `owner\/repo` slug: stasis/)
     await t.assert.rejects(() => releases('a/b/c'), /Expected an `owner\/repo` slug: a\/b\/c/)
@@ -178,6 +178,25 @@ test('releases() rejects a malformed repo slug before making a request', withFet
     await t.assert.rejects(() => releases('o/r', { limit: 0 }), /Unexpected limit: 0/)
     await t.assert.rejects(() => releases('o/r', { limit: 1.5 }), /Unexpected limit: 1.5/)
     t.assert.equal(calls.length, 0, 'nothing reaches the network')
+  }
+))
+
+test('releases() accepts the repo names GitHub actually allows', withFetch(
+  () => json([]),
+  async (t, calls) => {
+    // Validation is a path-segment rule, not GitHub's account naming policy: a leading dot
+    // (`.github`, the org-wide community health repo), inner dots and leading hyphens are all
+    // real and must not be refused locally -- only `.`/`..` and non-segment characters are.
+    for (const repo of ['ExodusOSS/.github', 'ExodusOSS/my.repo', 'ExodusOSS/-dash', 'a-b/c_d']) {
+      // eslint-disable-next-line no-await-in-loop -- sequential so `calls` below is in list order
+      await releases(repo, { limit: 1 })
+    }
+    t.assert.deepEqual(calls.map((c) => c.url), [
+      `${API}/repos/ExodusOSS/.github/releases?per_page=1`,
+      `${API}/repos/ExodusOSS/my.repo/releases?per_page=1`,
+      `${API}/repos/ExodusOSS/-dash/releases?per_page=1`,
+      `${API}/repos/a-b/c_d/releases?per_page=1`,
+    ])
   }
 ))
 
@@ -197,7 +216,7 @@ test('release() fetches one release by tag, percent-encoding the tag', withFetch
 ))
 
 test('release() rejects tags git itself forbids, and an empty token', withFetch(
-  () => json(RELEASE),
+  () => { throw new Error('fetch must not be called') },
   async (t, calls) => {
     await t.assert.rejects(() => release('o/r', ''), /Unexpected tag: /)
     await t.assert.rejects(() => release('o/r', 'v1..v2'), /Unexpected tag: v1\.\.v2/)
@@ -251,7 +270,7 @@ test('asset() verifies a supplied digest and rejects a mismatch', withFetch(
 ))
 
 test('asset() rejects a non-numeric asset id before making a request', withFetch(
-  () => new Response(Buffer.alloc(0), { status: 200 }),
+  () => { throw new Error('fetch must not be called') },
   async (t, calls) => {
     await t.assert.rejects(() => asset('o/r', '7'), /Unexpected asset id: 7/)
     await t.assert.rejects(() => asset('o/r', 0), /Unexpected asset id: 0/)
