@@ -527,14 +527,12 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
   test('run --bundle=add records a resolution edge first observed during exit handlers', withTmp(async (t, tmp) => {
     // Regression for the lazy-require-at-exit shape: Babel lazy interop (e.g.
     // @react-native-community/cli-tools' logger) defers require('chalk') to the first log
-    // call, and CLIs commonly first log in an exit-time summary. stasis's save() handlers
-    // were registered at initState -- before user code -- so they fire FIRST on
-    // beforeExit/exit, and a one-shot save wrote the artifacts BEFORE a later handler's
-    // require resolved: the edge (its target already bundled via other importers, so only
-    // the EDGE was missing) silently never landed, and `--bundle=load` then died with
-    // `Cannot find module 'chalk'` out of the CJS shim's native fall-through. save() now
-    // re-flushes on every beforeExit/exit firing (unchanged artifacts are compare-skipped),
-    // so the exit firing persists what handlers after the beforeExit firing resolved.
+    // call, and CLIs commonly first log in an exit-time summary. stasis's save() registers at
+    // initState -- before user code -- so a beforeExit flush would write the artifacts BEFORE a
+    // later handler's require resolved: the edge (its target already bundled via other importers,
+    // so only the EDGE was missing) silently never landed, and `--bundle=load` then died with
+    // `Cannot find module 'chalk'` out of the CJS shim's native fall-through. save() hooks `exit`,
+    // which runs after every beforeExit handler.
     const write = (rel, content) => {
       mkdirSync(join(tmp, dirname(rel)), { recursive: true })
       writeFileSync(join(tmp, rel), content)
@@ -573,6 +571,24 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     const load = await run(['run', '--lock=frozen', '--bundle=load', 'entry.mjs'], { cwd: tmp })
     t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
     t.assert.match(load.stdout, /late log: DEP-OK/, 'the exit-time edge must be served from the bundle')
+  }))
+
+  test('run --lock=add flushes the capture exactly once, on `exit`', withTmp(async (t, tmp) => {
+    // Companion to the test above: that one proves an exit-time edge lands, this one that it lands
+    // from ONE flush -- a beforeExit listener alongside `exit` doubled every process's backfill +
+    // serialize pass. Nothing else registers either listener this early, so the counts are stasis's.
+    cpSync(runFixture, tmp, { recursive: true })
+    rmSync(join(tmp, 'stasis.lock.json'))
+    writeFileSync(join(tmp, 'src', 'entry.js'), [
+      "import { greet } from './hello.js'",
+      "console.log(greet('world'))",
+      "console.log('listeners', process.listenerCount('beforeExit'), process.listenerCount('exit'))",
+      '',
+    ].join('\n'))
+    const r = await run(['run', '--lock=add', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stdout, /^listeners 0 1$/mu, 'stasis must hook `exit` alone, not beforeExit+exit')
+    t.assert.ok(existsSync(join(tmp, 'stasis.lock.json')), 'the single exit flush still writes the lockfile')
   }))
 
   test('run --lock=replace --bundle=add rejects when disk disagrees with the pre-loaded bundle', withTmp(async (t, tmp) => {
