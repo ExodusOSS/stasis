@@ -15,7 +15,7 @@ assert(['node', 'node.exe'].includes(basename(argv.shift())))
 assert(['node', 'node.exe'].includes(basename(process.argv0)))
 
 const jsname = argv.shift()
-const pathsEqual = (a, b) => a === b || (existsSync(a) && realpathSync(a) === b) // resolve symlinks
+const pathsEqual = (a, b) => a === b || (existsSync(a) && realpathSync(a) === b)
 assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(import.meta.url)))
 
 function usage(prefix = '') {
@@ -69,17 +69,13 @@ if (command === '-v' || command === '--version') {
   const debug = values.debug ? '1' : ''
   if (!['none', 'ignore', 'add', 'replace', 'load', 'frozen'].includes(bundle)) usage('Error: invalid --bundle value')
   if (bundleFile && bundle === 'none') usage('Error: --bundle-file requires --bundle=(add|replace|load|frozen|ignore)')
-  // --resources-bundle-file needs an active bundle mode; front-run Config's rejection with a clean usage error.
   if (resourcesBundleFile && (bundle === 'none' || bundle === 'ignore')) usage('Error: --resources-bundle-file requires --bundle=(add|replace|load|frozen)')
   if (bundle === 'load' && lock !== 'frozen' && lock !== 'none' && lock !== 'ignore') usage('Error: --bundle=load is incompatible with --lock=(add|replace)')
   if (lock === 'none' && bundle === 'none') usage('Error: stasis needs a lockfile or a bundle: set --lock or --bundle')
-  // --fs=sync patches the sync fs readers; --fs=async adds their async (callback + fs.promises) counterparts on top.
   if (values.fs !== undefined && !['sync', 'async'].includes(values.fs)) usage("Error: --fs must be 'sync' or 'async'")
   if (values.fs !== undefined && !['add', 'replace', 'load'].includes(bundle)) usage('Error: --fs requires --bundle=(add|replace|load)')
   const captureFs = values.fs ?? ''
-  // --resources: comma-separated ext/filename allowlist for --fs resource captures (e.g. png,svg,LICENSE).
   const resources = values.resources ?? ''
-  // --brotli-quality: bundle compression quality (0..11; unset -> stasis default 9).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
     try {
@@ -88,7 +84,6 @@ if (command === '-v' || command === '--version') {
       usage(`Error: ${cause.message}`)
     }
   }
-  // --child-process: forward forked-child (e.g. Metro worker) capture to the root via per-pid shards; opt-in.
   const childProcess = values['child-process'] ? '1' : ''
   console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
@@ -118,7 +113,6 @@ if (command === '-v' || command === '--version') {
   if (argv.length === 0) usage('Nothing to add: no file given')
   if (argv.some((a) => a.startsWith('-'))) usage('Error: add takes no options; its targets and resource allowlist come from stasis.config.json')
   const { addCommand } = await import('../src/add.js')
-  // Let addCommand's errors propagate as-is (specific, actionable); don't bury them under the usage block.
   addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis-core' })
 } else if (command === 'extract') {
   const options = {

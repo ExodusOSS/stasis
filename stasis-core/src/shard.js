@@ -1,26 +1,13 @@
-// Wire format for child->root capture forwarding (--child-process). A shard is NOT a lockfile: it is
-// a machine-only message between two processes of ONE build, signed with the root's key, merged once
-// and discarded. So it carries only what State#mergeShard reads -- the scope, the project-relative
-// KEYS the child recorded, their formats, and the resolution edges. Everything else a lockfile holds
-// is re-derived from the root's OWN disk (bytes re-read and re-hashed, listings re-listed, stat kinds
-// re-stat'd, exec bits re-inspected), precisely so a shard cannot inject content or a forged bit.
-//
-// Unordered and unindented for the same reason: the merge is order-independent, and nothing diffs a
-// shard. VERSION is asserted on parse because the two ends can host different stasis-core copies -- a
-// mismatch must be refused (the merge skips a shard it cannot parse), not misread.
-//
-// `files` are keys whose CONTENT (or directory listing) the child recorded; a stat-only observation
-// has no content and rides `formats` alone as 'stat:*'. The two are NOT derivable from each other: an
-// fs-read .js carries a hash with no format, and an import edge can give a stat-only key a real
-// format without any bytes -- collapsing them would promote that key to a byte re-read.
+// Wire format for child->root capture forwarding (--child-process). A shard carries only keys, formats and
+// resolution edges; content, listings, stat kinds and exec bits are re-derived from the root's OWN disk, so
+// a shard cannot inject content or a forged bit. `files` and `formats` are independent -- don't collapse them.
 
 import { KNOWN_FORMATS, assert, fileMapToObject, isPlainObject, objectToMaps, posixPathEscapes } from './util.js'
 
 export const SHARD_VERSION = 1
 
-// Maps in, Maps out: State speaks Maps, so the object round-trip lives here rather than at both call
-// sites. `imports` nests (conditions -> parent -> specifier -> file, or -> platform -> file under
-// --metro), which is why the conversion recurses instead of flattening one level.
+// `imports` nests (conditions -> parent -> specifier -> file, or -> platform -> file under --metro),
+// so the conversion recurses rather than flattening one level.
 export function serializeShard({ scope, files, formats, imports }) {
   return JSON.stringify({
     version: SHARD_VERSION,
@@ -31,11 +18,8 @@ export function serializeShard({ scope, files, formats, imports }) {
   })
 }
 
-// Validate and convert in ONE pass, as Lockfile.parse and Bundle.parse do. The signature upstream is
-// what makes a shard trustworthy; this guards against a malformed message (wrong-version copy,
-// truncated write) and applies the two schema rules those parsers apply to the same fields, so a
-// shard can never carry a format the next run's Lockfile.parse would refuse. Maps also keep the
-// lookups off Object.prototype -- a key like 'constructor' is a legal path.
+// The upstream signature is what makes a shard trustworthy; this only guards a malformed message,
+// applying the same schema rules Lockfile.parse will. Maps keep lookups off Object.prototype.
 export function parseShard(text) {
   const json = JSON.parse(text)
   assert(isPlainObject(json), 'shard must be an object')

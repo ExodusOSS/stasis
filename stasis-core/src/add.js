@@ -13,7 +13,6 @@ import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBina
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
 
-// Loader format for a source file from its path alone (no parsing); null if not recognized as source.
 // LIMITATION: a `.js`/`.ts` with no package `type` falls back to commonjs -- use `.mjs`/`.cjs` or set `type` when the module system matters.
 function sourceFormat(absFile, content) {
   const ext = extname(absFile).toLowerCase()
@@ -45,8 +44,7 @@ function readAddConfig(baseDir) {
   }
   const bundleFile = cfg.bundleFile ?? 'stasis.code.br'
   const resourcesBundleFile = cfg.resourcesBundleFile
-  // Split targets must be distinct files: aiming both at one path clobbers on write and yields an unloadable pair.
-  // Canonicalize (resolve + realpath) so relative-path and symlink aliases are caught, not just byte-identical strings.
+  // Split targets must be distinct files (else they clobber on write); canonicalized so symlink and relative aliases are caught too.
   if (resourcesBundleFile &&
     canonicalizePath(resolve(baseDir, bundleFile)) === canonicalizePath(resolve(baseDir, resourcesBundleFile))) {
     throw new Error(`${CONFIG_FILE}: bundleFile and resourcesBundleFile must name distinct paths (both resolve to ${resolve(baseDir, bundleFile)})`)
@@ -54,10 +52,7 @@ function readAddConfig(baseDir) {
   return { bundleFile, resourcesBundleFile, resources, brotliQuality: cfg.brotliQuality }
 }
 
-// Assemble a Bundle, bucketed per package.json. Unlike the deep `bundle` (whose entries are the
-// roots it walked from), `add` records NO entries -- the files it attaches are attested, not
-// entry points -- so an add bundle carries code with empty entries (valid; assertEntry fails
-// closed for it) and nothing in it is runnable via `stasis run --bundle=load`.
+// Assemble a Bundle bucketed per package.json. `add` records NO entries -- its files are attested, not entry points -- so nothing in an add bundle is runnable via `--bundle=load`.
 function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
   const modules = new Map()
   const formats = new Map()
@@ -82,7 +77,7 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     const meta = metaFor(rel)
     const inNodeModules = splitNodeModulesPath(rel) !== null
     if (meta) {
-      // A node_modules file whose nearest package.json is the workspace root is a misconfigured dep -- refuse (matches the deep path).
+      // A node_modules file whose nearest package.json is the workspace root is a misconfigured dep -- refuse.
       if (inNodeModules && !hasNodeModulesSegment(meta.pkgDir)) {
         throw new Error(`add: no package.json with name+version found for ${rel}`)
       }
@@ -97,8 +92,6 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     if (isExec) executable.add(rel)
   }
 
-  // Attribute packed files to the `add` consumer (distinct from the deep bundler's `bundle`).
-  // Empty entries: add files are attested, never entry points.
   return new Bundle({
     config: { scope: 'full' },
     entries: new Set(),
@@ -128,8 +121,7 @@ function addToBundleFile(baseDir, targetPath, bundle, brotliQuality) {
   return { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom }
 }
 
-// Companion Lockfile for the packed files: the bundle's shape with each file's content swapped for
-// its on-disk integrity, so a `stasis run --lock=frozen` reading from disk matches. imports is empty.
+// Companion Lockfile: the bundle's shape with each file's content swapped for its on-disk integrity, so `--lock=frozen` matches.
 function bundleToLockfile(bundle, integrities) {
   const modules = new Map()
   for (const [dir, m] of bundle.modules) {
@@ -140,7 +132,7 @@ function bundleToLockfile(bundle, integrities) {
   return new Lockfile({ config: bundle.config, entries: bundle.entries, modules, imports: bundle.imports, formats: bundle.formats, executable: bundle.executable })
 }
 
-// Merge the companion lockfile into the project's stasis.lock.json (strict: divergent bytes throw).
+// Merge into the project's stasis.lock.json (strict: divergent bytes throw).
 function updateLockfile(lockPath, lockAdd) {
   let existing
   try {
@@ -155,10 +147,6 @@ function updateLockfile(lockPath, lockAdd) {
   return { total, added: total - before }
 }
 
-// Expand any directory in `rels` into the files under it (recursively, via Node's built-in
-// fs.globSync), so `add src/` attests every file in src/ without listing them. Plain files pass
-// through unchanged; a path that doesn't exist is kept as-is so the per-file existsSync check
-// reports it. `**/*` follows glob's usual rule of not sweeping in dotfiles (`.env`, `.git/...`),
 // Expand directories into their files (recursive glob). Gotcha: `**/*` skips dotfiles (.env, .git/...) -- name them explicitly.
 function expandDirectories(baseDir, rels) {
   const out = []
@@ -183,9 +171,6 @@ function expandDirectories(baseDir, rels) {
   return out
 }
 
-// Run `add` end-to-end: classify each listed file (recognized source = code, declared resource, else
-// refuse) and write the target bundle(s), merging into an existing one if present. If a
-// stasis.lock.json already exists, add updates it too (never creates one) so a frozen run stays consistent.
 export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-core' } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('add: at least one file is required')
@@ -209,20 +194,15 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   const resourceFiles = new Map()
   for (const rel of files) {
     const abs = join(baseDir, rel)
-    // One stat serves both the existence check and the mode read (`stasis add scripts/` would
-    // otherwise probe the same inode twice per file). The execute bit rides alongside the bytes so
-    // `stasis extract` restores it -- an added shell script comes back runnable.
     const stats = statSync(abs, { throwIfNoEntry: false })
     if (stats === undefined) throw new Error(`add: file not found: ${rel}`)
     const executable = isExecutableMode(stats)
-    // Refuse a symlink whose realpath escapes the project root -- a bundle carries only in-tree bytes (matches the deep bundler / loaders).
+    // Refuse a symlink whose realpath escapes the project root -- a bundle carries only in-tree bytes.
     assertRealPathWithinBase(realBase, baseDir, rel)
     const buf = readFileSync(abs)
     if (hasLock) integrities.set(rel, sha512integrity(buf))
     const format = sourceFormat(abs, buf)
-    // A BINARY plist can't be stored as the UTF-8 source string its 'xml' format implies, so it is
-    // NOT source here: fall through to the resource branch, which carries it as opaque base64 when
-    // `.plist` is declared in resources (and otherwise reports the actionable "declare it" error).
+    // A binary plist can't be stored as the UTF-8 string its 'xml' format implies, so it is NOT source: it falls through to the resource branch (opaque base64).
     if (format !== null && !isBinaryPlist(rel, buf)) {
       // Source is stored as a UTF-8 string, so non-UTF-8 bytes would lossily diverge from the file on disk.
       if (!isUtf8(buf)) throw new Error(`add: ${rel} is not valid UTF-8 (format '${format}')`)
@@ -250,8 +230,7 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     writeTarget(bundleFile, all, kind)
   }
 
-  // A present lockfile attests both split targets from one file, so merge in every packed file's
-  // integrity (code + resources together), mirroring the deep bundler's companion lockfile.
+  // One lockfile attests both split targets, so merge in every packed file's integrity (code + resources together).
   if (hasLock) {
     const allFiles = new Map([...codeFiles, ...resourceFiles])
     const lockAdd = bundleToLockfile(assembleBundle(baseDir, allFiles, workspaceName, workspaceVersion), integrities)
