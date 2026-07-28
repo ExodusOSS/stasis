@@ -18,21 +18,19 @@ const keyB64 = process.env.EXODUS_STASIS_SHARD_KEY
 if (dir && keyB64) {
   const rootPriv = createPrivateKey({ key: Buffer.from(keyB64, 'base64'), format: 'der', type: 'pkcs8' })
   const pubId = createPublicKey(rootPriv).export({ format: 'jwk' }).x
-  const lock = (files) => JSON.stringify({
-    version: 0,
-    config: { scope: 'full' },
-    entries: [],
-    sources: { '.': { name: 'stasis-cli-run-fork-shard', version: '0.0.0', files } },
-    modules: {},
-  })
-  const shard = lock({ 'src/decoy.js': 'sha512-AAAA' })
+  // A shard is not a lockfile -- see stasis-core/src/shard.js for the format (keys + formats +
+  // imports; no hashes, since the root re-reads every byte from its own disk). `version: 1` must track
+  // SHARD_VERSION there: the signature gate rejects these payloads before parse, so a stale version
+  // would still "pass" the tests, but for the wrong reason.
+  const shardText = (files) => JSON.stringify({ version: 1, scope: 'full', files, formats: {}, imports: {} })
+  const shard = shardText(['src/decoy.js'])
   let envelope
   if (mode === 'unsigned') {
     envelope = { shard } // no signature -> rejected by the typeof check
   } else if (mode === 'tampered') {
     // A genuine root signature, but over a DIFFERENT (decoy-free) payload -- proves verify covers
     // the bytes, not merely key identity: the swapped decoy-bearing shard fails verification.
-    const signature = sign(null, Buffer.from(lock({})), rootPriv).toString('base64url')
+    const signature = sign(null, Buffer.from(shardText([])), rootPriv).toString('base64url')
     envelope = { shard, signature }
   } else {
     const { privateKey: attackerKey } = generateKeyPairSync('ed25519') // NOT the root's key

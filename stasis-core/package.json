@@ -32,6 +32,7 @@
     "src/lockfile.js",
     "src/package.cjs",
     "src/prune.js",
+    "src/shard.js",
     "src/state.js",
     "src/state-util.js",
     "src/util.js"

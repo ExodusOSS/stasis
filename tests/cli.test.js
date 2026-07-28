@@ -7,7 +7,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
-import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { generateKeyPairSync, sign } from 'node:crypto'
+
+// shard.js is internal to stasis-core (no package export), like fs.js in metro-fs.test.js.
+import { serializeShard } from '../stasis-core/src/shard.js'
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'stasis', 'bin', 'stasis.js')
 const runFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-run')
@@ -2396,11 +2399,15 @@ describe('stasis run CLI (spawned, concurrent)', { concurrency: CONCURRENCY }, (
     try {
       const { privateKey, publicKey } = generateKeyPairSync('ed25519')
       const pubId = publicKey.export({ format: 'jwk' }).x
-      const realHash = `sha512-${createHash('sha512').update(readFileSync(join(tmp, 'src', 'decoy.js'))).digest('base64')}`
-      const shard = JSON.stringify({
-        version: 0, config: { scope: 'full' }, entries: [],
-        sources: { '.': { name: 'stasis-cli-run-fork-shard', version: '0.0.0', files: { 'src/decoy.js': realHash } } },
-        modules: {},
+      // A REAL shard (see stasis-core/src/shard.js), so the only thing standing between the decoy and
+      // the lockfile is the inherited-channel rejection -- a stale payload shape would be dropped at
+      // parse instead, and the assertion below could no longer tell the two apart. A shard carries no
+      // hashes: the root re-reads decoy.js from its own disk, which is what makes this worth refusing.
+      const shard = serializeShard({
+        scope: 'full',
+        files: ['src/decoy.js'],
+        formats: new Map([['src/decoy.js', 'module']]),
+        imports: new Map(),
       })
       const signature = sign(null, Buffer.from(shard), privateKey).toString('base64url')
       writeFileSync(join(attackerDir, `${pubId}-12345.json`), JSON.stringify({ shard, signature }))

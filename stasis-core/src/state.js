@@ -9,6 +9,7 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 import { Config } from './config.js'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
+import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
 import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
@@ -1762,63 +1763,48 @@ export class State {
     }
   }
 
-  // Lockfile-shaped snapshot of everything THIS process captured, for a forked child to hand back
-  // to the root (which never loaded what only the child did). Runs write()'s backfills first.
-  // Content is omitted -- the root re-reads each file's bytes from disk in mergeShard().
+  // Snapshot of what THIS process observed, for a forked child to hand back to the root (which never
+  // loaded what only the child did). Runs write()'s backfills first; see shard.js for the format and
+  // why `files` and `formats` are separate. Content is omitted -- the root re-reads bytes from disk.
   shardSnapshot() {
     this.#backfillObservedResolutions()
     this.#backfillBeforeWrite()
-    // Forward ONLY what THIS process observed this run (#observed), not the seeded baseline --
-    // re-shipping it would bloat every worker's shard past MAX_SHARD_BYTES. modules/formats/imports
-    // are all filtered to #observed below; entries are dropped (mergeShard never marks entries).
-    const modules = new Map()
-    for (const [dir, info] of this.modules) {
-      const files = {}
-      for (const rel of Object.keys(info.files)) {
-        if (this.#observed.has(moduleFileKey(dir, rel))) files[rel] = info.files[rel]
-      }
-      if (Object.keys(files).length === 0) continue
-      modules.set(dir, info.ecosystem === undefined
-        ? { name: info.name, version: info.version, files }
-        : { name: info.name, version: info.version, ecosystem: info.ecosystem, files })
-    }
-    // formats: only observed files. imports: only edges whose PARENT was observed (a child adds an
-    // edge only from a file it loaded), dropping bundle-seeded edges the root already attests.
+    // Only what THIS process observed (#observed), never the seeded baseline: re-shipping it would
+    // bloat every worker's shard toward MAX_SHARD_BYTES, and walking `this.modules` to intersect it
+    // would walk the whole absorbed lockfile on every flush. `this.hashes.has(file)` is the
+    // content/listing test. Entries are dropped: a child's "entry" is its fork target, not a root's.
+    const files = []
     const formats = new Map()
     for (const file of this.#observed) {
-      const fmt = this.formats.get(file)
-      if (fmt !== undefined) formats.set(file, fmt)
+      const format = this.formats.get(file)
+      if (format !== undefined) formats.set(file, format)
+      if (this.hashes.has(file)) files.push(file)
     }
+    // Only edges whose PARENT was observed (a child adds an edge only from a file it loaded), which
+    // drops the bundle-seeded ones the root already attests. Looked up per observed parent rather
+    // than by walking every absorbed edge, for the same reason the file loop above doesn't.
     const imports = new Map()
     for (const [conditions, byParent] of this.imports) {
       let kept
-      for (const [parent, specs] of byParent) {
-        if (!this.#observed.has(parent)) continue
-        if (kept === undefined) { kept = new Map(); imports.set(conditions, kept) }
+      for (const parent of this.#observed) {
+        const specs = byParent.get(parent)
+        if (specs === undefined) continue
+        if (kept === undefined) imports.set(conditions, (kept = new Map()))
         kept.set(parent, specs)
       }
     }
-    return new Lockfile({
-      config: this.config.values,
-      entries: new Set(),
-      modules,
-      imports,
-      formats,
-      // Narrowed to this shard's own (already #observed-filtered) buckets, else it would name files
-      // the shard doesn't record and Lockfile.parse would reject the whole shard in mergeShard.
-      executable: this.#bundleExecutable(modules, formats),
-    }).serialize()
+    return serializeShard({ scope: this.config.scope, files, formats, imports })
   }
 
-  // Merge a child's shardSnapshot() (serialized lockfile) into this State as if this process read
-  // those files itself: replay each file (re-reading bytes/listings from disk to hash) and edge.
-  // This is how the root attests what only a forked child observed. Best-effort: a gone/out-of-scope
-  // record is skipped rather than aborting the merge.
-  mergeShard(lockText) {
-    const lf = Lockfile.parse(lockText)
+  // Merge a child's shardSnapshot() into this State as if this process read those files itself:
+  // replay each file (re-reading bytes/listings from disk to hash) and each edge. This is how the
+  // root attests what only a forked child observed. Best-effort: a gone/out-of-scope record is
+  // skipped rather than aborting the merge.
+  mergeShard(shardText) {
+    const shard = parseShard(shardText)
     // A shard must describe the SAME scope as this root (defense-in-depth: cross-scope is
     // signature-rejected upstream, but a mismatch here means a malformed/foreign shard -- refuse).
-    assert.equal(lf.config.scope, this.config.scope, `shard scope "${lf.config.scope}" != root scope "${this.config.scope}"`)
+    assert.equal(shard.scope, this.config.scope, `shard scope "${shard.scope}" != root scope "${this.config.scope}"`)
     // A shard carries in-root KEYS, but the root re-reads bytes/listings from ITS OWN disk, where a
     // key may resolve (through a symlink) OUTSIDE the root. Re-attesting that would pull external
     // content in under an in-root key, so every replay below re-checks real-path containment -- the
@@ -1834,104 +1820,98 @@ export class State {
       return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
     }
     // Files first (addFile records bytes/format/identity), then edges. Merged files are NEVER marked
-    // entries -- a child's "entry" is its fork-target main, not a root entry; lf.entries is ignored.
-    for (const [dir, info] of lf.modules) {
-      for (const rel of Object.keys(info.files)) {
-        // moduleFileKey inverts the child's bucketing: yields `dir` for a dir captured AT a bucket root (rel==='').
-        const file = moduleFileKey(dir, rel)
-        const absolute = resolve(this.root, file)
-        // Skip a key whose on-disk path escapes the root through a symlink (see realContained), so no
-        // external bytes/listing are attested under an in-root key.
-        if (!realContained(absolute)) continue
-        // Exec bits ride this walk, ABOVE the already-attested fast path below: they must be observed
-        // for every file the shard RECORDS, not just the ones it lists as executable, because a child
-        // that re-read a file and found no bit refutes it by OMISSION. "Already attested" means skip
-        // the expensive byte re-read, not skip looking at the inode. Re-derived from THIS process's
-        // disk, like the stat replay below -- the shard only says which paths to look at, so it
-        // cannot inject a forged bit.
-        this.#recordExecutable(file, absolute)
-        // Skip a file the root already attests (its baseline or own capture) -- the byte re-read is
-        // the dominant merge cost. EXCEPTION: fall through to carry a concrete code format the root
-        // LACKS (root fs-READ a .js with no format, child IMPORTED it as `module`), else a later
-        // frozen run rejects the unattested format.
-        if (this.hashes.has(file)) {
-          const shardFormat = lf.formats?.get(file)
-          if (shardFormat === undefined || (this.formats.get(file) ?? this.#lockFormats?.get(file)) !== undefined) continue
+    // entries -- a child's "entry" is its fork-target main, not a root entry, so a shard has none.
+    // `shard.files` are already project-relative keys (see shardSnapshot), including a directory
+    // captured at a bucket root.
+    for (const file of shard.files) {
+      const absolute = resolve(this.root, file)
+      // Skip a key whose on-disk path escapes the root through a symlink (see realContained), so no
+      // external bytes/listing are attested under an in-root key.
+      if (!realContained(absolute)) continue
+      // Exec bits ride this walk, ABOVE the already-attested fast path below: they must be observed
+      // for every file the shard RECORDS, not just the ones it lists as executable, because a child
+      // that re-read a file and found no bit refutes it by OMISSION. "Already attested" means skip
+      // the expensive byte re-read, not skip looking at the inode. Re-derived from THIS process's
+      // disk, like the stat replay below -- the shard only says which paths to look at, so it
+      // cannot inject a forged bit.
+      this.#recordExecutable(file, absolute)
+      // Skip a file the root already attests (its baseline or own capture) -- the byte re-read is
+      // the dominant merge cost. EXCEPTION: fall through to carry a concrete code format the root
+      // LACKS (root fs-READ a .js with no format, child IMPORTED it as `module`), else a later
+      // frozen run rejects the unattested format.
+      if (this.hashes.has(file)) {
+        const shardFormat = shard.formats.get(file)
+        if (shardFormat === undefined || (this.formats.get(file) ?? this.#lockFormats?.get(file)) !== undefined) continue
+      }
+      const url = pathToFileURL(absolute).toString()
+      const format = shard.formats.get(file)
+      try {
+        if (format === 'directory') {
+          // A child's readdir capture: replay as a directory listing, re-reading from disk
+          // (disk-is-truth). Range-check the path FIRST so a child-forged `..` key can't make us list it.
+          const relFromRoot = relative(this.root, absolute)
+          if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
+          this.addFsDir(url, readdirSync(absolute))
+        } else if (format === 'resource' || format === 'resource:base64') {
+          // A child's asset readFileSync capture: mark resource:true and let addFile re-derive the
+          // exact 'resource'/'resource:base64' tag from the re-read bytes (don't pass it, risking a mismatch).
+          this.addFile(url, { resource: true })
+        } else if (format === undefined) {
+          // Code file the child recorded with NO format (fs-READ a .js/.ts): replay with
+          // inferFormat:false so we don't bake in the commonjs default and collide with the
+          // `module` the loader records if the file is later imported.
+          this.addFile(url, { inferFormat: false })
+        } else {
+          // Code file with a concrete format the child recorded: carry it, else a child-only ESM
+          // .js under a no-`type` package re-defaults to commonjs and a frozen run rejects the
+          // mismatch. addFile still validates it against an explicit package.json `type`.
+          this.addFile(url, { format })
         }
-        const url = pathToFileURL(absolute).toString()
-        const format = lf.formats?.get(file)
-        try {
-          if (format === 'directory') {
-            // A child's readdir capture: replay as a directory listing, re-reading from disk
-            // (disk-is-truth). Range-check the path FIRST so a child-forged `..` key can't make us list it.
-            const relFromRoot = relative(this.root, absolute)
-            if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
-            this.addFsDir(url, readdirSync(absolute))
-          } else if (format === 'resource' || format === 'resource:base64') {
-            // A child's asset readFileSync capture: mark resource:true and let addFile re-derive the
-            // exact 'resource'/'resource:base64' tag from the re-read bytes (don't pass it, risking a mismatch).
-            this.addFile(url, { resource: true })
-          } else if (format === undefined) {
-            // Code file the child recorded with NO format (fs-READ a .js/.ts): replay with
-            // inferFormat:false so we don't bake in the commonjs default and collide with the
-            // `module` the loader records if the file is later imported.
-            this.addFile(url, { inferFormat: false })
-          } else {
-            // Code file with a concrete format the child recorded: carry it, else a child-only ESM
-            // .js under a no-`type` package re-defaults to commonjs and a frozen run rejects the
-            // mismatch. addFile still validates it against an explicit package.json `type`.
-            this.addFile(url, { format })
-          }
-        } catch {
-          // Gone/unreadable, or addFile-rejected (out of scope): skip, like the edge replay below.
-        }
+      } catch {
+        // Gone/unreadable, or addFile-rejected (out of scope): skip, like the edge replay below.
       }
     }
     // Stat records live ONLY in the shard's formats map (no module-files entry), so replay each
     // here by re-deriving the kind from DISK (a shard can't inject a forged kind). Range-check
     // BEFORE touching disk; best-effort skip on a gone/unmodelled path.
-    if (lf.formats) {
-      for (const [file, format] of lf.formats) {
-        if (!isStatFormat(format)) continue
-        const absolute = resolve(this.root, file)
-        const relFromRoot = relative(this.root, absolute)
-        if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
-        try {
-          // statSync (follow symlinks), NOT lstatSync: the child's capture followed them, so statSync
-          // reproduces the kind a legitimate shard carries where lstatSync would report the link and drop it.
-          const stats = statSync(absolute)
-          const kind = stats.isDirectory() ? 'directory' : stats.isFile() ? 'file' : null
-          if (kind === null) continue
-          // statSync follows links, so re-assert real-path containment (see realContained): a symlink
-          // pointing OUT must not attest an external kind under an in-root key.
-          if (!realContained(absolute)) continue
-          this.addFsStat(pathToFileURL(absolute).toString(), kind)
-        } catch {
-          // Gone/dangling, or a kind conflict with the root's capture: skip.
-        }
+    for (const [file, format] of shard.formats) {
+      if (!isStatFormat(format)) continue
+      const absolute = resolve(this.root, file)
+      const relFromRoot = relative(this.root, absolute)
+      if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
+      try {
+        // statSync (follow symlinks), NOT lstatSync: the child's capture followed them, so statSync
+        // reproduces the kind a legitimate shard carries where lstatSync would report the link and drop it.
+        const stats = statSync(absolute)
+        const kind = stats.isDirectory() ? 'directory' : stats.isFile() ? 'file' : null
+        if (kind === null) continue
+        // statSync follows links, so re-assert real-path containment (see realContained): a symlink
+        // pointing OUT must not attest an external kind under an in-root key.
+        if (!realContained(absolute)) continue
+        this.addFsStat(pathToFileURL(absolute).toString(), kind)
+      } catch {
+        // Gone/dangling, or a kind conflict with the root's capture: skip.
       }
     }
-    if (lf.imports) {
-      for (const [conditions, byParent] of lf.imports) {
-        // Reverse #conditionsKey: '*' stays '*'; else a ', '-joined list, optionally ' (with: {json})'
-        // for import attributes -- parse when present so attributed edges merge under the child's key.
-        let condStr = conditions
-        let importAttributes
-        const withAt = conditions.indexOf(' (with: ')
-        if (withAt !== -1) {
-          condStr = conditions.slice(0, withAt)
-          try { importAttributes = JSON.parse(conditions.slice(withAt + ' (with: '.length, -1)) } catch { /* leave undefined */ }
-        }
-        const cond = condStr === '*' ? '*' : condStr.split(', ')
-        for (const [parent, specs] of byParent) {
-          const parentURL = pathToFileURL(resolve(this.root, parent)).toString()
-          for (const [specifier, file] of specs) {
-            const url = pathToFileURL(resolve(this.root, file)).toString()
-            try {
-              this.addImport(parentURL, specifier, url, { conditions: cond, importAttributes })
-            } catch {
-              // Same best-effort stance as addFile above.
-            }
+    for (const [conditions, byParent] of shard.imports) {
+      // Reverse #conditionsKey: '*' stays '*'; else a ', '-joined list, optionally ' (with: {json})'
+      // for import attributes -- parse when present so attributed edges merge under the child's key.
+      let condStr = conditions
+      let importAttributes
+      const withAt = conditions.indexOf(' (with: ')
+      if (withAt !== -1) {
+        condStr = conditions.slice(0, withAt)
+        try { importAttributes = JSON.parse(conditions.slice(withAt + ' (with: '.length, -1)) } catch { /* leave undefined */ }
+      }
+      const cond = condStr === '*' ? '*' : condStr.split(', ')
+    for (const [parent, specs] of byParent) {
+      const parentURL = pathToFileURL(resolve(this.root, parent)).toString()
+      for (const [specifier, file] of specs) {
+          const url = pathToFileURL(resolve(this.root, file)).toString()
+          try {
+            this.addImport(parentURL, specifier, url, { conditions: cond, importAttributes })
+          } catch {
+            // Same best-effort stance as addFile above.
           }
         }
       }

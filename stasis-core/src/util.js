@@ -566,11 +566,22 @@ export const fromEntries = (entries) => Object.setPrototypeOf(Object.fromEntries
 
 export const fileSetToObject = (set) => [...set].toSorted((a, b) => sortPaths(a, b))
 
-export const fileMapToObject = (map) => fromEntries(
-  [...map]
-    .toSorted((a, b) => sortPaths(a[0], b[0]))
-    .map(([k, v]) => [k, v instanceof Map ? fileMapToObject(v) : v])
-)
+// `sorted: false` skips the path ordering, for a machine-only payload whose reader does not care
+// (see shard.js): sortPaths splits BOTH operands into arrays on every comparison.
+export const fileMapToObject = (map, { sorted = true } = {}) => {
+  if (!sorted) {
+    // Straight into a null-prototype object: the sorted path's spread + map + fromEntries allocates
+    // three times per nesting level, which shows up when a shard converts three of them per flush.
+    const out = Object.create(null)
+    for (const [k, v] of map) out[k] = v instanceof Map ? fileMapToObject(v, { sorted }) : v
+    return out
+  }
+  return fromEntries(
+    [...map]
+      .toSorted((a, b) => sortPaths(a[0], b[0]))
+      .map(([k, v]) => [k, v instanceof Map ? fileMapToObject(v, { sorted }) : v])
+  )
+}
 
 export const objectToMaps = (obj) => new Map(
   Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
@@ -579,6 +590,10 @@ export const objectToMaps = (obj) => new Map(
 // True when a POSIX path escapes the root once normalized (leading `..`, absolute, or a mid-path
 // `..` that pops above the root). Plain `startsWith('..')` catches only the leading case.
 export function posixPathEscapes(path) {
+  // normalize() can only yield a '..'-prefixed result from an input containing '..', or an absolute
+  // one from an input already absolute -- so this prefilter is exact, and skips the allocation for the
+  // overwhelming majority that escape nothing. Parsers call this per KEY (a shard runs ~3k per merge).
+  if (!path.includes('..') && !posix.isAbsolute(path)) return false
   const normalized = posix.normalize(path)
   return normalized === '..' || normalized.startsWith('../') || posix.isAbsolute(normalized)
 }
