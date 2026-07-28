@@ -723,10 +723,32 @@ export class State {
     return file === '' ? '.' : file
   }
 
+  // Memoized #canonicalUncached, per URL for the life of this State. Canonicalizing a node_modules
+  // URL costs a realpathSync, and the callers repeat themselves relentlessly: #canonicalFile,
+  // inNodeModules, addFile, addImport and #locateModule all go through here, and
+  // #backfillObservedResolutions canonicalizes 2-3 times per observed edge on EVERY call -- and it
+  // runs on each write() AND each shardSnapshot(). Measured in a Metro transform worker: 991 edges
+  // cost 2383 realpathSync calls and ~100ms on the first pass plus 1322 and ~55ms on every later one,
+  // and a React Native preset carries 10-20x the edges. That is what pushed a capturing child's
+  // exit-time shard flush past jest-worker's 500ms force-exit window, losing its whole capture.
+  // Caching is sound for the same reason the rest of a run is: the tree must hold still while it runs
+  // (addFile re-reads every file and asserts byte-equality), so a symlink moving mid-run is out of
+  // scope exactly as changed bytes are. Callers only read `url`/`absolute`, never mutate the result.
+  #canonicalCache = new Map()
+
+  #canonical(url) {
+    let result = this.#canonicalCache.get(url)
+    if (result === undefined) {
+      result = this.#canonicalUncached(url)
+      this.#canonicalCache.set(url, result)
+    }
+    return result
+  }
+
   // A file under node_modules whose REAL path is outside node_modules is a linked-in workspace
   // source (pnpm): canonicalize to the real path so it's recorded as a source, not a dependency.
   // Everything else passes through (plain sources, real deps, node_modules->node_modules links).
-  #canonical(url) {
+  #canonicalUncached(url) {
     const absolute = this.absolute(url)
     const file = relative(this.root, absolute)
     if (file.startsWith('..') || !splitNodeModulesPath(file)) return { url, absolute }
