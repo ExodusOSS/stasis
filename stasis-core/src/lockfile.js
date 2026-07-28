@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, assertExecutableSubset, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
 
 const VERSION = 0
 
@@ -120,7 +120,7 @@ export class Lockfile {
     // it away, would tax the startup path of every run.
     const executable = json.executable === undefined
       ? new Set()
-      : parseExecutable(json.executable, { what: 'lockfile', files: moduleFileKeys(modules), formats })
+      : parseExecutable(json.executable, { what: 'lockfile', files: moduleFileKeys(modules), formats, scope: json.config.scope })
 
     return new Lockfile({ config: json.config, entries, modules, imports, formats, executable })
   }
@@ -147,7 +147,16 @@ export class Lockfile {
     if (this.formats !== null) Object.assign(store, { formats: fileMapToObject(this.formats) })
     // Omitted when empty (see Bundle.serialize): a lockfile with nothing executable is unchanged
     // from one written before the field existed.
-    if (this.executable.size > 0) store.executable = fileSetToObject(this.executable)
+    if (this.executable.size > 0) {
+      // Subset of the files this lockfile emits -- node_modules only under a non-full scope, which
+      // drops the `sources` half above. Same rules Lockfile.parse applies on the way back in.
+      assertExecutableSubset(this.executable, {
+        what: 'lockfile',
+        files: moduleFileKeys(this.modules, { scope: this.config.scope }),
+        scope: this.config.scope,
+      })
+      store.executable = fileSetToObject(this.executable)
+    }
     return JSON.stringify(store, undefined, 2) + '\n'
   }
 

@@ -1,6 +1,7 @@
 import {
   KNOWN_FORMATS,
   assert,
+  assertExecutableSubset,
   fileMapToObject,
   fileSetToObject,
   fromEntries,
@@ -214,7 +215,7 @@ export class Bundle {
       // vacuous, and honoring the list would let a legacy-shaped untrusted bundle pick a path for
       // `extract` to chmod +x. A v0 `executable` is ignored (fail-safe: no bit granted).
       executable: json.version === VERSION
-        ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats })
+        ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
       reason: isPlainObject(json.reason) ? json.reason : undefined,
     })
@@ -246,7 +247,16 @@ export class Bundle {
     Object.assign(data, { modules, formats, imports })
     // Omitted when empty: nothing executable is the overwhelmingly common case, and an absent key
     // keeps every pre-`executable` artifact byte-identical when rewritten.
-    if (this.executable.size > 0) data.executable = fileSetToObject(this.executable)
+    if (this.executable.size > 0) {
+      // `executable` must be a subset of the files this bundle emits -- which under a non-full scope
+      // is its node_modules files only, since `sources` isn't written. Same rules Bundle.parse applies.
+      assertExecutableSubset(this.executable, {
+        what: 'bundle',
+        files: moduleFileKeys(this.modules, { scope: this.config.scope }),
+        scope: this.config.scope,
+      })
+      data.executable = fileSetToObject(this.executable)
+    }
     if (this.reason !== undefined) data.reason = this.reason
     return JSON.stringify(data, undefined, 2)
   }

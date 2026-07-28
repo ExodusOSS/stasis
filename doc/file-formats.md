@@ -337,11 +337,19 @@ executable is byte-identical to one written before the field existed.
 { "executable": ["scripts/build.sh", "node_modules/dep/bin/cli.js"] }
 ```
 
-- Files only, and only files the artifact itself records. A `directory` capture is a
-  listing and a `stat:*` record carries no content — both parsers reject an entry
-  naming either, a path the artifact doesn't record, or a duplicate. Writers narrow to
-  the set they will actually serialize, so a `scope = node_modules` artifact (which
-  drops its workspace buckets) never lists a workspace file.
+Two rules govern the list, enforced on **both** sides — at `serialize`, so a producer
+that gets it wrong fails immediately with the offending path, and at `parse`, so a
+hand-edited or tampered artifact fails closed:
+
+1. **`executable` is a subset of the artifact's files.** Every entry names a file that
+   artifact records. An entry for anything else is malformed — there would be nothing
+   for `extract` to chmod.
+2. **A non-full scope lists only `node_modules` files.** A `scope = node_modules`
+   artifact records only its dependency tree (`sources` is not written), so a workspace
+   path can't be among its files and is rejected outright.
+
+- Files only. A `directory` capture is a listing and a `stat:*` record carries no
+  content — an entry naming either is rejected, as is a duplicate.
 - Ignored on a legacy `version: 0` bundle: v0 has no per-file `formats`, so those
   guards can't run, and `extract` is an untrusted-input path. Fail-safe — no bit granted.
 - The bit is read from disk at capture, from a **regular file**, following symlinks

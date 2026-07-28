@@ -429,19 +429,31 @@ export function narrowExecutable(executable, files, formats) {
   return out
 }
 
-// Validate a serialized `executable` array into a Set of project-relative paths. Every entry must
-// name a file the artifact itself records, and never a `directory` capture (a listing) or a
-// payload-free `stat:*` record: an entry naming anything else is malformed -- there is nothing for
-// `extract` to chmod -- so fail closed rather than carry it. `what` names the artifact in the messages.
-export function parseExecutable(list, { what, files, formats }) {
+// The two rules an artifact's `executable` list must satisfy, shared by the read side
+// (parseExecutable) and the write side (assertExecutableSubset), so neither can drift from the other:
+//   1. every entry names a file the artifact RECORDS -- `executable` is a subset of `files`;
+//   2. in a non-full scope, only node_modules files are recorded at all, so only those may be listed.
+// `files` is the artifact's recorded key set (moduleFileKeys with its scope), which already implies
+// rule 2 -- it is checked separately anyway so the error names the actual problem.
+function assertExecutableEntry(file, { at, what, files, scope }) {
+  assert(!posixPathEscapes(file), `${at} entry '${file}' escapes the root`)
+  assert(scope === 'full' || hasNodeModulesSegment(file),
+    `${at} entry '${file}' is outside node_modules, which a '${scope}'-scope ${what} does not record`)
+  assert(files.has(file), `${at} entry '${file}' names no file the ${what} records`)
+}
+
+// Validate a serialized `executable` array into a Set of project-relative paths. Beyond the shared
+// rules above, an entry must never be a `directory` capture (a listing) or a payload-free `stat:*`
+// record: there would be nothing for `extract` to chmod, so fail closed rather than carry it.
+// `what` names the artifact in the messages.
+export function parseExecutable(list, { what, files, formats, scope = 'full' }) {
   if (list === undefined) return new Set()
   const at = `${what}: executable`
   assert(Array.isArray(list), `${at} must be an array of file paths`)
   const out = new Set()
   for (const file of list) {
     assert(typeof file === 'string' && file !== '', `${at} entry must be a non-empty string`)
-    assert(!posixPathEscapes(file), `${at} entry '${file}' escapes the root`)
-    assert(files.has(file), `${at} entry '${file}' names no file the ${what} records`)
+    assertExecutableEntry(file, { at, what, files, scope })
     // Fail closed on a dupe like every sibling parse rule (duplicate file/format keys), rather than
     // letting out.add() silently collapse it and round-trip to different bytes.
     assert(!out.has(file), `${at} entry '${file}' is listed twice`)
@@ -451,6 +463,16 @@ export function parseExecutable(list, { what, files, formats }) {
     out.add(file)
   }
   return out
+}
+
+// Write-side twin of parseExecutable's subset rules, called from Bundle/Lockfile.serialize -- the
+// one choke point every producer goes through. The per-site narrowing (narrowExecutable) keeps the
+// in-memory artifact honest; this makes the invariant unmissable, so a future write site that
+// forgets to narrow fails HERE, naming the offending path, instead of silently emitting an artifact
+// that its own parser refuses on the next read (by which point the good copy is overwritten).
+export function assertExecutableSubset(executable, { what, files, scope }) {
+  const at = `${what}: executable`
+  for (const file of executable) assertExecutableEntry(file, { at, what, files, scope })
 }
 
 // Resolve `baseDir/relPath` through symlinks and confirm the real target stays within `realBase`.

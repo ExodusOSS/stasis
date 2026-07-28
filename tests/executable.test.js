@@ -171,6 +171,69 @@ test('Bundle.parse ignores an `executable` list on a legacy v0 bundle', (t) => {
   t.assert.deepEqual([...Bundle.parse(raw).executable], [])
 })
 
+// ── the two invariants, enforced on BOTH sides ───────────────────────────────
+
+// `executable` is a subset of the artifact's files, and a non-full-scope artifact records only its
+// node_modules tree so it may list only node_modules files. Both rules are checked at serialize --
+// the single choke point every producer goes through -- so a write site that forgets to narrow fails
+// there, naming the path, instead of emitting an artifact its own parser refuses on the next read.
+test('serialize refuses an `executable` entry that is not among the files it emits', (t) => {
+  const bundle = (executable) => new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(),
+    modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'run.sh': '#!/bin/sh\n' } }]]),
+    formats: new Map([['run.sh', 'shell']]),
+    executable: new Set(executable),
+  })
+  t.assert.doesNotThrow(() => bundle(['run.sh']).serialize())
+  t.assert.throws(() => bundle(['ghost.sh']).serialize(), /names no file the bundle records/)
+
+  const lock = (executable) => new Lockfile({
+    config: { scope: 'full' },
+    entries: new Set(),
+    modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'run.sh': 'sha512-a' } }]]),
+    imports: new Map(),
+    formats: new Map([['run.sh', 'shell']]),
+    executable: new Set(executable),
+  })
+  t.assert.doesNotThrow(() => lock(['run.sh']).serialize())
+  t.assert.throws(() => lock(['ghost.sh']).serialize(), /names no file the lockfile records/)
+})
+
+test('a non-full-scope artifact may list only node_modules executables', (t) => {
+  // Both buckets are held in memory, but serialize writes only the node_modules half -- so listing
+  // the workspace script would emit a path the written artifact does not record.
+  const modules = () => new Map([
+    ['node_modules/dep', { name: 'dep', version: '1.0.0', files: { 'cli.js': 'sha512-a' } }],
+    ['.', { name: 'app', version: '1.0.0', files: { 'run.sh': 'sha512-b' } }],
+  ])
+  const lock = (executable) => new Lockfile({
+    config: { scope: 'node_modules' },
+    modules: modules(),
+    imports: new Map(),
+    formats: new Map(),
+    executable: new Set(executable),
+  })
+  t.assert.throws(() => lock(['run.sh']).serialize(),
+    /is outside node_modules, which a 'node_modules'-scope lockfile does not record/)
+  const ok = lock(['node_modules/dep/cli.js']).serialize()
+  t.assert.deepEqual(JSON.parse(ok).executable, ['node_modules/dep/cli.js'])
+  t.assert.deepEqual([...Lockfile.parse(ok).executable], ['node_modules/dep/cli.js'])
+
+  // The read side states the same rule directly, so a hand-edited artifact gets the same diagnosis
+  // rather than a bare "names no file" (which is also true, but says less).
+  const raw = JSON.stringify({
+    version: 0,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/dep': { name: 'dep', version: '1.0.0', files: { 'cli.js': 'sha512-a' } } },
+    imports: {},
+    formats: {},
+    executable: ['run.sh'],
+  })
+  t.assert.throws(() => Lockfile.parse(raw),
+    /is outside node_modules, which a 'node_modules'-scope lockfile does not record/)
+})
+
 // ── merge ────────────────────────────────────────────────────────────────────
 
 test('merge lets the incoming artifact clear a bit for a file it records', (t) => {
