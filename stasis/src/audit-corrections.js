@@ -1,4 +1,4 @@
-import semver from './apis/npm/semver.cjs'
+import semver from '@exodus/stasis-api/npm/semver'
 
 // Manual corrections to audit findings: files that must NOT count as evidence
 // that a (potentially vulnerable) package's code is present. An import edge whose

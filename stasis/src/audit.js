@@ -1,7 +1,7 @@
+import { advisories } from '@exodus/stasis-api/npm'
+import semver from '@exodus/stasis-api/npm/semver'
 import { moduleFileKey } from '@exodus/stasis-core/util'
-import { advisories } from './apis/npm/index.js'
 import { isEvidenceFile } from './audit-corrections.js'
-import semver from './apis/npm/semver.cjs'
 import { parseFile } from './parse.js'
 import { collectWhy } from './why.js'
 

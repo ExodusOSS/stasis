@@ -4,6 +4,7 @@
 | Package | Location |
 | - | - |
 | `@exodus/stasis` | [stasis](stasis/) |
+| `@exodus/stasis-api` | [stasis-api](stasis-api/) |
 | `@exodus/stasis-core` | [stasis-core](stasis-core/) |
 | `@exodus/stasis-plugins` | [stasis-plugins](stasis-plugins/) |
 
