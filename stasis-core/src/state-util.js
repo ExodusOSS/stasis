@@ -31,8 +31,7 @@ export function noupsert(map, key, value) {
   }
 }
 
-// Canonicalize for write-target collision detection: resolve() misses symlinks, so two chains to one inode
-// would compare distinct. realpathSync closes that; fall back to lexical resolve() for not-yet-written targets.
+// Canonicalize for write-target collision detection: realpathSync catches symlink aliases resolve() would miss; lexical fallback for not-yet-written targets.
 export function canonicalizePath(p) {
   const abs = resolve(p)
   try {

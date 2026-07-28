@@ -3,16 +3,13 @@ import * as fs from 'node:fs'
 import { basename, isAbsolute, join, posix, relative } from 'node:path'
 import { parseArgs } from 'node:util'
 
-// Snapshot realpathSync before `stasis run --fs` patches fs.realpathSync: the patched wrapper
-// doesn't throw ENOENT, which would defeat assertRealPathWithinBase's reliance on that throw.
-// statSync likewise -- its patched form answers a bundle-served path with SYNTHETIC Stats, whose
-// `mode` would make isExecutableFile read the bundle's guess instead of the real inode's bits.
+// Snapshot before `stasis run --fs` patches fs: the patched realpathSync doesn't throw ENOENT (which
+// assertRealPathWithinBase relies on) and patched statSync answers with synthetic Stats modes.
 const { realpathSync, statSync } = fs
 
 const sep = '/'
 
-// KNOWN_FORMATS (the union of the category sets below) is the finite universe of `format` strings;
-// parsers reject anything outside it, so a tampered/forward-incompatible artifact fails closed.
+// KNOWN_FORMATS is the closed universe of `format` strings; parsers reject anything outside it.
 export const NODE_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript'])
 export const SOURCE_LANGUAGE_FORMATS = new Set(['solidity', 'php', 'shell', 'rust'])
 export const NATIVE_BUILD_FORMATS = new Set([
@@ -30,8 +27,7 @@ export const KNOWN_FORMATS = new Set([
   ...STAT_FORMATS,
 ])
 
-// JS-shaped code extensions. NODE_EXT_FORMATS fixes the format by extension; JS_UNRESOLVED_EXTS
-// (.js/.ts type/syntax-dependent, .jsx/.tsx bundler-transformed) return null from classifyFormat.
+// JS_UNRESOLVED_EXTS (.js/.ts type/syntax-dependent, .jsx/.tsx transformed) classify as null, not a format.
 const NODE_EXT_FORMATS = new Map([
   ['mjs', 'module'], ['cjs', 'commonjs'], ['json', 'json'],
   ['mts', 'module-typescript'], ['cts', 'commonjs-typescript'],
@@ -39,17 +35,13 @@ const NODE_EXT_FORMATS = new Map([
 const JS_UNRESOLVED_EXTS = new Set(['js', 'ts', 'jsx', 'tsx'])
 export const CODE_EXTENSIONS = new Set([...NODE_EXT_FORMATS.keys(), ...JS_UNRESOLVED_EXTS])
 
-// The payload-free stat-record formats (`--fs` lstat/stat): attest a path's KIND, no content, so
-// they live only in `formats` maps. Deliberately weak -- real content for the same path supersedes.
+// Payload-free stat records: attest a path's KIND, no content, and yield to a real format.
 export const isStatFormat = (format) => STAT_FORMATS.has(format)
 
-// Kind a format attests ('directory' vs 'file'). Gates reconcileFormat so a stat record only
-// reconciles with a real format of the SAME kind.
+// Gates reconcileFormat: a stat record only reconciles with a real format of the SAME kind.
 const formatKind = (format) => (format === 'directory' || format === 'stat:directory' ? 'directory' : 'file')
 
-// Reconcile a newly-seen `format` against `currentFormat`, returning the winner or throwing on
-// conflict. A weak 'stat:*' record yields to a real format of the SAME kind and never displaces
-// one; two real formats, or a stat vs a real format of the OTHER kind, conflict.
+// A weak 'stat:*' yields to a real format of the SAME kind and never displaces one; anything else throws.
 export function reconcileFormat(format, currentFormat, name) {
   if (format === currentFormat) return format
   const stat = isStatFormat(format)
@@ -60,27 +52,19 @@ export function reconcileFormat(format, currentFormat, name) {
   throw new Error(`format conflict for '${name}' ('${currentFormat}' vs '${format}')`)
 }
 
-// Lowercased, dot-less extension of a path, or '' if none.
 export function pathExt(filePath) {
   const m = /\.([^./\\]+)$/.exec(filePath)
   return m ? m[1].toLowerCase() : ''
 }
 
-// A `.env` secrets file by BASENAME: `.env` itself or the `.env.*` family (`.env.local`,
-// `.env.production`), plus any file whose final extension is `.env` (`web.env`, `.abc.env` --
-// Docker Compose env_file / reversed-dotenv conventions, secret-bearing all the same). Basename
-// alone can't key the whole family (pathExt('.env.local') is 'local'), and extension alone misses
-// `.env.*`, so both rules apply. Automated capture paths skip these (never bake a secret in);
-// `stasis add .env` still captures (classifyFormat is unchanged).
+// Both rules are needed: pathExt('.env.local') is 'local', and the extension rule alone misses `.env.*`.
 export function isDotEnvFile(name) {
   const base = basename(name).toLowerCase()
   return base === '.env' || base.startsWith('.env.') || pathExt(base) === 'env'
 }
 
-// Validate + normalize a `resources` allowlist into a Set of lowercase entries: each a bare
-// extension (`png`) or extensionless filename (`LICENSE`). A dotted entry (`data.bin`) is rejected
-// -- a file with an extension is keyed by it, so it would never match; declare the extension.
-// Code extensions are rejected too (always tracked).
+// Entries are a bare extension (`png`) or extensionless filename (`LICENSE`); a dotted entry
+// (`data.bin`) is rejected because a file with an extension is keyed by it and would never match.
 export function parseResourcesOption(label, resources) {
   if (resources === undefined) return new Set()
   if (!Array.isArray(resources)) {
@@ -105,8 +89,7 @@ export function parseResourcesOption(label, resources) {
 
 export const isBrotliQuality = (n) => Number.isInteger(n) && n >= 0 && n <= 11
 
-// Parse a brotli-quality string (0..11). `${n}` must round-trip to the input, so non-canonical
-// Number()-coercible forms ('5.0', '05', ' 5 ') throw instead of selecting an unintended quality.
+// `${n}` must round-trip to the input, so non-canonical forms ('5.0', '05', ' 5 ') throw.
 export function parseBrotliQuality(name, value) {
   const n = Number(value)
   if (`${n}` !== value || !isBrotliQuality(n)) {
@@ -115,9 +98,8 @@ export function parseBrotliQuality(name, value) {
   return n
 }
 
-// Shared bin option scan: shift the leading option tokens off `argv` -- stopping at the first
-// positional so `run`'s forwarded child argv survives -- then parseArgs them. `valueFlags` lists
-// options whose separate-token value (`-o dir`) must not be read as the positional.
+// Shifts the leading option tokens off `argv`, stopping at the first positional so `run`'s forwarded
+// child argv survives. `valueFlags` lists options whose separate-token value (`-o dir`) isn't the positional.
 export function parseLeadingOptions(argv, options, { valueFlags = [], onError } = {}) {
   const takesValue = new Set(valueFlags)
   const flags = []
@@ -132,19 +114,17 @@ export function parseLeadingOptions(argv, options, { valueFlags = [], onError } 
   }
 }
 
-// The JS-graph bundlers' policy view over classifyFormat. Returns 'code', 'resource' (allowlisted
-// asset), or 'unknown'. Only JS-family code counts as 'code'; native/source formats don't.
+// The JS-graph bundlers' policy view over classifyFormat: only JS-family code (null or a NODE_FORMAT)
+// counts as 'code'; native/source formats don't. Otherwise 'resource' if allowlisted, else 'unknown'.
 export function classifyExtension(filePath, resources) {
-  // null (js-family) + NODE_FORMATS (fixed mjs/cjs/json/*-ts) == exactly the JS-graph code set.
   const format = classifyFormat(filePath)
   if (format === null || NODE_FORMATS.has(format)) return 'code'
   if (resources.has(pathExt(filePath) || basename(filePath).toLowerCase())) return 'resource'
   return 'unknown'
 }
 
-// Compiled/prebuilt native artifacts and non-source directory bundles, typically non-deterministic
-// across installs, so the native capture skips them entirely (neither bytes nor integrity). Matched
-// by suffix on a file OR directory name (e.g. an Apple `*.framework` or `*.xcodeproj` bundle dir).
+// Compiled/prebuilt artifacts, non-deterministic across installs, so the native capture skips them
+// entirely. Matched on a file OR directory name (an Apple `*.framework`/`*.xcodeproj` bundle dir).
 const NATIVE_ARTIFACT_EXTS = new Set([
   'a', 'so', 'o', 'obj', 'dylib', 'lib', 'dll', 'exe', 'pdb',
   'aar', 'jar', 'class', 'dex',
@@ -157,31 +137,23 @@ export function isNativeArtifact(name) {
   return NATIVE_ARTIFACT_EXTS.has(pathExt(name))
 }
 
-// An extensionless file whose bytes aren't UTF-8 is a compiled binary/tool (e.g. Hermes' prebuilt
-// `hermesc` under sdks/), never source or a text asset -- the native capture skips it. Binary ASSETS
-// carry an extension (`.png` -> resource:base64); isNativeArtifact covers the binary EXTENSIONS, and
-// this covers the extensionless compiled tools a full-tree walk would otherwise sweep in as bytes.
+// An extensionless non-UTF-8 file is a compiled tool (Hermes' `hermesc`), never source -- skipped.
 function isExtensionlessBinary(name, content) {
   return pathExt(name) === '' && Buffer.isBuffer(content) && !isUtf8(content)
 }
 
-// A BINARY plist (Apple's `bplist00` format): a real build input, but its bytes aren't UTF-8, so it
-// can't ride the code path classifyFormat puts a `.plist` on ('xml', text-only) -- that combination
-// failed every capture outright. Detected post-read, by bytes rather than the `bplist00` magic (an
-// encoded-as-binary plist is never valid UTF-8). Callers treat one as NOT code, so it reaches their
-// `resources` allowlist gate and is carried as an opaque base64 resource only when `.plist` is
-// declared there -- an opaque binary is opt-in, never swept in by an automated walk.
+// A binary plist is a real build input, but its bytes can't ride the text-only 'xml' format
+// classifyFormat gives a `.plist`. Callers treat it as NOT code, so it needs `.plist` in `resources`.
 export function isBinaryPlist(name, content) {
   return pathExt(name) === 'plist' && Buffer.isBuffer(content) && !isUtf8(content)
 }
 
-// A CocoaPods podspec manifest, discovered by name (RN scatters them in subdirs `react-native config` misses).
+// Discovered by name: RN scatters podspecs in subdirs `react-native config` misses.
 export function isPodspec(name) {
   return name.endsWith('.podspec') || name.endsWith('.podspec.json')
 }
 
-// Non-JS code formats by extension (pathExt): the extension half of classifyFormat alongside
-// NODE_EXT_FORMATS. Every value is in KNOWN_FORMATS.
+// Non-JS code formats by extension. Every value must be in KNOWN_FORMATS.
 const CODE_EXT_FORMATS = new Map([
   ['sol', 'solidity'],
   ['php', 'php'],
@@ -209,15 +181,12 @@ const CODE_EXT_FORMATS = new Map([
   ['storyboard', 'xml'],
   ['entitlements', 'xml'],
   ['env', 'env'],
-  // pbxproj / *.xcworkspacedata live inside the `.xcodeproj`/`.xcworkspace` bundle dirs the Metro
-  // capture excludes, so only `stasis add`/`--fs` reach them; tagged here so every path agrees.
   ['pbxproj', 'pbxproj'],
   ['xcworkspacedata', 'xml'],
 ])
 
-// Code formats by exact (lowercased) basename, for names an extension can't key (Podfile.lock's
-// `.lock` and CMakeLists.txt's `.txt` are too generic). package.json / `*.podspec.json` handled in
-// classifyFormat directly.
+// Code formats by exact (lowercased) basename, for names whose extension is too generic to key
+// (Podfile.lock's `.lock`, CMakeLists.txt's `.txt`).
 const CODE_NAME_FORMATS = new Map([
   ['podfile', 'podfile'],
   ['podfile.lock', 'podfile-lock'],
@@ -228,8 +197,6 @@ const CODE_NAME_FORMATS = new Map([
   ['apple-app-site-association', 'json'],
 ])
 
-// A POSIX shell shebang on an extensionless, UTF-8 file -> 'shell'. Only the first line is
-// inspected; a non-shell one falls through to the extension/name rules.
 const SHELL_SHEBANG = /^#![^\n]*\b(?:bash|sh)\b/u
 function isShellShebang(content) {
   if (!Buffer.isBuffer(content) || !isUtf8(content)) return false
@@ -238,24 +205,17 @@ function isShellShebang(content) {
   return SHELL_SHEBANG.test(nl === -1 ? head : head.slice(0, nl))
 }
 
-// Files a native package ships that are NOT build inputs -- docs/legal, editor/lint/CI/tooling
-// config, logs/maps, JS-tooling lockfiles, IDE project metadata -- excluded from the Metro native
-// capture (a module is built by the APP's Gradle/CocoaPods, so its own wrapper/IDE files are
-// standalone-dev only). `.bat` (Windows batch) is excluded off Windows; `win32` defaults to the host.
-// `flow` covers the `*.js.flow` type-declaration sidecars (the Flow analog of `.d.ts`): read by the
-// Flow checker, never by Gradle/CocoaPods, and Metro bundles the plain `.js` beside them.
-// `swiftdoc` is a compiler-EMITTED sidecar (written next to a `.swiftmodule`, carrying the module's
-// doc comments for Xcode Quick Help): consumed by IDEs, never read by swiftc/clang/ld during a build,
-// and a binary format that would otherwise be swept in as base64.
+// Files a native package ships that are NOT build inputs (docs/legal, editor/lint/CI config, logs,
+// sidecars), excluded from the Metro native capture. `flow` covers the `*.js.flow` sidecars.
 const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map', 'flow', 'swiftdoc'])
 const NATIVE_EXCLUDE_NAMES = new Set([
-  'license', 'licence', 'third-party-licenses', // license / legal text (US + UK spelling)
+  'license', 'licence', 'third-party-licenses',
   '.prettierrc', '.prettierignore', '.prettierrc.js', '.gitattributes', '.flowconfig', '.eslintignore',
-  '.releaserc', '.clang-format', '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml', // editor / lint / CI config
-  'documentation.yml', // documentation.js config (a native build never reads it)
-  'yarn.lock', // JS dep lockfile (a native build never reads it)
-  '.project', // Eclipse IDE project metadata (Gradle doesn't read it)
-  'gradle-wrapper.properties', // a module's own Gradle wrapper -- the APP's wrapper drives the build
+  '.releaserc', '.clang-format', '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml',
+  'documentation.yml', // documentation.js config
+  'yarn.lock',
+  '.project', // Eclipse IDE metadata
+  'gradle-wrapper.properties', // the APP's wrapper drives the build, not a module's own
 ])
 export function isExcludedNativeFile(name, { win32 = process.platform === 'win32' } = {}) {
   const base = basename(name).toLowerCase()
@@ -265,21 +225,12 @@ export function isExcludedNativeFile(name, { win32 = process.platform === 'win32
   return !win32 && ext === 'bat'
 }
 
-// A native-module toplevel directory for a platform we're not capturing (e.g. `windows/` off Windows).
 export function isExcludedNativeDir(name, { win32 = process.platform === 'win32' } = {}) {
   return !win32 && name === 'windows'
 }
 
-// An Apple prebuilt-slice directory (`ios-arm64`, `tvos-arm64_x86_64-simulator`,
-// `watchos-arm64_32_armv7k`, `appletvos-arm64-simulator`, ...): the per-architecture payload dirs of
-// a prebuilt binary framework, holding compiled output rather than source. isNativeArtifact already
-// skips the enclosing `*.xcframework` bundle; deps that ship these slices loose (outside a bundle
-// dir) need this too, at ANY depth.
-// The PLATFORM segment is deliberately unconstrained (`[a-z0-9]+`) rather than an allowlist: the
-// naming spans modern SDK names (ios/tvos/watchos/macos/xros/visionos/driverkit), the older ones
-// (iphoneos/iphonesimulator/appletvos/appletvsimulator/watchsimulator), and whatever Apple adds
-// next. It's the required ARCH segment that makes this precise -- a real source dir doesn't end in
-// `-<arch>[_<arch>...][-simulator|-maccatalyst]`.
+// An Apple prebuilt-slice dir (`ios-arm64`, `tvos-arm64_x86_64-simulator`): compiled output, not source,
+// at ANY depth. The PLATFORM segment is deliberately loose -- the required ARCH segment is the precision.
 const APPLE_ARCH = String.raw`(?:arm64e|arm64_32|arm64|armv7k|armv7s|armv7|x86_64|i386)`
 const APPLE_SLICE_DIR = new RegExp(
   String.raw`^[a-z0-9]+-${APPLE_ARCH}(?:_${APPLE_ARCH})*(?:-(?:simulator|maccatalyst))?$`,
@@ -289,34 +240,27 @@ export function isAppleSliceDir(name) {
   return APPLE_SLICE_DIR.test(name)
 }
 
-// A TypeScript declaration file (`.d.ts` / `.d.mts` / `.d.cts`): types only, erased at runtime, so
-// it is never a runtime module. The resolvers refuse to land on one (a package whose `main` points
-// at a `.d.ts` must fall through to its real `.js`), keeping type-only files out of the bundle.
-// Keyed by compound suffix -- pathExt only sees the trailing `ts`.
+// Types only, never a runtime module: the resolvers must refuse to land on one and fall through to the
+// real `.js`. Keyed by compound suffix -- pathExt only sees the trailing `ts`.
 const TYPE_DECLARATION_SUFFIXES = ['.d.ts', '.d.mts', '.d.cts']
 export function isTypeDeclaration(name) {
   const base = basename(name).toLowerCase()
   return TYPE_DECLARATION_SUFFIXES.some((suffix) => base.endsWith(suffix))
 }
 
-// `name` with its type-declaration suffix removed (`dist/index.d.ts` -> `dist/index`), so a resolver
-// can probe the runtime sibling the declaration describes. Returns `name` unchanged if it isn't one.
 export function stripTypeDeclaration(name) {
   const lower = name.toLowerCase()
   const suffix = TYPE_DECLARATION_SUFFIXES.find((s) => lower.endsWith(s))
   return suffix === undefined ? name : name.slice(0, -suffix.length)
 }
 
-// The single name->format classifier every capture path is a policy view of. Returns a concrete
-// format when the name determines one; null for a JS-family file whose format is type/syntax
-// dependent (.js/.ts) or none (.jsx/.tsx); undefined when the name isn't recognized code.
+// The single name->format classifier every capture path is a policy view of. Returns a concrete format
+// when the name determines one; null for a JS-family file (.js/.ts/.jsx/.tsx); undefined if unrecognized.
 export function classifyFormat(name, { content } = {}) {
   const base = basename(name).toLowerCase()
-  // package.json / JSON podspecs are 'json' by name, checked before the extension rules so a
-  // `*.podspec.json` isn't shadowed.
+  // Before the extension rules, so a `*.podspec.json` isn't shadowed.
   if (base === 'package.json' || base.endsWith('.podspec.json')) return 'json'
-  // A `*.cmake.in` is a CMake configure_file template (build input); keyed by its compound suffix
-  // because pathExt only sees the trailing `.in`.
+  // Compound suffix: pathExt only sees the trailing `in`.
   if (base.endsWith('.cmake.in')) return 'cmake'
   const byName = CODE_NAME_FORMATS.get(base)
   if (byName !== undefined) return byName
@@ -328,13 +272,11 @@ export function classifyFormat(name, { content } = {}) {
   return undefined
 }
 
-// The Metro native capture's policy view. Returns { action, format }: 'code' (a native build
-// input), 'skip' (excluded noise, or a JS-family file matched BY EXTENSION -- Metro owns those),
-// or 'resource' (anything else). `content` (optional) enables the shell-shebang rule.
+// The Metro native capture's policy view. Returns { action, format }: 'code' (a native build input),
+// 'skip' (excluded noise, or a JS-family file matched BY EXTENSION -- Metro owns those), else 'resource'.
 export function classifyNativeCapture(name, { win32 = process.platform === 'win32', content } = {}) {
   if (isExcludedNativeFile(name, { win32 })) return { action: 'skip' }
-  // `.env`/`.env.*` carry secrets: an automated capture must never sweep them in. classifyFormat
-  // still tags `.env` as 'env', so an explicit `stasis add .env` keeps working.
+  // `.env` files carry secrets: an automated capture must never sweep them in.
   if (isDotEnvFile(name)) return { action: 'skip' }
   const base = basename(name).toLowerCase()
   // Name-matched code is always a native build input, even when its tag is a Node format the JS
@@ -342,38 +284,28 @@ export function classifyNativeCapture(name, { win32 = process.platform === 'win3
   if (base === 'package.json' || base.endsWith('.podspec.json')) return { action: 'code', format: 'json' }
   const byName = CODE_NAME_FORMATS.get(base)
   if (byName !== undefined) return { action: 'code', format: byName }
-  // JS-family by extension: Metro's module graph owns it.
   if (CODE_EXTENSIONS.has(pathExt(name))) return { action: 'skip' }
   const format = classifyFormat(name, { content })
   if (format !== undefined) return { action: 'code', format }
   return { action: 'resource' }
 }
 
-// Second half of the native walks' classification: the rules that need the file's BYTES, applied to
-// the { action, format } classifyNativeCapture already derived from its NAME. Split in two so a walk
-// can drop an excluded file (README.md, a `.map`) without reading it at all, then refine once it has
-// the bytes in hand. Both rules demote to 'resource'/'skip', never promote:
-//   - a prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -> skip.
-//   - a BINARY plist can't be the UTF-8 text its 'xml' format implies -> an opaque resource when
-//     `.plist` is declared in `resources`, else skip (an opaque binary is never swept in unasked).
-// A 'resource' result carries no format: the storage layer derives 'resource' vs 'resource:base64'
-// from the bytes, so the base64 encoding needs no special-casing at the call site.
+// The byte-level half of the native classification, refining what classifyNativeCapture derived from the
+// NAME. Both rules only ever demote. A 'resource' carries no format: storage derives base64 from bytes.
 export function refineNativeCapture(classified, name, content, resources = new Set()) {
   if (isExtensionlessBinary(name, content)) return { action: 'skip' }
   if (isBinaryPlist(name, content)) return { action: resources.has('plist') ? 'resource' : 'skip' }
-  return classified // no byte-level rule fires: the name-derived classification stands, shape intact
+  return classified
 }
 
-// Files `pod install` reads while loading podspecs (Ruby helpers a podspec `require`s, package.json
-// for the version). Captured alongside podspecs -- NOT the native source those podspecs compile.
+// Files `pod install` reads while loading podspecs (Ruby helpers, package.json) -- NOT the native
+// source those podspecs compile.
 export function isNativeManifest(name) {
   return isPodspec(name) || pathExt(name) === 'rb' || name === 'package.json'
 }
 
-// react-native CORE build scripts the native-source walk skips (they're `.js`, so the walk defers
-// them to Metro's graph -- but these never enter it: RN's podspecs/Ruby helpers invoke them at
-// pod-install). Force-included as code. Project-relative (rnPath-relative), so react-native's
-// `exports` map can't hide them; a missing file is skipped.
+// RN core build scripts the native walk would defer to Metro as `.js`, but Metro never sees them (RN's
+// podspecs invoke them at pod-install). Project-relative, so react-native's `exports` can't hide them.
 export const RN_CORE_INCLUDE_FILES = ['sdks/hermes-engine/utils/replace_hermes_version.js']
 
 export function extSetsEqual(a, b) {
@@ -382,19 +314,15 @@ export function extSetsEqual(a, b) {
   return true
 }
 
-// Flat project-relative key for file `rel` inside module dir `dir`. The `rel === ''` branch (a
-// `directory` capture whose path IS a module root) keys the bare dir -- never `${dir}/`, which a
-// trailing-slash join would wrongly produce, breaking the round-trip (the workspace root keys at '.').
+// Flat project-relative key. `rel === ''` (a `directory` capture whose path IS a module root) keys the
+// bare dir, never `${dir}/` -- a trailing slash breaks the round-trip.
 export function moduleFileKey(dir, rel) {
   if (rel === '') return dir
   return dir === '.' ? rel : `${dir}/${rel}`
 }
 
-// The flat project-relative keys a module map records -- the file set an artifact's `executable`
-// list must be a subset of. `scope` MUST be the artifact's own: a non-full-scope artifact serializes
-// only its node_modules buckets (Bundle/Lockfile.serialize drop `sources`), so its workspace files
-// are not keys the WRITTEN artifact records, and listing one produces an artifact its own parser
-// rejects. Parsers may omit it -- what they read back is already scope-filtered.
+// The keys a module map records -- the set an artifact's `executable` must be a subset of. `scope` MUST
+// be the artifact's own: a non-full-scope artifact records only its node_modules buckets.
 export function moduleFileKeys(modules, { scope = 'full' } = {}) {
   const keys = new Set()
   for (const [dir, { files }] of modules) {
@@ -404,26 +332,15 @@ export function moduleFileKeys(modules, { scope = 'full' } = {}) {
   return keys
 }
 
-// The POSIX execute bits (user/group/other).
 export const EXECUTE_BITS = 0o111
 
-// Tri-state executability of the REGULAR FILE at absolute path `abs`, following symlinks (the
-// recorded bytes are the target's, so the target's mode is the honest answer). `true`/`false` when
-// the mode was actually observed; `undefined` when it could NOT be -- gone mid-run, an unreadable
-// parent dir, a symlink loop, or a synthetic bundle entry with no file on disk. Callers must not
-// read `undefined` as "not executable": failing to look is not evidence, and treating it as one
-// would let a transient stat error refute a bit the artifact legitimately attests.
-// A directory answers `false`: `executable` holds files only, and the parsers reject a directory
-// entry, so answering true would let a writer emit an artifact it can't read back.
-// Whether an already-obtained fs.Stats describes an executable regular file, for callers that
-// stat the path for their own reasons and shouldn't pay for a second syscall.
 export const isExecutableMode = (stats) => stats.isFile() && (stats.mode & EXECUTE_BITS) !== 0
 
+// Tri-state: `undefined` means the mode could NOT be observed (gone mid-run, EACCES, ELOOP, a synthetic
+// bundle entry). Callers must not read that as "not executable" -- failing to look is not evidence.
 export function observeExecutable(abs) {
   let stats
   try {
-    // throwIfNoEntry covers ENOENT/ENOTDIR; the catch covers the rest (EACCES, ELOOP, EPERM), which
-    // are equally "could not observe" and must not abort a capture.
     stats = statSync(abs, { throwIfNoEntry: false })
   } catch {
     return undefined
@@ -432,27 +349,15 @@ export function observeExecutable(abs) {
   return isExecutableMode(stats)
 }
 
-// Boolean view for callers with nothing to refute (the static builders, `stasis add`): they are
-// recording a fresh set from scratch, so an unobservable path is simply not executable.
+// Boolean view for callers with nothing to refute (recording a fresh set from scratch).
 export const isExecutableFile = (abs) => observeExecutable(abs) === true
 
-// Whether this platform reports POSIX execute bits at all. Windows does not (libuv synthesizes
-// 0o666/0o444), so a capture there can neither observe a bit nor honestly refute one: it records
-// none, and must NOT read "no bit" as "the bit was removed" and strip what a POSIX capture attested.
-// Same win32 opt-out shape as isExcludedNativeFile.
+// Windows reports no POSIX execute bits, so a capture there records none and must NOT read "no bit" as
+// "the bit was removed" and strip what a POSIX capture attested.
 export const canObserveExecuteBits = ({ win32 = process.platform === 'win32' } = {}) => !win32
 
-// THE rule an artifact's `executable` entry must satisfy. Returns a description of the problem, or
-// null when the entry is legal. Every side of the feature goes through this one function --
-// parseExecutable asserts on it (read), assertExecutableSubset asserts on it (write),
-// narrowExecutable filters on it -- so the three cannot drift, which is the only reason to have one.
-//   1. no path escapes;
-//   2. a non-full scope records only its node_modules tree, so only those files may be listed;
-//   3. the entry names a file the artifact RECORDS -- `executable` is a subset of `files`;
-//   4. it is a real file, never a `directory` listing or a payload-free `stat:*` record -- there
-//      would be nothing for `extract` to chmod.
-// `files` is the artifact's recorded key set (moduleFileKeys with its scope) and already implies
-// rule 2; rule 2 is checked separately anyway so the error names the actual problem.
+// THE rule an artifact's `executable` entry must satisfy; returns the problem, or null when legal.
+// parseExecutable (read), assertExecutable (write) and narrowExecutable share it so they cannot drift.
 function executableEntryProblem(file, { what, files, formats, scope }) {
   if (posixPathEscapes(file)) return 'escapes the root'
   if (scope !== 'full' && !hasNodeModulesSegment(file)) {
@@ -465,22 +370,17 @@ function executableEntryProblem(file, { what, files, formats, scope }) {
   return null
 }
 
-// Narrow an executable set to the entries an artifact may legally carry, applied at every write site
-// so the in-memory artifact is honest before it is ever serialized. Takes the artifact's own
-// `modules`/`scope` and indexes them only when there is something to test -- on a graph where that
-// index is the size of the whole module map, the common nothing-executable case must cost nothing.
+// Applied at every write site, so the in-memory artifact is honest before it is ever serialized.
 export function narrowExecutable(executable, { modules, formats, scope }) {
   const out = new Set()
   if (executable.size === 0) return out
   const files = moduleFileKeys(modules, { scope })
   for (const file of executable) {
-    // `what` is only ever used to build a message, and this path throws none.
     if (executableEntryProblem(file, { what: 'artifact', files, formats, scope }) === null) out.add(file)
   }
   return out
 }
 
-// Assert every entry is legal, applying the SAME rules on both sides of the format.
 function assertExecutable(executable, { what, files, formats, scope }) {
   for (const file of executable) {
     const problem = executableEntryProblem(file, { what, files, formats, scope })
@@ -488,7 +388,6 @@ function assertExecutable(executable, { what, files, formats, scope }) {
   }
 }
 
-// Validate a serialized `executable` array into a Set of project-relative paths.
 export function parseExecutable(list, { what, files, formats, scope = 'full' }) {
   if (list === undefined) return new Set()
   const at = `${what}: executable`
@@ -496,8 +395,7 @@ export function parseExecutable(list, { what, files, formats, scope = 'full' }) 
   const out = new Set()
   for (const file of list) {
     assert(typeof file === 'string' && file !== '', `${at} entry must be a non-empty string`)
-    // Fail closed on a dupe like every sibling parse rule (duplicate file/format keys), rather than
-    // letting out.add() silently collapse it and round-trip to different bytes.
+    // A dupe would silently collapse in out.add() and round-trip to different bytes.
     assert(!out.has(file), `${at} entry '${file}' is listed twice`)
     out.add(file)
   }
@@ -505,22 +403,16 @@ export function parseExecutable(list, { what, files, formats, scope = 'full' }) 
   return out
 }
 
-// The `executable` value an artifact serializes, or undefined to omit the key. Called from
-// Bundle/Lockfile.serialize -- the one choke point every producer goes through, applying the same
-// rules parse will. The per-site narrowing (narrowExecutable) keeps the in-memory artifact honest;
-// this makes the invariant unmissable, so a write site that forgets to narrow fails HERE, naming the
-// offending path, instead of emitting an artifact its own parser refuses on the next read (by which
-// point the good copy is overwritten). Omitted when empty: nothing executable is the overwhelmingly
-// common case, and an absent key keeps every pre-`executable` artifact byte-identical when rewritten.
+// The one choke point every producer goes through, so a write site that forgot to narrow fails HERE, not
+// on the next read. Omitted when empty: keeps every pre-`executable` artifact byte-identical when rewritten.
 export function serializeExecutable(executable, { what, modules, formats, scope }) {
   if (executable.size === 0) return undefined
   assertExecutable(executable, { what, files: moduleFileKeys(modules, { scope }), formats, scope })
   return fileSetToObject(executable)
 }
 
-// Resolve `baseDir/relPath` through symlinks and confirm the real target stays within `realBase`.
-// Throws on a symlink escaping the bundle root (a crafted `link.sh -> /etc/passwd` must not pull an
-// external file into an attestable bundle). realpathSync surfaces ENOENT, which loaders treat as "missing".
+// Throws on a symlink escaping the bundle root: a crafted `link.sh -> /etc/passwd` must not pull an
+// external file into an attestable bundle. realpathSync surfaces ENOENT, which loaders treat as "missing".
 export function assertRealPathWithinBase(realBase, baseDir, relPath) {
   const real = realpathSync(join(baseDir, relPath))
   const rel = relative(realBase, real).split(/[\\/]/u).join('/')
@@ -545,11 +437,9 @@ export function sortPaths(a, b) {
   if (al.length < 2) return bl.length < 2 && al > bl ? 1 : -1
   if (bl.length < 2) return 1
 
-  // * comes first
   if (al[0] === '*') return -1
   if (bl[0] === '*') return 1
 
-  // node_modules comes last
   if (al[0] === 'node_modules') return 1
   if (bl[0] === 'node_modules') return -1
 
@@ -566,12 +456,9 @@ export const fromEntries = (entries) => Object.setPrototypeOf(Object.fromEntries
 
 export const fileSetToObject = (set) => [...set].toSorted((a, b) => sortPaths(a, b))
 
-// `sorted: false` skips the path ordering, for a machine-only payload whose reader does not care
-// (see shard.js): sortPaths splits BOTH operands into arrays on every comparison.
+// `sorted: false` only for a machine-only payload whose reader does not care about ordering (shard.js).
 export const fileMapToObject = (map, { sorted = true } = {}) => {
   if (!sorted) {
-    // Straight into a null-prototype object: the sorted path's spread + map + fromEntries allocates
-    // three times per nesting level, which shows up when a shard converts three of them per flush.
     const out = Object.create(null)
     for (const [k, v] of map) out[k] = v instanceof Map ? fileMapToObject(v, { sorted }) : v
     return out
@@ -587,22 +474,16 @@ export const objectToMaps = (obj) => new Map(
   Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
 
-// True when a POSIX path escapes the root once normalized (leading `..`, absolute, or a mid-path
-// `..` that pops above the root). Plain `startsWith('..')` catches only the leading case.
+// Normalizes first: plain `startsWith('..')` would miss a mid-path `..` that pops above the root.
 export function posixPathEscapes(path) {
-  // normalize() can only yield a '..'-prefixed result from an input containing '..', or an absolute
-  // one from an input already absolute -- so this prefilter is exact, and skips the allocation for the
-  // overwhelming majority that escape nothing. Parsers call this per KEY (a shard runs ~3k per merge).
+  // Exact prefilter: normalize() can only yield a '..'-prefixed result from an input containing '..',
+  // or an absolute one from an input already absolute.
   if (!path.includes('..') && !posix.isAbsolute(path)) return false
   const normalized = posix.normalize(path)
   return normalized === '..' || normalized.startsWith('../') || posix.isAbsolute(normalized)
 }
 
-// Shared by Bundle.merge and Lockfile.merge: union a freshly built artifact into an on-disk one.
-// The merge rule is identical -- an overlapping entry must match exactly, a genuine conflict throws
-// rather than letting the newer artifact silently mask what the existing one attested.
-
-// Value-equality for one import-edge target: a resolved-file string, or a { platform: file } Map.
+// A target is a resolved-file string, or a { platform: file } Map under --metro.
 function importTargetsEqual(a, b) {
   const aMap = a instanceof Map
   if (aMap !== (b instanceof Map)) return false
@@ -614,8 +495,7 @@ function importTargetsEqual(a, b) {
 
 const fmtTarget = (t) => (t instanceof Map ? `{${[...t].map(([p, f]) => `${p}: ${f}`).join(', ')}}` : t)
 
-// Merge two import maps (conditions -> parent -> specifier -> target). An edge on both sides must
-// resolve to the same target; a redirect conflict throws.
+// Merge two import maps (conditions -> parent -> specifier -> target); a redirect conflict throws.
 export function mergeImportMaps(a, b, label) {
   const out = new Map()
   const absorb = (imports) => {
@@ -641,8 +521,6 @@ export function mergeImportMaps(a, b, label) {
   return out
 }
 
-// Merge two per-file format maps (file -> Node format string) into a fresh Map. A
-// file present on both sides must carry the same format; a conflict throws.
 export function mergeFormatMaps(a, b, label) {
   const out = new Map()
   const absorb = (formats) => {
@@ -652,7 +530,6 @@ export function mergeFormatMaps(a, b, label) {
         out.set(file, format)
         continue
       }
-      // reconcileFormat supersedes a weak 'stat:*' with a real format and throws on conflict.
       try {
         out.set(file, reconcileFormat(format, currentFormat, file))
       } catch (cause) {
@@ -665,13 +542,8 @@ export function mergeFormatMaps(a, b, label) {
   return out
 }
 
-// Merge two artifacts' `executable` lists. A union, EXCEPT that `b` -- the INCOMING (newer)
-// artifact -- is authoritative for the files it records: a file both sides carry takes b's bit, so
-// re-adding a file that has since lost its execute bit clears the stale entry instead of the union
-// resurrecting it. Without that, `stasis add` / `stasis bundle --add` could only ever grant a bit,
-// never revoke one, and `extract` would keep restoring +x the source tree no longer has. `bFiles`
-// every call site has the newer artifact on the right. Indexing b's files is deferred until there is
-// an `a` entry to test, so the common nothing-executable merge costs nothing.
+// A union, EXCEPT that `b` (the INCOMING, newer artifact -- every call site passes it on the right) is
+// authoritative for its own files: a since-lost execute bit is cleared, not resurrected by the union.
 export function mergeExecutableSets(a, b, bModules, scope) {
   if (a.size === 0) return new Set(b)
   const bFiles = moduleFileKeys(bModules, { scope })
@@ -680,8 +552,6 @@ export function mergeExecutableSets(a, b, bModules, scope) {
   return out
 }
 
-// Merge two per-package module maps into a fresh Map. Overlapping buckets must agree on
-// name/version/ecosystem, and a file in both must carry the identical value -- a divergence throws.
 // Result `files` objects are null-prototype, so a `__proto__` file name is a plain own key.
 export function mergeModuleMaps(a, b, label) {
   const out = new Map()
@@ -717,17 +587,13 @@ export function mergeModuleMaps(a, b, label) {
   return out
 }
 
-// True when `node_modules` appears as a full path SEGMENT in `path` -- at the start or right after
-// a `/`, and terminated by a `/` or the end -- NOT as a bare substring (`foo_node_modules/dep` is
-// a source dir, not a dependency bucket). Shared segment-aware gate for the module-bucket
-// classification across state/bundle/lockfile/prune/add; paths here are always POSIX ('/'-joined).
+// A full path SEGMENT, NOT a bare substring (`foo_node_modules/dep` is a source dir, not a bucket).
 export function hasNodeModulesSegment(path) {
   return path.split('/').includes('node_modules')
 }
 
-// Locate the LAST (deepest) segment-aligned `node_modules/` marker in `path`. Returns its start
-// index, or -1. `lastIndexOf` alone would also match a bare substring (`foo_node_modules/`), so a
-// candidate only counts when it starts the path or follows a `/`.
+// Deepest segment-aligned `node_modules/` marker, or -1: `lastIndexOf` alone would also match a bare
+// substring (`foo_node_modules/`), so a candidate only counts at the start or after a `/`.
 function lastNodeModulesMarker(path) {
   const marker = 'node_modules/'
   let idx = path.length

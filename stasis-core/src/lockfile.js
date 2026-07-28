@@ -3,7 +3,6 @@ import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToO
 const VERSION = 0
 
 const normalize = ({ name, version, ecosystem, files }) => {
-  // `ecosystem` names the source ecosystem (npm/composer/soldeer); workspace buckets omit it.
   assert(ecosystem === undefined || typeof ecosystem === 'string')
   return { name, version, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
 }
@@ -15,13 +14,11 @@ export class Lockfile {
   config
   entries
   modules
-  // conditions -> parent -> specifier -> resolved file. parse always yields a Map; null only on
-  // in-memory constructs (diff tooling's "doesn't attest" side).
+  // conditions -> parent -> specifier -> resolved file. A Map from parse; null only on in-memory constructs that don't attest it.
   imports
   // file -> format string. Same Map/null rule as imports.
   formats
-  // Project-relative paths of the attested files that carry a POSIX execute bit, so a tree rebuilt
-  // from this lockfile (`stasis extract`) can restore it. Files only, never a `directory` capture.
+  // Project-relative paths of attested files carrying a POSIX execute bit, for `stasis extract`. Files only, never a `directory`.
   executable
 
   constructor({ config = { scope: 'full' }, entries, modules, imports, formats, executable } = {}) {
@@ -38,7 +35,6 @@ export class Lockfile {
     const json = JSON.parse(text)
     assert(json.version === VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
-    // Every stasis writer emits both facets; a file missing either is not a stasis lockfile.
     assert(json.imports !== undefined && json.formats !== undefined, 'lockfile must attest imports and formats')
 
     const full = json.config.scope === 'full'
@@ -81,7 +77,6 @@ export class Lockfile {
         assert(isPlainObject(specifiers))
         const specs = new Map()
         for (const [specifier, target] of Object.entries(specifiers)) {
-          // A file string, or a { platform: file } map (--metro); reject any other shape (fail closed).
           if (typeof target === 'string') {
             assert(!posixPathEscapes(target))
             specs.set(specifier, target)
@@ -115,9 +110,7 @@ export class Lockfile {
       formats.set(key, format)
     }
 
-    // Every executable must be a file this lockfile attests. The key index is built only when the
-    // (usually absent) key is present -- indexing every attested file on every parse, just to throw
-    // it away, would tax the startup path of every run.
+    // Every executable must be a file this lockfile attests; the key index is built only when the (usually absent) key is present.
     const executable = json.executable === undefined
       ? new Set()
       : parseExecutable(json.executable, { what: 'lockfile', files: moduleFileKeys(modules), formats, scope: json.config.scope })
@@ -142,13 +135,12 @@ export class Lockfile {
     const store = { version: this.version, config: this.config }
     if (this.config.scope === 'full') Object.assign(store, { entries, sources: fromEntries(sources) })
     Object.assign(store, { modules: fromEntries(modules) })
-    // A null facet (in-memory constructs only) omits the key.
     if (this.imports !== null) Object.assign(store, { imports: fileMapToObject(this.imports) })
     if (this.formats !== null) Object.assign(store, { formats: fileMapToObject(this.formats) })
     const executable = serializeExecutable(this.executable, {
       what: 'lockfile',
       modules: this.modules,
-      // May be null on an in-memory construct; an unrecorded format is simply not a directory/stat.
+      // Null on an in-memory construct; an unrecorded format is simply not a directory/stat.
       formats: this.formats ?? new Map(),
       scope: this.config.scope,
     })
@@ -172,7 +164,6 @@ export class Lockfile {
   }
 }
 
-// Merge nullable facets (imports/formats): both-null stays null; a one-sided null throws rather than drop the other's attestation.
 const mergeNullable = (a, b, merge, what) => {
   if (a === null && b === null) return null
   assert(a !== null && b !== null,

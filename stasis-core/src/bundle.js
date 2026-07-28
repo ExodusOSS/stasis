@@ -23,7 +23,6 @@ const VERSION = 1
 const LEGACY_VERSION = 0
 
 const normalize = ({ name, version, ecosystem, files }) => {
-  // `ecosystem` names the source ecosystem (npm/composer/soldeer); workspace buckets omit it.
   assert(ecosystem === undefined || typeof ecosystem === 'string')
   return { name, version, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
 }
@@ -31,7 +30,6 @@ const normalize = ({ name, version, ecosystem, files }) => {
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
 
-// Union the informational, never-attested `reason` provenance of two bundles.
 const mergeReason = (a, b) => {
   if (a === undefined) return b
   if (b === undefined) return a
@@ -44,8 +42,7 @@ const mergeReason = (a, b) => {
   return out
 }
 
-// JSON shape of stasis.code.br (code + resources; callers own the brotli wrap). parse accepts
-// legacy v0 (flat `sources`, null metadata) and v1; serialize always writes v1.
+// JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
 export class Bundle {
   static VERSION = VERSION
 
@@ -55,10 +52,9 @@ export class Bundle {
   modules
   formats
   imports
-  // Project-relative paths of the bundled files that carry a POSIX execute bit, so `stasis extract`
-  // can restore it. Files only -- a `directory` capture is a listing, never executable.
+  // Project-relative paths of bundled files carrying a POSIX execute bit, for `stasis extract`. Files only, never a `directory`.
   executable
-  // Informational only, NOT attested -- never consulted for verification. Present only with >1 consumer.
+  // Informational only, NOT attested -- never consulted for verification.
   reason
 
   constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION } = {}) {
@@ -74,7 +70,7 @@ export class Bundle {
     this.reason = reason
   }
 
-  // Flat project-relative view of raw stored file contents from this.modules.
+  // Flat project-relative view of the raw stored file contents (resources stay base64).
   get sources() {
     const m = new Map()
     for (const [dir, { files }] of this.modules) {
@@ -85,14 +81,11 @@ export class Bundle {
     return m
   }
 
-  // The single "is this a code file?" discriminator: true for the non-code resource formats the loader rejects.
   static isResourceFormat(format) {
     return format === 'resource' || format === 'resource:base64' || format === 'directory'
   }
 
-  // True if any bundled file is executable/source (non-resource). A full-scope code bundle must
-  // declare an entry to be runnable (the runtime enforces this in State#absorbCodeBundle); a
-  // resources-only bundle legitimately has none.
+  // True if any bundled file is non-resource; a full-scope code bundle must declare an entry to be runnable (State#absorbCodeBundle).
   get hasCode() {
     for (const [dir, { files }] of this.modules) {
       for (const rel of Object.keys(files)) {
@@ -142,10 +135,7 @@ export class Bundle {
           assert(info?.name && info.version && info.files)
           modules.set(dir, normalize(info))
         }
-        // Full-scope entries: an array (possibly empty) or absent. A code bundle with EMPTY
-        // entries is valid -- `stasis add` attests files without making them entry points. That's
-        // safe because state.assertEntry fails closed on an authoritatively-empty entry set
-        // (nothing runs as an entry); it no longer relies on a parse-time non-empty guarantee.
+        // Empty entries are valid (`stasis add` attests files without making them entry points); state.assertEntry fails closed on an empty set.
         assert(json.entries === undefined || Array.isArray(json.entries))
         entries = new Set(json.entries)
       } else {
@@ -167,8 +157,7 @@ export class Bundle {
       }
     }
 
-    // Flat keys must be unique across buckets: `node_modules/a`+`b/c` and `node_modules/a/b`+`c` both
-    // flatten to `node_modules/a/b/c`, and the last-wins `sources` getter would serve one of two payloads.
+    // Flat keys must be unique across buckets: two different bucket splits can flatten to one path, and the `sources` getter would serve either payload.
     const flatKeys = new Set()
     for (const [dir, { files }] of modules) {
       for (const rel of Object.keys(files)) {
@@ -180,7 +169,6 @@ export class Bundle {
 
     // Reject paths escaping the root here (incl. mid-path `a/../../x`): getImport resolves against the root at load.
     const imports = objectToMaps(json.imports)
-    // Target is a file string or a {platform: file} map (--metro); reject anything else (fail closed).
     const assertTarget = (target) => {
       if (typeof target === 'string') {
         assert(!posixPathEscapes(target))
@@ -209,10 +197,7 @@ export class Bundle {
       modules,
       formats,
       imports,
-      // Checked against flatKeys (built above): every executable must be a file this bundle carries.
-      // v1 only -- a v0 bundle has no per-file `formats`, so the directory/stat guards below would be
-      // vacuous, and honoring the list would let a legacy-shaped untrusted bundle pick a path for
-      // `extract` to chmod +x. A v0 `executable` is ignored (fail-safe: no bit granted).
+      // Every executable must be a file this bundle carries. A v0 `executable` is ignored: with no per-file `formats` it could point `extract` at any path to chmod +x.
       executable: json.version === VERSION
         ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
@@ -252,7 +237,7 @@ export class Bundle {
     return JSON.stringify(data, undefined, 2)
   }
 
-  // Stamp `consumer` onto every carried file in the informational `reason` map (static builders do this; the runtime tags as it records).
+  // Stamp `consumer` onto every carried file in the informational `reason` map.
   withReason(consumer) {
     const files = [...this.sources.keys()]
     return new Bundle({

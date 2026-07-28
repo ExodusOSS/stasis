@@ -8,22 +8,18 @@ const VALID_LOCK = new Set(['none', 'ignore', 'add', 'replace', 'frozen'])
 const VALID_BUNDLE = new Set(['none', 'ignore', 'add', 'replace', 'load', 'frozen'])
 const VALID_FS = new Set(['sync', 'async'])
 
-// Defaults Config applies when neither env nor options specify a value. Exported so callers share
-// one source of truth.
 export const DEFAULT_LOCK = 'add'
 export const DEFAULT_BUNDLE = 'none'
 export const DEFAULT_SCOPE = 'full'
 
-// Strict boolean env parsing: ''/'0'/'false' -> false, '1'/'true' -> true, anything else throws.
-// A truthiness parse would read 'no'/'off' as *enabling* the toggle.
+// Strict, not truthy: a truthiness parse would read 'no'/'off' as *enabling* the toggle.
 const envBool = (name, value) => {
   if (value === '' || value === '0' || value === 'false') return false
   if (value === '1' || value === 'true') return true
   throw new RangeError(`${name} must be ''/'0'/'false' or '1'/'true' (got '${value}')`)
 }
 
-// EXODUS_STASIS_RESOURCES is a comma-separated extension list; split + trim + drop empties so ''
-// and ' png , svg ' normalize predictably. Empty/unset means "no allowlist".
+// EXODUS_STASIS_RESOURCES is a comma-separated extension list; empty/unset means "no allowlist".
 const envList = (value) => value.split(',').map((s) => s.trim()).filter(Boolean)
 
 const OPTION_KEYS = ['scope', 'lock', 'bundle', 'bundleFile', 'resourcesBundleFile', 'debug', 'resources', 'childProcess', 'packageJSON']
@@ -45,12 +41,10 @@ export function validatePluginOptions(label, options) {
   if (resources !== undefined) parseResourcesOption(label, resources)
 }
 
-// When a plugin runs against an existing State (preload path), the active Config is authoritative;
-// any options the plugin was given must agree with it.
+// The active Config is authoritative; options a plugin was given must agree with it.
 export function assertOptionsMatchConfig(config, options) {
   const { scope, lock, bundle, bundleFile, resourcesBundleFile, debug, childProcess, packageJSON } = options
-  // `resources` is intentionally NOT cross-checked here: it's a Set (coordinated in
-  // resolvePluginState) -- don't "fix" the omission with assert.equal(config.resources, ...).
+  // `resources` is deliberately NOT checked here: it's a Set, coordinated in resolvePluginState.
   try {
     if (scope !== undefined) assert.equal(config.scope, scope)
     if (lock !== undefined) assert.equal(config.lock, lock)
@@ -82,9 +76,7 @@ export class Config {
   #fs
   #brotliQuality
 
-  // Env vars apply at construction; if both env and an option are set they must agree. Explicit
-  // constructor options are likewise authoritative: a later `loadConfig` must agree with them
-  // rather than silently overwriting (e.g. `--scope=full` vs the file's `"scope":"node_modules"`).
+  // Env and options must agree when both are set; #explicit is kept so a later loadConfig can't override them.
   constructor(options = {}) {
     const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, packageJSON, fs, brotliQuality, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
@@ -152,17 +144,14 @@ export class Config {
     this.#debug = this.#env.debug !== undefined ? envBool('EXODUS_STASIS_DEBUG', this.#env.debug) : (debug ?? false)
     this.#childProcess = this.#env.childProcess !== undefined ? envBool('EXODUS_STASIS_CHILD_PROCESS', this.#env.childProcess) : (childProcess ?? false)
     this.#packageJSON = this.#env.packageJSON !== undefined ? envBool('EXODUS_STASIS_PACKAGE_JSON', this.#env.packageJSON) : (packageJSON ?? false)
-    // Env-only: shard-channel plumbing a parent sets for its descendants, not a user-facing knob.
     this.#shardSignalFlush = this.#env.shardSignalFlush !== undefined
       ? envBool('EXODUS_STASIS_SHARD_SIGNAL_FLUSH', this.#env.shardSignalFlush)
       : false
-    // env wins over the option; undefined means "fs untouched".
     this.#fs = this.#env.fs || fs || undefined
-    // env wins over the option; no `||` chaining -- 0 is a valid quality and falsy.
+    // No `||` chaining here -- 0 is a valid quality and falsy.
     this.#brotliQuality = this.#env.brotliQuality !== undefined
       ? parseBrotliQuality('EXODUS_STASIS_BROTLI_QUALITY', this.#env.brotliQuality)
       : brotliQuality
-    // env wins over the option; parseResourcesOption normalizes both to a Set (empty if neither set).
     this.#resources = parseResourcesOption(
       'resources',
       this.#env.resources !== undefined ? envList(this.#env.resources) : resources
@@ -171,7 +160,6 @@ export class Config {
     this.#checkInvariants()
   }
 
-  // Per-field validation + cross-field invariants; both the constructor and loadConfig call this.
   #checkInvariants() {
     assert.ok(VALID_SCOPE.has(this.#scope), `Invalid scope: ${this.#scope}`)
     assert.ok(VALID_LOCK.has(this.#lock), `Invalid lock: ${this.#lock}`)
@@ -184,8 +172,7 @@ export class Config {
     }
     if (this.#fs !== undefined) {
       assert.ok(VALID_FS.has(this.#fs), `Invalid fs: ${this.#fs}`)
-      // --fs patches the fs readers to capture into the bundle (add/replace) or serve from it
-      // (load); other bundle modes have nothing to record into or read from.
+      // --fs captures into the bundle (add/replace) or serves from it (load); other modes have nothing to do.
       if (this.#bundle !== 'add' && this.#bundle !== 'replace' && this.#bundle !== 'load') {
         throw new RangeError(`fs requires bundle=(add|replace|load) (got bundle='${this.#bundle}')`)
       }
@@ -193,22 +180,18 @@ export class Config {
     if (this.#bundleFile !== undefined) assert.equal(typeof this.#bundleFile, 'string', 'bundleFile must be a string')
     if (this.#lockFile !== undefined) {
       assert.equal(typeof this.#lockFile, 'string', 'lockFile must be a string')
-      // lockFile is only meaningful with an active lock mode; none/ignore would silently ignore it.
       if (this.#lock === 'none' || this.#lock === 'ignore') {
         throw new RangeError(`lockFile requires an active lock mode (got lock='${this.#lock}')`)
       }
     }
     if (this.#resourcesBundleFile !== undefined) {
       assert.equal(typeof this.#resourcesBundleFile, 'string', 'resourcesBundleFile must be a string')
-      // The split is only meaningful with an active bundle; none/ignore would leave it silently inert.
       if (this.#bundle === 'none' || this.#bundle === 'ignore') {
         throw new RangeError(`resourcesBundleFile requires an active bundle mode (got bundle='${this.#bundle}')`)
       }
     }
 
-    // The three write targets (lockFile, bundleFile, resourcesBundleFile) must each name a distinct
-    // file. Canonicalize (resolve() + realpathSync) so './x.br' vs 'x.br' and two symlinks to one
-    // inode compare equal -- a raw string compare would let the second writer silently clobber the first.
+    // Write targets must be distinct: canonicalize so './x.br' vs 'x.br' and symlinks to one inode compare equal.
     const claimed = new Map()
     for (const [label, value] of [
       ['lockFile', this.#lockFile],
@@ -223,15 +206,12 @@ export class Config {
       claimed.set(canonical, label)
     }
 
-    // bundle=load needs a trust root for source bytes: frozen pins each file's sha512 and we
-    // cross-check on load; otherwise the bundle is itself authoritative (lock=none/ignore).
+    // bundle=load needs a trust root: frozen pins each file's sha512, else the bundle itself is it (none/ignore).
     if (this.#bundle === 'load' && this.#lock !== 'frozen' && this.#lock !== 'none' && this.#lock !== 'ignore') {
       throw new RangeError('bundle=load is incompatible with lock=(add|replace)')
     }
 
-    // bundle=frozen places no constraint on lock: it reads each file from disk and verifies against
-    // the bundle's recorded bytes/resolutions/formats, so the bundle is itself the trust root. It
-    // composes with any lock mode and satisfies the "needs a lockfile or a bundle" rule below.
+    // bundle=frozen deliberately constrains no lock mode: it verifies disk against the bundle, its own trust root.
     if (this.#lock === 'none' && this.#bundle === 'none') {
       throw new RangeError('stasis needs a lockfile or a bundle: set lock or bundle')
     }
@@ -256,8 +236,7 @@ export class Config {
     this.#scope = scope
     this.#lock = lock
     this.#bundle = bundle
-    // Coerce '' -> undefined to match the constructor: otherwise #checkInvariants would
-    // resolve('') -> cwd and claim it as a write target.
+    // '' -> undefined like the constructor: otherwise canonicalizePath('') claims cwd as a write target.
     this.#bundleFile = bundleFile || undefined
     this.#resourcesBundleFile = resourcesBundleFile || undefined
     this.#debug = debug
@@ -285,8 +264,7 @@ export class Config {
         assert.ok(extSetsEqual(this.#resources, parseResourcesOption('env', envList(this.#env.resources))),
           'resources in stasis.config.json must match EXODUS_STASIS_RESOURCES')
       }
-      // Explicit constructor options are equally authoritative: an explicit `--scope=full` shouldn't
-      // be silently overridden by an on-disk `{"scope":"node_modules"}`.
+      // Explicit constructor options are equally authoritative: an on-disk config can't override --scope=full.
       if (this.#explicit.scope !== undefined) assert.equal(this.#scope, this.#explicit.scope)
       if (this.#explicit.lock !== undefined) assert.equal(this.#lock, this.#explicit.lock)
       if (this.#explicit.bundle !== undefined) assert.equal(this.#bundle, this.#explicit.bundle)
@@ -310,20 +288,17 @@ export class Config {
     return this.#bundleFile
   }
 
-  // When set, State reads/writes the lockfile at this exact path instead of discovering
-  // `stasis.lock.json` at the project root; bundler plugins can't set it. Unset -> default discovery.
+  // Exact lockfile path, bypassing `stasis.lock.json` discovery; bundler plugins can't set it.
   get lockFile() {
     return this.#lockFile
   }
 
-  // When set, State.write() emits resources to this file and code-only to bundleFile;
-  // bundle=load reads both. Unset is the default unified-bundle behavior.
+  // When set, resources go to this file and code-only to bundleFile; bundle=load reads both.
   get resourcesBundleFile() {
     return this.#resourcesBundleFile
   }
 
-  // The parsed `resources` allowlist: a Set of lowercase extensions/filenames classifyExtension
-  // treats as asset payloads. Drives both plugin classification and State's `--fs` capture.
+  // Set of lowercase extensions/filenames treated as asset payloads.
   get resources() {
     return this.#resources
   }
@@ -332,35 +307,28 @@ export class Config {
     return this.#debug
   }
 
-  // Opt-in: enable cross-process capture forwarding. A forked child (e.g. a Metro transform worker)
-  // writes a shard of what it captured into a root-owned dir the root merges before writing, so
-  // files only a child loads get attested. Off by default. Not attested (not in `values`), like debug.
+  // Opt-in cross-process capture forwarding: a forked child writes a shard the root merges. Not attested.
   get childProcess() {
     return this.#childProcess
   }
 
-  // Opt-in: when bundling, auto-include every bundled module's package.json (even if the run/scan
-  // never reached it). A build-time inclusion flag; its effect is the extra bundled files, so like
-  // debug it is not attested (not in `values`).
+  // Opt-in: bundle every bundled module's package.json even if the run never reached it. Not attested.
   get packageJSON() {
     return this.#packageJSON
   }
 
-  // Env-only: a capturing CHILD flushes its shard on SIGTERM, then re-delivers the signal. The
-  // audience is Metro's transform workers, which jest-worker force-kills ~500ms after the END
-  // message, otherwise silently dropping the shard. Not a user option, not attested.
+  // Env-only: a capturing child flushes its shard on SIGTERM (jest-worker force-kills Metro workers),
+  // then re-delivers the signal. Not a user option, not attested.
   get shardSignalFlush() {
     return this.#shardSignalFlush
   }
 
-  // The --fs hook mode: 'sync' patches the sync fs readers, 'async' additionally patches their
-  // async counterparts, undefined leaves fs untouched. Not serialized -- a how-to-run flag.
+  // --fs hook mode: 'sync' patches the sync readers, 'async' both; undefined leaves fs untouched. Not serialized.
   get fs() {
     return this.#fs
   }
 
-  // Brotli quality (0..11) for bundle writes; undefined -> stasis's default (DEFAULT_BROTLI_QUALITY).
-  // Not serialized -- a how-to-write flag; decompressed content is identical at any quality.
+  // Brotli quality (0..11); undefined -> DEFAULT_BROTLI_QUALITY. Not serialized -- output decompresses identically.
   get brotliQuality() {
     return this.#brotliQuality
   }
@@ -393,9 +361,7 @@ export class Config {
     return this.#bundle === 'load'
   }
 
-  // bundle=frozen: the bundle is a read-only attestation. It is loaded but never rewritten, and
-  // every file/resolution from disk is checked against it. Distinct from load (serves bytes) and
-  // add (loads-then-rewrites, tolerates new files).
+  // bundle=frozen: loaded, never rewritten, and disk is checked against it (load serves bytes instead).
   get frozenBundle() {
     return this.#bundle === 'frozen'
   }
@@ -434,8 +400,7 @@ export class Config {
 
   get json() {
     const data = { scope: this.#scope, lock: this.#lock, bundle: this.#bundle }
-    // resources persists like scope/lock/bundle, but only when non-empty so configs without an
-    // allowlist serialize byte-identically as before.
+    // Only serialize `resources` when non-empty, so configs without an allowlist stay byte-identical.
     if (this.#resources.size > 0) data.resources = [...this.#resources].toSorted()
     return JSON.stringify(data, undefined, 2) + '\n'
   }

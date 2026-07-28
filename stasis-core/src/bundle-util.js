@@ -6,7 +6,6 @@ import { pathToFileURL } from 'node:url'
 
 import { assertRealPathWithinBase } from './util.js'
 
-// Module system from the nearest package.json `type`, or null when absent/unrecognized.
 export function packageType(file) {
   const pkg = findPackageJSON(pathToFileURL(file).toString())
   if (!pkg) return null
@@ -18,7 +17,7 @@ export function packageType(file) {
   }
 }
 
-// Nearest package.json (walking up) that has both name and version; returns { pkgDir, name, version } (pkgDir relative to baseDir, "." for root) or null.
+// Nearest package.json (walking up) with both name and version; pkgDir is relative to baseDir ("." at the root). Null if none.
 export function findPackageMetadata(baseDir, fileRelPath) {
   let dir = dirname(fileRelPath)
   while (true) {
@@ -36,7 +35,6 @@ export function findPackageMetadata(baseDir, fileRelPath) {
   }
 }
 
-// Map the given CLI entries to POSIX, project-relative paths, rejecting any that escape cwd.
 export function normalizeEntries(entries, cwd) {
   const baseDir = resolve(cwd)
   return entries.map((e) => {
@@ -48,11 +46,7 @@ export function normalizeEntries(entries, cwd) {
   })
 }
 
-// Read a bundled module's `package.json` for the `packageJSON` auto-include option, applying the
-// read/validate rules shared by the State (`run`/plain `bundle`) and resolved (`--metro`/
-// `--mainFields`) paths: skip (null) when absent on disk; reject a manifest whose real path escapes
-// the root (like every bundled read); ABORT on non-UTF-8 bytes (never silently skipped). `rel` is
-// the project-relative manifest path; returns the raw bytes to bundle, or null to skip.
+// Bytes of a bundled module's `package.json`, or null to skip when it's absent on disk; non-UTF-8 aborts (never silently skipped).
 export function readModuleManifest({ baseDir, realBase, rel } = {}) {
   const absolute = join(baseDir, rel)
   if (!existsSync(absolute)) return null
@@ -62,7 +56,7 @@ export function readModuleManifest({ baseDir, realBase, rel } = {}) {
   return buf
 }
 
-// Parse a JSON file, returning null on a missing/unreadable/malformed file instead of throwing.
+// Never throws: a missing/unreadable/malformed file yields null.
 export function readJson(file) {
   try {
     return JSON.parse(readFileSync(file, 'utf8'))

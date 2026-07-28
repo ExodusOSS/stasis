@@ -1,6 +1,4 @@
-// stasis-core's run-time loader entry. Evaluating it -- `stasis-core run`, or
-// `node --import @exodus/stasis-core/loader` -- snapshots the lib's
-// node:fs/path/etc. bindings and registers the module hooks.
+// Run-time loader entry (`node --import @exodus/stasis-core/loader`): evaluating it snapshots the lib's node:fs/path bindings before any patch.
 import { install } from './hooks.js'
 
 install()
