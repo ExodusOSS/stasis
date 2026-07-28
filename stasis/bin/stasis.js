@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
-import { parseArgs } from 'node:util'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { basename, dirname, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
-import { parseBrotliQuality, parseResourcesOption } from '@exodus/stasis-core/util'
+import { parseBrotliQuality, parseLeadingOptions, parseResourcesOption } from '@exodus/stasis-core/util'
 import pkg from '../package.json' with { type: 'json' }
 
 const argv = [...process.argv]
@@ -68,12 +67,6 @@ if (command === '-v' || command === '--version') {
   console.log(`v${pkg.version}`)
   process.exit(0)
 } else if (command === 'run') {
-  const flags = []
-  const valueFlags = new Set(['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
-
   const options = {
     lock: { type: 'string', default: 'none' },
     bundle: { type: 'string', default: 'none' },
@@ -88,13 +81,10 @@ if (command === '-v' || command === '--version') {
     resources: { type: 'string' },
     'brotli-quality': { type: 'string' },
   }
-
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, {
+    valueFlags: ['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'],
+    onError: usage,
+  })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
   if (!['none', 'ignore', 'add', 'replace', 'frozen'].includes(values.lock)) usage('Error: invalid --lock value')
   const lock = values.lock
@@ -181,11 +171,6 @@ if (command === '-v' || command === '--version') {
   // code is null when the child died from a signal; report 128+signo (shell convention) instead of the implicit 0
   process.exitCode = code ?? 128 + (osConstants.signals[signal] ?? 0)
 } else if (command === 'bundle') {
-  const flags = []
-  const valueFlags = new Set(['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--brotli-quality', '-o'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
   const options = {
     mapping: { type: 'string' },
     output: { type: 'string', short: 'o' },
@@ -203,12 +188,10 @@ if (command === '-v' || command === '--version') {
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, {
+    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--brotli-quality', '-o'],
+    onError: usage,
+  })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
   const allSol = argv.every((f) => f.endsWith('.sol'))
   const allPhp = argv.every((f) => f.endsWith('.php'))
@@ -333,11 +316,6 @@ if (command === '-v' || command === '--version') {
   // Let addCommand's runtime errors propagate as-is; wrapping in usage() would bury the cause.
   addCommand({ cwd: process.cwd(), entries: argv, logLabel: 'stasis' })
 } else if (command === 'build') {
-  const flags = []
-  const valueFlags = new Set(['--output', '-o', '--format', '--platform', '--define', '--external', '--loader'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
   const options = {
     output: { type: 'string', short: 'o' },
     format: { type: 'string' },
@@ -350,12 +328,10 @@ if (command === '-v' || command === '--version') {
     external: { type: 'string', multiple: true },
     loader: { type: 'string', multiple: true },
   }
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, {
+    valueFlags: ['--output', '-o', '--format', '--platform', '--define', '--external', '--loader'],
+    onError: usage,
+  })
   if (argv.length === 0) usage('Nothing to build: no bundle or lockfile given')
   if (argv.length > 2) usage('Error: build takes a bundle or lockfile and an optional entry point')
   // esbuild output knobs; the import graph itself is fixed by the artifact, not these.
@@ -403,37 +379,20 @@ if (command === '-v' || command === '--version') {
     loader,
   })
 } else if (command === 'extract') {
-  const flags = []
-  const valueFlags = new Set(['--output', '-o'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
   const options = {
     output: { type: 'string', short: 'o' },
   }
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, { valueFlags: ['--output', '-o'], onError: usage })
   if (argv.length === 0) usage('Nothing to extract: no bundle file given')
   if (argv.length > 1) usage('Error: extract takes exactly one bundle file')
   const { extractCommand } = await import('@exodus/stasis-core/extract')
   extractCommand({ cwd: process.cwd(), bundleFile: argv[0], output: values.output, logLabel: 'stasis' })
 } else if (command === 'diff') {
-  const flags = []
-  while (argv.length > 0 && argv[0].startsWith('-')) flags.push(argv.shift())
   const options = {
     stat: { type: 'boolean' },
     imports: { type: 'boolean' },
   }
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, { onError: usage })
   // --stat is required for now (it reports what changed, not the content); bare `stasis diff`
   // is reserved for a future content-level diff.
   if (!values.stat) usage('Error: stasis diff currently requires --stat')
@@ -450,17 +409,7 @@ if (command === '-v' || command === '--version') {
   const { removed, validated } = prune({ root })
   console.warn(`[stasis] prune: validated ${validated.length} file(s), removed ${removed.length} file(s)`)
 } else if (command === 'audit') {
-  const flags = []
-  const valueFlags = new Set(['--reason'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options: { why: { type: 'boolean' }, 'why-deep': { type: 'boolean' }, 'why-full': { type: 'boolean' }, reason: { type: 'string' } } }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, { why: { type: 'boolean' }, 'why-deep': { type: 'boolean' }, 'why-full': { type: 'boolean' }, reason: { type: 'string' } }, { valueFlags: ['--reason'], onError: usage })
   if (argv.length === 0) usage('Nothing to audit: no path to file given')
   const { audit, printAuditReport } = await import('../src/audit.js')
   const files = argv.map((f) => resolve(f))
@@ -468,21 +417,11 @@ if (command === '-v' || command === '--version') {
   printAuditReport(report)
   process.exitCode = report.rows.length === 0 ? 0 : 1
 } else if (command === 'sbom') {
-  const flags = []
-  const valueFlags = new Set(['--format', '--output', '-o'])
-  while (argv.length > 0 && (argv[0].startsWith('-') || valueFlags.has(flags.at(-1)))) {
-    flags.push(argv.shift())
-  }
   const options = {
     format: { type: 'string' },
     output: { type: 'string', short: 'o' },
   }
-  let values
-  try {
-    ({ values } = parseArgs({ args: flags, options }))
-  } catch (cause) {
-    usage(`Error: ${cause.message}`)
-  }
+  const values = parseLeadingOptions(argv, options, { valueFlags: ['--format', '--output', '-o'], onError: usage })
   if (!values.format) usage('Error: stasis sbom requires --format=(spdx|cyclonedx)')
   if (!['spdx', 'cyclonedx'].includes(values.format)) usage('Error: --format must be spdx or cyclonedx')
   if (argv.length === 0) usage('Nothing to export: no lockfile or bundle given')
