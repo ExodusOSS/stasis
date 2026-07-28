@@ -129,17 +129,13 @@ if (mode === 'customSerializer') {
 } else if (mode === 'withStasis') {
   // withStasis builds its OWN StasisMetro(pluginOptions) (which reuses the preload) and
   // wires it onto the config's customSerializer, wrapping the base we provide.
-  // STASIS_TEST_METRO_CACHE_STORES (JSON array) models a user-configured Metro transform cache,
-  // so tests can see whether withStasis dropped it; the values stand in for CacheStore instances
-  // (withStasis only ever counts/replaces them, never calls into them).
+  // The values stand in for CacheStore instances -- withStasis only counts/replaces them, never
+  // calls in.
   const storesRaw = process.env.STASIS_TEST_METRO_CACHE_STORES
   const input = { serializer: { customSerializer: baseSerializer } }
   if (storesRaw) input.cacheStores = JSON.parse(storesRaw)
   const config = withStasis(input, pluginOptions ?? {})
-  // Test-only visibility (STASIS_TEST_REPORT_CACHE_STORES=1): a capture/verify must serve every
-  // file through a worker (see withStasis), so cacheStores must come back as []; a load/inert run
-  // must get the input back untouched ('absent' when it never set any). Also proves purity: the
-  // input object we passed in must be unchanged.
+  // Second line is the purity check: the input object we passed must come back unchanged.
   if (process.env.STASIS_TEST_REPORT_CACHE_STORES) {
     const show = (c) => ('cacheStores' in c ? JSON.stringify(c.cacheStores) : 'absent')
     console.log(`CACHE_STORES=${show(config)}`)
