@@ -45,7 +45,7 @@ test('@exodus/stasis-api exposes the npm and GitHub clients', (t) => {
   for (const fn of ['compare', 'satisfies', 'valid', 'validRange']) {
     t.assert.equal(typeof apiSemver[fn], 'function', `semver.${fn}`)
   }
-  for (const fn of ['asset', 'latestRelease', 'release', 'releases']) {
+  for (const fn of ['asset', 'latestRelease', 'release', 'releases', 'subtree']) {
     t.assert.equal(typeof githubApi[fn], 'function', `github.${fn}`)
   }
 })
