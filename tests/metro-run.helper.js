@@ -30,6 +30,10 @@
 // STASIS_TEST_PLUGIN_OPTIONS (JSON)  -- routes through the plugin's options.
 // STASIS_TEST_PRELOAD_OPTIONS (JSON) -- overrides what the preload sees (sidecar/rule 6).
 // STASIS_TEST_PRELOAD=0              -- disables the preload State entirely.
+// STASIS_TEST_METRO_CACHE_STORES (JSON array) -- 'withStasis' mode only: a user-configured Metro
+//   transform cache on the input config.
+// STASIS_TEST_REPORT_CACHE_STORES=1 -- 'withStasis' mode only: print the returned + input
+//   cacheStores, so tests can pin that a capture/verify drops them and a load/inert run doesn't.
 
 import { resolve } from 'node:path'
 import { readFileSync } from 'node:fs'
@@ -125,7 +129,18 @@ if (mode === 'customSerializer') {
 } else if (mode === 'withStasis') {
   // withStasis builds its OWN StasisMetro(pluginOptions) (which reuses the preload) and
   // wires it onto the config's customSerializer, wrapping the base we provide.
-  const config = withStasis({ serializer: { customSerializer: baseSerializer } }, pluginOptions ?? {})
+  // The values stand in for CacheStore instances -- withStasis only counts/replaces them, never
+  // calls in.
+  const storesRaw = process.env.STASIS_TEST_METRO_CACHE_STORES
+  const input = { serializer: { customSerializer: baseSerializer } }
+  if (storesRaw) input.cacheStores = JSON.parse(storesRaw)
+  const config = withStasis(input, pluginOptions ?? {})
+  // Second line is the purity check: the input object we passed must come back unchanged.
+  if (process.env.STASIS_TEST_REPORT_CACHE_STORES) {
+    const show = (c) => ('cacheStores' in c ? JSON.stringify(c.cacheStores) : 'absent')
+    console.log(`CACHE_STORES=${show(config)}`)
+    console.log(`CACHE_STORES_INPUT=${show(input)}`)
+  }
   serializeAndPrint(config.serializer.customSerializer)
 } else {
   // experimentalSerializerHook signature: (graph, delta) -- no preModules.

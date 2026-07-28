@@ -422,6 +422,98 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
     t.assert.match(r.stdout, /^SIGNAL_FLUSH=$/m, 'a non-writing run must not set the flush opt-in')
   }))
 
+  // withStasis drops Metro's transform cache for a capture/verify -- a CORRECTNESS guard, not a speed
+  // knob (mechanism: see withStasis in stasis-plugins/src/metro.js). Confirmed against real Metro
+  // 0.87: 638 attested files on a cold cache vs 612 on a warm one (exit 0, no warning), and the warm
+  // capture's lockfile is then REJECTED by a cold-cache frozen run ("observed resolution
+  // '../../../jest-util/build/index.js' from ... processChild.js is not attested by the lockfile").
+  // A frozen verify over a warm cache is the mirror image: it passes vacuously, verifying transforms
+  // nobody performed. Hence both modes drop the stores -- a capture to RECORD what the workers load,
+  // a verify to CHECK it.
+  for (const [mode, env, dropLock] of [
+    ['a CAPTURE', () => withOpts({ lock: 'add' }), true],
+    ['a frozen VERIFY', () => ({ EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full' }), false],
+  ]) {
+    test(`withStasis drops the Metro transform cache for ${mode}`, withTmp(async (t, tmp) => {
+      cpSync(fullFixture, tmp, { recursive: true })
+      if (dropLock) rmSync(join(tmp, 'stasis.lock.json')) // capture from scratch; the verify needs the committed lockfile
+      const r = await run('src/entry.js', {
+        cwd: tmp,
+        env: { ...env(), STASIS_TEST_METRO_MODE: 'withStasis', STASIS_TEST_REPORT_CACHE_STORES: '1' },
+      })
+      t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+      t.assert.match(r.stdout, /^CACHE_STORES=\[\]$/m, 'every file must be transformed, so no store may serve one')
+      // The config carried no stores of its own (Metro's default is the absent field), so there was
+      // nothing of the caller's to override -- and withStasis owns the config, so neither warning fires.
+      t.assert.doesNotMatch(r.stderr, /ignoring the `cacheStores`/u, "nothing of the caller's was replaced")
+      t.assert.doesNotMatch(r.stderr, /wired without withStasis/u, 'withStasis owns the config')
+    }))
+  }
+
+  test('withStasis replaces a user-configured cacheStores and says so', withTmp(async (t, tmp) => {
+    // Overriding what the user asked for is worth a warning; the default store (field absent) is
+    // nothing they chose, so that case stays quiet -- pinned by the capture test above.
+    cpSync(fullFixture, tmp, { recursive: true })
+    rmSync(join(tmp, 'stasis.lock.json'))
+    const r = await run('src/entry.js', {
+      cwd: tmp,
+      env: {
+        ...withOpts({ lock: 'add' }),
+        STASIS_TEST_METRO_MODE: 'withStasis',
+        STASIS_TEST_REPORT_CACHE_STORES: '1',
+        STASIS_TEST_METRO_CACHE_STORES: JSON.stringify(['user-store']),
+      },
+    })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stdout, /^CACHE_STORES=\[\]$/m, "the user's stores must not survive a capture")
+    t.assert.match(r.stderr, /ignoring the `cacheStores` in your Metro config/, 'the override must be announced')
+    // Pure: the config the caller handed us keeps its stores. Only observable here -- the inert path
+    // never reaches the rewrite, so the in-process transparency test can't cover this branch.
+    t.assert.match(r.stdout, /^CACHE_STORES_INPUT=\["user-store"\]$/m, 'withStasis must not mutate the input config')
+  }))
+
+  test('withStasis leaves the Metro transform cache alone under bundle=load', withTmp(async (t, tmp) => {
+    // Load mode derives each transform from the BUNDLE's bytes, so a cache hit costs no attestation
+    // (and load results are keyed apart by the transformer's getCacheKey marker). Nothing to drop.
+    cpSync(fullFixture, tmp, { recursive: true })
+    const bundlePath = join(tmp, 'snapshot.br')
+    const cap = await run('src/entry.js', {
+      cwd: tmp,
+      env: {
+        EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full',
+        EXODUS_STASIS_BUNDLE: 'add', EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+      },
+    })
+    t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+
+    const r = await run('src/entry.js', {
+      cwd: tmp,
+      env: {
+        EXODUS_STASIS_LOCK: 'frozen', EXODUS_STASIS_SCOPE: 'full',
+        EXODUS_STASIS_BUNDLE: 'load', EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+        STASIS_TEST_METRO_MODE: 'withStasis', STASIS_TEST_REPORT_CACHE_STORES: '1',
+        STASIS_TEST_METRO_CACHE_STORES: JSON.stringify(['user-store']),
+      },
+    })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stdout, /^CACHE_STORES=\["user-store"\]$/m, "load mode must keep the caller's cache")
+    t.assert.doesNotMatch(r.stderr, /ignoring the `cacheStores`/u, 'nothing was overridden, so nothing to warn about')
+  }))
+
+  test('a hand-wired capture warns that Metro\'s transform cache is out of stasis\'s hands', withTmp(async (t, tmp) => {
+    // customSerializer()/serializerHook never hand stasis the Metro config, so it cannot drop the
+    // stores -- and it cannot detect a cache hit either. Warn once instead of under-attesting quietly.
+    // (The withStasis side of this -- no warning -- is asserted by the two drop tests above.)
+    cpSync(fullFixture, tmp, { recursive: true })
+    rmSync(join(tmp, 'stasis.lock.json'))
+    const r = await run('src/entry.js', {
+      cwd: tmp,
+      env: { ...withOpts({ lock: 'add' }), STASIS_TEST_METRO_MODE: 'customSerializer' },
+    })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stderr, /wired without withStasis\(\)/, 'the hand-wired capture must be flagged')
+  }))
+
   test('a Rule-6 sidecar inherits childProcess from the preload (env-less programmatic option)', withTmp(async (t, tmp) => {
     cpSync(fullFixture, tmp, { recursive: true })
     // Empty env => no env opinion, so childProcess is driven purely by the explicit preload option.
@@ -498,6 +590,9 @@ describe('StasisMetro (spawned, concurrent)', { concurrency: CONCURRENCY }, () =
       const bare = withStasis({})
       t.assert.equal(bare.serializer?.customSerializer, undefined,
         'no wrapper is installed when the config had no customSerializer (Metro keeps its default)')
+      // Nor may it invent a cacheStores field: an inert plugin dropping the transform cache would
+      // silently slow down (and change the cache semantics of) a build stasis isn't even capturing.
+      t.assert.equal('cacheStores' in bare, false, 'an inert plugin must not touch cacheStores')
     } finally {
       if (saved === undefined) delete process.env.EXODUS_STASIS_LOCK
       else process.env.EXODUS_STASIS_LOCK = saved

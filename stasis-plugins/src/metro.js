@@ -36,6 +36,10 @@ const NATIVE_WALK_SKIP_DIRS = new Set([
   'build', '.gradle', '.cxx', 'Pods',
 ])
 
+// The worker-side toolchain that only Metro's transform workers load, named in both the
+// --child-process assert and the transform-cache warning so the two can't describe different sets.
+const WORKER_TOOLCHAIN = 'babel.config.js, @babel/core, the RN preset + plugins'
+
 // Run `react-native config` (RN's autolinking resolver) for native deps. Null when the RN CLI
 // isn't installed; THROWS when present but failing -- silently under-attesting breaks frozen runs.
 function loadReactNativeConfig(projectDir) {
@@ -121,7 +125,9 @@ function metroDefaultSerializer() {
 // Capture is one-shot (dev-server rebuilds refused, see #run) and REQUIRES --child-process so the
 // worker-side toolchain (babel, RN preset) is attested (enforced in the constructor). withStasis
 // wires the stable customSerializer -- the only surface that receives preModules; serializerHook
-// is a lower-coverage fallback that never sees them.
+// is a lower-coverage fallback that never sees them. Prefer withStasis for a second reason too: a
+// hand-wired serializer leaves the Metro config -- and therefore its transform cache -- out of
+// stasis's hands (see withStasis).
 export class StasisMetro {
   #seen = new Set()
   #state
@@ -133,9 +139,15 @@ export class StasisMetro {
   // Whether this instance already captured; the dev-server rebuild guard in #run trips on the second.
   #ran = false
 
-  constructor(options = {}) {
+  // Set by withStasis, which returns the Metro config and can therefore drop its transform cache;
+  // a hand-wired customSerializer/serializerHook can't, so #run warns instead. Internal wiring, in
+  // the second options bag like StasisEsbuild's -- not a user-facing option.
+  #ownsConfig
+
+  constructor(options = {}, { ownsConfig = false } = {}) {
     const { state } = resolvePluginState('StasisMetro', options, process.cwd())
     this.#state = state // null when the plugin should be inert (Rule 0 or Rule 7)
+    this.#ownsConfig = ownsConfig
     // A capture-that-writes REQUIRES --child-process: the worker toolchain (babel, RN preset) is
     // observed only in workers. Gate on writeLockfile||writeBundle so it's demanded only when
     // forwarding does something (frozen/load verify per-process and need no channel).
@@ -143,7 +155,7 @@ export class StasisMetro {
       assert.ok(
         state.config.childProcess,
         'StasisMetro: child-process capture must be enabled -- Metro transforms in worker processes, ' +
-        'and without it the toolchain they load (babel.config.js, @babel/core, the RN preset + plugins) ' +
+        `and without it the toolchain they load (${WORKER_TOOLCHAIN}) ` +
         'is never attested. Enable it: `stasis run --child-process ...`, EXODUS_STASIS_CHILD_PROCESS=1, ' +
         'or "childProcess": true in stasis.config.json.'
       )
@@ -158,6 +170,17 @@ export class StasisMetro {
     }
     // Cache the resolved resources Set for the per-file classify hot path.
     this.#resources = state?.config.resources ?? new Set()
+  }
+
+  // True when this build's guarantees depend on Metro actually TRANSFORMING files: any active
+  // lockfile/bundle mode either records what the workers load (capture) or checks it (frozen).
+  // False when inert, when attesting nothing ('none'/'ignore' -- what useLockfile/bundle exclude),
+  // or under bundle=load, where the transform derives from the bundle's own bytes so a cache hit
+  // costs nothing. Read by withStasis to decide whether Metro's transform cache must be dropped.
+  get needsTransforms() {
+    const config = this.#state?.config
+    if (!config || config.loadBundle) return false
+    return config.useLockfile || config.bundle
   }
 
   // Build a Metro `serializer.customSerializer`: captures the graph + preModules (which the
@@ -196,6 +219,16 @@ export class StasisMetro {
       )
     }
     this.#ran = true
+    // Keyed on ownership: a withStasis-built instance already dropped the stores (see withStasis).
+    // Nothing here can detect a cache hit, so say it once rather than silently under-attest.
+    if (!this.#ownsConfig && this.needsTransforms) {
+      console.warn(
+        "[stasis] StasisMetro: wired without withStasis(), so Metro's transform cache is outside " +
+        `stasis's control -- a cached transform skips the worker and the toolchain it loads ` +
+        `(${WORKER_TOOLCHAIN}) goes unattested. Wrap your config in withStasis(), or set ` +
+        '`cacheStores: []` yourself for capture/frozen builds.'
+      )
+    }
     this.#capture(graph, preModules)
 
     // The preload writes itself (hooks.js); standalone/sidecar States are written here. Reaching
@@ -419,12 +452,33 @@ export class StasisMetro {
 
 // Idiomatic Metro-config wrapper: returns a new config with `serializer.customSerializer` wired
 // so stasis captures the graph + preModules while your existing serializer (or Metro's default)
-// still produces the bundle. Pure -- returns a new object, doesn't mutate `config`.
+// still produces the bundle, and (for a capture/verify) with Metro's transform cache dropped so the
+// workers really run. Pure -- returns a new object, doesn't mutate `config`.
 export function withStasis(config = {}, options = {}) {
-  const stasis = new StasisMetro(options)
+  const stasis = new StasisMetro(options, { ownsConfig: true })
   const existing = config.serializer?.customSerializer ?? undefined
+  // Metro's transform cache is a CORRECTNESS hazard here, not a speed knob. On a cache hit Metro
+  // returns the stored result WITHOUT calling a worker, so the worker-side toolchain is never loaded
+  // in any process and never reaches the root -- exactly what the constructor's --child-process
+  // assert exists to guarantee. The default store is a FileStore in the OS tmpdir shared with every
+  // other Metro run, so ONE earlier `metro build`/dev server silently decides what gets attested: a
+  // capture over a warm cache drops the toolchain (exit 0, no warning) and a later frozen run
+  // rejects the lockfile it wrote, while a frozen run over a warm cache passes vacuously (it
+  // verifies transforms nobody performed). Drop the stores so every file is transformed for real --
+  // slower, but the attested set stops depending on what ran before. Capture is one-shot anyway.
+  const dropCache = stasis.needsTransforms
+  // `undefined` is Metro's own default store, which the user never chose; an array or a
+  // `(MetroCache) => stores` factory is theirs, so replacing it is worth saying out loud.
+  const stores = config.cacheStores
+  if (dropCache && (typeof stores === 'function' || stores?.length > 0)) {
+    console.warn(
+      '[stasis] StasisMetro: ignoring the `cacheStores` in your Metro config for this build -- a cached ' +
+      'transform skips the worker, leaving the toolchain it loads unattested'
+    )
+  }
   return {
     ...config,
+    ...(dropCache && { cacheStores: [] }),
     serializer: {
       ...config.serializer,
       customSerializer: stasis.customSerializer(existing),
