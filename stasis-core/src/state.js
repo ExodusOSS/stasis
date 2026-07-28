@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isExecutableFile, isStatFormat, moduleFileKey, moduleFileKeys, narrowExecutable, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, moduleFileKeys, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -1004,18 +1004,36 @@ export class State {
     // Record the file's POSIX execute bit for the artifacts' `executable` list (`stasis extract`
     // restores it). Not a noupsert: a mode change is not a content change, so disk simply wins over
     // whatever a loaded lockfile/bundle seeded -- including clearing a bit the file no longer has.
-    // The CLEAR is gated on the platform actually reporting exec bits: on Windows every file stats
-    // as 0o666, so treating that as "the bit was removed" would let one Windows run strip the whole
-    // list a POSIX capture committed. There, the seeded list is left alone (see canObserveExecuteBits).
-    if (isExecutableFile(absolute)) {
-      this.executable.add(file)
-    } else if (canObserveExecuteBits()) {
-      this.executable.delete(file)
-      // A sidecar's re-read must clear the PARENT's seeded entry too: the parent never re-reads this
-      // file, and #mergedExecutable unions the two, so its stale bit would otherwise outlive the
-      // observation that refutes it -- unclearable in the bundler-plugin layout without --lock=replace.
-      this.#parent?.executable.delete(file)
-    }
+    // Only a real observation refutes: `undefined` (unstat-able) and Windows (which reports no exec
+    // bits at all) both mean "unknowable", and neither may strip a list a POSIX capture committed.
+    const executable = observeExecutable(absolute)
+    if (executable === true) this.#setExecutable(file)
+    else if (executable === false && canObserveExecuteBits()) this.#clearExecutable(file)
+  }
+
+  // Record/refute `file` across the whole State FAMILY -- this State, its parent, and every
+  // write-mode sidecar. The lockfile the parent writes unions all of their sets (#mergedExecutable),
+  // so an observation that reaches only the State that made it is no observation at all: a sibling's
+  // seeded entry would resurrect a bit this run just refuted, unclearable without --lock=replace.
+  #family() {
+    const root = this.#parent ?? this
+    return [root, ...root.sidecars()]
+  }
+
+  #setExecutable(file) {
+    // Only the observer records the bit: a sidecar's bundle must list only the files it carries, and
+    // the parent's lockfile picks it up through the union.
+    this.executable.add(file)
+  }
+
+  #clearExecutable(file) {
+    for (const state of this.#family()) state.executable.delete(file)
+  }
+
+  // This State's write-mode sidecars. Public so #family reaches them across the class brand (a
+  // sidecar may come from a duplicate stasis-core copy), like sidecarInheritance/registerSidecar.
+  sidecars() {
+    return [...this.#sidecars]
   }
 
   // Record an `fs.readFileSync` capture (--fs). classifyFormat routes the bytes:
@@ -1431,13 +1449,22 @@ export class State {
   #mergedExecutable(formats) {
     const all = new Set(this.executable)
     for (const sidecar of this.#sidecars) for (const file of sidecar.executable) all.add(file)
-    return narrowExecutable(all, moduleFileKeys(this.modules, { scope: this.config.scope }), formats)
+    return this.#narrowExecutable(all, this.modules, formats, 'lockfile')
   }
 
   // The executable list ONE bundle declares, narrowed against the bucket map that bundle will emit
   // (a split half holds only its own code-vs-resource files) and that half's own formats.
   #bundleExecutable(modules, formats) {
-    return narrowExecutable(this.executable, moduleFileKeys(modules, { scope: this.config.scope }), formats)
+    return this.#narrowExecutable(this.executable, modules, formats, 'bundle')
+  }
+
+  // Shared narrowing: keep only the entries the artifact built from `modules`/`formats` may legally
+  // carry. Short-circuits before indexing every attested file, which is the common case (nothing
+  // executable) on a graph where that index would be the size of the whole module map.
+  #narrowExecutable(executable, modules, formats, what) {
+    if (executable.size === 0) return new Set()
+    const scope = this.config.scope
+    return narrowExecutable(executable, { what, files: moduleFileKeys(modules, { scope }), formats, scope })
   }
 
   get lockData() {
@@ -1756,7 +1783,7 @@ export class State {
       formats,
       // Narrowed to this shard's own (already #observed-filtered) buckets, else it would name files
       // the shard doesn't record and Lockfile.parse would reject the whole shard in mergeShard.
-      executable: narrowExecutable(this.executable, moduleFileKeys(modules, { scope: this.config.scope }), formats),
+      executable: this.#bundleExecutable(modules, formats),
     }).serialize()
   }
 
@@ -1854,16 +1881,23 @@ export class State {
         }
       }
     }
-    // Exec bits the child observed. Like the stat replay, the KIND is re-derived from THIS process's
-    // disk (a shard can't inject a forged bit); the shard only says which paths to look at. Needed
-    // because the file replay above fast-paths past anything the root already attests from its
-    // lockfile baseline, so a file only a child loaded would never get its bit recorded.
-    for (const file of lf.executable) {
-      const absolute = resolve(this.root, file)
-      const relFromRoot = relative(this.root, absolute)
-      if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
-      if (!realContained(absolute)) continue
-      if (isExecutableFile(absolute)) this.executable.add(file)
+    // Exec bits for everything the shard RECORDS -- not just what it lists as executable, because a
+    // child that re-read a file and found no bit refutes it by OMISSION, and that refutation has to
+    // land too. (The file replay above fast-paths past anything the root already attests from its
+    // lockfile baseline, so without this the root never looks at those paths at all and a bit can be
+    // granted but never revoked.) As with the stat replay, the answer is re-derived from THIS
+    // process's disk -- the shard only says which paths to look at, so it can't inject a forged bit.
+    for (const [dir, info] of lf.modules) {
+      for (const rel of Object.keys(info.files)) {
+        const file = moduleFileKey(dir, rel)
+        const absolute = resolve(this.root, file)
+        const relFromRoot = relative(this.root, absolute)
+        if (relFromRoot.startsWith('..') || isAbsolute(relFromRoot)) continue
+        if (!realContained(absolute)) continue
+        const executable = observeExecutable(absolute)
+        if (executable === true) this.#setExecutable(file)
+        else if (executable === false && canObserveExecuteBits()) this.#clearExecutable(file)
+      }
     }
     if (lf.imports) {
       for (const [conditions, byParent] of lf.imports) {

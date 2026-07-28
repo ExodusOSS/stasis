@@ -103,14 +103,9 @@ export function diffArtifacts(left, right, { imports = false, hash } = {}) {
 
   // Execute-bit changes, reported for every path either side marks (not just files in shared
   // modules): gaining or losing +x is a real change to the extracted tree, whatever bucket it sits in.
-  const executableAdded = []
-  const executableRemoved = []
-  for (const file of new Set([...L.executable, ...R.executable])) {
-    if (!L.executable.has(file)) executableAdded.push(file)
-    else if (!R.executable.has(file)) executableRemoved.push(file)
-  }
-  executableAdded.sort(sortPaths)
-  executableRemoved.sort(sortPaths)
+  const onlyIn = (a, b) => [...a].filter((file) => !b.has(file)).toSorted(sortPaths)
+  const executableAdded = onlyIn(R.executable, L.executable)
+  const executableRemoved = onlyIn(L.executable, R.executable)
 
   const result = {
     scope: { left: L.scope, right: R.scope },

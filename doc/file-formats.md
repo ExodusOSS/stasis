@@ -353,7 +353,8 @@ hand-edited or tampered artifact fails closed:
 - Ignored on a legacy `version: 0` bundle: v0 has no per-file `formats`, so those
   guards can't run, and `extract` is an untrusted-input path. Fail-safe — no bit granted.
 - The bit is read from disk at capture, from a **regular file**, following symlinks
-  (a link records its target's mode).
+  (a link records its target's mode). A path that can't be stat'd at all is *unknowable*,
+  not "not executable" — a transient failure never refutes a recorded bit.
 - Disk is authoritative on re-capture: re-reading a file under `lock = add` /
   `bundle = add` refreshes its bit, dropping a stale entry for a file that has since
   lost the bit — a mode change is not a content change, so it needs no

@@ -253,6 +253,7 @@ export class Bundle {
       assertExecutableSubset(this.executable, {
         what: 'bundle',
         files: moduleFileKeys(this.modules, { scope: this.config.scope }),
+        formats: this.formats,
         scope: this.config.scope,
       })
       data.executable = fileSetToObject(this.executable)
@@ -287,8 +288,7 @@ export class Bundle {
       formats: mergeFormatMaps(this.formats, other.formats, 'bundle merge'),
       imports: mergeImportMaps(this.imports, other.imports, 'bundle merge'),
       // `other` (the incoming, newer build) wins for the files it carries -- see mergeExecutableSets.
-      executable: mergeExecutableSets(this.executable, other.executable,
-        moduleFileKeys(other.modules, { scope: this.config.scope })),
+      executable: mergeExecutableSets(this.executable, other.executable, other.modules, this.config.scope),
       reason: mergeReason(this.reason, other.reason),
     })
   }

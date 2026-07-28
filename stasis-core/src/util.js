@@ -400,15 +400,30 @@ export function moduleFileKeys(modules, { scope = 'full' } = {}) {
 // The POSIX execute bits (user/group/other).
 const EXECUTE_BITS = 0o111
 
-// Executability of the REGULAR FILE at absolute path `abs`, following symlinks (the recorded bytes
-// are the target's, so the target's mode is the honest answer). A directory is never executable in
-// this sense whatever its mode -- `executable` holds files only, and the parsers reject a directory
-// entry, so answering true here would let a writer emit an artifact it can't read back. A path that
-// can't be stat'd -- gone mid-run, or a synthetic bundle entry with no file on disk -- is not executable.
-export function isExecutableFile(abs) {
-  const stats = statSync(abs, { throwIfNoEntry: false })
-  return stats !== undefined && stats.isFile() && (stats.mode & EXECUTE_BITS) !== 0
+// Tri-state executability of the REGULAR FILE at absolute path `abs`, following symlinks (the
+// recorded bytes are the target's, so the target's mode is the honest answer). `true`/`false` when
+// the mode was actually observed; `undefined` when it could NOT be -- gone mid-run, an unreadable
+// parent dir, a symlink loop, or a synthetic bundle entry with no file on disk. Callers must not
+// read `undefined` as "not executable": failing to look is not evidence, and treating it as one
+// would let a transient stat error refute a bit the artifact legitimately attests.
+// A directory answers `false`: `executable` holds files only, and the parsers reject a directory
+// entry, so answering true would let a writer emit an artifact it can't read back.
+export function observeExecutable(abs) {
+  let stats
+  try {
+    // throwIfNoEntry covers ENOENT/ENOTDIR; the catch covers the rest (EACCES, ELOOP, EPERM), which
+    // are equally "could not observe" and must not abort a capture.
+    stats = statSync(abs, { throwIfNoEntry: false })
+  } catch {
+    return undefined
+  }
+  if (stats === undefined) return undefined
+  return stats.isFile() && (stats.mode & EXECUTE_BITS) !== 0
 }
+
+// Boolean view for callers with nothing to refute (the static builders, `stasis add`): they are
+// recording a fresh set from scratch, so an unobservable path is simply not executable.
+export const isExecutableFile = (abs) => observeExecutable(abs) === true
 
 // Whether this platform reports POSIX execute bits at all. Windows does not (libuv synthesizes
 // 0o666/0o444), so a capture there can neither observe a bit nor honestly refute one: it records
@@ -416,36 +431,40 @@ export function isExecutableFile(abs) {
 // Same win32 opt-out shape as isExcludedNativeFile.
 export const canObserveExecuteBits = ({ win32 = process.platform === 'win32' } = {}) => !win32
 
-// Narrow an executable set to the files an artifact will actually SERIALIZE -- the invariant
-// parseExecutable enforces on read, applied at every write site so a writer can't emit an artifact
-// its own parser refuses. `files` is the post-scope-filter key set (moduleFileKeys with the
-// artifact's scope); `formats` excludes a `directory` capture, matching parseExecutable exactly.
-export function narrowExecutable(executable, files, formats) {
+// THE rule an artifact's `executable` entry must satisfy. Returns a description of the problem, or
+// null when the entry is legal. Every side of the feature goes through this one function --
+// parseExecutable asserts on it (read), assertExecutableSubset asserts on it (write),
+// narrowExecutable filters on it -- so the three cannot drift, which is the only reason to have one.
+//   1. no path escapes;
+//   2. a non-full scope records only its node_modules tree, so only those files may be listed;
+//   3. the entry names a file the artifact RECORDS -- `executable` is a subset of `files`;
+//   4. it is a real file, never a `directory` listing or a payload-free `stat:*` record -- there
+//      would be nothing for `extract` to chmod.
+// `files` is the artifact's recorded key set (moduleFileKeys with its scope) and already implies
+// rule 2; rule 2 is checked separately anyway so the error names the actual problem.
+function executableEntryProblem(file, { what, files, formats, scope }) {
+  if (posixPathEscapes(file)) return 'escapes the root'
+  if (scope !== 'full' && !hasNodeModulesSegment(file)) {
+    return `is outside node_modules, which a '${scope}'-scope ${what} does not record`
+  }
+  if (!files.has(file)) return `names no file the ${what} records`
+  const format = formats.get(file)
+  if (format === 'directory') return 'is a directory capture, not a file'
+  if (isStatFormat(format)) return `is a payload-free '${format}' record, not a file`
+  return null
+}
+
+// Narrow an executable set to the entries an artifact may legally carry, applied at every write site
+// so the in-memory artifact is honest before it is ever serialized.
+export function narrowExecutable(executable, { what = 'artifact', files, formats, scope = 'full' }) {
   const out = new Set()
-  if (executable.size === 0) return out
   for (const file of executable) {
-    if (files.has(file) && formats?.get(file) !== 'directory') out.add(file)
+    if (executableEntryProblem(file, { what, files, formats, scope }) === null) out.add(file)
   }
   return out
 }
 
-// The two rules an artifact's `executable` list must satisfy, shared by the read side
-// (parseExecutable) and the write side (assertExecutableSubset), so neither can drift from the other:
-//   1. every entry names a file the artifact RECORDS -- `executable` is a subset of `files`;
-//   2. in a non-full scope, only node_modules files are recorded at all, so only those may be listed.
-// `files` is the artifact's recorded key set (moduleFileKeys with its scope), which already implies
-// rule 2 -- it is checked separately anyway so the error names the actual problem.
-function assertExecutableEntry(file, { at, what, files, scope }) {
-  assert(!posixPathEscapes(file), `${at} entry '${file}' escapes the root`)
-  assert(scope === 'full' || hasNodeModulesSegment(file),
-    `${at} entry '${file}' is outside node_modules, which a '${scope}'-scope ${what} does not record`)
-  assert(files.has(file), `${at} entry '${file}' names no file the ${what} records`)
-}
-
-// Validate a serialized `executable` array into a Set of project-relative paths. Beyond the shared
-// rules above, an entry must never be a `directory` capture (a listing) or a payload-free `stat:*`
-// record: there would be nothing for `extract` to chmod, so fail closed rather than carry it.
-// `what` names the artifact in the messages.
+// Validate a serialized `executable` array into a Set of project-relative paths.
 export function parseExecutable(list, { what, files, formats, scope = 'full' }) {
   if (list === undefined) return new Set()
   const at = `${what}: executable`
@@ -453,26 +472,26 @@ export function parseExecutable(list, { what, files, formats, scope = 'full' }) 
   const out = new Set()
   for (const file of list) {
     assert(typeof file === 'string' && file !== '', `${at} entry must be a non-empty string`)
-    assertExecutableEntry(file, { at, what, files, scope })
     // Fail closed on a dupe like every sibling parse rule (duplicate file/format keys), rather than
     // letting out.add() silently collapse it and round-trip to different bytes.
     assert(!out.has(file), `${at} entry '${file}' is listed twice`)
-    const format = formats.get(file)
-    assert(format !== 'directory', `${at} entry '${file}' is a directory capture, not a file`)
-    assert(!isStatFormat(format), `${at} entry '${file}' is a payload-free '${format}' record, not a file`)
+    const problem = executableEntryProblem(file, { what, files, formats, scope })
+    assert(problem === null, `${at} entry '${file}' ${problem}`)
     out.add(file)
   }
   return out
 }
 
-// Write-side twin of parseExecutable's subset rules, called from Bundle/Lockfile.serialize -- the
-// one choke point every producer goes through. The per-site narrowing (narrowExecutable) keeps the
-// in-memory artifact honest; this makes the invariant unmissable, so a future write site that
-// forgets to narrow fails HERE, naming the offending path, instead of silently emitting an artifact
-// that its own parser refuses on the next read (by which point the good copy is overwritten).
-export function assertExecutableSubset(executable, { what, files, scope }) {
-  const at = `${what}: executable`
-  for (const file of executable) assertExecutableEntry(file, { at, what, files, scope })
+// Write-side twin, called from Bundle/Lockfile.serialize -- the one choke point every producer goes
+// through, applying the SAME rules parse will. The per-site narrowing keeps the in-memory artifact
+// honest; this makes the invariant unmissable, so a write site that forgets to narrow fails HERE,
+// naming the offending path, instead of emitting an artifact its own parser refuses on the next read
+// (by which point the good copy is overwritten).
+export function assertExecutableSubset(executable, { what, files, formats, scope }) {
+  for (const file of executable) {
+    const problem = executableEntryProblem(file, { what, files, formats, scope })
+    assert(problem === null, `${what}: executable entry '${file}' ${problem}`)
+  }
 }
 
 // Resolve `baseDir/relPath` through symlinks and confirm the real target stays within `realBase`.
@@ -612,8 +631,11 @@ export function mergeFormatMaps(a, b, label) {
 // re-adding a file that has since lost its execute bit clears the stale entry instead of the union
 // resurrecting it. Without that, `stasis add` / `stasis bundle --add` could only ever grant a bit,
 // never revoke one, and `extract` would keep restoring +x the source tree no longer has. `bFiles`
-// is b's recorded file set (moduleFileKeys); every call site has the newer artifact on the right.
-export function mergeExecutableSets(a, b, bFiles) {
+// every call site has the newer artifact on the right. Indexing b's files is deferred until there is
+// an `a` entry to test, so the common nothing-executable merge costs nothing.
+export function mergeExecutableSets(a, b, bModules, scope) {
+  if (a.size === 0) return new Set(b)
+  const bFiles = moduleFileKeys(bModules, { scope })
   const out = new Set(b)
   for (const file of a) if (!bFiles.has(file)) out.add(file)
   return out

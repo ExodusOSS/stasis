@@ -1,5 +1,5 @@
 import { test } from 'node:test'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -198,6 +198,36 @@ test('serialize refuses an `executable` entry that is not among the files it emi
   })
   t.assert.doesNotThrow(() => lock(['run.sh']).serialize())
   t.assert.throws(() => lock(['ghost.sh']).serialize(), /names no file the lockfile records/)
+})
+
+// serialize applies the SAME four rules parse does. Regression: it enforced only membership and
+// scope, so an artifact naming a `directory` capture or a payload-free `stat:*` record serialized
+// cleanly and then failed its own parse -- the corrupt-on-next-read failure the check exists to stop.
+test('serialize applies every rule parse does, so an artifact always round-trips', (t) => {
+  const cases = [
+    ['directory', '["a.js"]', 'sha512-d', /is a directory capture, not a file/u],
+    ['stat:file', '#!/bin/sh\n', 'sha512-s', /is a payload-free 'stat:file' record, not a file/u],
+  ]
+  for (const [format, content, digest, message] of cases) {
+    const bundle = new Bundle({
+      config: { scope: 'full' },
+      entries: new Set(),
+      modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'x': content } }]]),
+      formats: new Map([['x', format]]),
+      executable: new Set(['x']),
+    })
+    t.assert.throws(() => bundle.serialize(), message, `bundle rejects '${format}' at serialize`)
+
+    const lock = new Lockfile({
+      config: { scope: 'full' },
+      entries: new Set(),
+      modules: new Map([['.', { name: 'app', version: '1.0.0', files: { 'x': digest } }]]),
+      imports: new Map(),
+      formats: new Map([['x', format]]),
+      executable: new Set(['x']),
+    })
+    t.assert.throws(() => lock.serialize(), message, `lockfile rejects '${format}' at serialize`)
+  }
 })
 
 test('a non-full-scope artifact may list only node_modules executables', (t) => {
@@ -448,6 +478,57 @@ test('a sidecar re-read clears the execute bit the parent seeded from the lockfi
     'and the lockfile the parent writes drops it too')
 }))
 
+// The clear has to reach the whole family, not just the State that made the observation: the
+// parent's lockfile unions every sidecar's set, so a sibling's -- or the parent's own -- seeded entry
+// would resurrect a bit this run just refuted. Both directions, since only child->parent was covered.
+test('a re-read clears the execute bit across the whole sidecar family', posixOnly, withTmp('exec-family')((t, tmp) => {
+  seedProject(tmp)
+  const url = pathToFileURL(join(tmp, 'run.sh')).toString()
+  const parent = new State(tmp, { scope: 'full', lock: 'add', bundle: 'ignore' })
+  const a = new State(tmp, { parent, bundle: 'add', bundleFile: join(tmp, 'a.br') })
+  const b = new State(tmp, { parent, bundle: 'add', bundleFile: join(tmp, 'b.br') })
+
+  // Everyone holds the bit, as a seed from their own artifact on disk would leave them.
+  for (const state of [parent, a, b]) state.executable.add('run.sh')
+
+  // The PARENT is the one that re-reads it (a loader import, or an --fs read) -- the direction the
+  // child->parent clear alone could not handle.
+  chmodSync(join(tmp, 'run.sh'), 0o644)
+  parent.addFile(url, { format: 'shell', isEntry: true })
+  t.assert.deepEqual([...parent.executable], [])
+  t.assert.deepEqual([...a.executable], [], 'sidecar A drops it too')
+  t.assert.deepEqual([...b.executable], [], 'and so does sibling B')
+  t.assert.ok(!Object.hasOwn(JSON.parse(parent.lockData), 'executable'))
+}))
+
+// A forked child refutes a bit by OMISSION -- it records the file but leaves it off `executable`.
+// The root's file replay fast-paths past anything it already attests, so without walking the shard's
+// recorded files the root would never look, and a bit could be granted but never revoked.
+test('mergeShard revokes a bit the child observed as gone, not just grants', posixOnly, withTmp('exec-shard')((t, tmp) => {
+  seedProject(tmp)
+  const url = pathToFileURL(join(tmp, 'run.sh')).toString()
+
+  // Root captures it executable and persists, so the next root starts from that lockfile baseline.
+  const first = new State(tmp, { scope: 'full', lock: 'add', bundle: 'ignore', childProcess: true })
+  first.addFile(url, { format: 'shell', isEntry: true })
+  first.write()
+  t.assert.deepEqual(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf8')).executable, ['run.sh'])
+
+  chmodSync(join(tmp, 'run.sh'), 0o644)
+  // The child re-reads it and correctly records no bit.
+  const child = new State(tmp, { scope: 'full', lock: 'add', bundle: 'ignore', childProcess: true })
+  child.addFile(url, { format: 'shell', isEntry: true })
+  const shard = child.shardSnapshot()
+  t.assert.ok(!Object.hasOwn(JSON.parse(shard), 'executable'), 'the shard refutes by omission')
+
+  // The root never touches run.sh itself; only the merge can carry the refutation.
+  const root = new State(tmp, { scope: 'full', lock: 'add', bundle: 'ignore', childProcess: true })
+  t.assert.deepEqual([...root.executable], ['run.sh'], 'seeded from the lockfile')
+  root.mergeShard(shard)
+  t.assert.deepEqual([...root.executable], [])
+  t.assert.ok(!Object.hasOwn(JSON.parse(root.lockData), 'executable'))
+}))
+
 // ── static builders ──────────────────────────────────────────────────────────
 
 test('the bash bundler records the execute bit of every script it walks', posixOnly, withTmp('exec-bash')(async (t, tmp) => {
@@ -582,12 +663,12 @@ test('extract chmods the files the bundle marks executable and leaves the rest a
   t.assert.ok(!isExec(join(out, 'lib.sh')), 'a plain file is not made executable')
   // Contents are untouched by the chmod.
   t.assert.equal(readFileSync(join(out, 'main.sh'), 'utf8'), readFileSync(join(src, 'main.sh'), 'utf8'))
-  // The restored mode is umask-derived, not hard-coded: assert the concrete modes the CURRENT umask
-  // implies, so a hard-coded 0o755/0o644 would fail under any non-default umask. (`mode & 0o111 ===
-  // (mode & 0o444) >> 2` would NOT catch that -- 0o755 satisfies it identically.)
-  const umask = process.umask()
-  t.assert.equal(perms(join(out, 'main.sh')), ((0o777 & ~umask) | 0o100) & 0o777)
-  t.assert.equal(perms(join(out, 'lib.sh')), 0o666 & ~umask & 0o777)
+  // Read/write bits come from the write (umask-derived for a fresh file); extract adds execute
+  // wherever the file is readable. Asserted as concrete octals so a hard-coded 0o755 would fail
+  // under a non-default umask -- `mode & 0o111 === (mode & 0o444) >> 2` would NOT catch that.
+  const plain = 0o666 & ~process.umask()
+  t.assert.equal(perms(join(out, 'lib.sh')), plain)
+  t.assert.equal(perms(join(out, 'main.sh')), plain | ((plain & 0o444) >> 2) | 0o100)
 
   // The derived lockfile beside the tree agrees with the bundle.
   const lock = Lockfile.parse(readFileSync(join(out, 'stasis.lock.json'), 'utf8'))
@@ -631,6 +712,72 @@ test('extract into a non-empty directory clears a stale execute bit', posixOnly,
   extractCommand({ cwd: tmp, bundleFile: bundlePath, output: out })
   t.assert.ok(!isExec(join(out, 'lib.sh')), 'the bundle no longer attests the bit, so the tree loses it')
   t.assert.equal(perms(join(out, 'lib.sh')), 0o666 & ~process.umask() & 0o777)
+}))
+
+// extract attests only executability, so it must not touch read/write bits. Regression: normalizing
+// the whole mode turned a deliberately restricted pre-existing target into a world-readable one.
+test('extract leaves the read/write bits of a restricted pre-existing file alone', posixOnly, withTmp('exec-nowiden')((t, tmp) => {
+  const out = join(tmp, 'out')
+  mkdirSync(out)
+  writeFileSync(join(out, 'secret.json'), '{"old":1}')
+  chmodSync(join(out, 'secret.json'), 0o600) // owner-only, e.g. it holds a token
+
+  const bundlePath = join(tmp, 'b.br')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { '.': { name: 'x', version: '1.0.0', files: { 'secret.json': '{"new":1}' } } },
+    modules: {},
+    formats: { 'secret.json': 'json' },
+    imports: {},
+  })))
+  extractCommand({ cwd: tmp, bundleFile: bundlePath, output: out })
+  t.assert.equal(readFileSync(join(out, 'secret.json'), 'utf8'), '{"new":1}', 'content is replaced')
+  t.assert.equal(perms(join(out, 'secret.json')), 0o600, 'but the mode is not widened')
+}))
+
+// A v0 bundle attests nothing about modes, so there is no list to honour and clearing execute bits
+// off the tree would destroy information rather than restore it.
+test('extract leaves modes untouched for a legacy v0 bundle', posixOnly, withTmp('exec-v0-modes')((t, tmp) => {
+  const out = join(tmp, 'out')
+  mkdirSync(out)
+  writeFileSync(join(out, 'run.sh'), 'old\n')
+  chmodSync(join(out, 'run.sh'), 0o755)
+
+  const bundlePath = join(tmp, 'v0.br')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify({
+    version: 0, config: { scope: 'full' }, sources: { 'run.sh': '#!/bin/sh\n' }, formats: {}, imports: {},
+  })))
+  extractCommand({ cwd: tmp, bundleFile: bundlePath, output: out })
+  t.assert.equal(perms(join(out, 'run.sh')), 0o755)
+}))
+
+// The write deliberately follows a symlink inside outDir (a pnpm node_modules), but granting +x to
+// a link's target would let an untrusted bundle make a file OUTSIDE the tree runnable, which an
+// overwrite alone cannot do.
+test('extract never chmods through a symlink', posixOnly, withTmp('exec-symlink')((t, tmp) => {
+  const out = join(tmp, 'out')
+  mkdirSync(out)
+  mkdirSync(join(tmp, 'elsewhere'))
+  const victim = join(tmp, 'elsewhere', 'cron.sh')
+  writeFileSync(victim, 'benign data\n')
+  chmodSync(victim, 0o644)
+  symlinkSync(victim, join(out, 'hook.sh'))
+
+  const bundlePath = join(tmp, 'b.br')
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { '.': { name: 'x', version: '1.0.0', files: { 'hook.sh': '#!/bin/sh\nid\n' } } },
+    modules: {},
+    formats: { 'hook.sh': 'shell' },
+    imports: {},
+    executable: ['hook.sh'],
+  })))
+  extractCommand({ cwd: tmp, bundleFile: bundlePath, output: out })
+  t.assert.equal(perms(victim), 0o644, 'the link target is not made executable')
 }))
 
 // A v0 bundle carries no per-file `formats`, so the directory/stat guards that make an `executable`

@@ -1,11 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { sha512integrity } from './state-util.js'
-import { moduleFileKey } from './util.js'
+import { canObserveExecuteBits, moduleFileKey } from './util.js'
 
 const FILE_LOCK = 'stasis.lock.json'
 
@@ -121,31 +121,52 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
   }
   const lockText = withLockfile ? lockfileFromBundle(bundle).serialize() : null
 
-  // Modes for the files we write, derived once from the process umask so a fresh create lands where
-  // the caller expects (0644/0755 at the usual 022, 0600/0700 at 077). Deriving from each file's own
-  // post-write mode instead would inherit whatever a PRE-EXISTING target carried -- writeFileSync
-  // keeps an existing inode's mode -- which could neither clear an execute bit the bundle no longer
-  // attests nor avoid arming a stale setuid bit. Masked to plain permission bits for the same reason.
-  // An executable keeps at least owner-execute, so an aggressive umask can't quietly produce a file
-  // the bundle says is runnable and isn't.
-  const umask = process.umask()
-  const PLAIN_MODE = 0o666 & ~umask & 0o777
-  const EXEC_MODE = ((0o777 & ~umask) | 0o100) & 0o777
-
-  // Applied to EVERY written file, not just the executable ones, so the extracted tree matches the
-  // artifact: re-extracting over an older tree drops a bit the bundle stopped attesting.
+  // The bundle attests exactly ONE permission fact per file -- whether it is executable -- so that
+  // is the only bit extract touches. Read/write bits are left exactly as the write produced them
+  // (umask-derived for a new file, the target's own for an overwrite): normalizing the whole mode
+  // would widen a deliberately restricted pre-existing target, turning a 0600 secret into 0644, and
+  // extract has no standing to decide that. Applied to every written file rather than only the
+  // executable ones, so re-extracting over an older tree also DROPS a bit the bundle stopped
+  // attesting. setuid/setgid/sticky are cleared from anything we rewrite: the bytes are the bundle's
+  // now, and a privileged bit a stale target carried must not survive to arm them.
+  //
+  // Skipped wholesale for a v0 bundle, which attests nothing about modes -- there is no list to
+  // honour, so clearing execute bits off the tree would destroy information rather than restore it --
+  // and on Windows, which reports no POSIX execute bits at all (see canObserveExecuteBits).
+  const withModes = bundle.version === Bundle.VERSION && canObserveExecuteBits()
   let chmodFailures = 0
-  for (const [abs, content, exec] of writes) {
-    mkdirSync(dirname(abs), { recursive: true })
-    writeFileSync(abs, content)
+  const applyMode = (abs, exec) => {
+    let stats
+    try {
+      stats = lstatSync(abs)
+    } catch {
+      chmodFailures += 1
+      return
+    }
+    // Never chmod through a symlink. The WRITE deliberately follows one (a pnpm-managed
+    // node_modules; see doc/extract.md), but granting +x to a link's target would let an untrusted
+    // bundle make an arbitrary file outside the output tree runnable -- an overwrite alone can't.
+    if (stats.isSymbolicLink()) return
+    const perms = stats.mode & 0o7777
+    const rwx = perms & 0o777
+    // Execute wherever the file is readable, with owner-execute as a floor so an aggressive umask
+    // can't quietly produce a file the bundle calls runnable and isn't.
+    const want = exec ? rwx | ((rwx & 0o444) >> 2) | 0o100 : rwx & ~0o111
+    if (want === perms) return
     // Tolerated per file: a filesystem with no POSIX modes (vfat/exFAT/CIFS, a drvfs mount) accepts
     // the write and rejects the chmod, and losing the whole extraction -- including the lockfile
     // below -- over metadata it cannot store would be worse than the bytes landing with host modes.
     try {
-      chmodSync(abs, exec ? EXEC_MODE : PLAIN_MODE)
+      chmodSync(abs, want)
     } catch {
       chmodFailures += 1
     }
+  }
+
+  for (const [abs, content, exec] of writes) {
+    mkdirSync(dirname(abs), { recursive: true })
+    writeFileSync(abs, content)
+    if (withModes) applyMode(abs, exec)
   }
   mkdirSync(outDir, { recursive: true }) // for an empty bundle, where no write created it
   if (withLockfile) writeFileSync(lockAbs, lockText)

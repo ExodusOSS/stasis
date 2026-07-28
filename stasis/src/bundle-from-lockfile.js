@@ -53,7 +53,13 @@ export function bundleFromLockfile(lockfile, { root }) {
     imports: lockfile.imports,
     formats,
     // Narrowed to the files this bundle ended up carrying (a skipped `directory` capture drops out),
-    // keeping Bundle.parse's "executable names a carried file" rule true for a hand-built lockfile too.
-    executable: narrowExecutable(lockfile.executable, moduleFileKeys(modules), formats),
+    // keeping Bundle.parse's rules true for a hand-built lockfile too. The scope is the artifact's
+    // own, as moduleFileKeys requires -- it comes from the lockfile, not from this module.
+    executable: narrowExecutable(lockfile.executable, {
+      what: 'bundle',
+      files: moduleFileKeys(modules, { scope: lockfile.config.scope }),
+      formats,
+      scope: lockfile.config.scope,
+    }),
   })
 }

@@ -153,6 +153,8 @@ export class Lockfile {
       assertExecutableSubset(this.executable, {
         what: 'lockfile',
         files: moduleFileKeys(this.modules, { scope: this.config.scope }),
+        // May be null on an in-memory construct; an unrecorded format is simply not a directory/stat.
+        formats: this.formats ?? new Map(),
         scope: this.config.scope,
       })
       store.executable = fileSetToObject(this.executable)
@@ -171,8 +173,7 @@ export class Lockfile {
       imports: mergeNullable(this.imports, other.imports, (a, b) => mergeImportMaps(a, b, 'lockfile merge'), 'imports'),
       formats: mergeNullable(this.formats, other.formats, (a, b) => mergeFormatMaps(a, b, 'lockfile merge'), 'formats'),
       // `other` (the incoming, newer lockfile) wins for the files it records -- see mergeExecutableSets.
-      executable: mergeExecutableSets(this.executable, other.executable,
-        moduleFileKeys(other.modules, { scope: this.config.scope })),
+      executable: mergeExecutableSets(this.executable, other.executable, other.modules, this.config.scope),
     })
   }
 }
