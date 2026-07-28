@@ -9,14 +9,7 @@
     "./github": "./src/github/index.js"
   },
   "files": [
-    "src/archive.js",
-    "src/github/core.js",
-    "src/github/index.js",
-    "src/github/releases.js",
-    "src/github/subtree.js",
-    "src/npm/index.js",
-    "src/npm/semver.cjs",
-    "src/request.js"
+    "src"
   ],
   "engines": {
     "node": ">=24.14.0"

@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict'
 import { hash } from 'node:crypto'
 
-import { API, METADATA_TIMEOUT, assertRepo, encodeRef, nextLink, parseJson, request } from './core.js'
+import {
+  METADATA_TIMEOUT,
+  TRANSFER_TIMEOUT,
+  encodeRef,
+  nextLink,
+  parseJson,
+  repoUrl,
+  request,
+} from './core.js'
 
 // Releases and their attachments ("assets" in API terms).
-
-// An asset download is bounded by its size, not by GitHub's response time.
-const ASSET_TIMEOUT = 300_000
 
 // GitHub reports an asset's content digest as `<algorithm>:<hex>`. The hex length is pinned
 // per algorithm so a truncated digest fails as a bad argument, not as a content mismatch.
@@ -54,63 +59,59 @@ function normalizeRelease(raw) {
   }
 }
 
-async function releasePage(url, options) {
-  const res = await request('releases', url, options)
-  const page = await parseJson('releases', res)
-  assert(Array.isArray(page), 'Expected an array of GitHub releases')
-  return { page, next: nextLink(res.headers.get('link')) }
-}
-
 // List a repo's releases, newest first, including drafts and prereleases (for those the
 // token must be able to see them). `limit` caps how many are returned; pass `Infinity` to
 // walk every page.
-export async function releases(repo, { limit = 100, signal = AbortSignal.timeout(METADATA_TIMEOUT), token = null } = {}) {
-  assertRepo(repo)
+export async function releases(repo, { limit = 100, signal = AbortSignal.timeout(METADATA_TIMEOUT), token } = {}) {
   assert((Number.isInteger(limit) || limit === Infinity) && limit > 0, `Unexpected limit: ${limit}`)
 
   const out = []
   // GitHub caps a page at 100 entries. Walking `Link: rel="next"` instead of incrementing
   // `page=` keeps the walk on URLs GitHub itself handed back. One `signal` covers the
   // whole walk, so `limit` also bounds how long a repo with many releases can take.
-  let url = `${API}/repos/${repo}/releases?per_page=${Math.min(limit, 100)}`
+  let url = `${repoUrl(repo, 'releases')}?per_page=${Math.min(limit, 100)}`
   while (url !== null) {
     // eslint-disable-next-line no-await-in-loop -- pagination is sequential by nature: the next URL comes from this page's Link header
-    const { page, next } = await releasePage(url, { token, signal })
+    const res = await request('releases', url, { token, signal })
+    // eslint-disable-next-line no-await-in-loop -- same walk, one page at a time
+    const page = await parseJson('releases', res)
+    assert(Array.isArray(page), 'Expected an array of GitHub releases')
     for (const entry of page) {
       out.push(normalizeRelease(entry))
       if (out.length === limit) return out
     }
-    url = next
+    url = nextLink(res.headers.get('link'))
   }
   return out
 }
 
-// Fetch a single release by its tag.
-export async function release(repo, tag, { signal = AbortSignal.timeout(METADATA_TIMEOUT), token = null } = {}) {
-  assertRepo(repo)
-  const res = await request('release', `${API}/repos/${repo}/releases/tags/${encodeRef(tag, 'tag')}`, { token, signal })
+// `release()` and `latestRelease()` differ only in how the one release is addressed.
+async function oneRelease(repo, tail, { signal = AbortSignal.timeout(METADATA_TIMEOUT), token } = {}) {
+  const res = await request('release', repoUrl(repo, 'releases', tail), { token, signal })
   return normalizeRelease(await parseJson('release', res))
+}
+
+// Fetch a single release by its tag.
+export async function release(repo, tag, options) {
+  return oneRelease(repo, `tags/${encodeRef(tag, 'tag')}`, options)
 }
 
 // Fetch the latest release. GitHub's notion of "latest" skips drafts and prereleases --
 // use `releases()` when those matter.
-export async function latestRelease(repo, { signal = AbortSignal.timeout(METADATA_TIMEOUT), token = null } = {}) {
-  assertRepo(repo)
-  const res = await request('release', `${API}/repos/${repo}/releases/latest`, { token, signal })
-  return normalizeRelease(await parseJson('release', res))
+export async function latestRelease(repo, options) {
+  return oneRelease(repo, 'latest', options)
 }
 
 // Download one attachment's bytes by asset id (from a listing's `assets[].id`). Pass the
 // listing's `digest` to have it verified before the bytes are handed back, so a truncated or
 // swapped download fails here rather than downstream. The default timeout is far longer than
 // the metadata calls': release assets can be very large.
-export async function asset(repo, id, { digest = null, signal = AbortSignal.timeout(ASSET_TIMEOUT), token = null } = {}) {
-  assertRepo(repo)
+export async function asset(repo, id, { digest = null, signal = AbortSignal.timeout(TRANSFER_TIMEOUT), token } = {}) {
   assert(Number.isInteger(id) && id > 0, `Unexpected asset id: ${id}`)
   const expected = digest === null ? null : String(digest).toLowerCase()
   assert(expected === null || digestRegex.test(expected), `Unexpected digest: ${digest}`)
 
-  const url = `${API}/repos/${repo}/releases/assets/${id}`
+  const url = repoUrl(repo, 'releases/assets', id)
   const res = await request('asset', url, { accept: 'application/octet-stream', token, signal })
   let bytes
   try {

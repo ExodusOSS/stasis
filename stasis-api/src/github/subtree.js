@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict'
 
 import { isSafePath, readTarGz } from '../archive.js'
-import { API, assertRepo, encodeRef, readCapped, request } from './core.js'
+import { TRANSFER_TIMEOUT, encodeRef, repoUrl, request } from './core.js'
 
 // A repo's source tree at an exact ref, read into memory.
 
-const ARCHIVE_TIMEOUT = 300_000
 // The archive is decoded in memory, so it needs a ceiling: a runaway repo should error
 // instead of exhausting the heap. Set well clear of ordinary repos -- a small library's
 // archive already measures in the tens of MB -- since the cap is a backstop, not a budget.
@@ -20,27 +19,29 @@ function subtreePrefix(path) {
   return `${trimmed}/`
 }
 
-// Every GitHub archive nests the tree under one top-level directory whose name carries the
-// resolved commit (`owner-repo-<sha>`). Take that directory from the entries themselves
-// rather than reconstructing the name and trusting it to match.
-function stripRoot(entries) {
-  let root = null
-  for (const name of entries.keys()) {
-    const slash = name.indexOf('/')
-    assert(slash > 0, `Unexpected archive entry outside the root directory: ${name}`)
-    const first = name.slice(0, slash)
-    if (root === null) root = first
-    else assert.equal(first, root, 'Unexpected archive with more than one top-level directory')
+// Read the archive body with a hard ceiling. Lives here rather than in core.js because the
+// ceiling is this endpoint's `maxBytes` option -- the asset endpoint takes the whole body,
+// whose size the caller already knows from the release listing.
+async function readCapped(res, maxBytes) {
+  const over = (n) => `github archive is over the ${maxBytes} byte limit (${n} bytes); raise maxBytes`
+  // Trust `content-length` only to fail early -- it is absent on a chunked response.
+  const declared = Number(res.headers.get('content-length'))
+  assert(!(declared > maxBytes), over(declared))
+
+  const chunks = []
+  let total = 0
+  for await (const chunk of res.body) {
+    total += chunk.length
+    assert(!(total > maxBytes), over(total))
+    chunks.push(chunk)
   }
-  const files = new Map()
-  for (const [name, content] of entries) files.set(name.slice(root.length + 1), content)
-  return { root, files }
+  return Buffer.concat(chunks)
 }
 
 // Fetch a repo subtree at an exact commit, tag or branch, into memory.
 //
 // One request to GitHub's tarball endpoint returns the whole tree at `ref`, which is then
-// filtered to `path` (default: everything). No git client is involved and nothing is written
+// narrowed to `path` (default: everything). No git client is involved and nothing is written
 // to disk -- the archive is decompressed and parsed in memory, and only regular files
 // survive (see ../archive.js).
 //
@@ -51,28 +52,39 @@ export async function subtree(repo, ref, options = {}) {
   const {
     path = '',
     maxBytes = ARCHIVE_MAX_BYTES,
-    signal = AbortSignal.timeout(ARCHIVE_TIMEOUT),
-    token = null,
+    signal = AbortSignal.timeout(TRANSFER_TIMEOUT),
+    token,
   } = options
-  assertRepo(repo)
   assert(Number.isInteger(maxBytes) && maxBytes > 0, `Unexpected maxBytes: ${maxBytes}`)
   const prefix = subtreePrefix(path)
 
-  const url = `${API}/repos/${repo}/tarball/${encodeRef(ref)}`
+  const url = repoUrl(repo, 'tarball', encodeRef(ref))
   // Keeps the default JSON Accept even though the body is an archive: unlike the asset
   // endpoint, /tarball answers 415 to `application/octet-stream`. GitHub redirects to
   // codeload, which serves the bytes regardless of what was negotiated here.
   const res = await request('archive', url, { token, signal })
-  const bytes = await readCapped('archive', res, maxBytes)
-  const { root, files } = stripRoot(readTarGz(bytes))
-  if (prefix === '') return { root, files }
+  const bytes = await readCapped(res, maxBytes)
 
-  const out = new Map()
-  for (const [name, content] of files) {
-    if (name.startsWith(prefix)) out.set(name, content)
-  }
+  // Every GitHub archive nests the tree under one top-level directory whose name carries the
+  // resolved commit (`owner-repo-<sha>`). Take that directory from the entries themselves
+  // rather than reconstructing the name and trusting it to match.
+  //
+  // Stripping the root and applying `path` as the archive is read, rather than filtering the
+  // finished Map, is what keeps a small subtree cheap: an entry outside it is checked for
+  // safety and then skipped, so the whole tree is never copied to keep a fraction of it.
+  let root = null
+  const files = readTarGz(bytes, (name) => {
+    const slash = name.indexOf('/')
+    assert(slash > 0, `Unexpected archive entry outside the root directory: ${name}`)
+    const first = name.slice(0, slash)
+    if (root === null) root = first
+    else assert.equal(first, root, 'Unexpected archive with more than one top-level directory')
+    // '' prefixes everything, so the whole-tree case needs no branch of its own.
+    return name.startsWith(prefix, slash + 1) ? name.slice(slash + 1) : null
+  })
+
   // A path that matches nothing is a typo far more often than an intentionally empty
   // subtree, and an empty Map would be indistinguishable from a successful read.
-  assert(out.size > 0, `No files under '${path}' in ${repo} at ${ref}`)
-  return { root, files: out }
+  assert(prefix === '' || files.size > 0, `No files under '${path}' in ${repo} at ${ref}`)
+  return { root, files }
 }

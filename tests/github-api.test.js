@@ -3,26 +3,9 @@ import { hash } from 'node:crypto'
 
 import { asset, latestRelease, release, releases } from '@exodus/stasis-api/github'
 
+import { json, withFetch } from './fetch.helper.js'
+
 const API = 'https://api.github.com'
-
-// Swap in a fetch stub for the duration of one test, recording every call so the
-// request (URL, method-less GET, headers) can be asserted alongside the result.
-const withFetch = (impl, fn) => async (t) => {
-  const original = globalThis.fetch
-  const calls = []
-  globalThis.fetch = async (url, opts) => {
-    calls.push({ url, opts })
-    return impl({ url, opts, calls })
-  }
-  try {
-    return await fn(t, calls)
-  } finally {
-    globalThis.fetch = original
-  }
-}
-
-const json = (body, headers = {}) =>
-  new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', ...headers } })
 
 const RELEASE = {
   id: 42,

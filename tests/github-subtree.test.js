@@ -3,22 +3,10 @@ import { gzipSync } from 'node:zlib'
 
 import { subtree } from '@exodus/stasis-api/github'
 
+import { withFetch } from './fetch.helper.js'
+
 const API = 'https://api.github.com'
 const ROOT = 'ExodusOSS-stasis-802ab55'
-
-const withFetch = (impl, fn) => async (t) => {
-  const original = globalThis.fetch
-  const calls = []
-  globalThis.fetch = async (url, opts) => {
-    calls.push({ url, opts })
-    return impl({ url, opts, calls })
-  }
-  try {
-    return await fn(t, calls)
-  } finally {
-    globalThis.fetch = original
-  }
-}
 
 // --- archive fixtures -------------------------------------------------------
 // Built byte-by-byte rather than shelled out to tar/zip, so the tests pin the framing the
@@ -26,7 +14,8 @@ const withFetch = (impl, fn) => async (t) => {
 
 const tarHeader = (name, size, type = '0') => {
   const h = Buffer.alloc(512)
-  h.write(name.length > 100 ? name.slice(0, 100) : name, 0, 100, 'utf8')
+  // `write` is bounded to 100 bytes, which is the truncation ustar itself does.
+  h.write(name, 0, 100, 'utf8')
   h.write('000644 \0', 100, 8, 'utf8')
   h.write('0000000 \0', 108, 8, 'utf8')
   h.write('0000000 \0', 116, 8, 'utf8')
@@ -167,6 +156,19 @@ test('subtree() refuses an archive entry that escapes the tree', withFetch(
   () => archive(tarball([[`${ROOT}/ok.js`, 'x'], [`${ROOT}/../../etc/passwd`, 'boom']])),
   async (t) => {
     await t.assert.rejects(() => subtree('o/r', 'v1'), /Unsafe archive path: .*etc\/passwd/)
+  }
+))
+
+test('subtree() still vets entries a path filter excludes', withFetch(
+  ({ calls }) => archive(tarball(calls.length === 1
+    ? [[`${ROOT}/src/ok.js`, 'x'], [`${ROOT}/../../etc/passwd`, 'boom']]
+    : [[`${ROOT}/src/ok.js`, 'x'], [`${ROOT}/docs/a.md`, 'first'], [`${ROOT}/docs/a.md`, 'second']])),
+  async (t) => {
+    // Narrowing to 'src' skips copying the other entries' bytes, but they are still checked:
+    // an archive that is unsafe or self-shadowing anywhere is refused, not quietly delivered
+    // because the bad entry happened to fall outside the requested subtree.
+    await t.assert.rejects(() => subtree('o/r', 'v1', { path: 'src' }), /Unsafe archive path: .*etc\/passwd/)
+    await t.assert.rejects(() => subtree('o/r', 'v1', { path: 'src' }), /Duplicate archive path: .*docs\/a\.md/)
   }
 ))
 

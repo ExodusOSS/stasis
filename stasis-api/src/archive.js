@@ -12,11 +12,13 @@ import { gunzipSync } from 'node:zlib'
 
 const BLOCK = 512
 
+const dotdotRegex = /(?:^|\/)\.\.(?:\/|$)/u
+
 // An entry must land inside the tree it claims to be part of. Rejected: absolute paths, any
 // `..` segment, a backslash (a separator that would slip past a posix-only check), and NUL.
 export function isSafePath(path) {
   if (path === '' || path.startsWith('/') || path.includes('\\') || path.includes('\0')) return false
-  return !path.split('/').includes('..')
+  return !dotdotRegex.test(path)
 }
 
 // Copy an entry out of the archive buffer instead of returning a view into it: callers
@@ -24,13 +26,12 @@ export function isSafePath(path) {
 // memory for as long as any single file is referenced.
 const detach = (bytes) => new Uint8Array(bytes)
 
-const view = (bytes) =>
-  Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-
+// tar pads its text fields with NUL. Read the range directly rather than slicing a view out
+// of it first -- this runs three times per entry, so the views alone would outnumber the
+// files in the archive several times over.
 const field = (buf, start, end) => {
-  const slice = buf.subarray(start, end)
-  const nul = slice.indexOf(0)
-  return slice.subarray(0, nul === -1 ? slice.length : nul).toString('utf8')
+  const nul = buf.indexOf(0, start)
+  return buf.toString('utf8', start, nul === -1 || nul > end ? end : nul)
 }
 
 // tar numbers are octal ASCII. GNU/star write sizes above 8 GiB in a base-256 form instead,
@@ -73,9 +74,11 @@ function paxPath(data) {
   return null
 }
 
-function readTar(bytes) {
-  const tar = view(bytes)
+function readTar(tar, select) {
   const files = new Map()
+  // Names are tracked separately from the returned entries so the checks below cover the
+  // whole archive even when `select` keeps only part of it.
+  const seen = new Set()
   // A pax ('x') or GNU longname ('L') block names the entry that FOLLOWS it.
   let pending = null
   let offset = 0
@@ -101,8 +104,13 @@ function readTar(bytes) {
         // tar can legally hold the same path twice and the reader would keep whichever came
         // last, so a second entry could shadow the first -- and the shadowed bytes would
         // never be seen. Refuse the archive instead of silently picking a winner.
-        assert(!files.has(name), `Duplicate archive path: ${name}`)
-        files.set(name, detach(tar.subarray(start, end)))
+        assert(!seen.has(name), `Duplicate archive path: ${name}`)
+        seen.add(name)
+        // `select` maps an entry to the key it is stored under, or drops it by returning
+        // null. Both checks above run either way, so a dropped entry still cannot smuggle an
+        // unsafe or duplicated path past them -- it only skips being copied.
+        const key = select(name)
+        if (key !== null) files.set(key, detach(tar.subarray(start, end)))
       }
     }
 
@@ -111,12 +119,15 @@ function readTar(bytes) {
   return files
 }
 
-export function readTarGz(bytes) {
+// `select` narrows and re-keys the archive as it is read, so the bytes of an entry the caller
+// does not want are never copied out of it -- filtering afterwards would memcpy the whole
+// tree to keep a fraction of it.
+export function readTarGz(bytes, select = (name) => name) {
   let tar
   try {
-    tar = gunzipSync(view(bytes))
+    tar = gunzipSync(bytes)
   } catch (cause) {
     throw new Error(`Malformed tar.gz archive: ${cause.message}`, { cause })
   }
-  return readTar(tar)
+  return readTar(tar, select)
 }
