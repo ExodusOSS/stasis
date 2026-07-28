@@ -3,6 +3,8 @@ import { createRequire, isBuiltin } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { isTypeDeclaration } from '@exodus/stasis-core/util'
+
 // Adapter that drives the PROJECT's own `metro-resolver` from stasis's static scanner, so
 // `stasis bundle --metro --metro-resolver` resolves modules EXACTLY the way that project's
 // installed Metro does -- rather than the hand-rolled Metro/RN approximation in
@@ -45,6 +47,12 @@ function pathType(p) {
     return null
   }
 }
+
+// A `.d.ts` is types-only, erased at runtime, so the resolver must never land on one: report it as
+// non-existent to Metro's filesystem hooks and a package whose entry points at a declaration falls
+// through to its real `.js`. Only the RESOLUTION hooks use this -- getPackageForModule's own
+// dir-vs-file probe stays on raw pathType (it locates package scopes, never a module target).
+const resolvableType = (p) => (isTypeDeclaration(p) ? null : pathType(p))
 
 // Metro's `getPackageForModule`: the closest package scope for an absolute candidate path
 // (which need not exist). The candidate can be a package DIRECTORY (a bare import lands on
@@ -99,14 +107,14 @@ export function createMetroResolver({
     assetExts: new Set(),
     customResolverOptions: {},
     disableHierarchicalLookup: false,
-    doesFileExist: (p) => pathType(p) === 'f',
+    doesFileExist: (p) => resolvableType(p) === 'f',
     extraNodeModules: null,
     dev: false,
     getPackage: (packageJsonPath) => readJson(packageJsonPath),
     getPackageForModule,
     fileSystemLookup: (p) => {
       const abs = isAbsolute(p) ? p : join(projectDir, p)
-      const type = pathType(abs)
+      const type = resolvableType(abs)
       if (!type) return { exists: false }
       let realPath = abs
       try {

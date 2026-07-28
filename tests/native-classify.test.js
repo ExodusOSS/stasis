@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 
-import { classifyNativeCapture, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile } from '@exodus/stasis-core/util'
+import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, nativeBinaryPlistAllowed, stripTypeDeclaration } from '@exodus/stasis-core/util'
 
 const NOT_WIN = { win32: false }
 const WIN = { win32: true }
@@ -14,8 +14,10 @@ test('isExcludedNativeFile: docs / config / logs / maps are always excluded', (t
     'README.md', 'CHANGELOG.md', 'LICENSE', 'license', 'LICENCE', 'THIRD-PARTY-LICENSES',
     '.prettierrc', '.prettierignore', '.prettierrc.js', '.gitattributes', '.flowconfig', '.eslintignore', '.releaserc', '.clang-format',
     '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml',
+    'documentation.yml', // documentation.js config
     'yarn.lock', '.project', 'gradle-wrapper.properties',
     'debug.log', 'bundle.js.map',
+    'index.js.flow', 'Thing.js.flow', // Flow declaration sidecars (the `.d.ts` analog)
   ]) {
     t.assert.equal(isExcludedNativeFile(name, NOT_WIN), true, `${name} excluded off Windows`)
     t.assert.equal(isExcludedNativeFile(name, WIN), true, `${name} excluded on Windows too`)
@@ -32,6 +34,7 @@ test('isExcludedNativeFile: real build inputs are NOT excluded', (t) => {
     'RNThing.podspec', 'hermes-utils.rb', 'build.gradle', 'RNThing.mm', 'Yoga.cpp', 'RNThing.h',
     'package.json', 'AndroidManifest.xml', 'Info.plist', 'PrivacyInfo.xcprivacy', 'CMakeLists.txt',
     'gradle.properties', // project build config -- kept, distinct from the excluded gradle-wrapper.properties
+    'other.yml', 'buildkite.yml', // only documentation.yml/circle.yml/.swiftlint.yml are excluded BY NAME, not all YAML
   ]) {
     t.assert.equal(isExcludedNativeFile(name, NOT_WIN), false, `${name} kept`)
     t.assert.equal(isExcludedNativeFile(name, WIN), false, `${name} kept`)
@@ -62,6 +65,53 @@ test('classifyNativeCapture: excluded files skip; a .bat is win32-conditional', 
   t.assert.deepEqual(classifyNativeCapture('ReactABI.cmake.in', NOT_WIN), { action: 'code', format: 'cmake' })
   // ...but only `.cmake.in`, NOT a bare `.in`: a config.h.in isn't cmake (stays a resource).
   t.assert.deepEqual(classifyNativeCapture('config.h.in', NOT_WIN), { action: 'resource' })
+})
+
+test('isAppleSliceDir: per-arch prebuilt slice dirs are matched; real source dirs are not', (t) => {
+  // The payload dirs of a prebuilt binary framework -- compiled output, not source. Deps that ship
+  // them LOOSE (outside a `*.xcframework`, which isNativeArtifact already skips) need this.
+  for (const dir of [
+    'ios-arm64', 'ios-arm64_x86_64-simulator', 'ios-arm64e', 'ios-arm64_x86_64-maccatalyst',
+    'tvos-arm64_x86_64-simulator', 'watchos-arm64_32_armv7k', 'macos-arm64_x86_64', 'xros-arm64',
+  ]) {
+    t.assert.equal(isAppleSliceDir(dir), true, `${dir} is a slice dir`)
+  }
+  // Keyed on `<platform>-<arch>[_<arch>...][-variant]`, so ordinary dirs can't collide.
+  for (const dir of ['ios', 'android', 'src', 'cpp', 'React', 'ios-helpers', 'iossupport', 'arm64', 'ios-']) {
+    t.assert.equal(isAppleSliceDir(dir), false, `${dir} is NOT a slice dir`)
+  }
+})
+
+test('isTypeDeclaration / stripTypeDeclaration: types-only files, and their runtime stem', (t) => {
+  for (const name of ['index.d.ts', 'dist/index.d.ts', 'types.d.mts', 'x.d.cts', 'Foo.D.TS']) {
+    t.assert.equal(isTypeDeclaration(name), true, `${name} is a declaration`)
+  }
+  // A `.ts`/`.tsx` is real source, and a stem merely ending in `d` is not a declaration.
+  for (const name of ['index.ts', 'foo.tsx', 'notd.ts', 'index.js']) {
+    t.assert.equal(isTypeDeclaration(name), false, `${name} is not a declaration`)
+  }
+  // The stem a resolver probes instead, so `main: "dist/index.d.ts"` lands on dist/index.js.
+  t.assert.equal(stripTypeDeclaration('dist/index.d.ts'), 'dist/index')
+  t.assert.equal(stripTypeDeclaration('types.d.mts'), 'types')
+  t.assert.equal(stripTypeDeclaration('x.d.cts'), 'x')
+  t.assert.equal(stripTypeDeclaration('dist/index.js'), 'dist/index.js') // not a declaration -> unchanged
+})
+
+test('isBinaryPlist / nativeBinaryPlistAllowed: binary plists are opt-in via resources', (t) => {
+  // Apple's `bplist00` format: a real build input whose bytes aren't UTF-8, so it can't ride the
+  // text/code path a `.plist` classifies onto (that combination used to fail the capture).
+  const binary = Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])])
+  t.assert.equal(isBinaryPlist('Info.plist', binary), true)
+  t.assert.equal(isBinaryPlist('ios/PrivacyInfo.plist', binary), true)
+  // A TEXT (XML) plist is unaffected -- it stays on the code path as 'xml'.
+  t.assert.equal(isBinaryPlist('Info.plist', Buffer.from('<?xml version="1.0"?>\n<plist/>\n')), false)
+  t.assert.deepEqual(classifyNativeCapture('Info.plist', NOT_WIN), { action: 'code', format: 'xml' })
+  // Only a `.plist` counts: other binary bytes are handled by their own rules.
+  t.assert.equal(isBinaryPlist('logo.png', binary), false)
+  // Carrying one is opt-in: an automated walk never sweeps an opaque binary in unasked.
+  t.assert.equal(nativeBinaryPlistAllowed(new Set(['plist'])), true)
+  t.assert.equal(nativeBinaryPlistAllowed(new Set(['png'])), false)
+  t.assert.equal(nativeBinaryPlistAllowed(new Set()), false)
 })
 
 test('classifyNativeCapture: TypeScript source (.ts/.tsx/.d.ts) is skipped -- Metro owns the JS graph', (t) => {

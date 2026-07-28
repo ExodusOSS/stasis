@@ -931,6 +931,14 @@ process.exit(1)
     writeFileSync(join(root, 'debug.log'), 'log line\n')
     writeFileSync(join(root, 'ios', 'RNThing.js.map'), '{"version":3}\n')
     writeFileSync(join(root, 'install.bat'), '@echo off\n')       // Windows batch -> excluded off Windows
+    writeFileSync(join(root, 'documentation.yml'), 'toc:\n  - name: Thing\n') // documentation.js config
+    writeFileSync(join(root, 'index.js.flow'), 'declare module.exports: any\n') // Flow declaration sidecar
+    // A LOOSE Apple per-arch slice dir (not inside a `*.xcframework`): prebuilt output, pruned whole.
+    mkdirSync(join(root, 'ios', 'ios-arm64_x86_64-simulator'), { recursive: true })
+    writeFileSync(join(root, 'ios', 'ios-arm64_x86_64-simulator', 'Slice.h'), '// prebuilt slice header\n')
+    // A BINARY plist (bplist00): non-UTF-8, so it can't ride the `.plist`->xml code path. Opt-in only
+    // (via the resources allowlist), which this capture does NOT set -> excluded here.
+    writeFileSync(join(root, 'ios', 'Binary.plist'), Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])]))
     mkdirSync(join(root, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace'), { recursive: true }) // Xcode project bundle
     writeFileSync(join(root, 'ios', 'RNThing.xcodeproj', 'project.pbxproj'), '// pbxproj\n')
     writeFileSync(join(root, 'ios', 'RNThing.xcodeproj', 'project.xcworkspace', 'contents.xcworkspacedata'), '<Workspace/>\n')
@@ -1008,7 +1016,12 @@ process.exit(1)
     for (const f of ['README.md', 'LICENSE', '.prettierrc', '.gitattributes', '.flowconfig', '.eslintignore',
       '.releaserc', '.clang-format', '.buckconfig', '.watchmanconfig', 'debug.log', 'ios/RNThing.js.map',
       'install.bat', 'ios/RNThing.xcodeproj/project.pbxproj',
-      'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata', 'windows/RNThing.cpp', '.env']) {
+      'ios/RNThing.xcodeproj/project.xcworkspace/contents.xcworkspacedata', 'windows/RNThing.cpp', '.env',
+      'documentation.yml', // documentation.js config (NOT all YAML -- only this name)
+      'index.js.flow', // Flow declaration sidecar (the `.d.ts` analog)
+      'ios/ios-arm64_x86_64-simulator/Slice.h', // a LOOSE Apple per-arch slice dir is pruned whole
+      'ios/Binary.plist', // a BINARY plist is opt-in via resources; this capture doesn't opt in
+    ]) {
       t.assert.equal(mod.files[f], undefined, `expected ${f} to be excluded from native capture`)
     }
     // (Info.plist + Apple's privacy manifest are kept, tagged 'xml' -- asserted below with the

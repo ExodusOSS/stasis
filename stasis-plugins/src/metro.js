@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isPodspec, nativeBinaryPlistAllowed, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -352,8 +352,10 @@ export class StasisMetro {
       if (ent.isSymbolicLink()) continue
       const full = join(dir, ent.name)
       if (ent.isDirectory()) {
-        // Skip build-output subtrees, Apple binary bundles, and an off-platform toplevel dir.
-        const skipDir = NATIVE_WALK_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
+        // Skip build-output subtrees, Apple binary bundles + their loose per-arch slice dirs, and an
+        // off-platform toplevel dir.
+        const skipDir = NATIVE_WALK_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name)
+          || isAppleSliceDir(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
         if (!skipDir) this.#captureNativeTree(full)
         continue
       }
@@ -367,8 +369,12 @@ export class StasisMetro {
       const source = realReadFileSync(full)
       // A prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -- skip it.
       if (isExtensionlessBinary(ent.name, source)) continue
+      // A BINARY plist can't ride the text/code path a `.plist` classifies onto: carry it as an
+      // opaque base64 resource, and only when `.plist` is opted into via the resources allowlist.
+      const binaryPlist = isBinaryPlist(ent.name, source)
+      if (binaryPlist && !nativeBinaryPlistAllowed(this.#resources)) continue
       this.#seen.add(full)
-      this.#recordCapture(full, source, { format, resource: action === 'resource' })
+      this.#recordCapture(full, source, { format: binaryPlist ? undefined : format, resource: binaryPlist || action === 'resource' })
     }
   }
 

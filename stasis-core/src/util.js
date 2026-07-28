@@ -163,6 +163,21 @@ export function isExtensionlessBinary(name, content) {
   return pathExt(name) === '' && Buffer.isBuffer(content) && !isUtf8(content)
 }
 
+// A BINARY plist (Apple's `bplist00` format): a real build input, but its bytes aren't UTF-8, so it
+// can't ride the code path classifyFormat puts a `.plist` on ('xml', text-only) -- that combination
+// used to fail the capture outright. Detected post-read, by bytes rather than the `bplist00` magic
+// (an encoded-as-binary plist is never valid UTF-8), so the caller can carry it as an opaque
+// base64 resource instead. Gated on the `resources` allowlist by nativeBinaryPlistAllowed.
+export function isBinaryPlist(name, content) {
+  return pathExt(name) === 'plist' && Buffer.isBuffer(content) && !isUtf8(content)
+}
+
+// Whether a binary plist may be carried (as a base64 resource): only when `.plist` is explicitly in
+// the resources allowlist -- an opaque binary is opt-in, never swept in by an automated walk.
+export function nativeBinaryPlistAllowed(resources) {
+  return resources instanceof Set && resources.has('plist')
+}
+
 // A CocoaPods podspec manifest, discovered by name (RN scatters them in subdirs `react-native config` misses).
 export function isPodspec(name) {
   return name.endsWith('.podspec') || name.endsWith('.podspec.json')
@@ -230,11 +245,14 @@ function isShellShebang(content) {
 // config, logs/maps, JS-tooling lockfiles, IDE project metadata -- excluded from the Metro native
 // capture (a module is built by the APP's Gradle/CocoaPods, so its own wrapper/IDE files are
 // standalone-dev only). `.bat` (Windows batch) is excluded off Windows; `win32` defaults to the host.
-const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map'])
+// `flow` covers the `*.js.flow` type-declaration sidecars (the Flow analog of `.d.ts`): read by the
+// Flow checker, never by Gradle/CocoaPods, and Metro bundles the plain `.js` beside them.
+const NATIVE_EXCLUDE_EXTS = new Set(['md', 'log', 'map', 'flow'])
 const NATIVE_EXCLUDE_NAMES = new Set([
   'license', 'licence', 'third-party-licenses', // license / legal text (US + UK spelling)
   '.prettierrc', '.prettierignore', '.prettierrc.js', '.gitattributes', '.flowconfig', '.eslintignore',
   '.releaserc', '.clang-format', '.buckconfig', '.watchmanconfig', '.editorconfig', 'circle.yml', '.swiftlint.yml', // editor / lint / CI config
+  'documentation.yml', // documentation.js config (a native build never reads it)
   'yarn.lock', // JS dep lockfile (a native build never reads it)
   '.project', // Eclipse IDE project metadata (Gradle doesn't read it)
   'gradle-wrapper.properties', // a module's own Gradle wrapper -- the APP's wrapper drives the build
@@ -250,6 +268,39 @@ export function isExcludedNativeFile(name, { win32 = process.platform === 'win32
 // A native-module toplevel directory for a platform we're not capturing (e.g. `windows/` off Windows).
 export function isExcludedNativeDir(name, { win32 = process.platform === 'win32' } = {}) {
   return !win32 && name === 'windows'
+}
+
+// An Apple prebuilt-slice directory (`ios-arm64`, `ios-arm64_x86_64-simulator`,
+// `tvos-arm64_x86_64-maccatalyst`, ...): the per-architecture payload dirs of a prebuilt binary
+// framework, holding compiled output rather than source. isNativeArtifact already skips the
+// enclosing `*.xcframework` bundle; deps that ship these slices loose (outside a bundle dir) need
+// this too, at ANY depth. Deliberately keyed on `<platform>-<arch>[_<arch>...][-variant]` so a real
+// source dir can't collide.
+const APPLE_ARCH = String.raw`(?:arm64e|arm64_32|arm64|armv7k|armv7s|armv7|x86_64|i386)`
+const APPLE_SLICE_DIR = new RegExp(
+  String.raw`^(?:ios|tvos|watchos|macos|xros|visionos|driverkit)-${APPLE_ARCH}(?:_${APPLE_ARCH})*(?:-(?:simulator|maccatalyst))?$`,
+  'u'
+)
+export function isAppleSliceDir(name) {
+  return APPLE_SLICE_DIR.test(name)
+}
+
+// A TypeScript declaration file (`.d.ts` / `.d.mts` / `.d.cts`): types only, erased at runtime, so
+// it is never a runtime module. The resolvers refuse to land on one (a package whose `main` points
+// at a `.d.ts` must fall through to its real `.js`), keeping type-only files out of the bundle.
+// Keyed by compound suffix -- pathExt only sees the trailing `ts`.
+const TYPE_DECLARATION_SUFFIXES = ['.d.ts', '.d.mts', '.d.cts']
+export function isTypeDeclaration(name) {
+  const base = basename(name).toLowerCase()
+  return TYPE_DECLARATION_SUFFIXES.some((suffix) => base.endsWith(suffix))
+}
+
+// `name` with its type-declaration suffix removed (`dist/index.d.ts` -> `dist/index`), so a resolver
+// can probe the runtime sibling the declaration describes. Returns `name` unchanged if it isn't one.
+export function stripTypeDeclaration(name) {
+  const lower = name.toLowerCase()
+  const suffix = TYPE_DECLARATION_SUFFIXES.find((s) => lower.endsWith(s))
+  return suffix === undefined ? name : name.slice(0, -suffix.length)
 }
 
 // The single name->format classifier every capture path is a policy view of. Returns a concrete
