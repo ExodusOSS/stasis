@@ -149,6 +149,34 @@ test('addCommand classifies the native build-input vocabulary as code (shared wi
   t.assert.ok(!existsSync(join(tmp, 'dist/res.br')), 'native build inputs are code, not resources')
 }))
 
+const BPLIST = Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])])
+
+test('addCommand carries a BINARY plist as a declared resource; a text plist stays xml code', withTmp(async (t, tmp) => {
+  // A `.plist` classifies as 'xml' CODE, which is stored as a UTF-8 string -- so a binary plist
+  // (bplist00) used to abort `add` on the UTF-8 check even with `plist` declared, because the code
+  // branch was taken before the resource branch. It is now routed to the resource path as base64.
+  seed(tmp, { bundleFile: 'dist/code.br', resourcesBundleFile: 'dist/res.br', resources: ['plist'] })
+  writeFileSync(join(tmp, 'Binary.plist'), BPLIST)
+  writeFileSync(join(tmp, 'Text.plist'), '<?xml version="1.0"?>\n<plist><dict/></plist>\n')
+  addCommand({ cwd: tmp, entries: ['Binary.plist', 'Text.plist'] })
+
+  const res = decode(join(tmp, 'dist/res.br'))
+  t.assert.equal(res.formats.get('Binary.plist'), 'resource:base64')
+  t.assert.deepEqual(Buffer.from(res.modules.get('.').files['Binary.plist'], 'base64'), BPLIST)
+  // The TEXT plist is unaffected: still code, tagged xml.
+  const code = decode(join(tmp, 'dist/code.br'))
+  t.assert.equal(code.formats.get('Text.plist'), 'xml')
+  t.assert.equal(res.formats.get('Text.plist'), undefined, 'a text plist is not a resource')
+}))
+
+test('addCommand rejects a BINARY plist that is not declared in resources, with actionable guidance', withTmp(async (t, tmp) => {
+  // Undeclared, an opaque binary must not be packed silently -- and the error should say what to do
+  // rather than the old, confusing "not valid UTF-8 (format 'xml')".
+  seed(tmp, { bundleFile: 'dist/code.br' }) // no `plist` in resources
+  writeFileSync(join(tmp, 'Binary.plist'), BPLIST)
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['Binary.plist'] }), /neither a recognized source file nor a declared resource/u)
+}))
+
 test('addCommand still captures an explicitly-listed .env (manual add is a deliberate choice)', withTmp(async (t, tmp) => {
   // Automated capture skips the whole env family, but an explicit `stasis add` is the user opting
   // in -- basename AND extension family must still be recorded as 'env' code (classifyFormat keeps

@@ -8,7 +8,7 @@ import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBrotliQuality, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBinaryPlist, isBrotliQuality, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
@@ -212,7 +212,10 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     const buf = readFileSync(abs)
     if (hasLock) integrities.set(rel, sha512integrity(buf))
     const format = sourceFormat(abs, buf)
-    if (format !== null) {
+    // A BINARY plist can't be stored as the UTF-8 source string its 'xml' format implies, so it is
+    // NOT source here: fall through to the resource branch, which carries it as opaque base64 when
+    // `.plist` is declared in resources (and otherwise reports the actionable "declare it" error).
+    if (format !== null && !isBinaryPlist(rel, buf)) {
       // Source is stored as a UTF-8 string, so non-UTF-8 bytes would lossily diverge from the file on disk.
       if (!isUtf8(buf)) throw new Error(`add: ${rel} is not valid UTF-8 (format '${format}')`)
       codeFiles.set(rel, { content: buf.toString('utf8'), format })

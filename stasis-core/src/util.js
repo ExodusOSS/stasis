@@ -165,17 +165,12 @@ export function isExtensionlessBinary(name, content) {
 
 // A BINARY plist (Apple's `bplist00` format): a real build input, but its bytes aren't UTF-8, so it
 // can't ride the code path classifyFormat puts a `.plist` on ('xml', text-only) -- that combination
-// used to fail the capture outright. Detected post-read, by bytes rather than the `bplist00` magic
-// (an encoded-as-binary plist is never valid UTF-8), so the caller can carry it as an opaque
-// base64 resource instead. Gated on the `resources` allowlist by nativeBinaryPlistAllowed.
+// failed every capture outright. Detected post-read, by bytes rather than the `bplist00` magic (an
+// encoded-as-binary plist is never valid UTF-8). Callers treat one as NOT code, so it reaches their
+// `resources` allowlist gate and is carried as an opaque base64 resource only when `.plist` is
+// declared there -- an opaque binary is opt-in, never swept in by an automated walk.
 export function isBinaryPlist(name, content) {
   return pathExt(name) === 'plist' && Buffer.isBuffer(content) && !isUtf8(content)
-}
-
-// Whether a binary plist may be carried (as a base64 resource): only when `.plist` is explicitly in
-// the resources allowlist -- an opaque binary is opt-in, never swept in by an automated walk.
-export function nativeBinaryPlistAllowed(resources) {
-  return resources instanceof Set && resources.has('plist')
 }
 
 // A CocoaPods podspec manifest, discovered by name (RN scatters them in subdirs `react-native config` misses).
