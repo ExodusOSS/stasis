@@ -1,6 +1,7 @@
 
 packages:
   - stasis
+  - stasis-api
   - stasis-core
   - stasis-plugins
 

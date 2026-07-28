@@ -10,6 +10,9 @@ import { StasisEsbuild } from '@exodus/stasis/esbuild'
 import { StasisWebpack } from '@exodus/stasis/webpack'
 import { StasisMetro } from '@exodus/stasis/metro'
 import * as metroTransformer from '@exodus/stasis/metro-transformer'
+import * as githubApi from '@exodus/stasis-api/github'
+import { advisories } from '@exodus/stasis-api/npm'
+import apiSemver from '@exodus/stasis-api/npm/semver'
 import { StasisEsbuild as PluginsEsbuild } from '@exodus/stasis-plugins/esbuild'
 import { StasisWebpack as PluginsWebpack } from '@exodus/stasis-plugins/webpack'
 import { StasisMetro as PluginsMetro } from '@exodus/stasis-plugins/metro'
@@ -34,6 +37,17 @@ test('@exodus/stasis/metro-transformer re-exports the stasis-plugins worker tran
   t.assert.equal(typeof metroTransformer.getCacheKey, 'function')
   t.assert.equal(metroTransformer.transform, pluginsMetroTransformer.transform)
   t.assert.equal(metroTransformer.getCacheKey, pluginsMetroTransformer.getCacheKey)
+})
+
+test('@exodus/stasis-api exposes the npm and GitHub clients', (t) => {
+  t.assert.equal(typeof advisories, 'function')
+  // A CJS shim behind an export subpath: the default import is its module.exports.
+  for (const fn of ['compare', 'satisfies', 'valid', 'validRange']) {
+    t.assert.equal(typeof apiSemver[fn], 'function', `semver.${fn}`)
+  }
+  for (const fn of ['asset', 'latestRelease', 'release', 'releases']) {
+    t.assert.equal(typeof githubApi[fn], 'function', `github.${fn}`)
+  }
 })
 
 test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API', (t) => {
