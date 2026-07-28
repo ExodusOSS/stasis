@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 
+import { requestOk } from '../request.js'
 import semver from './semver.cjs'
+
+const BULK_ADVISORIES_URL = 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk'
 
 const packageNameRegex = /^(@[\da-z-]+\/)?[\w-]+(\.[\w-]+)*$/u
 
@@ -17,20 +20,11 @@ export async function advisories(list, { signal = AbortSignal.timeout(30_000) } 
   const entries = [...groups].map(([k, v]) => [k, [...v].toSorted((a, b) => semver.compare(a, b))])
   const body = Object.fromEntries(entries.toSorted((a, b) => a[0] < b[0] ? -1 : 1))
 
-  let res
-  try {
-    res = await fetch('https://registry.npmjs.org/-/npm/v1/security/advisories/bulk', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal,
-    })
-  } catch (cause) {
-    throw new Error(`npm advisories request failed: ${cause.message}`, { cause })
-  }
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`npm advisories request failed: ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 200)}` : ''}`)
-  }
+  const res = await requestOk('npm advisories', BULK_ADVISORIES_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
   return res.json()
 }
