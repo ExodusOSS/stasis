@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isPodspec, nativeBinaryPlistAllowed, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isPodspec, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -372,7 +372,7 @@ export class StasisMetro {
       // A BINARY plist can't ride the text/code path a `.plist` classifies onto: carry it as an
       // opaque base64 resource, and only when `.plist` is opted into via the resources allowlist.
       const binaryPlist = isBinaryPlist(ent.name, source)
-      if (binaryPlist && !nativeBinaryPlistAllowed(this.#resources)) continue
+      if (binaryPlist && !this.#resources.has('plist')) continue
       this.#seen.add(full)
       this.#recordCapture(full, source, { format: binaryPlist ? undefined : format, resource: binaryPlist || action === 'resource' })
     }

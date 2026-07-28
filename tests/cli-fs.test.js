@@ -357,6 +357,29 @@ describe('stasis run --fs (spawned, concurrent)', { concurrency: CONCURRENCY }, 
     t.assert.equal(decode(bundlePath).formats['src/thing.dat'], 'resource')
   }))
 
+  test('run --fs reading a BINARY plist captures it as base64 when declared, and never fails the read', withTmp(async (t, tmp) => {
+    // A `.plist` classifies as 'xml' CODE, stored as a UTF-8 string -- so reading a binary plist
+    // (bplist00) used to abort the capture on addFile's UTF-8 assert. It is now routed to the
+    // resource path, which the allowlist gates: `plist` declared -> carried as base64.
+    writeFileSync(join(tmp, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+    const bplist = Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])])
+    writeFileSync(join(tmp, 'src', 'Binary.plist'), bplist)
+    writeFileSync(join(tmp, 'src', 'entry.js'), [
+      "import { readFileSync } from 'node:fs'",
+      'console.log(`plist:${readFileSync(new URL("./Binary.plist", import.meta.url)).length}`)',
+      '',
+    ].join('\n'))
+    const bundlePath = join(tmp, 'snapshot.br')
+    const r = await run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', '--resources=plist', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.equal(r.stdout, `plist:${bplist.length}\n`)
+    t.assert.doesNotMatch(r.stderr, /capture aborted|not UTF-8/u, 'reading a binary plist must not fail the capture')
+    t.assert.ok(existsSync(bundlePath), 'declared -> bundle written')
+    const bundle = decode(bundlePath)
+    t.assert.equal(bundle.formats['src/Binary.plist'], 'resource:base64')
+    t.assert.deepEqual(Buffer.from(bundle.sources['.'].files['src/Binary.plist'], 'base64'), bplist)
+  }))
+
   test('stasis-core run --fs captures and serves the same way', withTmp(async (t, tmp) => {
     const bundlePath = join(tmp, 'snapshot.br')
     const core = async (args) => {

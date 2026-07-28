@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 
-import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, nativeBinaryPlistAllowed, stripTypeDeclaration } from '@exodus/stasis-core/util'
+import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, stripTypeDeclaration } from '@exodus/stasis-core/util'
 
 const NOT_WIN = { win32: false }
 const WIN = { win32: true }
@@ -97,9 +97,10 @@ test('isTypeDeclaration / stripTypeDeclaration: types-only files, and their runt
   t.assert.equal(stripTypeDeclaration('dist/index.js'), 'dist/index.js') // not a declaration -> unchanged
 })
 
-test('isBinaryPlist / nativeBinaryPlistAllowed: binary plists are opt-in via resources', (t) => {
+test('isBinaryPlist: a bplist is detected by bytes, so callers can route it off the code path', (t) => {
   // Apple's `bplist00` format: a real build input whose bytes aren't UTF-8, so it can't ride the
-  // text/code path a `.plist` classifies onto (that combination used to fail the capture).
+  // text/code path a `.plist` classifies onto (that combination failed every capture). Each caller
+  // then treats it as NOT code, so its own `resources` allowlist gate decides.
   const binary = Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])])
   t.assert.equal(isBinaryPlist('Info.plist', binary), true)
   t.assert.equal(isBinaryPlist('ios/PrivacyInfo.plist', binary), true)
@@ -108,10 +109,8 @@ test('isBinaryPlist / nativeBinaryPlistAllowed: binary plists are opt-in via res
   t.assert.deepEqual(classifyNativeCapture('Info.plist', NOT_WIN), { action: 'code', format: 'xml' })
   // Only a `.plist` counts: other binary bytes are handled by their own rules.
   t.assert.equal(isBinaryPlist('logo.png', binary), false)
-  // Carrying one is opt-in: an automated walk never sweeps an opaque binary in unasked.
-  t.assert.equal(nativeBinaryPlistAllowed(new Set(['plist'])), true)
-  t.assert.equal(nativeBinaryPlistAllowed(new Set(['png'])), false)
-  t.assert.equal(nativeBinaryPlistAllowed(new Set()), false)
+  // Needs the bytes: a name alone can't tell a binary plist from a text one.
+  t.assert.equal(isBinaryPlist('Info.plist', undefined), false)
 })
 
 test('classifyNativeCapture: TypeScript source (.ts/.tsx/.d.ts) is skipped -- Metro owns the JS graph', (t) => {
