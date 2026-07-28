@@ -9,6 +9,7 @@
     "./github": "./src/github/index.js"
   },
   "files": [
+    "src/archive.js",
     "src/github/index.js",
     "src/npm/index.js",
     "src/npm/semver.cjs",
