@@ -11,7 +11,7 @@ import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, objectToMaps, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -987,11 +987,14 @@ export class State {
   //  - null (.js/.ts/.jsx/.tsx) -> code with NO format imposed (loader stays authoritative).
   //  - undefined (not code) -> a resource payload IFF allowlisted, else THROW (an undeclared
   //    file would widen the attested set).
+  // A BINARY plist joins that last case: its bytes can't be the UTF-8 code its 'xml' format implies,
+  // so the resources allowlist decides (base64 resource, or the same actionable throw) -- reading one
+  // must not fail the capture on the UTF-8 assert.
   addFsFile(url, source) {
     assert.ok(Buffer.isBuffer(source), 'addFsFile requires a Buffer source')
     const path = fileURLToPath(url)
     const format = classifyFormat(path, { content: source })
-    if (format === undefined) {
+    if (format === undefined || isBinaryPlist(path, source)) {
       if (this.config.resources.has(pathExt(path) || basename(path).toLowerCase())) {
         this.addFile(url, { source, resource: true, fsRead: true })
         return

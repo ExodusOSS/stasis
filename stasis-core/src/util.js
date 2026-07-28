@@ -159,23 +159,18 @@ export function isNativeArtifact(name) {
 // `hermesc` under sdks/), never source or a text asset -- the native capture skips it. Binary ASSETS
 // carry an extension (`.png` -> resource:base64); isNativeArtifact covers the binary EXTENSIONS, and
 // this covers the extensionless compiled tools a full-tree walk would otherwise sweep in as bytes.
-export function isExtensionlessBinary(name, content) {
+function isExtensionlessBinary(name, content) {
   return pathExt(name) === '' && Buffer.isBuffer(content) && !isUtf8(content)
 }
 
 // A BINARY plist (Apple's `bplist00` format): a real build input, but its bytes aren't UTF-8, so it
 // can't ride the code path classifyFormat puts a `.plist` on ('xml', text-only) -- that combination
-// used to fail the capture outright. Detected post-read, by bytes rather than the `bplist00` magic
-// (an encoded-as-binary plist is never valid UTF-8), so the caller can carry it as an opaque
-// base64 resource instead. Gated on the `resources` allowlist by nativeBinaryPlistAllowed.
+// failed every capture outright. Detected post-read, by bytes rather than the `bplist00` magic (an
+// encoded-as-binary plist is never valid UTF-8). Callers treat one as NOT code, so it reaches their
+// `resources` allowlist gate and is carried as an opaque base64 resource only when `.plist` is
+// declared there -- an opaque binary is opt-in, never swept in by an automated walk.
 export function isBinaryPlist(name, content) {
   return pathExt(name) === 'plist' && Buffer.isBuffer(content) && !isUtf8(content)
-}
-
-// Whether a binary plist may be carried (as a base64 resource): only when `.plist` is explicitly in
-// the resources allowlist -- an opaque binary is opt-in, never swept in by an automated walk.
-export function nativeBinaryPlistAllowed(resources) {
-  return resources instanceof Set && resources.has('plist')
 }
 
 // A CocoaPods podspec manifest, discovered by name (RN scatters them in subdirs `react-native config` misses).
@@ -343,6 +338,21 @@ export function classifyNativeCapture(name, { win32 = process.platform === 'win3
   const format = classifyFormat(name, { content })
   if (format !== undefined) return { action: 'code', format }
   return { action: 'resource' }
+}
+
+// Second half of the native walks' classification: the rules that need the file's BYTES, applied to
+// the { action, format } classifyNativeCapture already derived from its NAME. Split in two so a walk
+// can drop an excluded file (README.md, a `.map`) without reading it at all, then refine once it has
+// the bytes in hand. Both rules demote to 'resource'/'skip', never promote:
+//   - a prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -> skip.
+//   - a BINARY plist can't be the UTF-8 text its 'xml' format implies -> an opaque resource when
+//     `.plist` is declared in `resources`, else skip (an opaque binary is never swept in unasked).
+// A 'resource' result carries no format: the storage layer derives 'resource' vs 'resource:base64'
+// from the bytes, so the base64 encoding needs no special-casing at the call site.
+export function refineNativeCapture(classified, name, content, resources = new Set()) {
+  if (isExtensionlessBinary(name, content)) return { action: 'skip' }
+  if (isBinaryPlist(name, content)) return { action: resources.has('plist') ? 'resource' : 'skip' }
+  return classified // no byte-level rule fires: the name-derived classification stands, shape intact
 }
 
 // Files `pod install` reads while loading podspecs (Ruby helpers a podspec `require`s, package.json
