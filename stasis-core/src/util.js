@@ -155,6 +155,14 @@ export function isNativeArtifact(name) {
   return NATIVE_ARTIFACT_EXTS.has(pathExt(name))
 }
 
+// An extensionless file whose bytes aren't UTF-8 is a compiled binary/tool (e.g. Hermes' prebuilt
+// `hermesc` under sdks/), never source or a text asset -- the native capture skips it. Binary ASSETS
+// carry an extension (`.png` -> resource:base64); isNativeArtifact covers the binary EXTENSIONS, and
+// this covers the extensionless compiled tools a full-tree walk would otherwise sweep in as bytes.
+export function isExtensionlessBinary(name, content) {
+  return pathExt(name) === '' && Buffer.isBuffer(content) && !isUtf8(content)
+}
+
 // A CocoaPods podspec manifest, discovered by name (RN scatters them in subdirs `react-native config` misses).
 export function isPodspec(name) {
   return name.endsWith('.podspec') || name.endsWith('.podspec.json')
@@ -292,13 +300,11 @@ export function isNativeManifest(name) {
   return isPodspec(name) || pathExt(name) === 'rb' || name === 'package.json'
 }
 
-// React Native CORE subdirectories captured IN FULL (native source too) with a metro bundle:
-// build inputs unreachable from the JS graph. A fixed list, project-relative; a missing dir is skipped.
-export const RN_CORE_INCLUDE_DIRS = ['ReactCommon/yoga', 'sdks/hermes-engine', 'scripts']
-
-// Individual react-native CORE files captured with a metro bundle. Named rather than folded into
-// an include DIR because their directory also holds huge prebuilt binaries we must NOT capture.
-export const RN_CORE_INCLUDE_FILES = ['sdks/.hermesversion']
+// react-native CORE build scripts the native-source walk skips (they're `.js`, so the walk defers
+// them to Metro's graph -- but these never enter it: RN's podspecs/Ruby helpers invoke them at
+// pod-install). Force-included as code. Project-relative (rnPath-relative), so react-native's
+// `exports` map can't hide them; a missing file is skipped.
+export const RN_CORE_INCLUDE_FILES = ['sdks/hermes-engine/utils/replace_hermes_version.js']
 
 export function extSetsEqual(a, b) {
   if (a.size !== b.size) return false

@@ -12,8 +12,8 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { findPackageMetadata, normalizeEntries, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_DIRS, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
+import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExtensionlessBinary, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -764,15 +764,12 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     }
     for (const pkgDir of [...pkgDirs].toSorted()) {
       const pkgAbs = join(baseDir, pkgDir)
-      const files = nativeModuleFiles(pkgAbs)
-      // React Native core also contributes vetted native dirs/files (Yoga, hermes-engine podspec, CocoaPods scripts).
-      if (pkgDir.slice(pkgDir.lastIndexOf('node_modules/') + 'node_modules/'.length) === 'react-native') {
-        for (const sub of RN_CORE_INCLUDE_DIRS) walkNativeDir(join(pkgAbs, sub), files)
-        for (const file of RN_CORE_INCLUDE_FILES) {
-          const f = join(pkgAbs, file)
-          if (existsSync(f)) files.push(f)
-        }
-      }
+      // react-native core isn't a Pod (config reports it via reactNativePath, not `dependencies`),
+      // so walk its whole tree for native source (React/, ReactCommon/, ReactAndroid/, ...) the same
+      // way a native dep's ios/android surface is walked; every other dep gets its ios/android + podspecs.
+      const isRnCore = pkgDir.slice(pkgDir.lastIndexOf('node_modules/') + 'node_modules/'.length) === 'react-native'
+      const files = isRnCore ? [] : nativeModuleFiles(pkgAbs)
+      if (isRnCore) walkNativeDir(pkgAbs, files)
       for (const abs of files) {
         const rel = toRel(abs)
         if (sources.has(rel)) continue
@@ -782,6 +779,8 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
         if (action === 'skip') continue
         const buf = readFileSync(abs)
         const utf8 = isUtf8(buf)
+        // A prebuilt compiled tool with no extension (Hermes' `hermesc`) is not source -- skip it.
+        if (isExtensionlessBinary(rel, buf)) continue
         if (action === 'code') {
           if (!utf8) throw new Error(`native source is not valid UTF-8: ${rel}`)
           sources.set(rel, buf.toString('utf8'))
@@ -791,6 +790,22 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           formatsByRel.set(rel, utf8 ? 'resource' : 'resource:base64')
         }
         integrities.set(rel, sha512integrity(buf))
+      }
+      // RN core's `.js` build scripts the classify loop skips (Metro-owned by extension, but never in
+      // the graph): force-include as code so the podspec/Ruby that invokes them at pod-install resolves.
+      if (isRnCore) {
+        for (const file of RN_CORE_INCLUDE_FILES) {
+          const abs = join(pkgAbs, file)
+          if (!existsSync(abs)) continue
+          const rel = toRel(abs)
+          if (sources.has(rel)) continue
+          assertRealPathWithinBase(realBase, baseDir, rel)
+          const buf = readFileSync(abs)
+          if (!isUtf8(buf)) throw new Error(`native source is not valid UTF-8: ${rel}`)
+          sources.set(rel, buf.toString('utf8'))
+          formatsByRel.set(rel, packageType(abs) === 'module' ? 'module' : 'commonjs')
+          integrities.set(rel, sha512integrity(buf))
+        }
       }
     }
   }
