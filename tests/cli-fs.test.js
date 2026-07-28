@@ -1345,6 +1345,73 @@ describe('stasis run --fs (spawned, concurrent)', { concurrency: CONCURRENCY }, 
     t.assert.equal(load.stdout, 'stat:true:X\n')
   }))
 
+  test('run --fs lock=add re-run upgrades a stat-only .js WITHOUT leaving a stale stat:file beside its hash', withTmp(async (t, tmp) => {
+    // Regression: a type-less .js can't be classified on an fs-read (module vs commonjs is the
+    // loader's call), so it records NO format. If run A only STATS it (stat:file) and a SEPARATE
+    // run B fs-READS it, the content upgrade must not leave the lockfile attesting BOTH a hash and a
+    // payload-free stat:file for the same path. The bug: #mergedFormats re-seeded the stat from run
+    // A's lockfile (#lockFormats), and a loader-authoritative .js produced no real format to override
+    // it -- so the lockfile kept stat:file next to a real hash, disagreeing with the bundle (which
+    // drops it). Extension-determinable siblings (.mjs/.json) must still land as their REAL format.
+    writeFileSync(join(tmp, 'src', 'helper.js'), 'export const h = 1\n') // ambiguous: no format on fs-read
+    writeFileSync(join(tmp, 'src', 'mod.mjs'), 'export const m = 2\n')   // .mjs  -> module
+    writeFileSync(join(tmp, 'src', 'data.json'), '{ "k": "v" }\n')       // .json -> json
+    writeFileSync(join(tmp, 'src', 'entry.js'), [
+      "import { lstatSync, readFileSync } from 'node:fs'",
+      "import { join } from 'node:path'",
+      'const d = import.meta.dirname',
+      'const names = ["helper.js", "mod.mjs", "data.json"]',
+      'const isFile = names.map((n) => lstatSync(join(d, n)).isFile()).join(",")', // STAT each (run A + load)
+      'let line = `stat:${isFile}`',
+      'if (process.env.STASIS_TEST_READ) line += ` reads:${names.map((n) => readFileSync(join(d, n), "utf8")).length}`', // run B/load: also READ
+      'console.log(line)',
+      '',
+    ].join('\n'))
+    const bundlePath = join(tmp, 'snapshot.br')
+
+    // Run A: stat only -> both artifacts attest stat:file, no hash/content.
+    const runA = await run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(runA.status, 0, `run A stderr: ${runA.stderr}`)
+    t.assert.equal(runA.stdout, 'stat:true,true,true\n')
+    t.assert.equal(decode(bundlePath).formats['src/helper.js'], 'stat:file')
+    t.assert.equal(JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8')).formats['src/helper.js'], 'stat:file')
+
+    // Run B (separate process, absorbs run A): fs-reads the files -> the stat records upgrade to content.
+    const runB = await run(['run', '--lock=add', '--bundle=add', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
+      { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_READ: '1' } })
+    t.assert.equal(runB.status, 0, `run B stderr: ${runB.stderr}`)
+    t.assert.equal(runB.stdout, 'stat:true,true,true reads:3\n')
+    t.assert.doesNotMatch(runB.stderr, /format flip|capture aborted/, 'the stat->content upgrade must not abort')
+
+    const bundle = decode(bundlePath)
+    const lock = JSON.parse(readFileSync(join(tmp, 'stasis.lock.json'), 'utf-8'))
+
+    // The ambiguous .js: content is now carried, and NEITHER artifact keeps the payload-free stat tag.
+    // The lockfile carries a real hash, so a lingering stat:file would break the payload-free invariant
+    // (and disagree with the bundle, which drops it).
+    t.assert.equal(bundle.sources['.'].files['src/helper.js'], 'export const h = 1\n', 'content upgraded into the bundle')
+    t.assert.equal(bundle.formats['src/helper.js'], undefined, 'no format for a loader-authoritative .js')
+    t.assert.notEqual(lock.formats['src/helper.js'], 'stat:file', 'stale stat:file must not survive beside a hash')
+    t.assert.equal(lock.formats['src/helper.js'], undefined, 'lockfile agrees with the bundle: no format')
+    t.assert.ok(lock.sources['.'].files['src/helper.js'], 'lockfile attests the content hash')
+
+    // Extension-determinable siblings keep their REAL format in BOTH artifacts (never dropped to none).
+    for (const [file, fmt] of [['src/mod.mjs', 'module'], ['src/data.json', 'json']]) {
+      t.assert.equal(bundle.formats[file], fmt, `${file} bundle format`)
+      t.assert.equal(lock.formats[file], fmt, `${file} lockfile format`)
+    }
+
+    // Load (frozen): files gone from disk. lstatSync().isFile() must still answer for helper.js from
+    // its carried content even though it has NO format tag -- stat works on content-present/no-format.
+    rmSync(join(tmp, 'src', 'helper.js'))
+    rmSync(join(tmp, 'src', 'mod.mjs'))
+    rmSync(join(tmp, 'src', 'data.json'))
+    const load = await run(['run', '--lock=frozen', '--bundle=load', `--bundle-file=${bundlePath}`, '--fs=sync', 'src/entry.js'],
+      { cwd: tmp, env: { ...cleanEnv, STASIS_TEST_READ: '1' } })
+    t.assert.equal(load.status, 0, `load stderr: ${load.stderr}`)
+    t.assert.equal(load.stdout, 'stat:true,true,true reads:3\n')
+  }))
+
   test('run --fs=async records stat-only paths via callback lstat and fs.promises.stat', withTmp(async (t, tmp) => {
     mkdirSync(join(tmp, 'src', 'd'))
     writeFileSync(join(tmp, 'src', 'd', 'probe.dat'), 'P')

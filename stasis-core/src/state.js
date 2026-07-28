@@ -1366,6 +1366,19 @@ export class State {
     for (const sidecar of this.#sidecars) {
       for (const [file, format] of sidecar.formats) upsertFormat(merged, file, format)
     }
+    // A 'stat:*' record is payload-free by definition, so it must never survive on a file that now
+    // carries a content hash. The content upgrade (addFile) drops the tag from the live `this.formats`,
+    // but a stat entry re-seeded here from `#lockFormats` (a prior run that only stat'd the path) is
+    // beyond that delete's reach, and a loader-authoritative .js/.ts yields no real format to override
+    // it via the upsert above -- leaving a lockfile that attests both a hash and a payload-free stat for
+    // the same path (and disagreeing with the bundle, whose formats come straight from `this.formats`).
+    // Drop it so the merged view honors the invariant. A determinable format (.mjs/.json/resource/...)
+    // is already on `this.formats` and won the upsert, so only the genuinely-ambiguous .js/.ts (module
+    // vs commonjs is the loader's call) falls through to no format -- matching the bundle, and served at
+    // load by content presence (getFsStat), not by a format tag.
+    for (const [file, format] of merged) {
+      if (isStatFormat(format) && this.hashes.has(file)) merged.delete(file)
+    }
     return merged
   }
 

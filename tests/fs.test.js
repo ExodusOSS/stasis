@@ -297,6 +297,35 @@ test('addFsFile records a type-less .js without a format so the loader stays aut
   t.assert.equal(state.formats.get('lib.js'), 'module')
 }))
 
+test('getFsStat answers isFile from carried content even when NO format is recorded', withProject((t, dir) => {
+  // A loader-authoritative .js fs-read carries bytes but no format (module vs commonjs is the loader's
+  // call). getFsStat must classify it a file by content PRESENCE, not a format tag -- so lstatSync()
+  // .isFile() keeps working at load once the file has left disk.
+  writeFileSync(join(dir, 'lib.js'), 'export const x = 1\n')
+  const url = fileURL(dir, 'lib.js')
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  state.addFsFile(url, Buffer.from('export const x = 1\n'))
+  t.assert.equal(state.formats.get('lib.js'), undefined, 'precondition: no format recorded for a type-less .js')
+  t.assert.equal(state.getFsStat(url), 'file', 'content presence answers isFile without a format')
+}))
+
+test('lockData keeps a payload-free stat:file but drops one superseded by content', withProject((t, dir) => {
+  // #mergedFormats enforces the payload-free invariant at the lockfile boundary: a stat:* must never
+  // sit beside a content hash. A path only stat'd keeps its record; one stat'd then read (a type-less
+  // .js -> no replacement format) has the stale tag dropped rather than attested next to its hash.
+  writeFileSync(join(dir, 'only-stat.js'), 'export const a = 1\n')
+  writeFileSync(join(dir, 'upgraded.js'), 'export const b = 2\n')
+  const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br') })
+  state.addFsStat(fileURL(dir, 'only-stat.js'), 'file')                             // stat-only
+  state.addFsStat(fileURL(dir, 'upgraded.js'), 'file')                              // stat first ...
+  state.addFsFile(fileURL(dir, 'upgraded.js'), Buffer.from('export const b = 2\n')) // ... then content
+  const lock = JSON.parse(state.lockData)
+  t.assert.equal(lock.formats['only-stat.js'], 'stat:file', 'stat-only path keeps its payload-free record')
+  t.assert.equal(lock.sources['.'].files['only-stat.js'], undefined, 'stat-only path carries no hash')
+  t.assert.equal(lock.formats['upgraded.js'], undefined, 'the superseded stat tag is dropped')
+  t.assert.ok(lock.sources['.'].files['upgraded.js'], 'upgraded path carries a real hash')
+}))
+
 test('getFsStat classifies recorded files and directories, undefined otherwise', withProject((t, dir) => {
   const state = new State(dir, { scope: 'full', lock: 'add', bundle: 'add', bundleFile: join(dir, 'b.br'), resources: ['bin', 'txt'] })
   state.addFsFile(fileURL(dir, 'assets', 'message.txt'), Buffer.from('hello\n'))
