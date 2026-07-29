@@ -399,7 +399,7 @@ export class StasisMetro {
       // Node-runnable JS/TS is captured via Metro's graph, not here (action==='skip').
       if (byName.action === 'skip') continue
       const source = realReadFileSync(full)
-      // Byte-level rules (prebuilt binaries, binary plists) -- see refineNativeCapture.
+      // Byte-level rules (prebuilt binaries, a binary plist/patch) -- see refineNativeCapture.
       const { action, format } = refineNativeCapture(byName, ent.name, source, this.#resources)
       if (action === 'skip') continue
       this.#seen.add(full)

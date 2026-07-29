@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 
-import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, refineNativeCapture, stripTypeDeclaration } from '@exodus/stasis-core/util'
+import { classifyNativeCapture, isAppleSliceDir, isBinaryTextInput, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, refineNativeCapture, stripTypeDeclaration } from '@exodus/stasis-core/util'
 
 const NOT_WIN = { win32: false }
 const WIN = { win32: true }
@@ -109,20 +109,26 @@ test('isTypeDeclaration / stripTypeDeclaration: types-only files, and their runt
   t.assert.equal(stripTypeDeclaration('dist/index.js'), 'dist/index.js') // not a declaration -> unchanged
 })
 
-test('isBinaryPlist: a bplist is detected by bytes, so callers can route it off the code path', (t) => {
-  // Apple's `bplist00` format: a real build input whose bytes aren't UTF-8, so it can't ride the
-  // text/code path a `.plist` classifies onto (that combination failed every capture). Each caller
-  // then treats it as NOT code, so its own `resources` allowlist gate decides.
+test('isBinaryTextInput: a UTF-8-only format holding binary bytes is routed off the code path', (t) => {
+  // Two formats classifyFormat assigns by name are stored as UTF-8 text but legitimately turn up
+  // binary: Apple's `bplist00` plist, and a `.patch` whose hunks copy raw bytes out of a non-UTF-8
+  // file. Neither can ride the text/code path its extension classifies onto (that combination failed
+  // every capture), so each caller treats it as NOT code and its own `resources` gate decides.
   const binary = Buffer.concat([Buffer.from('bplist00'), Buffer.from([0xd1, 0xff, 0xfe, 0x00])])
-  t.assert.equal(isBinaryPlist('Info.plist', binary), true)
-  t.assert.equal(isBinaryPlist('ios/PrivacyInfo.plist', binary), true)
-  // A TEXT (XML) plist is unaffected -- it stays on the code path as 'xml'.
-  t.assert.equal(isBinaryPlist('Info.plist', Buffer.from('<?xml version="1.0"?>\n<plist/>\n')), false)
+  t.assert.equal(isBinaryTextInput('Info.plist', binary), true)
+  t.assert.equal(isBinaryTextInput('ios/PrivacyInfo.plist', binary), true)
+  // A patch of a latin-1 source file: valid unified diff framing, non-UTF-8 hunk bytes.
+  const latin1Patch = Buffer.concat([Buffer.from('--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n+// caf'), Buffer.from([0xe9]), Buffer.from('\n')])
+  t.assert.equal(isBinaryTextInput('patches/fix.patch', latin1Patch), true)
+  // TEXT content is unaffected -- both stay on the code path under their own format.
+  t.assert.equal(isBinaryTextInput('Info.plist', Buffer.from('<?xml version="1.0"?>\n<plist/>\n')), false)
+  t.assert.equal(isBinaryTextInput('patches/fix.patch', Buffer.from('--- a/x.c\n+++ b/x.c\n')), false)
   t.assert.deepEqual(classifyNativeCapture('Info.plist', NOT_WIN), { action: 'code', format: 'xml' })
-  // Only a `.plist` counts: other binary bytes are handled by their own rules.
-  t.assert.equal(isBinaryPlist('logo.png', binary), false)
+  t.assert.deepEqual(classifyNativeCapture('patches/fix.patch', NOT_WIN), { action: 'code', format: 'patch' })
+  // Only those extensions count: other binary bytes are handled by their own rules.
+  t.assert.equal(isBinaryTextInput('logo.png', binary), false)
   // Needs the bytes: a name alone can't tell a binary plist from a text one.
-  t.assert.equal(isBinaryPlist('Info.plist', undefined), false)
+  t.assert.equal(isBinaryTextInput('Info.plist', undefined), false)
 })
 
 test('refineNativeCapture: the byte-level half both native walks share', (t) => {
@@ -140,6 +146,12 @@ test('refineNativeCapture: the byte-level half both native walks share', (t) => 
   t.assert.deepEqual(refineNativeCapture(code, 'Info.plist', bplist), { action: 'skip' }, 'no allowlist -> skip')
   // A TEXT plist is untouched: still code, still tagged xml.
   t.assert.deepEqual(refineNativeCapture(code, 'Info.plist', Buffer.from('<plist/>\n'), new Set(['plist'])), code)
+  // Same rule for the other UTF-8-only format: a non-UTF-8 `.patch` demotes, a text one stays code.
+  const patch = { action: 'code', format: 'patch' }
+  const binaryPatch = Buffer.concat([Buffer.from('--- a/x.c\n+++ b/x.c\n+'), Buffer.from([0xe9]), Buffer.from('\n')])
+  t.assert.deepEqual(refineNativeCapture(patch, 'fix.patch', binaryPatch, new Set(['patch'])), { action: 'resource' })
+  t.assert.deepEqual(refineNativeCapture(patch, 'fix.patch', binaryPatch), { action: 'skip' }, 'no allowlist -> skip')
+  t.assert.deepEqual(refineNativeCapture(patch, 'fix.patch', Buffer.from('--- a/x.c\n+++ b/x.c\n')), patch)
   // Neither rule fires -> the name-derived classification passes through verbatim.
   t.assert.deepEqual(refineNativeCapture({ action: 'code', format: 'c-header' }, 'RNThing.h', text),
     { action: 'code', format: 'c-header' })

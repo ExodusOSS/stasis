@@ -23,6 +23,10 @@ export const KNOWN_FORMATS = new Set([
   ...SOURCE_LANGUAGE_FORMATS,
   ...NATIVE_BUILD_FORMATS,
   ...RESOURCE_FORMATS,
+  // A unified diff (`.patch`) applied by a patch step -- pnpm `patchedDependencies`, patch-package, a
+  // build script. Its own family: a UTF-8 text build input, but no language's source and not the
+  // opaque byte blob 'resource' would make it.
+  'patch',
   'directory',
   ...STAT_FORMATS,
 ])
@@ -142,10 +146,13 @@ function isExtensionlessBinary(name, content) {
   return pathExt(name) === '' && Buffer.isBuffer(content) && !isUtf8(content)
 }
 
-// A binary plist is a real build input, but its bytes can't ride the text-only 'xml' format
-// classifyFormat gives a `.plist`. Callers treat it as NOT code, so it needs `.plist` in `resources`.
-export function isBinaryPlist(name, content) {
-  return pathExt(name) === 'plist' && Buffer.isBuffer(content) && !isUtf8(content)
+// Extensions classifyFormat maps to a TEXT format (stored as a UTF-8 string) whose bytes still turn up
+// binary in the wild: an Apple binary plist, and a `.patch` whose hunks copy raw bytes out of a
+// non-UTF-8 file. That combination fails every capture, so callers treat these as NOT code -- they fall
+// through to the resource path, and carrying one needs its extension in `resources`.
+const UTF8_ONLY_EXTS = new Set(['plist', 'patch'])
+export function isBinaryTextInput(name, content) {
+  return UTF8_ONLY_EXTS.has(pathExt(name)) && Buffer.isBuffer(content) && !isUtf8(content)
 }
 
 // Discovered by name: RN scatters podspecs in subdirs `react-native config` misses.
@@ -159,6 +166,7 @@ const CODE_EXT_FORMATS = new Map([
   ['php', 'php'],
   ['sh', 'shell'], ['bash', 'shell'],
   ['rs', 'rust'],
+  ['patch', 'patch'],
   ['java', 'java'],
   ['kt', 'kotlin'],
   ['kts', 'kotlin'],
@@ -294,7 +302,9 @@ export function classifyNativeCapture(name, { win32 = process.platform === 'win3
 // NAME. Both rules only ever demote. A 'resource' carries no format: storage derives base64 from bytes.
 export function refineNativeCapture(classified, name, content, resources = new Set()) {
   if (isExtensionlessBinary(name, content)) return { action: 'skip' }
-  if (isBinaryPlist(name, content)) return { action: resources.has('plist') ? 'resource' : 'skip' }
+  if (isBinaryTextInput(name, content)) {
+    return { action: resources.has(pathExt(name)) ? 'resource' : 'skip' }
+  }
   return classified
 }
 

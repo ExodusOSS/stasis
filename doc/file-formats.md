@@ -147,7 +147,8 @@ attested.
   `commonjs-typescript`); source-language (`solidity`, `php`, `shell`, `rust`);
   native build-input (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `swift`, `c`,
   `cpp`, `c-header`, `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`,
-  `podfile-lock`, `template`, `xml`, `env`, `fastlane`, `pbxproj`); `resource`
+  `podfile-lock`, `template`, `xml`, `env`, `fastlane`, `pbxproj`); `patch` (a
+  `.patch` unified diff, see below); `resource`
   (raw UTF-8) / `resource:base64` (binary); and the filesystem-capture tags
   `directory`, `stat:file`, `stat:directory` (see "Filesystem captures"). Native
   tags come from the Metro native capture and aren't runnable by Node; `pbxproj`
@@ -289,6 +290,30 @@ What counts as a fatal unresolved reference differs by language:
 | Rust | every unconditional `mod foo;` | `#[cfg(...)]`-gated `mod`, all `use crate::` edges |
 
 A missing entry is always fatal.
+
+## Patch files (`patch`)
+
+A `.patch` file — a unified diff applied by a patch step (pnpm
+`patchedDependencies`, `patch-package`, a podspec or build script that shells out
+to `git apply`) — carries the format `patch`. It is a build input in its own
+right, not the file it patches, and it is stored as **raw UTF-8 text** like every
+other non-`resource:base64` payload, so `stasis diff` shows a changed patch as a
+text diff and `stasis extract` writes it back byte-for-byte.
+
+`patch` is recorded wherever a name-based classification runs: `stasis add`
+(no `resources` entry needed), an `fs.readFileSync` capture under `--fs`, and the
+Metro native capture / `stasis bundle --metro` native walk. The JS-graph bundler
+plugins are unchanged — a `.patch` pulled in as a bundler *asset* is still a
+`resource`, like a `.sh` or a `.plist`.
+
+Because the payload is a UTF-8 string, a patch whose hunks copy raw bytes out of a
+non-UTF-8 file cannot ride the format. Such a file is treated as **not code** and
+falls through to the resource path — carried as `resource:base64` when `patch` is
+in the `resources` allowlist, and refused otherwise rather than aborting the
+capture. This is the same rule a binary `.plist` follows.
+
+`patch` is not a Node loader format: importing one under
+`stasis run --bundle=load` is refused, as with every non-executable format.
 
 ## Resources in the bundle
 

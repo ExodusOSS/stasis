@@ -119,6 +119,24 @@ test('addFsFile follows the full classifyFormat vocabulary: a native/source file
   t.assert.equal(state.formats.get('AndroidManifest.xml'), 'xml')
   t.assert.equal(state.sources.get('Native.swift'), 'import Foundation\n')
   t.assert.equal(state.resources.has('Native.swift'), false, 'a code file is never a resource')
+
+  // A `.patch` is in that vocabulary too: a build tool reading one (pnpm/patch-package) captures it
+  // as 'patch' code, stored raw as UTF-8.
+  const diff = '--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-const x = 1\n+const x = 2\n'
+  writeFileSync(join(dir, 'fix.patch'), diff)
+  state.addFsFile(fileURL(dir, 'fix.patch'), Buffer.from(diff))
+  t.assert.equal(state.formats.get('fix.patch'), 'patch')
+  t.assert.equal(state.sources.get('fix.patch'), diff)
+  t.assert.equal(state.resources.has('fix.patch'), false)
+
+  // ...but a patch carrying non-UTF-8 hunk bytes can't be that string: it falls to the resource gate,
+  // which throws here because nothing is allowlisted (fail-closed, as for a binary plist).
+  const binaryPatch = Buffer.concat([Buffer.from('--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n+// caf'), Buffer.from([0xe9]), Buffer.from('\n')])
+  writeFileSync(join(dir, 'latin1.patch'), binaryPatch)
+  t.assert.throws(
+    () => state.addFsFile(fileURL(dir, 'latin1.patch'), binaryPatch),
+    /neither code nor a declared resource/
+  )
 }))
 
 test('addFsFile recognizes an extensionless shell shebang as shell code (content-based)', withProject((t, dir) => {
