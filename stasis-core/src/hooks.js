@@ -41,6 +41,12 @@ function refuseNonNodeFormat(format, url) {
       `executable JavaScript. Read it with fs (or your bundler's asset loader) instead (${url})`
     )
   }
+  if (format === 'patch') {
+    throw new Error(
+      `[stasis] cannot execute a 'patch' file: a unified diff is applied by a patch step ` +
+      `(pnpm patchedDependencies, patch-package, a build script), not run by Node (${url})`
+    )
+  }
   if (format === 'directory') {
     throw new Error(
       `[stasis] cannot import a directory listing ('directory'): a captured ` +

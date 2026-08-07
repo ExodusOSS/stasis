@@ -119,6 +119,15 @@ test('addFsFile follows the full classifyFormat vocabulary: a native/source file
   t.assert.equal(state.formats.get('AndroidManifest.xml'), 'xml')
   t.assert.equal(state.sources.get('Native.swift'), 'import Foundation\n')
   t.assert.equal(state.resources.has('Native.swift'), false, 'a code file is never a resource')
+
+  // A `.patch` is in that vocabulary too: a build tool reading one (pnpm/patch-package) captures it
+  // as 'patch' code, stored raw as UTF-8 (non-UTF-8 bytes fail closed like any other source file).
+  const diff = '--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-const x = 1\n+const x = 2\n'
+  writeFileSync(join(dir, 'fix.patch'), diff)
+  state.addFsFile(fileURL(dir, 'fix.patch'), Buffer.from(diff))
+  t.assert.equal(state.formats.get('fix.patch'), 'patch')
+  t.assert.equal(state.sources.get('fix.patch'), diff)
+  t.assert.equal(state.resources.has('fix.patch'), false)
 }))
 
 test('addFsFile recognizes an extensionless shell shebang as shell code (content-based)', withProject((t, dir) => {

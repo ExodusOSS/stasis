@@ -177,6 +177,24 @@ test('addCommand rejects a BINARY plist that is not declared in resources, with 
   t.assert.throws(() => addCommand({ cwd: tmp, entries: ['Binary.plist'] }), /neither a recognized source file nor a declared resource/u)
 }))
 
+test('addCommand records a .patch unified diff as `patch` code, stored raw as UTF-8', withTmp(async (t, tmp) => {
+  // A unified diff (pnpm patchedDependencies, patch-package) is a text build input in its own right,
+  // so it is CODE tagged 'patch' -- stored raw, no `resources` entry needed.
+  const diff = '--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-const x = 1\n+const x = 2\n'
+  seed(tmp, { bundleFile: 'dist/code.br' })
+  mkdirSync(join(tmp, 'patches'), { recursive: true })
+  writeFileSync(join(tmp, 'patches', 'dep@1.0.0.patch'), diff)
+  addCommand({ cwd: tmp, entries: ['patches/dep@1.0.0.patch'] })
+
+  const code = decode(join(tmp, 'dist/code.br'))
+  t.assert.equal(code.formats.get('patches/dep@1.0.0.patch'), 'patch')
+  t.assert.equal(code.modules.get('.').files['patches/dep@1.0.0.patch'], diff, 'stored raw as UTF-8, not base64')
+
+  // A patch is UTF-8 text by definition here: non-UTF-8 bytes fail closed like any other source file.
+  writeFileSync(join(tmp, 'patches', 'latin1.patch'), Buffer.concat([Buffer.from('+// caf'), Buffer.from([0xe9]), Buffer.from('\n')]))
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['patches/latin1.patch'] }), /not valid UTF-8 \(format 'patch'\)/u)
+}))
+
 test('addCommand still captures an explicitly-listed .env (manual add is a deliberate choice)', withTmp(async (t, tmp) => {
   // Automated capture skips the whole env family, but an explicit `stasis add` is the user opting
   // in -- basename AND extension family must still be recorded as 'env' code (classifyFormat keeps

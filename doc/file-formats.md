@@ -147,7 +147,9 @@ attested.
   `commonjs-typescript`); source-language (`solidity`, `php`, `shell`, `rust`);
   native build-input (`java`, `kotlin`, `gradle`, `objc`, `objcpp`, `swift`, `c`,
   `cpp`, `c-header`, `cpp-header`, `ruby`, `cmake`, `podspec`, `podfile`,
-  `podfile-lock`, `template`, `xml`, `env`, `fastlane`, `pbxproj`); `resource`
+  `podfile-lock`, `template`, `xml`, `env`, `fastlane`, `pbxproj`); `patch` (a
+  `.patch` unified diff — e.g. pnpm `patchedDependencies`, patch-package — a
+  UTF-8 text build input applied by a patch step, not runnable by Node); `resource`
   (raw UTF-8) / `resource:base64` (binary); and the filesystem-capture tags
   `directory`, `stat:file`, `stat:directory` (see "Filesystem captures"). Native
   tags come from the Metro native capture and aren't runnable by Node; `pbxproj`

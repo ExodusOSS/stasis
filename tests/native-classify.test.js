@@ -66,6 +66,8 @@ test('classifyNativeCapture: excluded files skip; a .bat is win32-conditional', 
   t.assert.deepEqual(classifyNativeCapture('ReactABI.cmake.in', NOT_WIN), { action: 'code', format: 'cmake' })
   // ...but only `.cmake.in`, NOT a bare `.in`: a config.h.in isn't cmake (stays a resource).
   t.assert.deepEqual(classifyNativeCapture('config.h.in', NOT_WIN), { action: 'resource' })
+  // A `.patch` unified diff (pnpm patchedDependencies, patch-package) is 'patch' code.
+  t.assert.deepEqual(classifyNativeCapture('patches/dep@1.0.0.patch', NOT_WIN), { action: 'code', format: 'patch' })
 })
 
 test('isAppleSliceDir: per-arch prebuilt slice dirs are matched; real source dirs are not', (t) => {

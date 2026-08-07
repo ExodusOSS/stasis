@@ -23,6 +23,7 @@ export const KNOWN_FORMATS = new Set([
   ...SOURCE_LANGUAGE_FORMATS,
   ...NATIVE_BUILD_FORMATS,
   ...RESOURCE_FORMATS,
+  'patch', // a `.patch` unified diff (pnpm patchedDependencies, patch-package): UTF-8 text applied by a patch step
   'directory',
   ...STAT_FORMATS,
 ])
@@ -159,6 +160,7 @@ const CODE_EXT_FORMATS = new Map([
   ['php', 'php'],
   ['sh', 'shell'], ['bash', 'shell'],
   ['rs', 'rust'],
+  ['patch', 'patch'],
   ['java', 'java'],
   ['kt', 'kotlin'],
   ['kts', 'kotlin'],
