@@ -125,7 +125,7 @@ function prepareBundleFile(baseDir, targetPath, bundle, brotliQuality) {
       mkdirSync(dirname(abs), { recursive: true })
       writeFileSync(abs, brotliCompressSync(bundle.serialize(), brotliOptions(brotliQuality)))
     },
-    summary: { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom },
+    counts: { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom },
   }
 }
 
@@ -152,18 +152,19 @@ function prepareLockfile(lockPath, lockAdd) {
   const before = tally(existing).files
   const merged = existing.merge(lockAdd)
   const total = tally(merged).files
-  return { write: () => writeFileSync(lockPath, merged.serialize()), summary: { total, added: total - before } }
+  return { write: () => writeFileSync(lockPath, merged.serialize()), counts: { total, added: total - before } }
 }
 
 // GLOB + FILTER: expand each directory entry into the files under it (recursive glob), dropping the
 // auto-excluded set from what a sweep FINDS -- dir rules on the segments BELOW the named root (`add
 // src/examples` sweeps the dir it was pointed at, `add src` skips one it merely found), file rules
-// via `dropSwept`. A path the caller NAMED is always kept (naming is the override; a missing one
-// keeps stats undefined so validation reports it), and inclusion is monotone: a nearer root's sweep
-// can only ever see FEWER excluded segments, so a path any entry keeps stays kept -- `add src
-// src/examples` includes the subtree it names in either order. `stats` is the walk's own stat,
-// reused by validation. Gotcha: `**/*` skips dotfiles (.env, .git/...) -- name them explicitly.
-function expandDirectories(baseDir, rels, dropSwept) {
+// by name plus the caller's `outputs` (this run's own write targets). A path the caller NAMED is
+// always kept (naming is the override; a missing one keeps stats undefined so validation reports
+// it), and inclusion is monotone: a nearer root's sweep can only ever see FEWER excluded segments,
+// so a path any entry keeps stays kept -- `add src src/examples` includes the subtree it names in
+// either order. `stats` is the walk's own stat, reused by validation. Gotcha: `**/*` skips dotfiles
+// (.env, .git/...) -- name them explicitly.
+function expandDirectories(baseDir, rels, outputs) {
   const files = new Map() // rel -> stats
   const excluded = new Set()
   for (const rel of rels) {
@@ -180,31 +181,34 @@ function expandDirectories(baseDir, rels, dropSwept) {
       const fileStats = statSync(fileAbs, { throwIfNoEntry: false })
       if (fileStats?.isFile()) found.push([toPosix(relative(baseDir, fileAbs)), match, fileStats])
     }
-    // Sorted, so neither the packed order nor any message derived from it depends on readdir order.
+    // Sorted because serialize() emits `reason` in insertion order (everything else it re-sorts):
+    // without this, the attested bundle's BYTES would depend on readdir order.
     for (const [file, match, fileStats] of found.toSorted(([a], [b]) => sortPaths(a, b))) {
-      if (files.has(file)) continue
-      if (match.split(/[\\/]/u).slice(0, -1).some(isAutoExcludedDir) || dropSwept(file)) excluded.add(file)
+      if (toPosix(match).split('/').slice(0, -1).some(isAutoExcludedDir)
+        || outputs.has(file) || isAutoExcludedFile(file)) excluded.add(file)
       else files.set(file, fileStats)
     }
   }
-  for (const file of files.keys()) excluded.delete(file) // a kept path can't also count as skipped
+  // A path any entry kept can't count as skipped -- another root's sweep may have re-flagged it.
+  for (const file of files.keys()) excluded.delete(file)
   return { files, excluded }
 }
+
+const listPaths = (rels) => [...rels].toSorted(sortPaths).join(', ')
 
 // One error for every file validation rejected, so a directory sweep names all of them at once
 // instead of one per re-run. A lone offender keeps its exact standalone message.
 function validationError({ missing, undeclared, nonUtf8 }) {
   // `one`/`many` per category; empty categories contribute nothing.
   const phrase = (items, one, many) => (items.length === 1 ? [one(items[0])] : items.length > 1 ? [many(items)] : [])
-  const list = (rels) => rels.toSorted(sortPaths).join(', ')
   const named = ({ rel, format }) => `${rel} (format '${format}')`
   const parts = [
     ...phrase(missing,
       (rel) => `file not found: ${rel}`,
-      (rels) => `${rels.length} files not found: ${list(rels)}`),
+      (rels) => `${rels.length} files not found: ${listPaths(rels)}`),
     ...phrase(undeclared,
       (rel) => `${rel} is neither a recognized source file nor a declared resource; add its extension to "resources" in ${CONFIG_FILE}`,
-      (rels) => `${rels.length} files are neither recognized source files nor declared resources; add their extensions to "resources" in ${CONFIG_FILE}: ${list(rels)}`),
+      (rels) => `${rels.length} files are neither recognized source files nor declared resources; add their extensions to "resources" in ${CONFIG_FILE}: ${listPaths(rels)}`),
     ...phrase(nonUtf8,
       ({ rel, format }) => `${rel} is not valid UTF-8 (format '${format}')`,
       (bad) => `${bad.length} files are not valid UTF-8: ${bad.map(named).join(', ')}`),
@@ -280,11 +284,10 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     .map((file) => toPosix(relative(baseDir, resolve(baseDir, file)))))
 
   // `excluded` is counted in the summary below rather than dropped silently.
-  const dropSwept = (rel) => outputs.has(rel) || isAutoExcludedFile(rel)
-  const { files, excluded } = expandDirectories(baseDir, normalizeEntries(entries, cwd), dropSwept)
+  const { files, excluded } = expandDirectories(baseDir, normalizeEntries(entries, cwd), outputs)
   if (files.size === 0) {
     throw new Error(`add: no files to add (directory entries matched ${excluded.size === 0
-      ? 'nothing' : `only auto-excluded files: ${[...excluded].toSorted(sortPaths).join(', ')}`})`)
+      ? 'nothing' : `only auto-excluded files: ${listPaths(excluded)}`})`)
   }
 
   const { codeFiles, resourceFiles, integrities } = validateFiles({ baseDir, realBase, files, resources, withIntegrity: hasLock })
@@ -294,9 +297,9 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   const writes = []
   const planTarget = (target, entriesForTarget, kind) => {
     if (entriesForTarget.size === 0) return
-    const { write, summary: r } = prepareBundleFile(baseDir, target, assembleBundle(baseDir, entriesForTarget, workspaceName, workspaceVersion), brotliQuality)
+    const { write, counts } = prepareBundleFile(baseDir, target, assembleBundle(baseDir, entriesForTarget, workspaceName, workspaceVersion), brotliQuality)
     writes.push(write)
-    summary.push(`+${r.added} ${kind} (${r.total} total) -> ${r.path}`)
+    summary.push(`+${counts.added} ${kind} (${counts.total} total) -> ${counts.path}`)
   }
   if (resourcesBundleFile) {
     planTarget(bundleFile, codeFiles, 'source')
@@ -311,9 +314,9 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   if (hasLock) {
     const allFiles = new Map([...codeFiles, ...resourceFiles])
     const lockAdd = bundleToLockfile(assembleBundle(baseDir, allFiles, workspaceName, workspaceVersion), integrities)
-    const { write, summary: r } = prepareLockfile(lockPath, lockAdd)
+    const { write, counts } = prepareLockfile(lockPath, lockAdd)
     writes.push(write)
-    summary.push(`+${r.added} (${r.total} total) -> ${LOCK_FILE}`)
+    summary.push(`+${counts.added} (${counts.total} total) -> ${LOCK_FILE}`)
   }
   if (excluded.size > 0) summary.push(`skipped ${excluded.size} auto-excluded`)
 

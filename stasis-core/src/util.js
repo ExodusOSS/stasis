@@ -266,16 +266,23 @@ export function isStasisArtifactName(name) {
 }
 
 // Dirs no walk descends into: VCS/CI/IDE metadata, sample apps, test scaffolding -- none of it is the
-// code being shipped -- plus the Apple prebuilt slice dirs. Matched by NAME at any depth, so every
-// walk agrees on what "not source" means; each adds its own build-output dirs (`build`, `Pods`, ...).
+// code being shipped -- plus the Apple prebuilt slice dirs. `name` is a BARE dir name (a dirent name
+// or path segment), matched at any depth, so every walk agrees on what "not source" means.
 const AUTO_EXCLUDED_DIRS = new Set([
   '.git', '.github', '.settings', // VCS / CI / IDE metadata
   'example', 'examples', // sample apps -- they import the package, they aren't it
   '__tests__', '__mocks__', 'jest', // test scaffolding
 ])
 export function isAutoExcludedDir(name) {
-  const base = basename(name).toLowerCase()
+  const base = name.toLowerCase()
   return AUTO_EXCLUDED_DIRS.has(base) || isAppleSliceDir(base)
+}
+
+// Dirs the NATIVE walks (Metro plugin + the static --metro bundler) skip, on top of the shared set:
+// nested packages (attested separately) and regenerated build output -- none is a build input.
+const NATIVE_BUILD_OUTPUT_DIRS = new Set(['node_modules', 'build', '.gradle', '.cxx', 'Pods', 'DerivedData'])
+export function isSkippedNativeWalkDir(name) {
+  return NATIVE_BUILD_OUTPUT_DIRS.has(name) || isAutoExcludedDir(name) || isNativeArtifact(name)
 }
 
 // Files a sweep drops: type declarations (types only, erased at runtime), the `.env` family (secrets),

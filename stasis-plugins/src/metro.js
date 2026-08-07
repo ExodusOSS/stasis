@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { resolvePluginState } from './plugins.js'
 import { State } from '@exodus/stasis-core/state'
 import { realReadFileSync, realReaddirSync } from '@exodus/stasis-core/state-util'
-import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isAutoExcludedDir, isExcludedNativeDir, isNativeArtifact, isPodspec, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, classifyExtension, classifyFormat, classifyNativeCapture, isExcludedNativeDir, isNativeArtifact, isPodspec, isSkippedNativeWalkDir, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 
 const require = createRequire(import.meta.url)
 
@@ -27,12 +27,6 @@ const AUTO_INCLUDES = [
   'metro-runtime/src/modules/asyncRequire.js',
   '@react-native-community/cli/setup_env.sh',
 ]
-
-// Subtrees skipped (by basename, any depth) when walking a native dep's build-input surface, ON TOP
-// of the shared isAutoExcludedDir set (metadata, demo apps, test scaffolding, Apple slice dirs):
-// nested packages, attested separately, and regenerated build output. None contribute to the build.
-const NATIVE_WALK_SKIP_DIRS = new Set(['node_modules', 'build', '.gradle', '.cxx', 'Pods', 'DerivedData'])
-const skipNativeWalkDir = (name) => NATIVE_WALK_SKIP_DIRS.has(name) || isAutoExcludedDir(name) || isNativeArtifact(name)
 
 // The worker-side toolchain that only Metro's transform workers load, named in both the
 // --child-process assert and the transform-cache warning so the two can't describe different sets.
@@ -283,7 +277,7 @@ export class StasisMetro {
   }
 
   // Attest each native dependency's build-input surface. Discovery is `react-native config`; each
-  // dep root is walked (NATIVE_WALK_SKIP_DIRS pruned) and its native sources are attested as code,
+  // dep root is walked (isSkippedNativeWalkDir pruned) and its native sources are attested as code,
   // other assets as resources, plus each package.json. Node-runnable JS/TS is skipped (already in
   // Metro's graph). Skipped when the RN CLI is absent or a root is outside root.
   #captureNativeModules() {
@@ -363,7 +357,7 @@ export class StasisMetro {
       if (ent.isSymbolicLink()) continue
       if (ent.isFile()) {
         if (isPodspec(ent.name)) return true
-      } else if (ent.isDirectory() && !skipNativeWalkDir(ent.name)) {
+      } else if (ent.isDirectory() && !isSkippedNativeWalkDir(ent.name)) {
         if (this.#hasPodspec(join(dir, ent.name))) return true
       }
     }
@@ -385,7 +379,7 @@ export class StasisMetro {
       if (ent.isDirectory()) {
         // Skip build-output subtrees, Apple binary bundles + their loose per-arch slice dirs, and an
         // off-platform toplevel dir.
-        if (!skipNativeWalkDir(ent.name) && !(atRoot && isExcludedNativeDir(ent.name))) this.#captureNativeTree(full)
+        if (!isSkippedNativeWalkDir(ent.name) && !(atRoot && isExcludedNativeDir(ent.name))) this.#captureNativeTree(full)
         continue
       }
       if (!ent.isFile()) continue // sockets/FIFOs/etc. -- no attestable bytes
