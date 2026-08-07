@@ -81,7 +81,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 
 ## Runtime
 
-The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run`, `prune`, and `add` commands only; the bundler plugins live in [`@exodus/stasis-plugins`](../stasis-plugins).
+The zero-dependency [`@exodus/stasis-core`](../stasis-core) CLI provides `run`, `prune`, and `add` commands only; the bundler plugins live in [`@exodus/stasis-plugins`](../stasis-plugins), and the npm client that `audit` builds on — alongside a GitHub releases client — lives in [`@exodus/stasis-api`](../stasis-api).
 
 ## License
 

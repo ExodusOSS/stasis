@@ -22,8 +22,6 @@
   "files": [
     "bin/stasis.js",
     "logo.svg",
-    "src/apis/npm/index.js",
-    "src/apis/npm/semver.cjs",
     "src/audit.js",
     "src/babel.js",
     "src/babel-worker.cjs",
@@ -70,6 +68,7 @@
   },
   "homepage": "https://github.com/ExodusOSS/stasis#readme",
   "dependencies": {
+    "@exodus/stasis-api": "1.0.0-beta.2",
     "@exodus/stasis-core": "1.0.0-beta.2",
     "@exodus/stasis-plugins": "1.0.0-beta.2",
     "oxc-parser": "^0.94.0"

@@ -1,4 +1,4 @@
-import semver from './apis/npm/semver.cjs'
+import semver from '@exodus/stasis-api/npm/semver'
 import pkg from '../package.json' with { type: 'json' }
 
 // Derive an SPDX 2.3 or CycloneDX 1.5 SBOM from already-parsed stasis artifacts (`Bundle`/`Lockfile`).

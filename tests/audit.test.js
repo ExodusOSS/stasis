@@ -9,6 +9,8 @@ import { stripVTControlCharacters } from 'node:util'
 
 import { audit, collectPackages, collectPackagesFromFile, collectReasons, flattenAdvisories, formatTable, printAuditReport } from '../stasis/src/audit.js'
 
+import { json, withFetch } from './fetch.helper.js'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
 
@@ -273,7 +275,7 @@ test('collectPackagesFromFile wraps brotli-valid but JSON-corrupt bundles', with
 
 test('collectPackagesFromFile accepts a bundle carrying only resources', withTmp((t, tmp) => {
   const file = join(tmp, 'resources.br')
-  const json = {
+  const bundle = {
     version: 1,
     config: { scope: 'full' },
     sources: {
@@ -286,7 +288,7 @@ test('collectPackagesFromFile accepts a bundle carrying only resources', withTmp
     formats: { 'a.bin': 'resource:base64', 'node_modules/lib/b.bin': 'resource:base64' },
     imports: {},
   }
-  writeFileSync(file, brotliCompressSync(Buffer.from(JSON.stringify(json))))
+  writeFileSync(file, brotliCompressSync(Buffer.from(JSON.stringify(bundle))))
   t.assert.deepEqual(collectPackagesFromFile(file), [{ name: 'lib', version: '3.2.1' }])
 }))
 
@@ -602,24 +604,10 @@ test('audit --reason consumes its value (space form) then reports no files', (t)
   t.assert.match(r.stderr, /Nothing to audit/)
 })
 
-const withFetch = (impl, fn) => async (t) => {
-  const original = globalThis.fetch
-  const calls = []
-  globalThis.fetch = async (url, opts) => {
-    calls.push({ url, opts })
-    return impl({ url, opts })
-  }
-  try {
-    return await fn(t, calls)
-  } finally {
-    globalThis.fetch = original
-  }
-}
-
 test('audit() POSTs grouped versions to the npm bulk endpoint and joins rows', withFetch(
-  () => new Response(JSON.stringify({
+  () => json({
     foo: [{ id: 1, severity: 'high', title: 'bug', url: 'https://x', vulnerable_versions: '<2' }],
-  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }),
   async (t, calls) => {
     const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
     try {
@@ -640,9 +628,9 @@ test('audit() POSTs grouped versions to the npm bulk endpoint and joins rows', w
 ))
 
 test('audit() collects from a brotli bundle and POSTs its node_modules versions', withFetch(
-  () => new Response(JSON.stringify({
+  () => json({
     foo: [{ id: 1, severity: 'critical', title: 'bug', url: 'https://x', vulnerable_versions: '<3' }],
-  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }),
   async (t, calls) => {
     const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
     try {
@@ -663,9 +651,9 @@ test('audit() collects from a brotli bundle and POSTs its node_modules versions'
 ))
 
 test('audit() attaches bundle reasons to advisory rows', withFetch(
-  () => new Response(JSON.stringify({
+  () => json({
     foo: [{ id: 1, severity: 'critical', title: 'bug', url: 'https://x', vulnerable_versions: '<3' }],
-  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }),
   async (t) => {
     const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
     try {
@@ -685,9 +673,9 @@ test('audit() attaches bundle reasons to advisory rows', withFetch(
 ))
 
 test('audit(--why) replaces the reason cell with per-consumer import paths', withFetch(
-  () => new Response(JSON.stringify({
+  () => json({
     foo: [{ id: 1, severity: 'high', title: 'bug', url: 'https://x', vulnerable_versions: '*' }],
-  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }),
   async (t) => {
     const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
     try {
@@ -734,9 +722,9 @@ test('audit(--why) replaces the reason cell with per-consumer import paths', wit
 ))
 
 test('audit(--why-deep) implies --why and keeps chains the default prunes', withFetch(
-  () => new Response(JSON.stringify({
+  () => json({
     foo: [{ id: 1, severity: 'high', title: 'bug', url: 'https://x', vulnerable_versions: '*' }],
-  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }),
   async (t) => {
     const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
     try {
