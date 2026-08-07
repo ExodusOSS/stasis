@@ -12,7 +12,7 @@ import { Lockfile } from './lockfile.js'
 import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryTextInput, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -935,14 +935,14 @@ export class State {
   }
 
   // Record an `fs.readFileSync` capture (--fs). classifyFormat routes the bytes: a concrete format
-  // is code, null defers to the loader, and undefined (or a binary plist / non-UTF-8 `.patch`, whose
-  // bytes can't be the UTF-8 code its format implies) is a resource IFF allowlisted, else THROW -- an
-  // undeclared file would widen the attested set.
+  // is code, null defers to the loader, and undefined (or a binary plist, whose bytes can't be the
+  // UTF-8 code its format implies) is a resource IFF allowlisted, else THROW -- an undeclared file
+  // would widen the attested set.
   addFsFile(url, source) {
     assert.ok(Buffer.isBuffer(source), 'addFsFile requires a Buffer source')
     const path = fileURLToPath(url)
     const format = classifyFormat(path, { content: source })
-    if (format === undefined || isBinaryTextInput(path, source)) {
+    if (format === undefined || isBinaryPlist(path, source)) {
       if (this.config.resources.has(pathExt(path) || basename(path).toLowerCase())) {
         this.addFile(url, { source, resource: true, fsRead: true })
         return

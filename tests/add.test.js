@@ -177,24 +177,22 @@ test('addCommand rejects a BINARY plist that is not declared in resources, with 
   t.assert.throws(() => addCommand({ cwd: tmp, entries: ['Binary.plist'] }), /neither a recognized source file nor a declared resource/u)
 }))
 
-test('addCommand records a .patch as UTF-8 `patch` code; a non-UTF-8 one needs `patch` in resources', withTmp(async (t, tmp) => {
-  // A unified diff is a text build input in its own right (pnpm patchedDependencies, patch-package),
-  // so it is CODE tagged 'patch' -- stored raw, no `resources` entry needed. A patch whose hunks copy
-  // raw bytes out of a non-UTF-8 file can't be that UTF-8 string, so it takes the resource path.
+test('addCommand records a .patch unified diff as `patch` code, stored raw as UTF-8', withTmp(async (t, tmp) => {
+  // A unified diff (pnpm patchedDependencies, patch-package) is a text build input in its own right,
+  // so it is CODE tagged 'patch' -- stored raw, no `resources` entry needed.
   const diff = '--- a/index.js\n+++ b/index.js\n@@ -1 +1 @@\n-const x = 1\n+const x = 2\n'
-  seed(tmp, { bundleFile: 'dist/code.br', resourcesBundleFile: 'dist/res.br', resources: ['patch'] })
+  seed(tmp, { bundleFile: 'dist/code.br' })
   mkdirSync(join(tmp, 'patches'), { recursive: true })
   writeFileSync(join(tmp, 'patches', 'dep@1.0.0.patch'), diff)
-  const binaryPatch = Buffer.concat([Buffer.from('--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n+// caf'), Buffer.from([0xe9]), Buffer.from('\n')])
-  writeFileSync(join(tmp, 'patches', 'latin1.patch'), binaryPatch)
-  addCommand({ cwd: tmp, entries: ['patches/dep@1.0.0.patch', 'patches/latin1.patch'] })
+  addCommand({ cwd: tmp, entries: ['patches/dep@1.0.0.patch'] })
 
   const code = decode(join(tmp, 'dist/code.br'))
   t.assert.equal(code.formats.get('patches/dep@1.0.0.patch'), 'patch')
   t.assert.equal(code.modules.get('.').files['patches/dep@1.0.0.patch'], diff, 'stored raw as UTF-8, not base64')
-  const res = decode(join(tmp, 'dist/res.br'))
-  t.assert.equal(res.formats.get('patches/latin1.patch'), 'resource:base64')
-  t.assert.deepEqual(Buffer.from(res.modules.get('.').files['patches/latin1.patch'], 'base64'), binaryPatch)
+
+  // A patch is UTF-8 text by definition here: non-UTF-8 bytes fail closed like any other source file.
+  writeFileSync(join(tmp, 'patches', 'latin1.patch'), Buffer.concat([Buffer.from('+// caf'), Buffer.from([0xe9]), Buffer.from('\n')]))
+  t.assert.throws(() => addCommand({ cwd: tmp, entries: ['patches/latin1.patch'] }), /not valid UTF-8 \(format 'patch'\)/u)
 }))
 
 test('addCommand still captures an explicitly-listed .env (manual add is a deliberate choice)', withTmp(async (t, tmp) => {
