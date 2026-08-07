@@ -9,7 +9,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { realReadFileSync } from './state-util.js'
-import { isDotEnvFile } from './util.js'
+import { isDotEnvFile, isStasisArtifactName } from './util.js'
 
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
@@ -78,14 +78,6 @@ function realContained(root, abs) {
   try { real = realRealpathSync(abs) } catch { return false }
   const rel = relative(realRootOf(root), real)
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-}
-
-// stasis's own outputs in the project root (`stasis.lock.json`, a `*.br` bundle): absent on a first
-// `--bundle=replace` run but present on a later `--bundle=add` one, so recording them in a root
-// listing makes the two runs diverge and the add run's capture conflict.
-function isStasisArtifactName(name) {
-  const base = name.toLowerCase()
-  return base === 'stasis.lock.json' || (base.includes('stasis') && base.endsWith('.br'))
 }
 
 // At the project root, drop stasis's own artifacts from the RECORDED listing so it doesn't depend on

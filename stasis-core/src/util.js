@@ -58,6 +58,9 @@ export function pathExt(filePath) {
   return m ? m[1].toLowerCase() : ''
 }
 
+// A native path as the '/'-joined form every artifact key uses (a no-op off Windows).
+export const toPosix = (path) => path.split(/[\\/]/u).join('/')
+
 // Both rules are needed: pathExt('.env.local') is 'local', and the extension rule alone misses `.env.*`.
 export function isDotEnvFile(name) {
   const base = basename(name).toLowerCase()
@@ -256,6 +259,43 @@ export function stripTypeDeclaration(name) {
   return suffix === undefined ? name : name.slice(0, -suffix.length)
 }
 
+// stasis's own outputs (`stasis.lock.json`, a `*stasis*.br`): absent on a first run but present on a
+// later one, so a listing (`--fs` readdir) or a sweep (`add .`) that records one diverges between runs
+// and the later capture conflicts.
+export function isStasisArtifactName(name) {
+  const base = basename(name).toLowerCase()
+  return base === 'stasis.lock.json' || (base.includes('stasis') && base.endsWith('.br'))
+}
+
+// Dirs no walk descends into: VCS/CI/IDE metadata, sample apps, test scaffolding -- none of it is the
+// code being shipped -- plus the Apple prebuilt slice dirs. `name` is a BARE dir name (a dirent name
+// or path segment), matched at any depth, so every walk agrees on what "not source" means.
+const AUTO_EXCLUDED_DIRS = new Set([
+  '.git', '.github', '.settings', // VCS / CI / IDE metadata
+  'example', 'examples', // sample apps -- they import the package, they aren't it
+  '__tests__', '__mocks__', 'jest', // test scaffolding
+])
+export function isAutoExcludedDir(name) {
+  const base = name.toLowerCase()
+  return AUTO_EXCLUDED_DIRS.has(base) || isAppleSliceDir(base)
+}
+
+// Dirs the NATIVE walks (Metro plugin + the static --metro bundler) skip, on top of the shared set:
+// nested packages (attested separately) and regenerated build output -- none is a build input.
+const NATIVE_BUILD_OUTPUT_DIRS = new Set(['node_modules', 'build', '.gradle', '.cxx', 'Pods', 'DerivedData'])
+export function isSkippedNativeWalkDir(name) {
+  return NATIVE_BUILD_OUTPUT_DIRS.has(name) || isAutoExcludedDir(name) || isNativeArtifact(name)
+}
+
+// Files a sweep drops: type declarations (types only, erased at runtime), the `.env` family (secrets),
+// stasis's own outputs (they'd attest themselves), and everything the native capture excludes as
+// non-build-input noise (docs/legal, editor/lint/CI config, `*.map`/`*.js.flow` sidecars, logs).
+// A path can only reach this via a glob -- an EXPLICITLY named one is added as asked (`add .env` still
+// captures), which is also the only way to attest a file this set covers.
+export function isAutoExcludedFile(name) {
+  return isTypeDeclaration(name) || isDotEnvFile(name) || isStasisArtifactName(name) || isExcludedNativeFile(name)
+}
+
 // The single name->format classifier every capture path is a policy view of. Returns a concrete format
 // when the name determines one; null for a JS-family file (.js/.ts/.jsx/.tsx); undefined if unrecognized.
 export function classifyFormat(name, { content } = {}) {
@@ -417,7 +457,7 @@ export function serializeExecutable(executable, { what, modules, formats, scope 
 // external file into an attestable bundle. realpathSync surfaces ENOENT, which loaders treat as "missing".
 export function assertRealPathWithinBase(realBase, baseDir, relPath) {
   const real = realpathSync(join(baseDir, relPath))
-  const rel = relative(realBase, real).split(/[\\/]/u).join('/')
+  const rel = toPosix(relative(realBase, real))
   if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`Refusing to follow symlink escaping bundle root: ${relPath} -> ${real}`)
   }
