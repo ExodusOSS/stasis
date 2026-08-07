@@ -42,7 +42,8 @@ returned: directories and symlinks carry no usable content, and a symlink target
 what could point outside the tree. Rejected rather than sanitized: entries that escape the
 tree, a path that appears twice (the second would shadow the first), and archives with more
 than one top-level directory. The whole archive is held in memory while it is parsed, bounded
-by `maxBytes` (256 MiB by default).
+by `maxBytes` (256 MiB by default) — enforced on the download and again on the decompressed
+bytes, so a compression bomb fails the same way an oversized repo does.
 
 Every function takes an optional `signal` (defaulting to a timeout) and, for GitHub, an
 optional `token` — no token is ever read from the environment.

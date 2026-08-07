@@ -122,11 +122,18 @@ function readTar(tar, select) {
 // `select` narrows and re-keys the archive as it is read, so the bytes of an entry the caller
 // does not want are never copied out of it -- filtering afterwards would memcpy the whole
 // tree to keep a fraction of it.
-export function readTarGz(bytes, select = (name) => name) {
+//
+// `maxBytes` bounds the DECOMPRESSED size. gzip can expand a tiny input a thousandfold, so a
+// cap on the downloaded bytes alone would still let a compression bomb exhaust the heap here.
+export function readTarGz(bytes, select = (name) => name, maxBytes = Infinity) {
   let tar
   try {
-    tar = gunzipSync(bytes)
+    tar = gunzipSync(bytes, { maxOutputLength: maxBytes === Infinity ? undefined : maxBytes })
   } catch (cause) {
+    // The output cap tripping is a size refusal, not a damaged archive -- say which.
+    if (cause.code === 'ERR_BUFFER_TOO_LARGE') {
+      throw new Error(`Archive is over the ${maxBytes} byte limit once decompressed; raise maxBytes`, { cause })
+    }
     throw new Error(`Malformed tar.gz archive: ${cause.message}`, { cause })
   }
   return readTar(tar, select)
