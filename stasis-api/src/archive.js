@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { gunzipSync } from 'node:zlib'
+import { promisify } from 'node:util'
+import { gunzip } from 'node:zlib'
 
-// In-memory reader for the gzipped tar GitHub serves a repo tree as (`/tarball`, available
-// for every repo). Takes the whole archive as bytes and returns a `Map` of entry path ->
-// bytes; nothing touches disk and no external tar is involved -- Node's zlib decompresses,
-// the ustar framing is parsed here, so the package stays dependency-free.
+// In-memory reader for a gzipped ustar archive that has already arrived as bytes (see
+// github/subtree.js, the consumer). Returns a `Map` of entry path -> bytes; nothing touches
+// disk and no external tar is involved -- Node's zlib decompresses, the ustar framing is
+// parsed here, so the package stays dependency-free.
 //
 // Only regular files are kept. Directories, symlinks, hardlinks and device nodes carry no
 // content a caller can use, and a symlink target is precisely the thing that could point
@@ -119,16 +120,20 @@ function readTar(tar, select) {
   return files
 }
 
+// zlib has no promise API of its own; inflating on the threadpool keeps a decompression
+// that can run to hundreds of MB from blocking the event loop for seconds.
+const gunzipAsync = promisify(gunzip)
+
 // `select` narrows and re-keys the archive as it is read, so the bytes of an entry the caller
 // does not want are never copied out of it -- filtering afterwards would memcpy the whole
 // tree to keep a fraction of it.
 //
 // `maxBytes` bounds the DECOMPRESSED size. gzip can expand a tiny input a thousandfold, so a
 // cap on the downloaded bytes alone would still let a compression bomb exhaust the heap here.
-export function readTarGz(bytes, select = (name) => name, maxBytes = Infinity) {
+export async function readTarGz(bytes, select, maxBytes) {
   let tar
   try {
-    tar = gunzipSync(bytes, { maxOutputLength: maxBytes === Infinity ? undefined : maxBytes })
+    tar = await gunzipAsync(bytes, { maxOutputLength: maxBytes })
   } catch (cause) {
     // The output cap tripping is a size refusal, not a damaged archive -- say which.
     if (cause.code === 'ERR_BUFFER_TOO_LARGE') {

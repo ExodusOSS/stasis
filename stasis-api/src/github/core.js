@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 
-import { requestOk } from '../request.js'
+import { requestFailed, requestOk } from '../request.js'
 
-// Core GitHub REST plumbing: the host, the headers every call sends, identifier validation,
-// and pagination. Knows how to talk to GitHub but not what to ask it -- each endpoint family
-// builds on this (see releases.js, subtree.js).
+// Core GitHub REST plumbing: the host, the headers every call sends, slug and ref
+// validation, and next-link parsing. Knows how to talk to GitHub but not what to ask it --
+// each endpoint family builds on this (see releases.js, subtree.js).
 //
 // Transport only: no disk, and no credential discovery -- a caller that needs a private repo
 // or a higher rate limit (60 requests/hour per IP unauthenticated, 5000 authenticated) passes
@@ -15,11 +15,6 @@ const API_VERSION = '2022-11-28'
 const JSON_MEDIA_TYPE = 'application/vnd.github+json'
 // GitHub rejects requests that carry no User-Agent, so one is always sent.
 const USER_AGENT = '@exodus/stasis-api'
-
-// Metadata answers in one round trip; a transfer is bounded by its size instead. Both halves
-// of that policy live here so the endpoints cannot drift apart on what is a long request.
-export const METADATA_TIMEOUT = 30_000
-export const TRANSFER_TIMEOUT = 300_000
 
 // Each half of a slug must be exactly one path segment, so a hand-assembled value can't
 // reshape the endpoint it is interpolated into -- `.` and `..` would climb out of /repos/
@@ -60,7 +55,7 @@ export function encodeRef(ref, what = 'ref') {
 // `undefined` and be reported as a bad token rather than as no token.
 export function request(what, url, { accept = JSON_MEDIA_TYPE, token = null, signal }) {
   const headers = { Accept: accept, 'User-Agent': USER_AGENT, 'X-GitHub-Api-Version': API_VERSION }
-  if (token !== null && token !== undefined) {
+  if (token !== null) {
     assert(typeof token === 'string' && token !== '', 'Expected a non-empty token')
     headers.Authorization = `Bearer ${token}`
   }
@@ -75,6 +70,17 @@ export async function parseJson(what, res) {
     return await res.json()
   } catch (cause) {
     throw new Error(`github ${what} response was not JSON: ${cause.message}`, { cause })
+  }
+}
+
+// An OK response's body can still die mid-read (a reset during the transfer): the same
+// transport failure class as the request itself, reported through the same shape and the
+// same `github <what>` label -- owned here so an endpoint cannot hand-assemble either.
+export async function readBody(what, read) {
+  try {
+    return await read()
+  } catch (cause) {
+    throw requestFailed(`github ${what}`, cause)
   }
 }
 
