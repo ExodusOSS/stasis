@@ -155,28 +155,21 @@ function prepareLockfile(lockPath, lockAdd) {
   return { write: () => writeFileSync(lockPath, merged.serialize()), summary: { total, added: total - before } }
 }
 
-const segments = (path) => path.split(/[\\/]/u)
-
-// GLOB step: expand directories into their files (recursive glob), as rel -> { swept, stats }. `swept`
-// is the match path relative to the directory the caller NAMED (null for a named path), so the filter
-// sees only the segments the sweep itself descended through; `stats` is the walk's own stat, carried so
-// validation doesn't re-probe the inode (undefined = not on disk, so validation reports it missing).
-// Gotcha: `**/*` skips dotfiles (.env, .git/...) -- name them explicitly.
-function expandDirectories(baseDir, rels) {
-  const out = new Map()
-  // A path reachable more than once keeps its most SPECIFIC provenance -- named beats swept, and a
-  // nearer root beats a farther one -- so `add src src/examples` sweeps the examples dir it names
-  // even though the `src` pass reached it through an excluded segment first.
-  const record = (rel, swept, stats) => {
-    const prior = out.get(rel)
-    if (prior !== undefined && (prior.swept === null ||
-      (swept !== null && segments(prior.swept).length <= segments(swept).length))) return
-    out.set(rel, { swept, stats })
-  }
+// GLOB + FILTER: expand each directory entry into the files under it (recursive glob), dropping the
+// auto-excluded set from what a sweep FINDS -- dir rules on the segments BELOW the named root (`add
+// src/examples` sweeps the dir it was pointed at, `add src` skips one it merely found), file rules
+// via `dropSwept`. A path the caller NAMED is always kept (naming is the override; a missing one
+// keeps stats undefined so validation reports it), and inclusion is monotone: a nearer root's sweep
+// can only ever see FEWER excluded segments, so a path any entry keeps stays kept -- `add src
+// src/examples` includes the subtree it names in either order. `stats` is the walk's own stat,
+// reused by validation. Gotcha: `**/*` skips dotfiles (.env, .git/...) -- name them explicitly.
+function expandDirectories(baseDir, rels, dropSwept) {
+  const files = new Map() // rel -> stats
+  const excluded = new Set()
   for (const rel of rels) {
     const stats = statSync(join(baseDir, rel), { throwIfNoEntry: false })
     if (stats === undefined || !stats.isDirectory()) {
-      record(rel, null, stats)
+      files.set(rel, stats)
       continue
     }
     const dirAbs = join(baseDir, rel)
@@ -188,9 +181,14 @@ function expandDirectories(baseDir, rels) {
       if (fileStats?.isFile()) found.push([toPosix(relative(baseDir, fileAbs)), match, fileStats])
     }
     // Sorted, so neither the packed order nor any message derived from it depends on readdir order.
-    for (const [file, match, fileStats] of found.toSorted(([a], [b]) => sortPaths(a, b))) record(file, match, fileStats)
+    for (const [file, match, fileStats] of found.toSorted(([a], [b]) => sortPaths(a, b))) {
+      if (files.has(file)) continue
+      if (match.split(/[\\/]/u).slice(0, -1).some(isAutoExcludedDir) || dropSwept(file)) excluded.add(file)
+      else files.set(file, fileStats)
+    }
   }
-  return out
+  for (const file of files.keys()) excluded.delete(file) // a kept path can't also count as skipped
+  return { files, excluded }
 }
 
 // One error for every file validation rejected, so a directory sweep names all of them at once
@@ -215,8 +213,8 @@ function validationError({ missing, undeclared, nonUtf8 }) {
 }
 
 // VALIDATE step: classify the WHOLE set -- each file recognized source or a declared resource --
-// before a single target is touched, collecting every offender into one error. `files` is [rel, stats]
-// pairs from the glob step (stats undefined = not on disk). Containment is the one rule NOT collected:
+// before a single target is touched, collecting every offender into one error. `files` is the glob
+// step's rel -> stats map (stats undefined = not on disk). Containment is the one rule NOT collected:
 // a symlink escaping the root is a security invariant, so it fails closed on the spot. Bytes are
 // hashed only when there's a lockfile to receive the integrities (`withIntegrity`).
 function validateFiles({ baseDir, realBase, files, resources, withIntegrity }) {
@@ -254,8 +252,8 @@ function validateFiles({ baseDir, realBase, files, resources, withIntegrity }) {
   return { codeFiles, resourceFiles, integrities }
 }
 
-// GLOB the listed paths (a directory expands to the files under it) -> FILTER the auto-excluded set
-// out of what the sweep found -> VALIDATE the whole surviving set -> only then ADD it to the target
+// GLOB the listed paths, FILTERING the auto-excluded set out of what a sweep finds (see
+// expandDirectories) -> VALIDATE the whole surviving set -> only then ADD it to the target
 // bundle(s), add-if-missing. A stasis.lock.json is updated only when one already exists.
 export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-core' } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
@@ -281,22 +279,12 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     .filter((file) => file !== undefined)
     .map((file) => toPosix(relative(baseDir, resolve(baseDir, file)))))
 
-  // FILTER step: a swept path goes when its own name is auto-excluded, when the sweep descended
-  // through an auto-excluded DIRECTORY to reach it (`swept` is root-relative, so a dir the caller
-  // named itself is never one), or when it's an artifact this run writes. A named path always stays.
-  const isSweptOut = (rel, swept) => outputs.has(rel) || isAutoExcludedFile(rel) ||
-    segments(swept).slice(0, -1).some(isAutoExcludedDir)
-
-  const expanded = expandDirectories(baseDir, normalizeEntries(entries, cwd))
-  const files = []
-  const excluded = [] // counted in the summary below rather than dropped silently
-  for (const [rel, { swept, stats }] of expanded) {
-    if (swept !== null && isSweptOut(rel, swept)) excluded.push(rel)
-    else files.push([rel, stats])
-  }
-  if (files.length === 0) {
-    throw new Error(`add: no files to add (directory entries matched ${excluded.length === 0
-      ? 'nothing' : `only auto-excluded files: ${excluded.toSorted(sortPaths).join(', ')}`})`)
+  // `excluded` is counted in the summary below rather than dropped silently.
+  const dropSwept = (rel) => outputs.has(rel) || isAutoExcludedFile(rel)
+  const { files, excluded } = expandDirectories(baseDir, normalizeEntries(entries, cwd), dropSwept)
+  if (files.size === 0) {
+    throw new Error(`add: no files to add (directory entries matched ${excluded.size === 0
+      ? 'nothing' : `only auto-excluded files: ${[...excluded].toSorted(sortPaths).join(', ')}`})`)
   }
 
   const { codeFiles, resourceFiles, integrities } = validateFiles({ baseDir, realBase, files, resources, withIntegrity: hasLock })
@@ -327,7 +315,7 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
     writes.push(write)
     summary.push(`+${r.added} (${r.total} total) -> ${LOCK_FILE}`)
   }
-  if (excluded.length > 0) summary.push(`skipped ${excluded.length} auto-excluded`)
+  if (excluded.size > 0) summary.push(`skipped ${excluded.size} auto-excluded`)
 
   for (const write of writes) write()
   console.warn(`[${logLabel}] add: ${summary.join('; ')}`)
