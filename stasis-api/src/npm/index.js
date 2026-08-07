@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 
-import { requestOk } from '../request.js'
+import { METADATA_TIMEOUT, requestOk } from '../request.js'
 import semver from './semver.cjs'
 
 const BULK_ADVISORIES_URL = 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk'
 
 const packageNameRegex = /^(@[\da-z-]+\/)?[\w-]+(\.[\w-]+)*$/u
 
-export async function advisories(list, { signal = AbortSignal.timeout(30_000) } = {}) {
+export async function advisories(list, { signal = AbortSignal.timeout(METADATA_TIMEOUT) } = {}) {
   const groups = new Map()
   for (const { name, version } of list) {
     assert(typeof name === 'string' && typeof version === 'string')

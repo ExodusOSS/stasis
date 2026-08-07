@@ -1,15 +1,8 @@
 import assert from 'node:assert/strict'
 import { hash } from 'node:crypto'
 
-import {
-  METADATA_TIMEOUT,
-  TRANSFER_TIMEOUT,
-  encodeRef,
-  nextLink,
-  parseJson,
-  repoUrl,
-  request,
-} from './core.js'
+import { METADATA_TIMEOUT, TRANSFER_TIMEOUT } from '../request.js'
+import { encodeRef, nextLink, parseJson, readBody, repoUrl, request } from './core.js'
 
 // Releases and their attachments ("assets" in API terms).
 
@@ -113,12 +106,7 @@ export async function asset(repo, id, { digest = null, signal = AbortSignal.time
 
   const url = repoUrl(repo, 'releases/assets', id)
   const res = await request('asset', url, { accept: 'application/octet-stream', token, signal })
-  let bytes
-  try {
-    bytes = new Uint8Array(await res.arrayBuffer())
-  } catch (cause) {
-    throw new Error(`github asset request failed: ${cause.message}`, { cause })
-  }
+  const bytes = new Uint8Array(await readBody('asset', () => res.arrayBuffer()))
 
   if (expected !== null) {
     const algorithm = expected.slice(0, expected.indexOf(':'))

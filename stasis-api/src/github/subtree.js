@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 
 import { isSafePath, readTarGz } from '../archive.js'
-import { TRANSFER_TIMEOUT, encodeRef, repoUrl, request } from './core.js'
+import { TRANSFER_TIMEOUT } from '../request.js'
+import { encodeRef, repoUrl, request } from './core.js'
 
 // A repo's source tree at an exact ref, read into memory.
 
@@ -76,7 +77,7 @@ export async function subtree(repo, ref, options = {}) {
   // finished Map, is what keeps a small subtree cheap: an entry outside it is checked for
   // safety and then skipped, so the whole tree is never copied to keep a fraction of it.
   let root = null
-  const files = readTarGz(bytes, (name) => {
+  const files = await readTarGz(bytes, (name) => {
     const slash = name.indexOf('/')
     assert(slash > 0, `Unexpected archive entry outside the root directory: ${name}`)
     const first = name.slice(0, slash)

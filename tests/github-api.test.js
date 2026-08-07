@@ -238,8 +238,8 @@ test('asset() verifies a supplied digest and rejects a mismatch', withFetch(
     const digest = `sha256:${hash('sha256', Buffer.from('payload'), 'hex')}`
     const bytes = await asset('o/r', 7, { digest })
     t.assert.equal(Buffer.from(bytes).toString(), 'payload')
-    // Uppercase hex (as some tools render it) still matches.
-    t.assert.ok(await asset('o/r', 7, { digest: digest.toUpperCase().replace('SHA256', 'sha256') }))
+    // Uppercase (as some tools render it) still matches.
+    t.assert.ok(await asset('o/r', 7, { digest: digest.toUpperCase() }))
     // A truncated or swapped download must fail here, not downstream.
     await t.assert.rejects(
       () => asset('o/r', 7, { digest: `sha256:${'0'.repeat(64)}` }),
