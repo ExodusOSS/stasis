@@ -6,8 +6,11 @@ import { TRANSFER_TIMEOUT, encodeRef, repoUrl, request } from './core.js'
 // A repo's source tree at an exact ref, read into memory.
 
 // The archive is decoded in memory, so it needs a ceiling: a runaway repo should error
-// instead of exhausting the heap. Set well clear of ordinary repos -- a small library's
-// archive already measures in the tens of MB -- since the cap is a backstop, not a budget.
+// instead of exhausting the heap. Enforced twice with the one number -- on the downloaded
+// bytes and again on what they decompress to -- because either form alone can be the huge
+// one (a checkout of large blobs downloads big; a compression bomb decompresses big). Set
+// well clear of ordinary repos -- a small library's archive already measures in the tens of
+// MB -- since the cap is a backstop, not a budget.
 const ARCHIVE_MAX_BYTES = 256 * 1024 * 1024
 
 // Normalize a subtree path to a `dir/` prefix; '' means the whole tree.
@@ -81,7 +84,7 @@ export async function subtree(repo, ref, options = {}) {
     else assert.equal(first, root, 'Unexpected archive with more than one top-level directory')
     // '' prefixes everything, so the whole-tree case needs no branch of its own.
     return name.startsWith(prefix, slash + 1) ? name.slice(slash + 1) : null
-  })
+  }, maxBytes)
 
   // A path that matches nothing is a typo far more often than an intentionally empty
   // subtree, and an empty Map would be indistinguishable from a successful read.

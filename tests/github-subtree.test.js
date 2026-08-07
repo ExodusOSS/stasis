@@ -211,6 +211,16 @@ test('subtree() enforces maxBytes from content-length and from the stream', with
   }
 ))
 
+test('subtree() bounds the decompressed size too, so a compression bomb cannot pass the cap', withFetch(
+  // gzip of a run of zeros compresses ~1000:1 — the download sails under `maxBytes` while
+  // what it decompresses to is far over it. The download-side cap alone would admit this.
+  () => archive(gzipSync(Buffer.alloc(1024 * 1024))),
+  async (t) => {
+    await t.assert.rejects(() => subtree('o/r', 'v1', { maxBytes: 64 * 1024 }),
+      /Archive is over the 65536 byte limit once decompressed; raise maxBytes/)
+  }
+))
+
 test('subtree() validates its arguments before making a request', withFetch(
   () => { throw new Error('fetch must not be called') },
   async (t, calls) => {
