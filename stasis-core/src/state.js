@@ -851,7 +851,7 @@ export class State {
     noupsert(this.hashes, file, integrity)
     if (this.config.childProcess) this.#observed.add(file) // only a child's shardSnapshot reads it; skip when the channel is off
     if (this.config.bundle && reason !== null) {
-      this.#recordReason(reason, file) // provenance for the bundle's `reason` field (null = not a consumer observation, e.g. backfill)
+      this.#recordReason(reason, file) // provenance for the bundle's `reason` field (null = caller derives attribution itself, see includePackageJson)
       // Track HOW 'run' saw this file so #bundleReason can drop files run merely fs-READ post-plugin.
       if (reason === 'run') {
         if (!fsRead) this.#runImported.add(file)
@@ -1524,10 +1524,20 @@ export class State {
       let pkg
       try { pkg = JSON.parse(buf.toString()) } catch { continue } // malformed manifest for an untouched bucket: skip
       if (pkg?.name !== module.name || pkg?.version !== module.version) continue
-      toAdd.push({ rel, buf })
+      // The manifest rides along BECAUSE some consumer bundled the bucket, so it inherits every
+      // consumer that recorded a file of the bucket -- nothing observed the manifest itself, but an
+      // unattributed file can't be sorted by provenance downstream. Derived BEFORE the adds below,
+      // so one fold's manifest can't count as another bucket's consumer evidence.
+      const files = Object.keys(module.files)
+      const consumers = []
+      for (const [who, recorded] of this.#reasonFiles) {
+        if (files.some((f) => recorded.has(moduleFileKey(dir, f)))) consumers.push(who)
+      }
+      toAdd.push({ rel, buf, consumers })
     }
-    for (const { rel, buf } of toAdd) {
+    for (const { rel, buf, consumers } of toAdd) {
       this.addFile(pathToFileURL(resolve(this.root, rel)).toString(), { source: buf, reason: null })
+      for (const who of consumers) this.#recordReason(who, rel)
     }
   }
 
@@ -1748,7 +1758,10 @@ export class State {
       assert.ok(isStasisCoreFile(file),
         `state.write() backfill refused: '${file}' is not a stasis-core source file ` +
         `(expected '.../@exodus/stasis-core/src/<name>.js')`)
-      this.addFile(pathToFileURL(resolve(this.root, file)).toString(), { reason: null }) // backfill is a write-time self-containment step, not a consumer observation -- don't attribute it
+      // reason 'run': Node evaluated these before registerHooks could observe it (that blindness is
+      // why this backfill exists), so they're run-loaded modules like any other. A consumer-less
+      // record can't be sorted by provenance downstream (app code vs toolchain).
+      this.addFile(pathToFileURL(resolve(this.root, file)).toString(), { reason: 'run' })
     }
 
     // Seeded from the missing files + every stasis-core file already in sources, to walk their

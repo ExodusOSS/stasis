@@ -1,9 +1,9 @@
 import { test } from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { brotliCompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
 import { Bundle } from '@exodus/stasis-core/bundle'
@@ -848,6 +848,44 @@ test('bundle records a `reason` map only when more than one consumer contributes
     t.assert.deepEqual(Object.keys(JSON.parse(shared.sourceData).reason), ['metro', 'run'])
     // Informational, preserved across a Bundle.parse round-trip.
     t.assert.deepEqual(Bundle.parse(shared.sourceData).reason, expected)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('--package-json manifests inherit the consumers of their bucket', (t) => {
+  // includePackageJson folds in manifests the run never read, so nothing observed them -- but an
+  // unattributed file can't be sorted by provenance downstream (app bundle vs bundler toolchain).
+  // Each folded manifest belongs to every consumer that recorded a file of its bucket.
+  const dir = mkdtempSync(join(tmpdir(), 'stasis-pkg-reason-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'p', version: '1.0.0' }))
+    writeFileSync(join(dir, 'entry.js'), 'export const e = 1\n')
+    for (const name of ['mdep', 'shared']) {
+      mkdirSync(join(dir, 'node_modules', name), { recursive: true })
+      writeFileSync(join(dir, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '1.0.0' }))
+      writeFileSync(join(dir, 'node_modules', name, 'index.js'), `export const x = '${name}'\n`)
+    }
+    const bundleFile = join(dir, 'snapshot.br')
+    const s = new State(dir, { scope: 'full', lock: 'none', bundle: 'add', bundleFile, packageJSON: true })
+    const url = (rel) => pathToFileURL(join(dir, rel)).toString()
+    s.addFile(url('entry.js'), { format: 'module', isEntry: true }) // 'run' (default)
+    s.addFile(url('node_modules/mdep/index.js'), { format: 'module', reason: 'metro' })
+    s.addFile(url('node_modules/shared/index.js'), { format: 'module', reason: 'metro' })
+    s.addFile(url('node_modules/shared/index.js'), { format: 'module' }) // 'run' saw it too
+    s.write()
+
+    const bundle = JSON.parse(brotliDecompressSync(readFileSync(bundleFile)).toString())
+    t.assert.ok(bundle.modules['node_modules/mdep'].files['package.json'], 'the manifest is folded into the bundle')
+    t.assert.ok(bundle.reason.metro.includes('node_modules/mdep/package.json'),
+      "mdep's manifest belongs to metro, the consumer that bundled the bucket")
+    t.assert.ok(!bundle.reason.run.includes('node_modules/mdep/package.json'), 'run recorded nothing of mdep')
+    for (const who of ['metro', 'run']) {
+      t.assert.ok(bundle.reason[who].includes('node_modules/shared/package.json'),
+        `both consumers recorded shared, so its manifest is ${who}'s too`)
+    }
+    t.assert.ok(bundle.reason.run.includes('package.json'), "the workspace manifest follows the workspace bucket's consumer")
+    t.assert.ok(!bundle.reason.metro.includes('package.json'), 'metro recorded no workspace file')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

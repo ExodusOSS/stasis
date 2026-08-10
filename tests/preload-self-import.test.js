@@ -201,3 +201,35 @@ test('bundle=frozen rejects a bundle missing stasis-core bytes for an attested e
   })
   t.assert.notEqual(r.status, 0, 'frozen-bundle run must refuse a bundle missing referenced files')
 }))
+
+test('backfilled stasis-core files are attributed to `run` in the bundle reason map', withTmp((t, tmp) => {
+  // The write-time backfill is the ONLY recorder of preload-cached stasis-core files (Node loaded
+  // them before the hooks registered), so its attribution is what the bundle shows. They are
+  // run-loaded modules like any other; unattributed, they can't be sorted by provenance downstream.
+  // A second consumer is needed at all because a single-consumer bundle omits `reason` entirely.
+  setupProject(tmp)
+  writeFileSync(join(tmp, 'extra.js'), 'export const x = 1\n')
+  writeFileSync(join(tmp, 'entry.js'),
+    "import { pathToFileURL } from 'node:url'\n" +
+    "import { State } from '@exodus/stasis-core/state'\n" +
+    "State.preload.addFile(pathToFileURL('extra.js').toString(), { format: 'module', reason: 'metro' })\n"
+  )
+  const bundlePath = join(tmp, 'snapshot.br')
+  const r = run(tmp, 'entry.js', {
+    EXODUS_STASIS_LOCK: 'add',
+    EXODUS_STASIS_SCOPE: 'full',
+    EXODUS_STASIS_BUNDLE: 'add',
+    EXODUS_STASIS_BUNDLE_FILE: bundlePath,
+  })
+  t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+
+  const bundle = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)).toString())
+  t.assert.ok(bundle.reason, 'two consumers -> the reason map is emitted')
+  t.assert.ok(bundle.reason.metro.includes('extra.js'), "the plugin-recorded file is metro's")
+  const stasisFiles = Object.keys(bundle.modules['node_modules/@exodus/stasis-core'].files)
+    .map((f) => `node_modules/@exodus/stasis-core/${f}`)
+  t.assert.ok(stasisFiles.length > 0, 'sanity: the backfill captured stasis-core files')
+  for (const file of stasisFiles) {
+    t.assert.ok(bundle.reason.run.includes(file), `${file} must be attributed to run, not float consumer-less`)
+  }
+}))
