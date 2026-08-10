@@ -1,0 +1,28 @@
+{
+  "name": "@exodus/stasis-api",
+  "version": "1.0.0-beta.2",
+  "description": "Zero-dependency registry API clients (npm, GitHub) for @exodus/stasis",
+  "type": "module",
+  "exports": {
+    "./npm": "./src/npm/index.js",
+    "./npm/semver": "./src/npm/semver.cjs",
+    "./github": "./src/github/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ExodusOSS/stasis.git",
+    "directory": "stasis-api"
+  },
+  "author": "Exodus Movement, Inc.",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ExodusOSS/stasis/issues"
+  },
+  "homepage": "https://github.com/ExodusOSS/stasis#readme"
+}
