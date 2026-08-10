@@ -13,7 +13,7 @@ import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isAppleSliceDir, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -597,14 +597,6 @@ const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
 // carried as a real empty CJS file so the edge points at attestable bytes.
 const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 
-// Build-output subtrees skipped when collecting native ios/android sources (regenerated, never
-// source); Eclipse `.settings`, JS test/mock scaffolding (never a native build input), and binary
-// artifacts (via isNativeArtifact) are excluded too.
-const NATIVE_SKIP_DIRS = new Set([
-  'build', '.gradle', '.cxx', 'Pods', 'DerivedData', 'node_modules', '.git', '.settings',
-  '__tests__', '__mocks__', 'jest',
-])
-
 // Recursively collect files under a native ios/android dir, skipping build output and symlinks
 // (cycle/escape hazard). Absolute paths into `out`.
 function walkNativeDir(dirAbs, out) {
@@ -618,8 +610,7 @@ function walkNativeDir(dirAbs, out) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      // Apple per-arch slice dirs (`ios-arm64_x86_64-simulator`) hold prebuilt output, not source.
-      if (!NATIVE_SKIP_DIRS.has(ent.name) && !isNativeArtifact(ent.name) && !isAppleSliceDir(ent.name)) walkNativeDir(full, out)
+      if (!isSkippedNativeWalkDir(ent.name)) walkNativeDir(full, out)
     } else if (ent.isFile() && !isNativeArtifact(ent.name)) {
       out.push(full)
     }
@@ -639,9 +630,7 @@ function collectNativeManifests(dirAbs, out, atRoot = false) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      const skipDir = NATIVE_SKIP_DIRS.has(ent.name) || isNativeArtifact(ent.name)
-        || isAppleSliceDir(ent.name) || (atRoot && isExcludedNativeDir(ent.name))
-      if (!skipDir) collectNativeManifests(full, out)
+      if (!isSkippedNativeWalkDir(ent.name) && !(atRoot && isExcludedNativeDir(ent.name))) collectNativeManifests(full, out)
     } else if (ent.isFile() && isNativeManifest(ent.name)) {
       out.push(full)
     }

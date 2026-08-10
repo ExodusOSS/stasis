@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 
-import { classifyNativeCapture, isAppleSliceDir, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isTypeDeclaration, refineNativeCapture, stripTypeDeclaration } from '@exodus/stasis-core/util'
+import { classifyNativeCapture, isAppleSliceDir, isAutoExcludedDir, isAutoExcludedFile, isBinaryPlist, isDotEnvFile, isExcludedNativeDir, isExcludedNativeFile, isStasisArtifactName, isTypeDeclaration, refineNativeCapture, stripTypeDeclaration } from '@exodus/stasis-core/util'
 
 const NOT_WIN = { win32: false }
 const WIN = { win32: true }
@@ -185,4 +185,49 @@ test('classifyNativeCapture: an extensionless shell shebang is shell code (conte
   const nodeScript = Buffer.from('#!/usr/bin/env node\nconsole.log(1)\n')
   t.assert.deepEqual(classifyNativeCapture('run-node', { win32: false, content: nodeScript }),
     { action: 'resource' })
+})
+
+// --- the directory-sweep exclusions (`stasis add <dir>`) ---------------------
+
+test('isStasisArtifactName: stasis own outputs, at any depth', (t) => {
+  for (const name of ['stasis.lock.json', 'dist/stasis.lock.json', 'stasis.code.br', 'app.stasis.res.br', 'dist/stasis.code.br']) {
+    t.assert.equal(isStasisArtifactName(name), true, `${name} is a stasis artifact`)
+  }
+  // A `.br` without `stasis` in its NAME isn't one (a dir named `stasis-app/` doesn't make it one),
+  // and neither is a same-stem source file.
+  for (const name of ['assets/data.br', 'stasis-app/data.br', 'stasis.config.json', 'stasis.js']) {
+    t.assert.equal(isStasisArtifactName(name), false, `${name} is not a stasis artifact`)
+  }
+})
+
+test('isAutoExcludedFile: a directory sweep drops declarations, secrets, stasis outputs, and native noise', (t) => {
+  for (const name of [
+    'src/types.d.ts', 'index.d.mts', 'a/b/legacy.d.cts', // types only, erased at runtime
+    '.env', 'src/.env.production', 'src/web.env', // secrets
+    'stasis.lock.json', 'stasis.code.br', // this run's own outputs -- would attest themselves
+    // ...and the whole native-capture exclusion set (NATIVE_EXCLUDE_EXTS / NATIVE_EXCLUDE_NAMES).
+    'README.md', 'LICENSE', 'debug.log', 'dist/bundle.js.map', 'src/index.js.flow',
+    'ios/Foo.swiftdoc', '.editorconfig', 'yarn.lock', 'android/gradle-wrapper.properties',
+  ]) {
+    t.assert.equal(isAutoExcludedFile(name), true, `${name} is auto-excluded from a sweep`)
+  }
+  // Real source and declared-resource candidates are NOT auto-excluded: they go on to the
+  // `resources` check, which is what decides them.
+  for (const name of ['src/a.js', 'src/index.ts', 'src/icon.svg', 'ios/Info.plist', 'stasis.config.json']) {
+    t.assert.equal(isAutoExcludedFile(name), false, `${name} is not auto-excluded`)
+  }
+})
+
+test('isAutoExcludedDir: metadata / sample-app / test-scaffolding dirs and Apple slice dirs', (t) => {
+  for (const dir of [
+    '.git', '.github', '.settings', 'example', 'examples', '__tests__', '__mocks__', 'jest',
+    'EXAMPLES', // matched case-insensitively, like every other name rule here
+    'ios-arm64', 'tvos-arm64_x86_64-simulator', // prebuilt slices: compiled output, not source
+  ]) {
+    t.assert.equal(isAutoExcludedDir(dir), true, `${dir} is not descended into`)
+  }
+  // Real source dirs, including near-misses on the above.
+  for (const dir of ['src', 'ios', 'android', 'lib', 'test', 'tests', 'jest-helpers', 'example-app', 'arm64-v8a']) {
+    t.assert.equal(isAutoExcludedDir(dir), false, `${dir} is swept`)
+  }
 })

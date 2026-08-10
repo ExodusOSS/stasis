@@ -8,7 +8,7 @@ import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
 import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
-import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, splitNodeModulesPath } from './util.js'
+import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isAutoExcludedDir, isAutoExcludedFile, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, sortPaths, splitNodeModulesPath, toPosix } from './util.js'
 
 const CONFIG_FILE = 'stasis.config.json'
 const LOCK_FILE = 'stasis.lock.json'
@@ -102,7 +102,11 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
   }).withReason('add')
 }
 
-function addToBundleFile(baseDir, targetPath, bundle, brotliQuality) {
+// Merge add-if-missing into any existing bundle (divergent bytes for an attested path throw -- see
+// mergeModuleMaps), returning the write as a thunk so every target's conflicts surface before the
+// first byte lands and an aborted `add` leaves the project untouched. Serializing INSIDE the thunk
+// keeps peak memory at one target's bytes rather than every target's at once.
+function prepareBundleFile(baseDir, targetPath, bundle, brotliQuality) {
   const abs = resolve(baseDir, targetPath)
   let mergedFrom
   if (existsSync(abs)) {
@@ -115,10 +119,14 @@ function addToBundleFile(baseDir, targetPath, bundle, brotliQuality) {
     mergedFrom = tally(existing).files
     bundle = existing.merge(bundle)
   }
-  mkdirSync(dirname(abs), { recursive: true })
-  writeFileSync(abs, brotliCompressSync(bundle.serialize(), brotliOptions(brotliQuality)))
   const { files, packages } = tally(bundle)
-  return { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom }
+  return {
+    write: () => {
+      mkdirSync(dirname(abs), { recursive: true })
+      writeFileSync(abs, brotliCompressSync(bundle.serialize(), brotliOptions(brotliQuality)))
+    },
+    counts: { path: targetPath, total: files, packages, added: mergedFrom === undefined ? files : files - mergedFrom },
+  }
 }
 
 // Companion Lockfile: the bundle's shape with each file's content swapped for its on-disk integrity, so `--lock=frozen` matches.
@@ -132,8 +140,9 @@ function bundleToLockfile(bundle, integrities) {
   return new Lockfile({ config: bundle.config, entries: bundle.entries, modules, imports: bundle.imports, formats: bundle.formats, executable: bundle.executable })
 }
 
-// Merge into the project's stasis.lock.json (strict: divergent bytes throw).
-function updateLockfile(lockPath, lockAdd) {
+// Merge into the project's stasis.lock.json (strict: divergent bytes throw), deferring the write like
+// prepareBundleFile so a conflict here doesn't leave the bundles updated.
+function prepareLockfile(lockPath, lockAdd) {
   let existing
   try {
     existing = Lockfile.parse(readFileSync(lockPath, 'utf8'))
@@ -142,35 +151,114 @@ function updateLockfile(lockPath, lockAdd) {
   }
   const before = tally(existing).files
   const merged = existing.merge(lockAdd)
-  writeFileSync(lockPath, merged.serialize())
   const total = tally(merged).files
-  return { total, added: total - before }
+  return { write: () => writeFileSync(lockPath, merged.serialize()), counts: { total, added: total - before } }
 }
 
-// Expand directories into their files (recursive glob). Gotcha: `**/*` skips dotfiles (.env, .git/...) -- name them explicitly.
-function expandDirectories(baseDir, rels) {
-  const out = []
+// GLOB + FILTER: expand each directory entry into the files under it (recursive glob), dropping the
+// auto-excluded set from what a sweep FINDS -- dir rules on the segments BELOW the named root (`add
+// src/examples` sweeps the dir it was pointed at, `add src` skips one it merely found), file rules
+// by name plus the caller's `outputs` (this run's own write targets). A path the caller NAMED is
+// always kept (naming is the override; a missing one keeps stats undefined so validation reports
+// it), and inclusion is monotone: a nearer root's sweep can only ever see FEWER excluded segments,
+// so a path any entry keeps stays kept -- `add src src/examples` includes the subtree it names in
+// either order. `stats` is the walk's own stat, reused by validation. Gotcha: `**/*` skips dotfiles
+// (.env, .git/...) -- name them explicitly.
+function expandDirectories(baseDir, rels, outputs) {
+  const files = new Map() // rel -> stats
+  const excluded = new Set()
   for (const rel of rels) {
-    let stat
-    try {
-      stat = statSync(join(baseDir, rel))
-    } catch {
-      out.push(rel) // not found -- defer to the caller's clean "file not found" error
-      continue
-    }
-    if (!stat.isDirectory()) {
-      out.push(rel)
+    const stats = statSync(join(baseDir, rel), { throwIfNoEntry: false })
+    if (stats === undefined || !stats.isDirectory()) {
+      files.set(rel, stats)
       continue
     }
     const dirAbs = join(baseDir, rel)
+    const found = []
     for (const match of globSync('**/*', { cwd: dirAbs })) {
       const fileAbs = join(dirAbs, match)
-      if (statSync(fileAbs).isFile()) out.push(relative(baseDir, fileAbs).split(/[\\/]/u).join('/'))
+      // A dangling symlink stats as undefined -- skipped, not a hard ENOENT out of the walk.
+      const fileStats = statSync(fileAbs, { throwIfNoEntry: false })
+      if (fileStats?.isFile()) found.push([toPosix(relative(baseDir, fileAbs)), match, fileStats])
+    }
+    // Sorted because serialize() emits `reason` in insertion order (everything else it re-sorts):
+    // without this, the attested bundle's BYTES would depend on readdir order.
+    for (const [file, match, fileStats] of found.toSorted(([a], [b]) => sortPaths(a, b))) {
+      if (toPosix(match).split('/').slice(0, -1).some(isAutoExcludedDir)
+        || outputs.has(file) || isAutoExcludedFile(file)) excluded.add(file)
+      else files.set(file, fileStats)
     }
   }
-  return out
+  // A path any entry kept can't count as skipped -- another root's sweep may have re-flagged it.
+  for (const file of files.keys()) excluded.delete(file)
+  return { files, excluded }
 }
 
+const listPaths = (rels) => [...rels].toSorted(sortPaths).join(', ')
+
+// One error for every file validation rejected, so a directory sweep names all of them at once
+// instead of one per re-run. A lone offender keeps its exact standalone message.
+function validationError({ missing, undeclared, nonUtf8 }) {
+  // `one`/`many` per category; empty categories contribute nothing.
+  const phrase = (items, one, many) => (items.length === 1 ? [one(items[0])] : items.length > 1 ? [many(items)] : [])
+  const named = ({ rel, format }) => `${rel} (format '${format}')`
+  const parts = [
+    ...phrase(missing,
+      (rel) => `file not found: ${rel}`,
+      (rels) => `${rels.length} files not found: ${listPaths(rels)}`),
+    ...phrase(undeclared,
+      (rel) => `${rel} is neither a recognized source file nor a declared resource; add its extension to "resources" in ${CONFIG_FILE}`,
+      (rels) => `${rels.length} files are neither recognized source files nor declared resources; add their extensions to "resources" in ${CONFIG_FILE}: ${listPaths(rels)}`),
+    ...phrase(nonUtf8,
+      ({ rel, format }) => `${rel} is not valid UTF-8 (format '${format}')`,
+      (bad) => `${bad.length} files are not valid UTF-8: ${bad.map(named).join(', ')}`),
+  ]
+  return new Error(`add: ${parts.join('; ')}`)
+}
+
+// VALIDATE step: classify the WHOLE set -- each file recognized source or a declared resource --
+// before a single target is touched, collecting every offender into one error. `files` is the glob
+// step's rel -> stats map (stats undefined = not on disk). Containment is the one rule NOT collected:
+// a symlink escaping the root is a security invariant, so it fails closed on the spot. Bytes are
+// hashed only when there's a lockfile to receive the integrities (`withIntegrity`).
+function validateFiles({ baseDir, realBase, files, resources, withIntegrity }) {
+  const codeFiles = new Map()
+  const resourceFiles = new Map()
+  const integrities = new Map()
+  const missing = []
+  const undeclared = []
+  const nonUtf8 = []
+  for (const [rel, stats] of files) {
+    if (stats === undefined) {
+      missing.push(rel)
+      continue
+    }
+    const executable = isExecutableMode(stats)
+    // Refuse a symlink whose realpath escapes the project root -- a bundle carries only in-tree bytes.
+    assertRealPathWithinBase(realBase, baseDir, rel)
+    const abs = join(baseDir, rel)
+    const buf = readFileSync(abs)
+    if (withIntegrity) integrities.set(rel, sha512integrity(buf))
+    const format = sourceFormat(abs, buf)
+    // A binary plist can't be stored as the UTF-8 string its 'xml' format implies, so it is NOT source: it falls through to the resource branch (opaque base64).
+    if (format !== null && !isBinaryPlist(rel, buf)) {
+      // Source is stored as a UTF-8 string, so non-UTF-8 bytes would lossily diverge from the file on disk.
+      if (isUtf8(buf)) codeFiles.set(rel, { content: buf.toString('utf8'), format, executable })
+      else nonUtf8.push({ rel, format })
+    } else if (resources.has(pathExt(rel) || basename(rel).toLowerCase())) {
+      const utf8 = isUtf8(buf)
+      resourceFiles.set(rel, { content: utf8 ? buf.toString('utf8') : buf.toString('base64'), format: utf8 ? 'resource' : 'resource:base64', executable })
+    } else {
+      undeclared.push(rel)
+    }
+  }
+  if (missing.length + undeclared.length + nonUtf8.length > 0) throw validationError({ missing, undeclared, nonUtf8 })
+  return { codeFiles, resourceFiles, integrities }
+}
+
+// GLOB the listed paths, FILTERING the auto-excluded set out of what a sweep finds (see
+// expandDirectories) -> VALIDATE the whole surviving set -> only then ADD it to the target
+// bundle(s), add-if-missing. A stasis.lock.json is updated only when one already exists.
 export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-core' } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('add: at least one file is required')
@@ -186,57 +274,52 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   // Lockfile updated only if one already exists (never created); hash packed bytes to match a frozen run.
   const lockPath = join(baseDir, LOCK_FILE)
   const hasLock = existsSync(lockPath)
-  const integrities = new Map()
 
-  const files = [...new Set(expandDirectories(baseDir, normalizeEntries(entries, cwd)))]
-  if (files.length === 0) throw new Error('add: no files to add (directory entries matched nothing)')
-  const codeFiles = new Map()
-  const resourceFiles = new Map()
-  for (const rel of files) {
-    const abs = join(baseDir, rel)
-    const stats = statSync(abs, { throwIfNoEntry: false })
-    if (stats === undefined) throw new Error(`add: file not found: ${rel}`)
-    const executable = isExecutableMode(stats)
-    // Refuse a symlink whose realpath escapes the project root -- a bundle carries only in-tree bytes.
-    assertRealPathWithinBase(realBase, baseDir, rel)
-    const buf = readFileSync(abs)
-    if (hasLock) integrities.set(rel, sha512integrity(buf))
-    const format = sourceFormat(abs, buf)
-    // A binary plist can't be stored as the UTF-8 string its 'xml' format implies, so it is NOT source: it falls through to the resource branch (opaque base64).
-    if (format !== null && !isBinaryPlist(rel, buf)) {
-      // Source is stored as a UTF-8 string, so non-UTF-8 bytes would lossily diverge from the file on disk.
-      if (!isUtf8(buf)) throw new Error(`add: ${rel} is not valid UTF-8 (format '${format}')`)
-      codeFiles.set(rel, { content: buf.toString('utf8'), format, executable })
-    } else if (resources.has(pathExt(rel) || basename(rel).toLowerCase())) {
-      const utf8 = isUtf8(buf)
-      resourceFiles.set(rel, { content: utf8 ? buf.toString('utf8') : buf.toString('base64'), format: utf8 ? 'resource' : 'resource:base64', executable })
-    } else {
-      throw new Error(`add: ${rel} is neither a recognized source file nor a declared resource; add its extension to "resources" in ${CONFIG_FILE}`)
-    }
+  // The CONFIGURED bundle targets, project-relative: a sweep must never attest an artifact this very
+  // run is writing, and a target can be named anything (`dist/code.br`), which isAutoExcludedFile's
+  // by-name rule can't recognize (it does cover the lockfile). One configured outside the project
+  // yields a '..' path, which no swept path can equal.
+  const outputs = new Set([bundleFile, resourcesBundleFile]
+    .filter((file) => file !== undefined)
+    .map((file) => toPosix(relative(baseDir, resolve(baseDir, file)))))
+
+  // `excluded` is counted in the summary below rather than dropped silently.
+  const { files, excluded } = expandDirectories(baseDir, normalizeEntries(entries, cwd), outputs)
+  if (files.size === 0) {
+    throw new Error(`add: no files to add (directory entries matched ${excluded.size === 0
+      ? 'nothing' : `only auto-excluded files: ${listPaths(excluded)}`})`)
   }
 
+  const { codeFiles, resourceFiles, integrities } = validateFiles({ baseDir, realBase, files, resources, withIntegrity: hasLock })
+
+  // ADD step: every target's merge is computed first, then the writes run -- see prepareBundleFile.
   const summary = []
-  const writeTarget = (target, entriesForTarget, kind) => {
+  const writes = []
+  const planTarget = (target, entriesForTarget, kind) => {
     if (entriesForTarget.size === 0) return
-    const r = addToBundleFile(baseDir, target, assembleBundle(baseDir, entriesForTarget, workspaceName, workspaceVersion), brotliQuality)
-    summary.push(`+${r.added} ${kind} (${r.total} total) -> ${r.path}`)
+    const { write, counts } = prepareBundleFile(baseDir, target, assembleBundle(baseDir, entriesForTarget, workspaceName, workspaceVersion), brotliQuality)
+    writes.push(write)
+    summary.push(`+${counts.added} ${kind} (${counts.total} total) -> ${counts.path}`)
   }
   if (resourcesBundleFile) {
-    writeTarget(bundleFile, codeFiles, 'source')
-    writeTarget(resourcesBundleFile, resourceFiles, 'resource')
+    planTarget(bundleFile, codeFiles, 'source')
+    planTarget(resourcesBundleFile, resourceFiles, 'resource')
   } else {
     const all = new Map([...codeFiles, ...resourceFiles])
     const kind = codeFiles.size > 0 && resourceFiles.size > 0 ? 'file' : resourceFiles.size > 0 ? 'resource' : 'source'
-    writeTarget(bundleFile, all, kind)
+    planTarget(bundleFile, all, kind)
   }
 
   // One lockfile attests both split targets, so merge in every packed file's integrity (code + resources together).
   if (hasLock) {
     const allFiles = new Map([...codeFiles, ...resourceFiles])
     const lockAdd = bundleToLockfile(assembleBundle(baseDir, allFiles, workspaceName, workspaceVersion), integrities)
-    const r = updateLockfile(lockPath, lockAdd)
-    summary.push(`+${r.added} (${r.total} total) -> ${LOCK_FILE}`)
+    const { write, counts } = prepareLockfile(lockPath, lockAdd)
+    writes.push(write)
+    summary.push(`+${counts.added} (${counts.total} total) -> ${LOCK_FILE}`)
   }
+  if (excluded.size > 0) summary.push(`skipped ${excluded.size} auto-excluded`)
 
+  for (const write of writes) write()
   console.warn(`[${logLabel}] add: ${summary.join('; ')}`)
 }

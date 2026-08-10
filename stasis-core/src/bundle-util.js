@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { findPackageJSON } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
-import { assertRealPathWithinBase } from './util.js'
+import { assertRealPathWithinBase, toPosix } from './util.js'
 
 export function packageType(file) {
   const pkg = findPackageJSON(pathToFileURL(file).toString())
@@ -39,7 +39,7 @@ export function normalizeEntries(entries, cwd) {
   const baseDir = resolve(cwd)
   return entries.map((e) => {
     const abs = resolve(cwd, e)
-    const rel = relative(baseDir, abs).split(/[\\/]/u).join('/')
+    const rel = toPosix(relative(baseDir, abs))
     // On Windows path.relative() returns an absolute path across drives (no leading '..'), so reject that form too.
     if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Entry escapes baseDir: ${e}`)
     return rel.replace(/^\.\//u, '')
