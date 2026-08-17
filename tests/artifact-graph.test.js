@@ -1,8 +1,7 @@
 // The artifact data model (`@exodus/stasis-core/bundle`, `/lockfile`, and the shard wire format)
-// must stay loadable without node:buffer, node:fs, node:util or process: consumers parse and
-// serialize artifacts in environments that have none of them. This pins the module graph's static
-// import specifiers so an ambient-authority builtin can't creep back in unnoticed -- the only
-// allowed builtin is node:path in artifact-util.js (pure computation, posixPathEscapes).
+// must stay loadable in any JS runtime: consumers parse and serialize artifacts in environments
+// with no node:buffer, node:fs or process. This pins the module graph's static import specifiers
+// so a Node builtin can't creep back in unnoticed -- artifact-util.js imports nothing at all.
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,8 +18,8 @@ const importSpecifiers = (file) => {
   return [...text.matchAll(statements)].map((m) => m[1] ?? m[2])
 }
 
-test('the artifact data model imports no ambient-authority builtins', (t) => {
-  t.assert.deepEqual(importSpecifiers('artifact-util.js'), ['node:path'])
+test('the artifact data model imports no Node builtins', (t) => {
+  t.assert.deepEqual(importSpecifiers('artifact-util.js'), [])
   for (const file of ['bundle.js', 'lockfile.js', 'shard.js']) {
     t.assert.deepEqual(importSpecifiers(file), ['./artifact-util.js'], file)
   }

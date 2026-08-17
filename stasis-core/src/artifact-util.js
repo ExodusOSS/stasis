@@ -1,12 +1,9 @@
-import { posix } from 'node:path'
-
 // The pure half of the util split: the artifact data model shared by bundle.js, lockfile.js and
 // shard.js -- the format universe, flat file keys, strict merges, the executable-set rules and the
-// JSON<->Map converters. Everything here is pure computation over caller-supplied values, so the
-// data-model entry points (`./bundle`, `./lockfile`) load without node:buffer, node:fs or process
-// (node:path's posix namespace only computes). Byte/name classification, fs observation and CLI
-// parsing live in util.js, which re-exports this module so `@exodus/stasis-core/util` keeps
-// serving the full set.
+// JSON<->Map converters. Everything here is pure computation over caller-supplied values with no
+// Node builtin imports at all, so the data-model entry points (`./bundle`, `./lockfile`) load in
+// any JS runtime. Byte/name classification, fs observation and CLI parsing live in util.js, which
+// re-exports this module so `@exodus/stasis-core/util` keeps serving the full set.
 
 const sep = '/'
 
@@ -172,13 +169,20 @@ export const objectToMaps = (obj) => new Map(
   Object.entries(obj).map(([k, v]) => [k, isPlainObject(v) ? objectToMaps(v) : v])
 )
 
-// Normalizes first: plain `startsWith('..')` would miss a mid-path `..` that pops above the root.
+// True for an absolute path or any `..` hop that pops above the root, INCLUDING a mid-path one
+// (`a/../../x`) that plain `startsWith('..')` would miss. A segment walk (not posix.normalize, whose
+// verdict it matches -- see posix-path-escapes.test.js) so this module stays free of node:path:
+// `.` and empty segments are skipped exactly as normalize collapses them, a real segment pushes, and
+// a `..` with nothing left to pop is an escape -- normalize would keep it as a leading `..` forever.
 export function posixPathEscapes(path) {
-  // Exact prefilter: normalize() can only yield a '..'-prefixed result from an input containing '..',
-  // or an absolute one from an input already absolute.
-  if (!path.includes('..') && !posix.isAbsolute(path)) return false
-  const normalized = posix.normalize(path)
-  return normalized === '..' || normalized.startsWith('../') || posix.isAbsolute(normalized)
+  if (path.startsWith('/')) return true
+  let depth = 0
+  for (const segment of path.split('/')) {
+    if (segment === '.' || segment === '') continue
+    if (segment !== '..') depth++
+    else if (--depth < 0) return true
+  }
+  return false
 }
 
 // A target is a resolved-file string, or a { platform: file } Map under --metro.
