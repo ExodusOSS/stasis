@@ -9,6 +9,9 @@
 //   - esbuild fails the SECOND build start from onStart -- rebuilds re-fire onStart against
 //     the same setup registrations, and an instance-level counter also catches one plugin
 //     instance reused across two esbuild.build() calls (same staleness hazard);
+//   - rollup throws from the SECOND buildStart -- watch rebuilds (and a second rollup()
+//     call reusing the same plugin instance) re-fire buildStart, so an instance-level
+//     counter catches the second exactly like esbuild's;
 //   - metro throws on the serializer's SECOND invocation -- a one-shot `metro build`
 //     serializes once, only a dev server (`metro start`) re-invokes it per rebuild.
 // Load mode is deliberately untouched: it serves immutable attested bytes back into the
@@ -27,6 +30,7 @@ import { join } from 'node:path'
 import { State } from '@exodus/stasis-core/state'
 import { StasisEsbuild } from '@exodus/stasis-plugins/esbuild'
 import { StasisMetro } from '@exodus/stasis-plugins/metro'
+import { StasisRollup } from '@exodus/stasis-plugins/rollup'
 
 // Run `mk` chdir'd into a throwaway project dir (resolvePluginState anchors standalone plugin
 // States at process.cwd(), like webpack-defer-write.test.js's withPlugin), restore cwd, and
@@ -103,6 +107,45 @@ test('esbuild: load mode registers no rebuild guard', (t) => {
   const cbs = setupStub(plugin)
   t.assert.equal(cbs.onStart.length, 0, 'load mode must not refuse rebuilds')
   t.assert.ok(cbs.onResolve.length > 0, 'sanity: the plugin did register its load-mode hooks')
+})
+
+test('rollup: the second build start is refused in capture mode (watch/rebuild)', (t) => {
+  const plugin = inProjectDir(t, (dir) =>
+    new StasisRollup({ lock: 'none', bundle: 'add', bundleFile: join(dir, 'sources.br') }))
+  t.assert.equal(typeof plugin.buildStart, 'function', 'capture registers the rebuild guard')
+
+  t.assert.doesNotThrow(() => plugin.buildStart(), 'the first build start proceeds')
+  // rollup fails a build when a plugin hook throws -- the refusal fires before the rebuild
+  // can (not) re-capture anything, and buildEnd's clean-build gate then skips write().
+  t.assert.throws(
+    () => plugin.buildStart(),
+    /StasisRollup: watch\/rebuild is not supported for capture -- run a one-shot build/,
+    'a rebuild (or a second rollup() call on the same instance) must throw'
+  )
+})
+
+test('rollup: load mode registers no rebuild guard', (t) => {
+  // Load serves immutable attested bytes (getFile re-verifies hashes on every read), so
+  // rebuilds have no drift hazard and must stay permitted -- no buildStart is assigned at all.
+  const plugin = inProjectDir(t, (dir) => {
+    const bundleFile = join(dir, 'sources.br')
+    // Mint an (empty) bundle to load: a capture State's write() emits it.
+    new State(dir, { lock: 'none', bundle: 'add', bundleFile }).write()
+    // The plugin accepts a caller-owned State directly (like StasisEsbuild).
+    return new StasisRollup(new State(dir, { lock: 'none', bundle: 'load', bundleFile }))
+  })
+  t.assert.equal(plugin.buildStart, undefined, 'load mode must not refuse rebuilds')
+  t.assert.equal(typeof plugin.resolveId, 'function', 'sanity: the plugin did register its load-mode hooks')
+})
+
+test('rollup: an inert plugin exposes no hooks at all', (t) => {
+  // Rule 7 (lock=none + bundle=none, no preload) -> resolvePluginState returns state:null and
+  // the constructor assigns no hooks, so rollup sees a name-only plugin and skips it entirely.
+  const plugin = inProjectDir(t, () => new StasisRollup({ lock: 'none', bundle: 'none' }))
+  t.assert.equal(plugin.name, 'stasis')
+  for (const hook of ['resolveId', 'load', 'buildStart', 'buildEnd']) {
+    t.assert.equal(plugin[hook], undefined, `inert plugin must not register ${hook}`)
+  }
 })
 
 test('metro: the second serialization is refused in capture mode (dev-server rebuild)', (t) => {

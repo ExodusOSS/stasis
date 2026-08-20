@@ -5,6 +5,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-338750?style=for-the-badge&logo=Node.js&logoColor=FFF)](https://nodejs.org/)
 [![esbuild](https://img.shields.io/badge/esbuild-191919?style=for-the-badge&logo=esbuild)](https://esbuild.github.io/)
 [![metro](https://img.shields.io/badge/metro-FFF?style=for-the-badge&logo=Metro&logoColor=Ef4242)](https://metrobundler.dev/)
+[![rollup](https://img.shields.io/badge/Rollup-EC4A3F?style=for-the-badge&logo=rollupdotjs&logoColor=FFF)](https://rollupjs.org/)
 [![webpack](https://img.shields.io/badge/WebPack-2B3A42?style=for-the-badge&logo=WebPack)](https://webpack.js.org/)
 
 Both lockfiles and bundles only include what is actually _used_.\

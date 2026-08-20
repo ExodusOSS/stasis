@@ -32,6 +32,7 @@
     "flow-remove-types": "^2.322.0",
     "metro-resolver": "^0.87.0",
     "oxlint": "^1.52.0",
+    "rollup": "^4.62.4",
     "string-replace-loader": "^2.3.0",
     "webpack": "^4.47.0",
     "webpack5": "npm:webpack@^5.107.2"
