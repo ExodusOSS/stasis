@@ -20,7 +20,10 @@ assert(basename(jsname) === 'stasis' || pathsEqual(jsname, fileURLToPath(import.
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--package-json] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
+ stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--package-json] [--mock] [--import=module ...] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
+ (--import forwards extra preload modules (repeatable) to the node process running the entry,
+  e.g. --import=tsx to run TypeScript through the project's tsx; a preload's own module graph is
+  runner infrastructure like stasis's loader itself, so it is not captured into the lockfile/bundle)
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -77,12 +80,13 @@ if (command === '-v' || command === '--version') {
     'child-process': { type: 'boolean' },
     'package-json': { type: 'boolean' },
     mock: { type: 'boolean' },
+    import: { type: 'string', multiple: true },
     fs: { type: 'string' },
     resources: { type: 'string' },
     'brotli-quality': { type: 'string' },
   }
   const values = parseLeadingOptions(argv, options, {
-    valueFlags: ['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'],
+    valueFlags: ['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--import', '--resources', '--brotli-quality'],
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
@@ -115,6 +119,10 @@ if (command === '-v' || command === '--version') {
       usage(`Error: ${cause.message}`)
     }
   }
+  // --import: extra preload module(s) passed through to the spawned node (e.g. --import=tsx).
+  // Node resolves each against the project cwd; they ride AFTER stasis's own loader import.
+  const imports = values.import ?? []
+  if (imports.some((s) => s === '')) usage('Error: --import requires a module specifier (e.g. --import=tsx)')
   // --child-process: forward forked-child (e.g. Metro worker) capture to the root via per-pid shards.
   const childProcess = values['child-process'] ? '1' : ''
   // --package-json: auto-include every bundled module's package.json. Only meaningful while WRITING
@@ -123,7 +131,7 @@ if (command === '-v' || command === '--version') {
     usage('Error: --package-json requires --bundle=(add|replace)')
   }
   const packageJSON = values['package-json'] ? '1' : ''
-  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(packageJSON && { packageJSON: true }), ...(values.mock && { mock: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
+  console.warn('[stasis] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(packageJSON && { packageJSON: true }), ...(values.mock && { mock: true }), ...(imports.length > 0 && { import: imports }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -166,6 +174,9 @@ if (command === '-v' || command === '--version') {
   // --mock uses stasis's loader-mock entry (composes the mock before installing the hooks).
   const loaderEntry = values.mock ? '../src/loader-mock.js' : '@exodus/stasis-core/loader'
   nodeArgs.push('--import', import.meta.resolve(loaderEntry))
+  // Passthrough preloads ride after the loader (and after --mock's denials), so they evaluate
+  // under its hooks; their pre-entry module graphs pass through uncaptured (see core hooks.js).
+  for (const specifier of imports) nodeArgs.push('--import', specifier)
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code, signal] = await once(child, 'close')
   // code is null when the child died from a signal; report 128+signo (shell convention) instead of the implicit 0

@@ -20,7 +20,10 @@ assert(basename(jsname) === 'stasis-core' || pathsEqual(jsname, fileURLToPath(im
 
 function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
- stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
+ stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--import=module ...] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
+ (--import forwards extra preload modules (repeatable) to the node process running the entry,
+  e.g. --import=tsx to run TypeScript through the project's tsx; a preload's own module graph is
+  runner infrastructure like stasis's loader itself, so it is not captured into the lockfile/bundle)
  stasis-core add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -51,12 +54,13 @@ if (command === '-v' || command === '--version') {
     debug: { type: 'boolean' },
     dependencies: { type: 'boolean' },
     'child-process': { type: 'boolean' },
+    import: { type: 'string', multiple: true },
     fs: { type: 'string' },
     resources: { type: 'string' },
     'brotli-quality': { type: 'string' },
   }
   const values = parseLeadingOptions(argv, options, {
-    valueFlags: ['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--resources', '--brotli-quality'],
+    valueFlags: ['--bundle', '--bundle-file', '--resources-bundle-file', '--lock', '--import', '--resources', '--brotli-quality'],
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to run: no path to file given')
@@ -85,7 +89,11 @@ if (command === '-v' || command === '--version') {
     }
   }
   const childProcess = values['child-process'] ? '1' : ''
-  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
+  // --import: extra preload module(s) passed through to the spawned node (e.g. --import=tsx).
+  // Node resolves each against the project cwd; they ride AFTER stasis's own loader import.
+  const imports = values.import ?? []
+  if (imports.some((s) => s === '')) usage('Error: --import requires a module specifier (e.g. --import=tsx)')
+  console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(imports.length > 0 && { import: imports }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
   setEnv('EXODUS_STASIS_SCOPE', scope)
@@ -99,6 +107,9 @@ if (command === '-v' || command === '--version') {
   // Only set when given: an unconditional setEnv('') would reject an ambient EXODUS_STASIS_BROTLI_QUALITY as a conflict.
   if (brotliQuality !== undefined) setEnv('EXODUS_STASIS_BROTLI_QUALITY', String(brotliQuality))
   const nodeArgs = ['--import', import.meta.resolve('../src/loader.js')]
+  // Passthrough preloads ride after the loader, so they evaluate under its hooks; their
+  // pre-entry module graphs pass through uncaptured (see src/hooks.js).
+  for (const specifier of imports) nodeArgs.push('--import', specifier)
   const child = spawn(process.execPath, [...nodeArgs, ...argv], { stdio: 'inherit' })
   const [code, signal] = await once(child, 'close')
   // code is null when the child died from a signal; report 128+signo (shell convention) instead of the implicit 0

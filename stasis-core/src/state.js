@@ -12,7 +12,7 @@ import { Lockfile } from './lockfile.js'
 import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, erasedTypeScriptFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -811,6 +811,10 @@ export class State {
       }
       const inferredFormat = extToFormat[extname(file)]
       if (inferredFormat !== undefined) {
+        // A transforming preload (`stasis run --import tsx`) loads a TypeScript file as its
+        // post-erasure family ('module-typescript' arrives as 'module'): attest the on-disk
+        // format, not the transformer's runtime view. Anything else must still match exactly.
+        if (format != null && format === erasedTypeScriptFormat(inferredFormat)) format = inferredFormat
         if (format != null) assert.equal(format, inferredFormat)
         else format = inferredFormat
       } else if (format == null) {

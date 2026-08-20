@@ -14,6 +14,7 @@ import {
   RESOURCE_FORMATS,
   SOURCE_LANGUAGE_FORMATS as NON_NODE_SOURCE_LANGUAGES,
   STAT_FORMATS,
+  erasedTypeScriptFormat,
 } from './util.js'
 
 // Snapshot off the namespace so `--fs` can't redirect stasis's own capture/shard reads.
@@ -139,6 +140,13 @@ let aborted = false
 let loadingModule = 0
 // True until the first non-builtin load hook fires (entry detection).
 let entryUnseen = true
+// True until the first parent-less resolution -- the CLI entry. Extra preloads (`stasis run
+// --import tsx`) resolve with the cwd as parent and load BEFORE it: they are runner
+// infrastructure like stasis's own loader, so both hooks pass them through unobserved.
+// Capturing them instead would misfile the first preload as the entry (initState from ITS
+// package root) and pollute the artifact with toolchain files; gating them would break
+// --bundle=load (the preload itself must keep loading from disk).
+let entryUnresolved = true
 
 // EXODUS_STASIS_PID = the root stasis's pid; on mismatch we're a child and must not write the
 // bundle/lockfile (root owns the artifact; a 2nd writer races). A forked child also relaxes assertEntry.
@@ -319,6 +327,9 @@ function initState(root) {
 function load(url, context, nextLoad) {
   assert.equal(typeof url, 'string')
 
+  // Pre-entry passthrough (see entryUnresolved): a preload's module graph loads before the entry.
+  if (entryUnresolved) return nextLoad(url, context)
+
   if (url.startsWith('node:')) {
     const result = nextLoad(url, context)
     assert.equal(result.format, 'builtin')
@@ -332,15 +343,21 @@ function load(url, context, nextLoad) {
     }
     const { source, format } = state.getFile(url)
     // Cross-check format only when the resolve chain set it; the formats map is itself attested
-    // against the lockfile at construction.
-    if (context.format != null) assert.equal(format, context.format)
+    // against the lockfile at construction. A transforming preload (`stasis run --import tsx`)
+    // legitimately asks for an attested '-typescript' file as its post-erasure family -- serve
+    // the chain's view then (the transformer above us turns the raw source into it).
+    let serveFormat = format
+    if (context.format != null) {
+      if (context.format === erasedTypeScriptFormat(format)) serveFormat = context.format
+      else assert.equal(format, context.format)
+    }
     // Trust gate: only serve a file whose attested format Node can execute; everything else fails closed.
     if (!NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
     // node:59666: a load-hook-supplied CJS source gets a re-invented require() missing .cache/.extensions.
     if (CJS_FORMATS.has(format)) {
-      return { source: repairCjsRequire(source), format, shortCircuit: true }
+      return { source: repairCjsRequire(source), format: serveFormat, shortCircuit: true }
     }
-    return { source, format, shortCircuit: true }
+    return { source, format: serveFormat, shortCircuit: true }
   }
 
   loadingModule++
@@ -378,6 +395,14 @@ function load(url, context, nextLoad) {
 }
 
 function resolve(specifier, context, nextResolve) {
+  // Pre-entry passthrough (see entryUnresolved). Everything a preload pulls in resolves WITH a
+  // parent (the cwd for the preload specifier itself, its files for the rest), so the first
+  // parent-less resolution is still the entry.
+  if (entryUnresolved) {
+    if (context.parentURL) return nextResolve(specifier)
+    entryUnresolved = false
+  }
+
   if (isBuiltin(specifier)) {
     const res = nextResolve(specifier)
     assert.equal(res.url, specifier.startsWith('node:') ? specifier : `node:${specifier}`)
