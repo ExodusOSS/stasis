@@ -143,7 +143,7 @@ test('rollup: an inert plugin exposes no hooks at all', (t) => {
   // the constructor assigns no hooks, so rollup sees a name-only plugin and skips it entirely.
   const plugin = inProjectDir(t, () => new StasisRollup({ lock: 'none', bundle: 'none' }))
   t.assert.equal(plugin.name, 'stasis')
-  for (const hook of ['resolveId', 'load', 'buildStart', 'buildEnd']) {
+  for (const hook of ['resolveId', 'load', 'buildStart', 'buildEnd', 'options']) {
     t.assert.equal(plugin[hook], undefined, `inert plugin must not register ${hook}`)
   }
 })
