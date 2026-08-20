@@ -1216,6 +1216,128 @@ test('CLI: bundle --flow alone still fails on JSX (JSX needs --jsx too)', withTm
   t.assert.match(r.stderr, /broken at load time/)
 }))
 
+// --- TypeScript resolution (`--typescript`) ---
+//
+// tsc never rewrites specifiers, so TS sources import each other by their OUTPUT names
+// (`import "./x.js"` for the file on disk as `./x.ts`) -- a mapping Node's resolver refuses.
+// `--typescript` retries a failed resolution with tsc's extension substitution (.js -> .ts,
+// .mjs -> .mts, .cjs -> .cts) and TS extension/index probing for extensionless specifiers,
+// on both the built-in resolver and the legacy-field one. Fallback-only: an on-disk `.js`
+// always wins over its `.ts` twin. See tests/scan.test.js and tests/resolve-fields.test.js
+// for the per-resolver rules; these cover the command-level threading.
+const writeTsProject = (dir) => {
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'ts-app', version: '1.2.3', type: 'module' }))
+  writeFileSync(join(dir, 'entry.ts'),
+    'import { dep } from "./dep.js"\n' +
+    'export const v: number = dep\n')
+  writeFileSync(join(dir, 'dep.ts'), 'export const dep: number = 1\n')
+}
+
+test('buildBundle (JS) --typescript resolves .js specifiers to their on-disk .ts sources', withTmp(async (t, tmp) => {
+  writeTsProject(tmp)
+  const bundle = await buildBundle({ cwd: tmp, entries: ['entry.ts'], typescript: true })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['dep.ts', 'entry.ts'])
+  // The edge keeps the source's specifier; only the target is the mapped file.
+  t.assert.equal(bundle.imports.get('*').get('entry.ts').get('./dep.js'), 'dep.ts')
+  t.assert.equal(bundle.formats.get('dep.ts'), 'module-typescript')
+}))
+
+test('buildBundle (JS) without --typescript fails closed on the unmapped .js specifier', withTmp(async (t, tmp) => {
+  writeTsProject(tmp)
+  await t.assert.rejects(
+    () => buildBundle({ cwd: tmp, entries: ['entry.ts'] }),
+    /would be broken at load time/,
+  )
+}))
+
+test('buildBundle rejects --typescript for non-JS entries', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], typescript: true }),
+    /--typescript is only valid for JS bundles/,
+  )
+})
+
+test('buildBundle rejects --typescript with --metro-resolver (it cannot substitute)', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: fieldsFixture, entries: ['src/entry.js'], metro: true, metroResolver: true, platforms: ['ios'], typescript: true }),
+    /--typescript is not supported with --metro-resolver/,
+  )
+})
+
+test('buildBundle --typescript threads through the legacy-field resolver (--mainFields path)', withTmp(async (t, tmp) => {
+  writeTsProject(tmp)
+  // A TS-source dependency whose main names the compiled file that isn't on disk.
+  mkdirSync(join(tmp, 'node_modules', 'tsdep', 'lib'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'tsdep', 'package.json'),
+    JSON.stringify({ name: 'tsdep', version: '2.0.0', main: './lib/main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'tsdep', 'lib', 'main.ts'), 'export const m: number = 5\n')
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import { dep } from "./dep.js"\nimport { m } from "tsdep"\nexport const v: number = dep + m\n')
+  const bundle = await buildBundle({ cwd: tmp, entries: ['entry.ts'], mainFields: ['main'], typescript: true })
+  t.assert.deepEqual(
+    [...bundle.sources.keys()].toSorted(),
+    ['dep.ts', 'entry.ts', 'node_modules/tsdep/lib/main.ts'],
+  )
+  t.assert.equal(bundle.imports.get('*').get('entry.ts').get('./dep.js'), 'dep.ts')
+  t.assert.equal(bundle.imports.get('*').get('entry.ts').get('tsdep'), 'node_modules/tsdep/lib/main.ts')
+}))
+
+test('buildBundle --typescript resolves per platform under --metro', withTmp(async (t, tmp) => {
+  writeTsProject(tmp)
+  const bundle = await buildBundle({ cwd: tmp, entries: ['entry.ts'], metro: true, platforms: ['ios', 'android'], typescript: true })
+  // Both platforms substitute identically, so the edge stays flat.
+  t.assert.equal(importTarget(bundle, 'entry.ts', './dep.js'), 'dep.ts')
+}))
+
+test('CLI: bundle --typescript bundles a nodenext-style TS project and the bundle loads', withTmp((t, tmp) => {
+  writeTsProject(tmp)
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import { dep } from "./dep.js"\nconsole.log("ts-loaded", (dep as number) + 1)\n')
+  const r = runCli(['bundle', '--typescript', '--output=stasis.code.br', 'entry.ts'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(join(tmp, 'stasis.code.br'))).toString('utf8'))
+  t.assert.deepEqual([...parsed.sources.keys()].toSorted(), ['dep.ts', 'entry.ts'])
+  // Stored source keeps the .js specifier verbatim; the recorded edge does the mapping at load.
+  t.assert.match(parsed.sources.get('entry.ts'), /from "\.\/dep\.js"/)
+  // The mapped edge round-trips: --bundle=load resolves ./dep.js -> dep.ts from the import map
+  // (plain node would refuse it), and Node strips the types at load.
+  const run = runCli(['run', '--lock=none', '--bundle=load', 'entry.ts'], { cwd: tmp })
+  t.assert.equal(run.status, 0, `run stderr: ${run.stderr}`)
+  t.assert.match(run.stdout, /ts-loaded 2/)
+}))
+
+test('CLI: bundle without --typescript reports the .js -> .ts miss as broken at load time', withTmp((t, tmp) => {
+  writeTsProject(tmp)
+  const r = runCli(['bundle', `--output=${join(tmp, 'snap.br')}`, 'entry.ts'], { cwd: tmp })
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /broken at load time/)
+  t.assert.match(r.stderr, /\.\/dep\.js/)
+}))
+
+test('CLI: bundle --typescript combines with --lockfile, attesting the mapped edge', withTmp((t, tmp) => {
+  writeTsProject(tmp)
+  const lockPath = join(tmp, 'stasis.lock.json')
+  const r = runCli(['bundle', '--typescript', `--lockfile=${lockPath}`, `--output=${join(tmp, 'snap.br')}`, 'entry.ts'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
+  t.assert.equal(lock.imports['*']['entry.ts']['./dep.js'], 'dep.ts')
+  // The mapped TARGET is what gets attested (dep.ts's bytes); no phantom dep.js appears.
+  t.assert.match(lock.sources['.'].files['dep.ts'], /^sha512-/)
+  t.assert.ok(!('dep.js' in lock.sources['.'].files))
+}))
+
+test('CLI: bundle rejects --typescript for .sol entries', (t) => {
+  const r = runCli(['bundle', '--typescript', 'a.sol'])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--typescript is only valid for JS bundles/)
+})
+
+test('CLI: bundle rejects --typescript with --metro-resolver', (t) => {
+  const r = runCli(['bundle', '--typescript', '--metro', '--metro-resolver', '--platforms=ios', 'entry.ts'])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--typescript is not supported with --metro-resolver/)
+})
+
 // --- Legacy-field / Metro resolution (`--mainFields`, `--metro --platforms`) ---
 //
 // These drive the legacy-field resolver (tests/resolve-fields.test.js covers it in

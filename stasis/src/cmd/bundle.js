@@ -512,8 +512,9 @@ function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '', ba
 // user code is executed, and TS is stored verbatim (Node strips types at load). Scope comes
 // from stasis.config.json / `EXODUS_STASIS_SCOPE` unless `scope` overrides. `conditions` are
 // extra `exports`/`imports` conditions; on their own they don't honour legacy mainFields or
-// platform suffixes (see `--mainFields` / buildResolvedJsBundle).
-export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [], jsx = false, flow = false, resources = [], packageJSON = false } = {}) {
+// platform suffixes (see `--mainFields` / buildResolvedJsBundle). `typescript` maps a failed
+// `./x.js` to its on-disk `./x.ts` (tsc's extension substitution; see scan's #typescriptResolve).
+export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [], jsx = false, flow = false, typescript = false, resources = [], packageJSON = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
@@ -530,7 +531,7 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   // --resources: extensions/filenames carried as opaque assets instead of failing "can't carry".
   const resourceSet = parseResourcesOption('buildJsBundle', resources)
 
-  const scanner = scan(absEntries, { conditions: scanConditions, jsx, flow, resources: resourceSet })
+  const scanner = scan(absEntries, { conditions: scanConditions, jsx, flow, typescript, resources: resourceSet })
 
   // Fail closed where the bundle is guaranteed broken at load; warn on catchable misses (see analyzeScanner).
   reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir })
@@ -655,7 +656,7 @@ function nativeModuleFiles(pkgAbs) {
 // Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
 // `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
 // have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false, resources = [], packageJSON = false }) {
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false, typescript = false, resources = [], packageJSON = false }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -701,6 +702,10 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           conditions: resolveConditions('commonjs', extras),
           // Opt into Metro's package-entry browser-field quirks only on the --metro path.
           metro,
+          // --typescript: tsc's extension substitution, inside the field resolver (the scanner's
+          // own fallback only backs the built-in resolver). Unreachable under --metro-resolver
+          // (classifyEntries rejects the combination -- metro-resolver can't substitute).
+          typescript,
         })
     const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx, flow, resources: resourceSet })
     reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir, label: platform ?? 'mainFields' })
@@ -895,7 +900,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources, packageJSON }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, resources, packageJSON }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -924,6 +929,10 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   // --flow strips Flow type syntax before the JS parser; the non-JS loaders never parse with oxc.
   if (flow && kind !== 'js') {
     throw new Error(`${name}: --flow is only valid for JS bundles`)
+  }
+  // --typescript maps JS-output specifiers to their on-disk TS sources; only the JS resolvers do it.
+  if (typescript && kind !== 'js') {
+    throw new Error(`${name}: --typescript is only valid for JS bundles`)
   }
   // --resources carries allowlisted assets reached through the JS import graph; JS-only. The list
   // is validated (parseResourcesOption) in the builders, but reject a code extension here too so a
@@ -974,6 +983,10 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (metroResolver && !metro) {
     throw new Error(`${name}: --metro-resolver is only valid with --metro`)
   }
+  // metro-resolver has no TS extension substitution, so --typescript would silently not apply -- reject it.
+  if (typescript && metroResolver) {
+    throw new Error(`${name}: --typescript is not supported with --metro-resolver (the project's metro-resolver doesn't substitute .js -> .ts)`)
+  }
   // The field resolver always emits full-scope, so --scope with --mainFields/--metro would be silently ignored -- reject it.
   if (scope !== undefined && (mainFields !== undefined || metro)) {
     throw new Error(`${name}: --scope is not supported with --mainFields or --metro`)
@@ -983,9 +996,9 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
-// (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, resources = [], packageJSON = false } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources, packageJSON })
+// (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow|--typescript/JS) is enforced by classifyEntries.
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, resources = [], packageJSON = false } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, resources, packageJSON })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
@@ -1001,12 +1014,13 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
       metroResolver: Boolean(metroResolver),
       jsx,
       flow,
+      typescript,
       resources,
       packageJSON,
     })
     return bundle
   }
-  const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, resources, packageJSON })
+  const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, typescript, resources, packageJSON })
   // Stamp the `bundle` consumer (the static build carries none).
   return state.sourceBundle.withReason('bundle')
 }
@@ -1021,8 +1035,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, resources = [], packageJSON = false, brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, resources, packageJSON })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, resources = [], packageJSON = false, brotliQuality, add = false } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, resources, packageJSON })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -1045,6 +1059,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
       metroResolver: Boolean(metroResolver),
       jsx,
       flow,
+      typescript,
       resources,
       packageJSON,
     })
@@ -1052,12 +1067,12 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     if (lockfile) lockData = built.lockfile.serialize()
   } else if (kind === 'js' && lockfile) {
     // Keep the State: only it carries the file hashes the companion lockfile needs (a Bundle holds sources, not digests).
-    const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, resources, packageJSON })
+    const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, typescript, resources, packageJSON })
     // Stamp the `bundle` consumer (this branch bypasses buildBundle to keep the State).
     bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
-    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, resources, packageJSON })
+    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, typescript, resources, packageJSON })
   }
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.

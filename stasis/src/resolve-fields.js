@@ -16,6 +16,29 @@ import { isTypeDeclaration, stripTypeDeclaration } from '@exodus/stasis-core/uti
 //   { builtin }  a Node builtin
 //   null         unresolved
 
+// The JS output extensions tsc's extension substitution maps back to TS source (--typescript):
+// a specifier/path ending in one of these may name a compiled file whose on-disk source is the
+// TS sibling. Everything else (extensionless, .json, unknown) is probing territory, not substitution.
+export const JS_OUTPUT_EXTS = new Set(['.js', '.jsx', '.mjs', '.cjs'])
+
+// tsc's extension substitution table: the TS source siblings that may sit on disk in place of a
+// path/specifier naming a JS output extension (./x.js -> ./x.ts; .mjs -> .mts; .cjs -> .cts; the
+// JSX-capable .js/.jsx -> .tsx only when `tsx` says the caller can carry/parse .tsx, i.e. --jsx).
+// Returns [] for a non-substitutable name. Candidates that spell a `.d.ts` (e.g. ./x.d + .ts) are
+// dropped: a declaration is types-only, erased at runtime, never a resolution target.
+export function typescriptSiblings(name, { tsx = false } = {}) {
+  const dot = name.lastIndexOf('.')
+  if (dot === -1) return []
+  const ext = name.slice(dot)
+  if (!JS_OUTPUT_EXTS.has(ext)) return []
+  const stem = name.slice(0, dot)
+  let out
+  if (ext === '.js') out = tsx ? [`${stem}.ts`, `${stem}.tsx`] : [`${stem}.ts`]
+  else if (ext === '.jsx') out = tsx ? [`${stem}.tsx`] : []
+  else out = [ext === '.mjs' ? `${stem}.mts` : `${stem}.cts`]
+  return out.filter((cand) => !isTypeDeclaration(cand))
+}
+
 // Metro divergence toggle. When a package's browser map maps its OWN entry to `false` (under
 // Metro's matching rules, which include bare keys like {"buf": false} for main "./buf.js"),
 // Metro's `getPackageEntryPoint` ignores the non-string replacement and keeps `main`. The
@@ -204,10 +227,9 @@ function resolveSourceFile(base, opts) {
     if (typeof r === 'string') return isAbsolute(r) ? r : resolvePath(scope.pkgDir, r)
     return p
   }
-  // `suffix` is everything appended to `base`; Metro redirect-checks suffixed candidates only.
-  const probe = (suffix) => {
-    let p = `${base}${suffix}`
-    if (opts.metro && suffix !== '') {
+  // `derived` marks a candidate that is not the literal base; Metro redirect-checks those only.
+  const probePath = (p, derived) => {
+    if (opts.metro && derived) {
       const r = redirectCandidate(p)
       if (r === false) return { empty: true }
       p = r
@@ -217,6 +239,8 @@ function resolveSourceFile(base, opts) {
     if (isTypeDeclaration(p)) return null
     return isFile(p) ? p : null
   }
+  // `suffix` is everything appended to `base`.
+  const probe = (suffix) => probePath(`${base}${suffix}`, suffix !== '')
   const tryExt = (sourceExt) => {
     if (opts.platform) {
       const hit = probe(`.${opts.platform}${sourceExt}`)
@@ -230,6 +254,18 @@ function resolveSourceFile(base, opts) {
   }
   const bare = tryExt('')
   if (bare) return bare
+  // --typescript: tsc's extension substitution. A base naming a JS output extension probes its TS
+  // source siblings once the literal file (the bare probe above) is absent, so the on-disk `.js`
+  // always wins over its `.ts` twin. Literal siblings only -- no platform suffixes (tsc has none);
+  // extensionless bases keep going through the appended-extension loop below (sourceExts carries
+  // ts, and tsx under --jsx). Placed before that loop so `x.js` -> `x.ts` beats a pathological
+  // `x.js.<ext>`, matching tsc's candidate order.
+  if (opts.typescript) {
+    for (const cand of typescriptSiblings(base, { tsx: opts.sourceExts.includes('tsx') })) {
+      const hit = probePath(cand, true)
+      if (hit) return hit
+    }
+  }
   for (const ext of opts.sourceExts) {
     const hit = tryExt(`.${ext}`)
     if (hit) return hit
@@ -266,8 +302,10 @@ function resolveFileOrDir(base, opts) {
 // `mainFields`/`platform`/`preferNative`/`sourceExts` drive the legacy-field + suffix probing.
 // `metro` opts into Metro's package-entry + candidate-redirect semantics (see
 // resolveEntryThroughMap and resolveSourceFile); leave it off for the esbuild-parity
-// `--mainFields` path. `metroKeepEntryOnBrowserFalse` overrides the module-level toggle
-// (METRO_KEEP_ENTRY_ON_BROWSER_FALSE) per resolver -- primarily so tests can cover both branches.
+// `--mainFields` path. `typescript` adds tsc's extension substitution (a missing `x.js` probes
+// its `x.ts` sibling; see resolveSourceFile). `metroKeepEntryOnBrowserFalse` overrides the
+// module-level toggle (METRO_KEEP_ENTRY_ON_BROWSER_FALSE) per resolver -- primarily so tests
+// can cover both branches.
 export function createFieldResolver({
   conditions = [],
   mainFields = ['main'],
@@ -275,9 +313,10 @@ export function createFieldResolver({
   preferNative = false,
   sourceExts = ['js', 'json', 'ts'],
   metro = false,
+  typescript = false,
   metroKeepEntryOnBrowserFalse = METRO_KEEP_ENTRY_ON_BROWSER_FALSE,
 } = {}) {
-  const opts = { platform, preferNative, sourceExts, mainFields, metro, metroKeepEntryOnBrowserFalse }
+  const opts = { platform, preferNative, sourceExts, mainFields, metro, typescript, metroKeepEntryOnBrowserFalse }
   // `callConditions` (from scan) is the parent's format-driven condition set, so `exports`
   // delegation matches Node resolving from THAT file; falls back to configured `conditions`.
   return function resolve(parentFile, specifier, callConditions) {

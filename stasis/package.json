@@ -49,6 +49,7 @@
     "src/mock.js",
     "src/parse.js",
     "src/prune.js",
+    "src/resolve-fields.js",
     "src/rollup.js",
     "src/sbom.js",
     "src/scan.js",

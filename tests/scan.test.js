@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -438,6 +438,113 @@ test('scan --flow leaves .ts sources to oxc (does not run flow-remove-types on T
   t.assert.deepEqual(result.parseErrors, [])
   t.assert.equal(result.files.get('entry.ts').format, 'module-typescript')
   t.assert.ok(result.files.has('dep.ts'), 'the TS import graph is unaffected by --flow')
+}))
+
+// --- TypeScript resolution (typescript: true / --typescript). ---
+//
+// tsc never rewrites specifiers, so TS sources import each other by their OUTPUT names
+// (`./x.js` for the file living on disk as `./x.ts`). Node's resolver refuses that mapping,
+// so `typescript: true` retries a FAILED resolution with tsc's extension substitution
+// (.js -> .ts, .mjs -> .mts, .cjs -> .cts) and TS extension/index probing for extensionless
+// specifiers. Fallback-only: an on-disk .js always beats its .ts twin.
+
+test('scan typescript:true maps a missing ./x.js to its on-disk ./x.ts, keyed by the original specifier', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { a } from "./a.js"\nexport const v: number = a\n')
+  writeFileSync(join(tmp, 'a.ts'), 'export const a: number = 1\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.unresolved, [])
+  t.assert.deepEqual(result.files.get('entry.ts').edges, [{ kind: 'import', spec: './a.js', child: 'a.ts' }])
+  t.assert.equal(result.files.get('a.ts').format, 'module-typescript')
+  // The recorded edge keeps the source's specifier -- only the target is the mapped file.
+  const byParent = flattenImports(result.imports)
+  t.assert.equal(byParent.get('entry.ts').get('./a.js'), 'a.ts')
+}))
+
+test('scan typescript:true never remaps a specifier whose literal target resolves (.js wins over its .ts twin)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { a } from "./a.js"\nexport const v: number = a\n')
+  writeFileSync(join(tmp, 'a.js'), 'export const a = 1\n')
+  writeFileSync(join(tmp, 'a.ts'), 'export const a: number = 999\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.files.get('entry.ts').edges, [{ kind: 'import', spec: './a.js', child: 'a.js' }])
+  t.assert.ok(!result.files.has('a.ts'), 'the shadowed .ts twin must not be walked')
+}))
+
+test('scan without typescript leaves the .js -> .ts mapping unresolved (off by default)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { a } from "./a.js"\nexport const v: number = a\n')
+  writeFileSync(join(tmp, 'a.ts'), 'export const a: number = 1\n')
+  const result = scan([join(tmp, 'entry.ts')]).toRelative(tmp)
+  t.assert.equal(result.unresolved.length, 1)
+  t.assert.equal(result.unresolved[0].spec, './a.js')
+  t.assert.ok(!result.files.has('a.ts'))
+}))
+
+test('scan typescript:true maps .mjs -> .mts and .cjs -> .cts', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import { m } from "./m.mjs"\nimport c = require("./c.cjs")\nexport const v: number = m + c.x\n')
+  writeFileSync(join(tmp, 'm.mts'), 'export const m: number = 1\n')
+  writeFileSync(join(tmp, 'c.cts'), 'exports.x = 2 as number\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.unresolved, [])
+  const byParent = flattenImports(result.imports)
+  t.assert.equal(byParent.get('entry.ts').get('./m.mjs'), 'm.mts')
+  t.assert.equal(byParent.get('entry.ts').get('./c.cjs'), 'c.cts')
+}))
+
+test('scan typescript:true completes extensionless and directory specifiers with .ts / index.ts', withTmp((t, tmp) => {
+  // Node's CJS algorithm already probed .js/.json/.node and directory indexes; only the TS
+  // completions are left. .mts/.cts stay explicit-extension-only, exactly like tsc (mirroring
+  // how Node never probes .mjs/.cjs).
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'entry.ts'),
+    'const { u } = require("./util")\nconst { d } = require("./dir")\nconst { s } = require("./x.service")\nrequire("./only-mts")\nmodule.exports = u + d + s\n')
+  writeFileSync(join(tmp, 'util.ts'), 'exports.u = 1 as number\n')
+  mkdirSync(join(tmp, 'dir'))
+  writeFileSync(join(tmp, 'dir', 'index.ts'), 'exports.d = 2 as number\n')
+  writeFileSync(join(tmp, 'x.service.ts'), 'exports.s = 3 as number\n')
+  writeFileSync(join(tmp, 'only-mts.mts'), 'export const nope: number = 4\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  const byParent = flattenImports(result.imports)
+  t.assert.equal(byParent.get('entry.ts').get('./util'), 'util.ts')
+  t.assert.equal(byParent.get('entry.ts').get('./dir'), 'dir/index.ts')
+  t.assert.equal(byParent.get('entry.ts').get('./x.service'), 'x.service.ts')
+  t.assert.deepEqual(result.unresolved.map((u) => u.spec), ['./only-mts'], 'extensionless never lands on .mts/.cts')
+}))
+
+test('scan typescript:true probes .tsx only under jsx (off, a .tsx twin stays unresolved)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { App } from "./App.js"\nexport const v: unknown = App\n')
+  writeFileSync(join(tmp, 'App.tsx'), 'export function App(): unknown { return <span>x</span> }\n')
+  const off = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.equal(off.unresolved.length, 1, 'without jsx the scanner cannot carry .tsx, so it must not resolve to one')
+  const on = scan([join(tmp, 'entry.ts')], { typescript: true, jsx: true }).toRelative(tmp)
+  t.assert.deepEqual(on.unresolved, [])
+  t.assert.equal(flattenImports(on.imports).get('entry.ts').get('./App.js'), 'App.tsx')
+}))
+
+test('scan typescript:true leaves bare package specifiers to the package manifest (no TS mapping)', withTmp((t, tmp) => {
+  // A bare specifier names a package whose entries are declared by exports/main; tsc's extension
+  // substitution is a relative/absolute-path rule, so a missing subpath stays unresolved.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { x } from "dep/sub.js"\nexport const v: number = x\n')
+  mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }))
+  writeFileSync(join(tmp, 'node_modules', 'dep', 'sub.ts'), 'export const x: number = 1\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.unresolved.map((u) => u.spec), ['dep/sub.js'])
+}))
+
+test('scan typescript:true never lands on a type declaration (./x.d + .ts spells one)', withTmp((t, tmp) => {
+  // `./x.d` + the probed `.ts` would name x.d.ts -- types only, erased at runtime, never a target.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'require("./x.d")\nmodule.exports = 1\n')
+  writeFileSync(join(tmp, 'x.d.ts'), 'export declare const x: number\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.unresolved.map((u) => u.spec), ['./x.d'])
+  t.assert.ok(!result.files.has('x.d.ts'))
 }))
 
 test('scan instance is reusable via the Scan class', (t) => {

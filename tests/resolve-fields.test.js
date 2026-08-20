@@ -1,20 +1,45 @@
 import { test } from 'node:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createFieldResolver, resolveConditions } from '../stasis/src/resolve-fields.js'
+import { createFieldResolver, resolveConditions, typescriptSiblings } from '../stasis/src/resolve-fields.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = join(here, 'fixtures', 'resolve-fields')
 const entry = join(fx, 'src', 'entry.js')
 const redirIndex = join(fx, 'node_modules', 'redir', 'index.js')
 
-// Resolve and reduce to a fixture-relative path (or a marker) for assertions.
-const rel = (r) => {
+// Resolve and reduce to a base-relative path (or a marker) for assertions.
+const relTo = (base, r) => {
   if (r == null) return null
   if (r.empty) return '<empty>'
   if (r.builtin) return '<builtin>'
-  return relative(fx, fileURLToPath(r.url)).split(/[\\/]/u).join('/')
+  return relative(base, fileURLToPath(r.url)).split(/[\\/]/u).join('/')
+}
+const rel = (r) => relTo(fx, r)
+
+// Throwaway TS-shaped project for the `typescript: true` tests (built per test, not a shared
+// fixture: .ts files in tests/fixtures would be scanned by the workspace's own tooling).
+const withTsTmp = (fn) => (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-resolve-fields-ts-'))
+  try {
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-fields', version: '0.0.0' }))
+    writeFileSync(join(tmp, 'entry.ts'), 'export {}\n')
+    writeFileSync(join(tmp, 'only-ts.ts'), 'export const x: number = 1\n')
+    writeFileSync(join(tmp, 'both.js'), 'exports.x = 1\n')
+    writeFileSync(join(tmp, 'both.ts'), 'export const x: number = 999\n')
+    writeFileSync(join(tmp, 'weird.ts'), 'export const w: number = 1\n')
+    writeFileSync(join(tmp, 'weird.js.ts'), 'export const w: number = 999\n')
+    mkdirSync(join(tmp, 'node_modules', 'tspkg', 'lib'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'tspkg', 'package.json'),
+      JSON.stringify({ name: 'tspkg', version: '1.0.0', main: './lib/main.js' }))
+    writeFileSync(join(tmp, 'node_modules', 'tspkg', 'lib', 'main.ts'), 'export const m: number = 1\n')
+    return fn(t, tmp)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 }
 
 // Build a resolver, varying the bits a caller tweaks (the legacy fields it honours,
@@ -239,3 +264,46 @@ test('locatePackage matches the node_modules segment exactly, not a *-node_modul
   const importer = join(fx, 'odd', 'my-node_modules', 'app.js')
   t.assert.equal(rel(mk()(importer, 'dep')), 'odd/my-node_modules/node_modules/dep/index.js')
 })
+
+// --- TypeScript extension substitution (`typescript: true` / --typescript). ---
+
+test('typescriptSiblings maps JS output extensions to their TS sources (tsx only when probeable)', (t) => {
+  t.assert.deepEqual(typescriptSiblings('./x.js'), ['./x.ts'])
+  t.assert.deepEqual(typescriptSiblings('./x.js', { tsx: true }), ['./x.ts', './x.tsx'])
+  t.assert.deepEqual(typescriptSiblings('./x.jsx'), [])
+  t.assert.deepEqual(typescriptSiblings('./x.jsx', { tsx: true }), ['./x.tsx'])
+  t.assert.deepEqual(typescriptSiblings('./x.mjs'), ['./x.mts'])
+  t.assert.deepEqual(typescriptSiblings('./x.cjs'), ['./x.cts'])
+  // Not substitutable: extensionless, already-TS, .json, unknown extensions.
+  t.assert.deepEqual(typescriptSiblings('./x'), [])
+  t.assert.deepEqual(typescriptSiblings('./x.ts'), [])
+  t.assert.deepEqual(typescriptSiblings('./x.json'), [])
+  t.assert.deepEqual(typescriptSiblings('./x.service'), [])
+  // A candidate spelling a type declaration is dropped, not returned as a target.
+  t.assert.deepEqual(typescriptSiblings('./x.d.js'), [])
+  t.assert.deepEqual(typescriptSiblings('./x.d.mjs'), [])
+})
+
+test('typescript: a missing x.js resolves to its x.ts sibling; an existing x.js wins', withTsTmp((t, tmp) => {
+  const resolver = createFieldResolver({ mainFields: ['main'], typescript: true })
+  const from = join(tmp, 'entry.ts')
+  t.assert.equal(relTo(tmp, resolver(from, './only-ts.js')), 'only-ts.ts')
+  t.assert.equal(relTo(tmp, resolver(from, './both.js')), 'both.js')
+  // Off by default: without the option the missing .js stays unresolved.
+  const plain = createFieldResolver({ mainFields: ['main'] })
+  t.assert.equal(relTo(tmp, plain(from, './only-ts.js')), null)
+}))
+
+test('typescript: a package main naming a missing .js lands on its .ts source', withTsTmp((t, tmp) => {
+  // TS-source packages (workspace deps) commonly point main at their compiled name; with only
+  // the source on disk, the entry substitutes like any other path.
+  const resolver = createFieldResolver({ mainFields: ['main'], typescript: true })
+  t.assert.equal(relTo(tmp, resolver(join(tmp, 'entry.ts'), 'tspkg')), 'node_modules/tspkg/lib/main.ts')
+}))
+
+test('typescript: substitution beats the appended-extension probe for a pathological x.js.ts', withTsTmp((t, tmp) => {
+  // Both `weird.ts` (tsc's substitution) and `weird.js.ts` (the sourceExts append) exist; tsc's
+  // candidate order puts substitution first, so the append must not shadow it.
+  const resolver = createFieldResolver({ mainFields: ['main'], typescript: true })
+  t.assert.equal(relTo(tmp, resolver(join(tmp, 'entry.ts'), './weird.js')), 'weird.ts')
+}))

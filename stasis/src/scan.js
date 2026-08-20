@@ -1,10 +1,11 @@
 import { readFileSync, existsSync } from 'node:fs'
-import { extname, resolve as resolvePath, relative } from 'node:path'
+import { extname, isAbsolute, resolve as resolvePath, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire, isBuiltin } from 'node:module'
 import assert from 'node:assert/strict'
 import { packageType } from '@exodus/stasis-core/bundle-util'
-import { classifyExtension, classifyFormat } from '@exodus/stasis-core/util'
+import { classifyExtension, classifyFormat, isTypeDeclaration } from '@exodus/stasis-core/util'
+import { JS_OUTPUT_EXTS, typescriptSiblings } from './resolve-fields.js'
 
 // Static require/import graph walker: parses source, never loads or executes user code.
 // Dynamic specifiers (`require(name)`, `import('./'+x)`) are recorded as unresolved.
@@ -127,14 +128,17 @@ export class Scan {
   // `jsx` opts the .js/.cjs/.mjs family into JSX syntax (React Native's JSX-in-.js convention);
   // off by default because oxc, like tsc, only auto-enables JSX for .jsx/.tsx by extension.
   // `flow`: strip Flow type syntax from JS-family sources before parsing (see #scanFile).
+  // `typescript`: retry a failed resolution with tsc's TS extension mapping (see #typescriptResolve);
+  // only consulted on the built-in (Node) resolver -- a custom `resolve` owns its own TS handling.
   // `resources` (a `parseResourcesOption` Set of extensions/filenames): reached files matching it
   // are carried as opaque resources (bytes only) rather than rejected as un-carryable -- for graphs
   // that aren't fully loadable in JS (e.g. Metro consuming .png/.svg assets).
-  constructor({ conditions = [], resolve = null, jsx = false, flow = false, resources = new Set() } = {}) {
+  constructor({ conditions = [], resolve = null, jsx = false, flow = false, typescript = false, resources = new Set() } = {}) {
     this.extraConditions = [...conditions]
     this.customResolve = resolve
     this.jsx = jsx
     this.flow = flow
+    this.typescript = typescript
     this.resources = resources
     // --jsx widens the script/resolvable extension sets to include .jsx/.tsx, so those files are
     // parsed (not left as opaque leaves) and queued when reached. Off by default the base sets apply.
@@ -181,6 +185,33 @@ export class Scan {
   #recordParseError(url, format, message, recovered) {
     this.files.set(url, { format, edges: [], parseError: message })
     this.parseErrors.push({ url, format, message, recovered })
+  }
+
+  // --typescript: resolve `spec` the way tsc maps TS sources, invoked only AFTER Node's own
+  // resolution missed -- so an on-disk `.js` (or any Node-resolvable target) always wins, and the
+  // mapping only completes a failed resolution, never rewrites a successful one. Two rules:
+  //   1. Extension substitution: `./x.js` -> `./x.ts` (plus `.tsx` under --jsx), `.mjs` -> `.mts`,
+  //      `.cjs` -> `.cts` -- TS sources import each other by their OUTPUT names (tsc never
+  //      rewrites specifiers), so the specifier names a file that only exists as its TS source.
+  //   2. TS extension/index probing for a specifier naming no JS output or resolvable extension
+  //      (`./util` -> `./util.ts`, `./dir` -> `./dir/index.ts`): Node's CJS algorithm already ran
+  //      out of .js/.json/.node candidates, so only the TS completions are left to try.
+  // Relative/absolute specifiers only: a bare specifier names a package, whose entry points are
+  // declared by its manifest (exports/main), not recovered by TS convention.
+  #typescriptResolve(req, spec, conditions) {
+    if (!spec.startsWith('./') && !spec.startsWith('../') && !isAbsolute(spec)) return null
+    const candidates = typescriptSiblings(spec, { tsx: this.jsx })
+    if (!JS_OUTPUT_EXTS.has(extname(spec)) && !this.resolvableExts.has(extname(spec))) {
+      const exts = this.jsx ? ['.ts', '.tsx'] : ['.ts']
+      candidates.push(...exts.map((e) => `${spec}${e}`), ...exts.map((e) => `${spec}/index${e}`))
+    }
+    for (const cand of candidates) {
+      if (isTypeDeclaration(cand)) continue // `./x.d` + `.ts` spells a declaration -- types only, skip
+      try {
+        return req.resolve(cand, { conditions })
+      } catch { /* not this candidate -- try the next */ }
+    }
+    return null
   }
 
   // Strip Flow type syntax to plain JS via the optional flow-remove-types dep (resolved lazily; a
@@ -360,17 +391,25 @@ export class Scan {
         edges.push({ ...s, builtin: true })
         continue
       }
+      let childPath
+      let failure
       try {
-        const childPath = req.resolve(s.spec, { conditions })
-        const childURL = pathToFileURL(childPath).toString()
-        edges.push({ ...s, child: childURL })
-        record(key, s.spec, childURL)
-        const childExt = extname(childPath)
-        if (this.resolvableExts.has(childExt) || this.#isResource(childPath)) queue.push(childURL)
+        childPath = req.resolve(s.spec, { conditions })
       } catch (cause) {
-        edges.push({ ...s, error: cause.code ?? cause.message })
-        this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: cause.code ?? cause.message })
+        // --typescript: complete the miss with tsc's TS extension mapping (see #typescriptResolve);
+        // the edge stays keyed by the ORIGINAL specifier -- only the target is the mapped file.
+        if (this.typescript) childPath = this.#typescriptResolve(req, s.spec, conditions)
+        if (childPath == null) failure = cause.code ?? cause.message
       }
+      if (failure !== undefined) {
+        edges.push({ ...s, error: failure })
+        this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: failure })
+        continue
+      }
+      const childURL = pathToFileURL(childPath).toString()
+      edges.push({ ...s, child: childURL })
+      record(key, s.spec, childURL)
+      if (this.resolvableExts.has(extname(childPath)) || this.#isResource(childPath)) queue.push(childURL)
     }
 
     for (const [key, specMap] of specMaps) {
