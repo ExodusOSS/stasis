@@ -2,7 +2,7 @@
 // resolution edges; content, listings, stat kinds and exec bits are re-derived from the root's OWN disk, so
 // a shard cannot inject content or a forged bit. `files` and `formats` are independent -- don't collapse them.
 
-import { KNOWN_FORMATS, assert, fileMapToObject, isPlainObject, objectToMaps, posixPathEscapes } from './util.js'
+import { KNOWN_FORMATS, assert, fileMapToObject, isPlainObject, objectToMaps, posixPathEscapes } from './artifact-util.js'
 
 export const SHARD_VERSION = 1
 

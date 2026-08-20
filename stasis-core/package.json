@@ -21,6 +21,7 @@
   "files": [
     "bin/stasis-core.js",
     "src/add.js",
+    "src/artifact-util.js",
     "src/brotli.js",
     "src/bundle.js",
     "src/bundle-util.js",

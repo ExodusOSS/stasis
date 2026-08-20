@@ -17,7 +17,7 @@ import {
   posixPathEscapes,
   sortPaths,
   splitNodeModulesPath,
-} from './util.js'
+} from './artifact-util.js'
 
 const VERSION = 1
 const LEGACY_VERSION = 0

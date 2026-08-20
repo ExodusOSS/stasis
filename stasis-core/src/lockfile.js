@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './util.js'
+import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './artifact-util.js'
 
 const VERSION = 0
 
