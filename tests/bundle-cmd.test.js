@@ -1338,6 +1338,65 @@ test('CLI: bundle rejects --typescript with --metro-resolver', (t) => {
   t.assert.match(r.stderr, /--typescript is not supported with --metro-resolver/)
 })
 
+// --- tsconfig `compilerOptions.paths` under --typescript ---
+
+test('CLI: bundle --typescript auto-discovers tsconfig paths and the aliased bundle loads', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-app', version: '1.2.3', type: 'module' }))
+  // JSONC on purpose (comments + trailing comma), like real tsconfigs.
+  writeFileSync(join(tmp, 'tsconfig.json'), `{
+  // path aliases
+  "compilerOptions": { "paths": { "@/*": ["./src/*"], } },
+}`)
+  mkdirSync(join(tmp, 'src'))
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import { dep } from "@/dep.js"\nconsole.log("aliased", (dep as number) + 1)\n')
+  writeFileSync(join(tmp, 'src', 'dep.ts'), 'export const dep: number = 1\n')
+  const r = runCli(['bundle', '--typescript', '--output=stasis.code.br', 'entry.ts'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(join(tmp, 'stasis.code.br'))).toString('utf8'))
+  t.assert.deepEqual([...parsed.sources.keys()].toSorted(), ['entry.ts', 'src/dep.ts'])
+  t.assert.equal(parsed.imports.get('*').get('entry.ts').get('@/dep.js'), 'src/dep.ts')
+  // The aliased edge round-trips: --bundle=load resolves it from the import map (plain node cannot).
+  const run = runCli(['run', '--lock=none', '--bundle=load', 'entry.ts'], { cwd: tmp })
+  t.assert.equal(run.status, 0, `run stderr: ${run.stderr}`)
+  t.assert.match(run.stdout, /aliased 2/)
+}))
+
+test('CLI: bundle --typescript --tsconfig=path uses the named config (and must exist)', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-app', version: '1.2.3', type: 'module' }))
+  writeFileSync(join(tmp, 'tsconfig.build.json'), JSON.stringify({ compilerOptions: { paths: { '~/*': ['./lib/*'] } } }))
+  mkdirSync(join(tmp, 'lib'))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { d } from "~/d.js"\nexport const v: number = d\n')
+  writeFileSync(join(tmp, 'lib', 'd.ts'), 'export const d: number = 1\n')
+  const r = runCli(['bundle', '--typescript', '--tsconfig=tsconfig.build.json', `--output=${join(tmp, 'snap.br')}`, 'entry.ts'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  // A named config that does not exist fails closed (a typo must not silently drop the aliases).
+  const missing = runCli(['bundle', '--typescript', '--tsconfig=tsconfig.nope.json', `--output=${join(tmp, 'snap2.br')}`, 'entry.ts'], { cwd: tmp })
+  t.assert.notEqual(missing.status, 0)
+  t.assert.match(missing.stderr, /tsconfig not found/)
+}))
+
+test('CLI: bundle rejects --tsconfig without --typescript', (t) => {
+  const r = runCli(['bundle', '--tsconfig=tsconfig.json', 'entry.ts'])
+  t.assert.notEqual(r.status, 0)
+  t.assert.match(r.stderr, /--tsconfig is only valid with --typescript/)
+})
+
+test('CLI: bundle --typescript resolves an exports-bearing TS-source dependency', withTmp((t, tmp) => {
+  // The modern-default package shape: `exports` pointing at compiled output that only exists as
+  // TS source (an unbuilt workspace dep). Plain --typescript must handle it like a main-bearing one.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-app', version: '1.2.3', type: 'module' }))
+  mkdirSync(join(tmp, 'node_modules', 'expdep', 'lib'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'expdep', 'package.json'),
+    JSON.stringify({ name: 'expdep', version: '2.0.0', exports: './lib/main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'expdep', 'lib', 'main.ts'), 'export const m: number = 5\n')
+  writeFileSync(join(tmp, 'entry.ts'), 'import { m } from "expdep"\nexport const v: number = m\n')
+  const r = runCli(['bundle', '--typescript', `--output=${join(tmp, 'snap.br')}`, 'entry.ts'], { cwd: tmp })
+  t.assert.equal(r.status, 0, `bundle stderr: ${r.stderr}`)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(join(tmp, 'snap.br'))).toString('utf8'))
+  t.assert.equal(parsed.imports.get('*').get('entry.ts').get('expdep'), 'node_modules/expdep/lib/main.ts')
+}))
+
 // --- Legacy-field / Metro resolution (`--mainFields`, `--metro --platforms`) ---
 //
 // These drive the legacy-field resolver (tests/resolve-fields.test.js covers it in

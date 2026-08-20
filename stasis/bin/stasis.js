@@ -23,8 +23,8 @@ function usage(prefix = '') {
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--package-json] [--mock] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
@@ -32,7 +32,9 @@ function usage(prefix = '') {
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
   --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep);
   --typescript resolves TS the way tsc does: an import of ./x.js lands on ./x.ts when no .js is on disk
-   (likewise .mjs/.cjs -> .mts/.cts, extensionless ./x -> ./x.ts); not with --metro-resolver;
+   (likewise .mjs/.cjs -> .mts/.cts, extensionless ./x -> ./x.ts, incl. exports/imports/main targets),
+   honouring tsconfig compilerOptions.paths aliases (from ./tsconfig.json, or --tsconfig=path);
+   not with --metro-resolver;
   --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them;
   --package-json auto-includes each bundled module's package.json, even ones the scan never reached))
  stasis add path/to/(file|dir) ...
@@ -186,13 +188,14 @@ if (command === '-v' || command === '--version') {
     jsx: { type: 'boolean' },
     flow: { type: 'boolean' },
     typescript: { type: 'boolean' },
+    tsconfig: { type: 'string' },
     resources: { type: 'string' },
     'package-json': { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
   const values = parseLeadingOptions(argv, options, {
-    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--brotli-quality', '-o'],
+    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--brotli-quality', '-o'],
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
@@ -230,6 +233,9 @@ if (command === '-v' || command === '--version') {
   // extensionless) lands on its on-disk TS source (./x.ts, .mts, .cts); an existing .js always wins.
   if (values.typescript && !allJs) usage('Error: --typescript is only valid for JS bundles')
   const typescript = Boolean(values.typescript)
+  // --tsconfig: the config whose compilerOptions.paths aliases --typescript honours (default:
+  // the project root's tsconfig.json when present). Meaningless without --typescript.
+  if (values.tsconfig !== undefined && !typescript) usage('Error: --tsconfig is only valid with --typescript')
   // --mainFields: legacy package entry fields (e.g. react-native,browser,main) for the non-exports resolver.
   if (values.mainFields !== undefined && !allJs) usage('Error: --mainFields is only valid for JS bundles')
   const mainFields = values.mainFields === undefined
@@ -312,6 +318,7 @@ if (command === '-v' || command === '--version') {
     jsx,
     flow,
     typescript,
+    tsconfig: values.tsconfig,
     resources,
     packageJSON,
     brotliQuality,

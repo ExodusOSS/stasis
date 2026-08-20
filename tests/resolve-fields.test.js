@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createFieldResolver, resolveConditions, typescriptSiblings } from '../stasis/src/resolve-fields.js'
+import { createFieldResolver, resolveConditions } from '../stasis/src/resolve-fields.js'
+import { loadTsconfigPaths, typescriptSiblings } from '../stasis/src/resolve-typescript.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fx = join(here, 'fixtures', 'resolve-fields')
@@ -36,6 +37,11 @@ const withTsTmp = (fn) => (t) => {
     writeFileSync(join(tmp, 'node_modules', 'tspkg', 'package.json'),
       JSON.stringify({ name: 'tspkg', version: '1.0.0', main: './lib/main.js' }))
     writeFileSync(join(tmp, 'node_modules', 'tspkg', 'lib', 'main.ts'), 'export const m: number = 1\n')
+    mkdirSync(join(tmp, 'node_modules', 'exppkg', 'lib'), { recursive: true })
+    writeFileSync(join(tmp, 'node_modules', 'exppkg', 'package.json'),
+      JSON.stringify({ name: 'exppkg', version: '1.0.0', exports: { '.': './lib/main.js', './sub': { default: './lib/sub.js' } } }))
+    writeFileSync(join(tmp, 'node_modules', 'exppkg', 'lib', 'main.ts'), 'export const e: number = 1\n')
+    writeFileSync(join(tmp, 'node_modules', 'exppkg', 'lib', 'sub.ts'), 'export const s: number = 1\n')
     return fn(t, tmp)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
@@ -279,9 +285,11 @@ test('typescriptSiblings maps JS output extensions to their TS sources (tsx only
   t.assert.deepEqual(typescriptSiblings('./x.ts'), [])
   t.assert.deepEqual(typescriptSiblings('./x.json'), [])
   t.assert.deepEqual(typescriptSiblings('./x.service'), [])
-  // A candidate spelling a type declaration is dropped, not returned as a target.
-  t.assert.deepEqual(typescriptSiblings('./x.d.js'), [])
-  t.assert.deepEqual(typescriptSiblings('./x.d.mjs'), [])
+  // A dotfile has no extension (extname sees none), so nothing to substitute.
+  t.assert.deepEqual(typescriptSiblings('./.js'), [])
+  // A candidate spelling a type declaration IS returned -- every probe site refuses declarations
+  // (the screen lives at probe time, once), pinned by the "never lands on a type declaration" tests.
+  t.assert.deepEqual(typescriptSiblings('./x.d.js'), ['./x.d.ts'])
 })
 
 test('typescript: a missing x.js resolves to its x.ts sibling; an existing x.js wins', withTsTmp((t, tmp) => {
@@ -306,4 +314,40 @@ test('typescript: substitution beats the appended-extension probe for a patholog
   // candidate order puts substitution first, so the append must not shadow it.
   const resolver = createFieldResolver({ mainFields: ['main'], typescript: true })
   t.assert.equal(relTo(tmp, resolver(join(tmp, 'entry.ts'), './weird.js')), 'weird.ts')
+}))
+
+test('typescript: an exports target naming a missing .js lands on its .ts source (shared fallback)', withTsTmp((t, tmp) => {
+  // The field resolver delegates exports-bearing packages to Node; on a miss the shared
+  // --typescript fallback substitutes the exports target, so `exports` and `main` packages
+  // behave alike under the flag (tsc's node16 rules substitute both).
+  const resolver = createFieldResolver({ mainFields: ['main'], typescript: true })
+  const from = join(tmp, 'entry.ts')
+  t.assert.equal(relTo(tmp, resolver(from, 'exppkg')), 'node_modules/exppkg/lib/main.ts')
+  t.assert.equal(relTo(tmp, resolver(from, 'exppkg/sub')), 'node_modules/exppkg/lib/sub.ts')
+  // A subpath the exports map does not export stays unresolved -- the fallback never widens exports.
+  t.assert.equal(relTo(tmp, resolver(from, 'exppkg/lib/main.js')), null)
+  // Off by default.
+  const plain = createFieldResolver({ mainFields: ['main'] })
+  t.assert.equal(relTo(tmp, plain(from, 'exppkg')), null)
+}))
+
+test("typescript: a '#' imports target naming a missing .js lands on its .ts source", withTsTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'),
+    JSON.stringify({ name: 'ts-fields', version: '0.0.0', imports: { '#only': './only-ts.js' } }))
+  const resolver = createFieldResolver({ mainFields: ['main'], typescript: true })
+  t.assert.equal(relTo(tmp, resolver(join(tmp, 'entry.ts'), '#only')), 'only-ts.ts')
+}))
+
+test('typescript: tsconfig paths aliases resolve through typescriptPaths', withTsTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { paths: { '@app/*': ['./*'] } } }))
+  const typescriptPaths = loadTsconfigPaths(join(tmp, 'tsconfig.json'))
+  const resolver = createFieldResolver({ mainFields: ['main'], typescript: true, typescriptPaths })
+  const from = join(tmp, 'entry.ts')
+  t.assert.equal(relTo(tmp, resolver(from, '@app/only-ts.js')), 'only-ts.ts')
+  // An alias never hijacks a resolution that succeeded (both.js exists; tspkg has a real main).
+  t.assert.equal(relTo(tmp, resolver(from, './both.js')), 'both.js')
+  // Without the matcher the alias stays unresolved.
+  const bare = createFieldResolver({ mainFields: ['main'], typescript: true })
+  t.assert.equal(relTo(tmp, bare(from, '@app/only-ts.js')), null)
 }))

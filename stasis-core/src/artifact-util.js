@@ -5,8 +5,6 @@
 // any JS runtime. Byte/name classification, fs observation and CLI parsing live in util.js, which
 // re-exports this module so `@exodus/stasis-core/util` keeps serving the full set.
 
-const sep = '/'
-
 // KNOWN_FORMATS is the closed universe of `format` strings; parsers reject anything outside it.
 export const NODE_FORMATS = new Set(['module', 'commonjs', 'json', 'module-typescript', 'commonjs-typescript'])
 export const SOURCE_LANGUAGE_FORMATS = new Set(['solidity', 'php', 'shell', 'rust'])
@@ -121,7 +119,7 @@ export function assert(condition, msg) {
 }
 
 export function sortPaths(a, b) {
-  const [al, bl] = [a.split(sep), b.split(sep)]
+  const [al, bl] = [a.split('/'), b.split('/')]
   while (al.length > 0 && al[0] === bl[0]) {
     al.shift()
     bl.shift()

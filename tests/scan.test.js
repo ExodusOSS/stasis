@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { brotliDecompressSync } from 'node:zlib'
 
 import { Scan, scan } from '../stasis/src/scan.js'
+import { loadTsconfigPaths } from '../stasis/src/resolve-typescript.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
@@ -525,16 +526,139 @@ test('scan typescript:true probes .tsx only under jsx (off, a .tsx twin stays un
   t.assert.equal(flattenImports(on.imports).get('entry.ts').get('./App.js'), 'App.tsx')
 }))
 
-test('scan typescript:true leaves bare package specifiers to the package manifest (no TS mapping)', withTmp((t, tmp) => {
-  // A bare specifier names a package whose entries are declared by exports/main; tsc's extension
-  // substitution is a relative/absolute-path rule, so a missing subpath stays unresolved.
-  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
-  writeFileSync(join(tmp, 'entry.ts'), 'import { x } from "dep/sub.js"\nexport const v: number = x\n')
+test('scan typescript:true substitutes bare package subpaths and manifest entry targets', withTmp((t, tmp) => {
+  // tsc's node16 rules substitute wherever a path lands: a bare subpath into a package without
+  // `exports`, a `main` naming the unbuilt compiled file, an `exports` target, and a `#` subpath
+  // `imports` target -- all resolve to the on-disk TS source. The two resolvers share one
+  // dispatcher (resolve-typescript.js), so this scan-side behavior matches --mainFields/--metro.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({
+    name: 'ts-res', version: '0.0.0', type: 'module', imports: { '#util': './util.js' },
+  }))
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import { x } from "dep/sub.js"\nimport { m } from "maindep"\nimport { e } from "expdep"\n' +
+    'import { u } from "#util"\nexport const v: number = x + m + e + u\n')
+  writeFileSync(join(tmp, 'util.ts'), 'export const u: number = 1\n')
   mkdirSync(join(tmp, 'node_modules', 'dep'), { recursive: true })
   writeFileSync(join(tmp, 'node_modules', 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }))
   writeFileSync(join(tmp, 'node_modules', 'dep', 'sub.ts'), 'export const x: number = 1\n')
+  mkdirSync(join(tmp, 'node_modules', 'maindep', 'lib'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'maindep', 'package.json'),
+    JSON.stringify({ name: 'maindep', version: '1.0.0', main: './lib/main.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'maindep', 'lib', 'main.ts'), 'export const m: number = 2\n')
+  mkdirSync(join(tmp, 'node_modules', 'expdep', 'lib'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'expdep', 'package.json'),
+    JSON.stringify({ name: 'expdep', version: '1.0.0', exports: { '.': { default: './lib/main.js' } } }))
+  writeFileSync(join(tmp, 'node_modules', 'expdep', 'lib', 'main.ts'), 'export const e: number = 3\n')
   const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
-  t.assert.deepEqual(result.unresolved.map((u) => u.spec), ['dep/sub.js'])
+  t.assert.deepEqual(result.unresolved, [])
+  const byParent = flattenImports(result.imports)
+  t.assert.equal(byParent.get('entry.ts').get('dep/sub.js'), 'node_modules/dep/sub.ts')
+  t.assert.equal(byParent.get('entry.ts').get('maindep'), 'node_modules/maindep/lib/main.ts')
+  t.assert.equal(byParent.get('entry.ts').get('expdep'), 'node_modules/expdep/lib/main.ts')
+  t.assert.equal(byParent.get('entry.ts').get('#util'), 'util.ts')
+}))
+
+test('scan typescript:true respects the exports map (a subpath it does not export stays unresolved)', withTmp((t, tmp) => {
+  // `exports` fully governs a bare import; the fallback substitutes only inside its targets,
+  // never around the map (Node parity -- --bundle=load would refuse a wider edge anyway).
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { h } from "sealed/lib/hidden.js"\nexport const v: number = h\n')
+  mkdirSync(join(tmp, 'node_modules', 'sealed', 'lib'), { recursive: true })
+  writeFileSync(join(tmp, 'node_modules', 'sealed', 'package.json'),
+    JSON.stringify({ name: 'sealed', version: '1.0.0', exports: { '.': './lib/main.js' } }))
+  writeFileSync(join(tmp, 'node_modules', 'sealed', 'lib', 'hidden.ts'), 'export const h: number = 1\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.unresolved.map((u) => u.spec), ['sealed/lib/hidden.js'])
+}))
+
+test('scan typescript:true resolves a relative directory through its package.json main', withTmp((t, tmp) => {
+  // LOAD_AS_DIRECTORY with substitution: ./sub -> sub/package.json main './lib/main.js' -> lib/main.ts.
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'entry.ts'), 'import { s } from "./sub"\nexport const v: number = s\n')
+  mkdirSync(join(tmp, 'sub', 'lib'), { recursive: true })
+  writeFileSync(join(tmp, 'sub', 'package.json'), JSON.stringify({ name: 'sub', version: '0.0.1', main: './lib/main.js' }))
+  writeFileSync(join(tmp, 'sub', 'lib', 'main.ts'), 'export const s: number = 1\n')
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.unresolved, [])
+  t.assert.equal(flattenImports(result.imports).get('entry.ts').get('./sub'), 'sub/lib/main.ts')
+}))
+
+test("scan typescript:true treats '.', '..' and a trailing '/' as directory imports (index.ts, never a '.ts' dotfile)", withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0' }))
+  mkdirSync(join(tmp, 'sub'))
+  writeFileSync(join(tmp, 'entry.ts'), 'require("./sub/")\nmodule.exports = 1\n')
+  writeFileSync(join(tmp, 'sub', 'entry.ts'), 'require(".")\nrequire("..")\nmodule.exports = 1\n')
+  writeFileSync(join(tmp, 'index.ts'), 'exports.r = 1\n')
+  writeFileSync(join(tmp, 'sub', 'index.ts'), 'exports.s = 1\n')
+  // A file literally named '.ts': naive `spec + '.ts'` concatenation would land './sub/' on it.
+  writeFileSync(join(tmp, 'sub', '.ts'), 'exports.bad = 1\n')
+  const result = scan([join(tmp, 'entry.ts'), join(tmp, 'sub', 'entry.ts')], { typescript: true }).toRelative(tmp)
+  t.assert.deepEqual(result.unresolved, [])
+  const byParent = flattenImports(result.imports)
+  t.assert.equal(byParent.get('entry.ts').get('./sub/'), 'sub/index.ts')
+  t.assert.equal(byParent.get('sub/entry.ts').get('.'), 'sub/index.ts')
+  t.assert.equal(byParent.get('sub/entry.ts').get('..'), 'index.ts')
+}))
+
+// --- tsconfig `compilerOptions.paths` (typescriptPaths / --tsconfig). ---
+
+test('scan typescriptPaths maps aliases: exact keys, longest-prefix patterns, JSONC, extends', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  // The base config (extended below) carries a key the child's wholesale-replaced paths must drop.
+  writeFileSync(join(tmp, 'tsconfig.base.json'), JSON.stringify({
+    compilerOptions: { paths: { 'dropped/*': ['./nowhere/*'] } },
+  }))
+  // JSONC on purpose: comments + a trailing comma must parse like tsc's own reader.
+  writeFileSync(join(tmp, 'tsconfig.json'), `{
+  "extends": "./tsconfig.base.json",
+  // aliases for the src tree
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"],
+      "@/deep/*": ["./src/deeper/*"], /* longer prefix wins */
+      "exact": ["./src/one.js"],
+    },
+  },
+}`)
+  mkdirSync(join(tmp, 'src', 'deeper'), { recursive: true })
+  writeFileSync(join(tmp, 'entry.ts'),
+    'import { a } from "@/one.js"\nimport { d } from "@/deep/two.js"\nimport { e } from "exact"\n' +
+    'import { n } from "dropped/one.js"\nexport const v: number = a + d + e + n\n')
+  writeFileSync(join(tmp, 'src', 'one.ts'), 'export const a: number = 1\nexport const e: number = 1\n')
+  writeFileSync(join(tmp, 'src', 'deeper', 'two.ts'), 'export const d: number = 2\n')
+  writeFileSync(join(tmp, 'nowhere.ts'), 'export const n: number = 3\n')
+  const typescriptPaths = loadTsconfigPaths(join(tmp, 'tsconfig.json'))
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true, typescriptPaths }).toRelative(tmp)
+  const byParent = flattenImports(result.imports)
+  t.assert.equal(byParent.get('entry.ts').get('@/one.js'), 'src/one.ts')
+  t.assert.equal(byParent.get('entry.ts').get('@/deep/two.js'), 'src/deeper/two.ts')
+  t.assert.equal(byParent.get('entry.ts').get('exact'), 'src/one.ts')
+  // `paths` replaces wholesale across extends (tsc never merges maps), so the base key is gone.
+  t.assert.deepEqual(result.unresolved.map((u) => u.spec), ['dropped/one.js'])
+}))
+
+test('scan typescriptPaths never applies to node_modules parents and never beats a real resolution', withTmp((t, tmp) => {
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-res', version: '0.0.0', type: 'module' }))
+  writeFileSync(join(tmp, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { paths: { '*': ['./shim/*'] } },
+  }))
+  mkdirSync(join(tmp, 'shim'), { recursive: true })
+  mkdirSync(join(tmp, 'node_modules', 'real'), { recursive: true })
+  writeFileSync(join(tmp, 'entry.ts'), 'import { r } from "real"\nimport { d } from "dep"\nexport const v: number = r + d\n')
+  // `real` resolves through node_modules -- the catch-all alias must not hijack it.
+  writeFileSync(join(tmp, 'node_modules', 'real', 'package.json'), JSON.stringify({ name: 'real', version: '1.0.0', main: 'index.js' }))
+  writeFileSync(join(tmp, 'node_modules', 'real', 'index.js'), 'export const r = 1\n')
+  // `real`'s own imports must not see the app's aliases either.
+  writeFileSync(join(tmp, 'node_modules', 'real', 'index.js'), 'import "inner"\nexport const r = 1\n')
+  writeFileSync(join(tmp, 'shim', 'inner.ts'), 'export const inner: number = 1\n')
+  writeFileSync(join(tmp, 'shim', 'dep.ts'), 'export const d: number = 2\n')
+  const typescriptPaths = loadTsconfigPaths(join(tmp, 'tsconfig.json'))
+  const result = scan([join(tmp, 'entry.ts')], { typescript: true, typescriptPaths }).toRelative(tmp)
+  const byParent = flattenImports(result.imports)
+  t.assert.equal(byParent.get('entry.ts').get('real'), 'node_modules/real/index.js')
+  t.assert.equal(byParent.get('entry.ts').get('dep'), 'shim/dep.ts')
+  // The dependency's own bare import stays unresolved rather than mapping through the app alias.
+  t.assert.deepEqual(result.unresolved.map((u) => u.spec), ['inner'])
 }))
 
 test('scan typescript:true never lands on a type declaration (./x.d + .ts spells one)', withTmp((t, tmp) => {
