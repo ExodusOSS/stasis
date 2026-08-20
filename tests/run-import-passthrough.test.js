@@ -5,6 +5,12 @@
 // ABOVE stasis's (registered later => outer), so stasis keeps seeing the RAW on-disk TypeScript:
 // the artifacts attest the on-disk bytes and the on-disk 'module-typescript' format while tsx
 // resolves/serves the file as its post-erasure 'module' family at run time.
+//
+// The exemption is graph-scoped, not blanket: a module BOTH the preload phase and the app graph
+// reach is promoted into the capture with the bytes that executed; a file executed through a
+// preload-transplanted require() pipeline (tsx's CJS '.ts' handler, babel-register-style '.js'
+// wrappers) is reconciled at write time; and under --bundle=load a preload-cached instance is
+// served only when its bytes match the attested ones. Eval entries keep failing closed.
 
 import { before, describe, test } from 'node:test'
 import { spawn } from 'node:child_process'
@@ -227,4 +233,241 @@ describe('stasis run --import passthrough (spawned, concurrent)', { concurrency:
     t.assert.equal(r.status, 1)
     t.assert.match(r.stderr, /--import requires a module specifier/)
   })
+
+  // tsx compiles CJS-flavored .ts through its own require.extensions handler, which reads and
+  // compiles files WITHOUT the load hook chain ever firing: the executed-file reconciliation
+  // (Module._load shim + write-time backfill) is what attests these.
+  test('CJS-flavored TS: hook-bypassing tsx requires are still attested and frozen-verified', withTmp(async (t, tmp) => {
+    await freshCopy(tmp)
+    const pkg = JSON.parse(await readFile(join(tmp, 'package.json'), 'utf-8'))
+    pkg.type = 'commonjs'
+    await tamper(join(tmp, 'package.json'), JSON.stringify(pkg, null, 2))
+
+    const cap = await run(['run', '--lock=add', '--bundle=add', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+    t.assert.equal(cap.stdout, expectedOutput)
+
+    const lock = await readLock(tmp)
+    t.assert.deepEqual(Object.keys(lock.sources['.'].files).toSorted(), ['src/entry.ts', 'src/hello.ts'],
+      'a require() executed through the transplanted .ts pipeline must not escape the capture')
+    t.assert.equal(lock.formats['src/entry.ts'], 'commonjs-typescript')
+    t.assert.equal(lock.formats['src/hello.ts'], 'commonjs-typescript')
+    t.assert.equal(flatImports(lock)['src/entry.ts']?.['./hello.ts'], 'src/hello.ts')
+
+    const frozen = await run(['run', '--lock=frozen', '--bundle=frozen', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.equal(frozen.status, 0, `frozen stderr: ${frozen.stderr}`)
+
+    await tamper(join(tmp, 'src', 'hello.ts'),
+      'export enum Color { Red = 1, Green = 2 }\nexport const greet = (c: Color): string => `TAMPERED:${c}`\n')
+    const rejected = await run(['run', '--lock=frozen', '--bundle=frozen', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.notEqual(rejected.status, 0,
+      'write-time reconciliation must reject a tampered hook-bypassed source')
+
+    // The attested bytes still win over the tampered disk when replayed from the bundle: the
+    // short-circuited resolve routes CJS-flavored .ts through the hook-served translator lane.
+    const replay = await run(['run', '--lock=frozen', '--bundle=load', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.equal(replay.status, 0, `replay stderr: ${replay.stderr}`)
+    t.assert.equal(replay.stdout, expectedOutput)
+  }))
+
+  test('a no-`type` package attests the on-disk -typescript format, not tsx\'s post-erasure view', withTmp(async (t, tmp) => {
+    await freshCopy(tmp)
+    const pkg = JSON.parse(await readFile(join(tmp, 'package.json'), 'utf-8'))
+    delete pkg.type
+    await tamper(join(tmp, 'package.json'), JSON.stringify(pkg, null, 2))
+
+    const cap = await run(['run', '--lock=add', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+    const lock = await readLock(tmp)
+    // tsx defaults a no-`type` .ts to commonjs and reports the post-erasure 'commonjs': the
+    // attestation must upgrade that to the '-typescript' variant, never a plain-JS format.
+    t.assert.equal(lock.formats['src/entry.ts'], 'commonjs-typescript')
+    t.assert.equal(lock.formats['src/hello.ts'], 'commonjs-typescript')
+
+    // Stacks may honestly disagree about a no-`type` .ts (Node syntax-detects this one as ESM):
+    // replaying WITHOUT tsx must surface that as a loud format flip, not silent re-attestation.
+    const native = await run(['run', '--lock=add', 'src/entry.ts'], { cwd: tmp })
+    t.assert.notEqual(native.status, 0)
+    t.assert.match(native.stderr, /format flip for src\/entry\.ts: lockfile attests 'commonjs-typescript', observed 'module-typescript'/)
+  }))
+
+  // An app module the preload ALREADY imported: its load hook can never re-fire (cached), so the
+  // capture must promote it -- bytes, hash, and its own transitive edges -- or the artifact ships
+  // a dangling edge no frozen replay ever verifies.
+  test('a module shared by the preload and the app is promoted into the capture, transitively', withTmp(async (t, tmp) => {
+    await mkdir(join(tmp, 'src'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"shared-preload-app","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'preload.mjs'), "import './src/shared.mjs'\n")
+    await writeFile(join(tmp, 'src', 'shared.mjs'), "import { d } from './dep.mjs'\nexport const v = `CLEAN:${d}`\n")
+    await writeFile(join(tmp, 'src', 'dep.mjs'), "export const d = 'D'\n")
+    await writeFile(join(tmp, 'src', 'entry.mjs'), "import { v } from './shared.mjs'\nconsole.log('entry sees:', v)\n")
+
+    const cap = await run(['run', '--lock=add', '--bundle=add', '--import', './preload.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+    t.assert.equal(cap.stdout, 'entry sees: CLEAN:D\n')
+
+    const lock = await readLock(tmp)
+    t.assert.deepEqual(Object.keys(lock.sources['.'].files).toSorted(), ['src/dep.mjs', 'src/entry.mjs', 'src/shared.mjs'],
+      'the shared module AND its own imports must be attested')
+    t.assert.equal(flatImports(lock)['src/shared.mjs']?.['./dep.mjs'], 'src/dep.mjs', 'promoted edges replay transitively')
+    // The preload itself stays out: nothing but the entry imported it.
+    t.assert.equal(lock.sources['.'].files['preload.mjs'], undefined)
+
+    const frozen = await run(['run', '--lock=frozen', '--bundle=frozen', '--import', './preload.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(frozen.status, 0, `frozen stderr: ${frozen.stderr}`)
+
+    await writeFile(join(tmp, 'src', 'shared.mjs'), "import { d } from './dep.mjs'\nexport const v = `TAMPERED:${d}`\n")
+    const rejected = await run(['run', '--lock=frozen', '--bundle=frozen', '--import', './preload.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.notEqual(rejected.status, 0)
+    t.assert.doesNotMatch(rejected.stdout, /TAMPERED/, 'promotion must reject the tamper BEFORE the entry runs it')
+  }))
+
+  test('bundle=load refuses a preload-cached module whose disk bytes diverge from the bundle', withTmp(async (t, tmp) => {
+    await mkdir(join(tmp, 'src'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"shared-preload-app","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'preload.mjs'), "import './src/shared.mjs'\n")
+    await writeFile(join(tmp, 'src', 'shared.mjs'), "export const v = 'CLEAN'\n")
+    await writeFile(join(tmp, 'src', 'entry.mjs'), "import { v } from './shared.mjs'\nconsole.log('entry sees:', v)\n")
+
+    const cap = await run(['run', '--lock=ignore', '--bundle=replace', '--import', './preload.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+
+    // Identical bytes: the cached instance IS the attested content, so the replay passes.
+    const clean = await run(['run', '--lock=ignore', '--bundle=load', '--import', './preload.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(clean.status, 0, `clean replay stderr: ${clean.stderr}`)
+    t.assert.equal(clean.stdout, 'entry sees: CLEAN\n')
+
+    // Tampered disk + preload: the preload executed the tampered copy before the entry, and the
+    // cached instance would shadow the attested bytes -- refuse before the entry consumes it.
+    await writeFile(join(tmp, 'src', 'shared.mjs'), "export const v = 'TAMPERED'\n")
+    const poisoned = await run(['run', '--lock=ignore', '--bundle=load', '--import', './preload.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.notEqual(poisoned.status, 0)
+    t.assert.match(poisoned.stderr, /divergent cached instance/)
+    t.assert.doesNotMatch(poisoned.stdout, /TAMPERED/)
+
+    // Without the preload the bundle serves the attested bytes; the tampered disk is irrelevant.
+    const noPreload = await run(['run', '--lock=ignore', '--bundle=load', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(noPreload.status, 0, `no-preload replay stderr: ${noPreload.stderr}`)
+    t.assert.equal(noPreload.stdout, 'entry sees: CLEAN\n')
+  }))
+
+  test('a deferred dynamic import from the preload stays out of the capture', withTmp(async (t, tmp) => {
+    // The exemption is graph-scoped, not a time gate: infrastructure that lazy-loads AFTER the
+    // entry started must not pollute the artifact (its timing would make captures depend on it).
+    await mkdir(join(tmp, 'src'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"deferred-preload","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'pre.mjs'), "setTimeout(() => import('./toolchain-helper.mjs'), 30)\n")
+    await writeFile(join(tmp, 'toolchain-helper.mjs'), "console.error('[helper] loaded')\n")
+    await writeFile(join(tmp, 'src', 'entry.mjs'), "console.log('entry ran')\nawait new Promise((r) => setTimeout(r, 150))\n")
+
+    const r = await run(['run', '--lock=add', '--import', './pre.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stderr, /\[helper\] loaded/, 'the deferred import must still evaluate')
+
+    const lock = await readLock(tmp)
+    t.assert.deepEqual(Object.keys(lock.sources['.'].files), ['src/entry.mjs'])
+    t.assert.deepEqual(flatImports(lock), {}, 'no infra edges may be recorded')
+  }))
+
+  test('an eval entry under the loader still fails closed in capture mode', withTmp(async (t, tmp) => {
+    // A -e script's imports carry an [eval] parent -- runner-infrastructure passthrough must not
+    // swallow them into a silent no-op capture (a spawn()ed `node -e` child under
+    // --child-process would otherwise execute entirely unobserved).
+    await writeFile(join(tmp, 'package.json'), '{"name":"eval-entry","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'dep.mjs'), "console.log('dep ran')\n")
+
+    const loader = join(here, '..', 'stasis-core', 'src', 'loader.js')
+    const env = { ...cleanEnv, EXODUS_STASIS_LOCK: 'add', EXODUS_STASIS_SCOPE: 'full', EXODUS_STASIS_BUNDLE: 'none' }
+    const child = spawn(process.execPath, ['--import', `file://${loader}`, '-e', "await import('./dep.mjs')"], { cwd: tmp, env })
+    const stderrChunks = []
+    const stdoutChunks = []
+    child.stdout.on('data', (d) => stdoutChunks.push(d))
+    child.stderr.on('data', (d) => stderrChunks.push(d))
+    const [status] = await once(child, 'close')
+    t.assert.notEqual(status, 0)
+    t.assert.match(Buffer.concat(stderrChunks).toString(), /assert\.ok\(state\)/)
+    t.assert.doesNotMatch(Buffer.concat(stdoutChunks).toString(), /dep ran/)
+    t.assert.equal(existsSync(join(tmp, 'stasis.lock.json')), false, 'no artifact may be written')
+  }))
+
+  // babel-register-style: a preload replacing require.extensions['.js'] loads files itself, so
+  // the load hook never fires -- the same reconciliation as tsx's CJS pipeline must cover it.
+  test('a transplanted .js require pipeline is reconciled in capture and refused under bundle=load', withTmp(async (t, tmp) => {
+    await mkdir(join(tmp, 'src'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"transplant","version":"1.0.0","private":true,"type":"commonjs"}\n')
+    await writeFile(join(tmp, 'transplant.mjs'),
+      "import Module from 'node:module'\nimport { readFileSync } from 'node:fs'\n" +
+      "Module._extensions['.js'] = (mod, filename) => { mod._compile(readFileSync(filename, 'utf8'), filename) }\n")
+    await writeFile(join(tmp, 'src', 'entry.js'), "const { v } = require('./dep.js')\nconsole.log('entry sees:', v)\n")
+    await writeFile(join(tmp, 'src', 'dep.js'), "module.exports = { v: 'CLEAN' }\n")
+
+    const cap = await run(['run', '--lock=add', '--bundle=add', '--import', './transplant.mjs', 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+    t.assert.equal(cap.stdout, 'entry sees: CLEAN\n')
+    const lock = await readLock(tmp)
+    t.assert.deepEqual(Object.keys(lock.sources['.'].files).toSorted(), ['src/dep.js', 'src/entry.js'])
+
+    await writeFile(join(tmp, 'src', 'dep.js'), "module.exports = { v: 'TAMPERED' }\n")
+    const rejected = await run(['run', '--lock=frozen', '--bundle=frozen', '--import', './transplant.mjs', 'src/entry.js'], { cwd: tmp })
+    t.assert.notEqual(rejected.status, 0)
+
+    // Under bundle=load (disk still tampered) exactly two outcomes are sound, and WHICH one
+    // depends on the Node minor: when the commonjs-sync pipeline routes the require through the
+    // hooks (24.14), the attested bytes simply win; when it consults require.extensions (24.19+),
+    // the transplanted handler reads DISK and the run must be refused -- never a silent tamper.
+    const replay = await run(['run', '--lock=frozen', '--bundle=load', '--import', './transplant.mjs', 'src/entry.js'], { cwd: tmp })
+    if (replay.status === 0) {
+      t.assert.equal(replay.stdout, 'entry sees: CLEAN\n', 'an exit-0 replay must have served the attested bytes')
+    } else {
+      t.assert.match(replay.stderr, /bypassing the attested bundle/)
+      t.assert.doesNotMatch(replay.stdout, /TAMPERED/)
+    }
+  }))
+
+  test('a wrapper preload importing the entry itself still yields a correct capture', withTmp(async (t, tmp) => {
+    await mkdir(join(tmp, 'src'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"wrapper-entry","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'wrapper.mjs'), "import './src/entry.mjs'\n")
+    await writeFile(join(tmp, 'src', 'entry.mjs'), "import { v } from './dep.mjs'\nconsole.log('entry sees:', v)\n")
+    await writeFile(join(tmp, 'src', 'dep.mjs'), "export const v = 'CLEAN'\n")
+
+    const r = await run(['run', '--lock=add', '--import', './wrapper.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    const lock = await readLock(tmp)
+    t.assert.deepEqual(lock.entries, ['src/entry.mjs'], 'the promoted module is attested as the ENTRY, not misfiled')
+    t.assert.deepEqual(Object.keys(lock.sources['.'].files).toSorted(), ['src/dep.mjs', 'src/entry.mjs'])
+    t.assert.equal(flatImports(lock)['src/entry.mjs']?.['./dep.mjs'], 'src/dep.mjs')
+  }))
+
+  test('--mock warns about --import preloads and still runs a non-transforming one', withTmp(async (t, tmp) => {
+    await mkdir(join(tmp, 'src'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"mock-preload","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'pre.mjs'), "console.error('[pre] loaded')\n")
+    await writeFile(join(tmp, 'src', 'entry.mjs'), "console.log('entry ran')\n")
+
+    const r = await run(['run', '--lock=add', '--mock', '--import', './pre.mjs', 'src/entry.mjs'], { cwd: tmp })
+    t.assert.equal(r.status, 0, `stderr: ${r.stderr}`)
+    t.assert.match(r.stderr, /--import preloads run under --mock's side-effect denials/)
+    t.assert.match(r.stderr, /\[pre\] loaded/)
+    const lock = await readLock(tmp)
+    t.assert.deepEqual(Object.keys(lock.sources['.'].files), ['src/entry.mjs'])
+  }))
+
+  test('the stasis-core CLI forwards --import with the same promotion semantics', withTmp(async (t, tmp) => {
+    await mkdir(join(tmp, 'src'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"core-parity","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'preload.mjs'), "import './src/shared.mjs'\n")
+    await writeFile(join(tmp, 'src', 'shared.mjs'), "export const v = 'CLEAN'\n")
+    await writeFile(join(tmp, 'src', 'entry.mjs'), "import { v } from './shared.mjs'\nconsole.log('entry sees:', v)\n")
+
+    const coreCli = join(here, '..', 'stasis-core', 'bin', 'stasis-core.js')
+    const child = spawn(process.execPath, [coreCli, 'run', '--lock=add', '--import', './preload.mjs', 'src/entry.mjs'], { cwd: tmp, env: cleanEnv })
+    const stderrChunks = []
+    child.stderr.on('data', (d) => stderrChunks.push(d))
+    const [status] = await once(child, 'close')
+    t.assert.equal(status, 0, `stderr: ${Buffer.concat(stderrChunks)}`)
+    t.assert.match(Buffer.concat(stderrChunks).toString(), /import: \[ '\.\/preload\.mjs' \]/)
+    const lock = await readLock(tmp)
+    t.assert.deepEqual(Object.keys(lock.sources['.'].files).toSorted(), ['src/entry.mjs', 'src/shared.mjs'])
+  }))
 })

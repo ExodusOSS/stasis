@@ -12,7 +12,7 @@ import { Lockfile } from './lockfile.js'
 import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
-import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, erasedTypeScriptFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
+import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, erasedTypeScriptFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isNativeArtifact, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
@@ -107,6 +107,17 @@ export class State {
   // Native resolutions (parent URL -> specifier -> resolved URL) from the Module._resolveFilename
   // shim: require.resolve()/CJS require()s bypassing the resolve hook.
   #observedResolutions = new Map()
+
+  // Files a require() actually EXECUTED (from the Module._load shim) -- unlike a resolve-only
+  // edge, an executed file with no captured bytes is a hole in the attestation, so write()
+  // backfills it from disk (a transplanted require.extensions handler, e.g. a transforming
+  // preload's CJS TypeScript pipeline, loads files without ever hitting the load hook).
+  #executedFiles = new Set()
+
+  // Files whose BYTES this run captured via addFile. Distinct from this.hashes, which also
+  // absorbs lockfile-seeded entries: #backfillExecutedFiles must key on "observed this run", or
+  // a frozen/add run would skip verifying an executed file merely because a hash is on record.
+  #filesCapturedThisRun = new Set()
 
   // Node's require-condition set, from the first require()-context addImport;
   // #backfillObservedResolutions keys native edges under it so the lockfile is Node-version-stable.
@@ -828,6 +839,12 @@ export class State {
         }[extname(file)]
         const known = this.formats.get(file) ?? this.#parent?.formats.get(file)
         format = variants?.includes(known) ? known : variants?.[0]
+      } else if (extname(file) === '.ts' && (format === 'commonjs' || format === 'module')) {
+        // No `type`, but a transforming preload reported this .ts as its post-erasure family:
+        // attest the on-disk '-typescript' variant, keeping same-stack replays self-consistent.
+        // Stacks can still honestly disagree about a no-`type` .ts (tsx defaults to commonjs,
+        // Node syntax-detects) -- that rightly surfaces as a format flip, not silently here.
+        format = `${format}-typescript`
       }
     }
 
@@ -853,6 +870,7 @@ export class State {
     if (isEntry) this.entries.add(file)
     const integrity = sha512integrity(source)
     noupsert(this.hashes, file, integrity)
+    this.#filesCapturedThisRun.add(file)
     if (this.config.childProcess) this.#observed.add(file) // only a child's shardSnapshot reads it; skip when the channel is off
     if (this.config.bundle && reason !== null) {
       this.#recordReason(reason, file) // provenance for the bundle's `reason` field (null = caller derives attribution itself, see includePackageJson)
@@ -1487,6 +1505,40 @@ export class State {
     byParent.set(specifier, resolvedURL)
   }
 
+  // Record that a require() executed `url` (from the Module._load shim). Out-of-root targets are
+  // skipped like #backfillObservedResolutions' -- the live hooks correctly ignore them too.
+  observeExecution(url) {
+    let file
+    try { file = this.#canonicalFile(url) } catch { return }
+    this.#executedFiles.add(file)
+  }
+
+  // Whether the bundle carries source bytes for `url` (the hooks' bundle-bypass reconciliation).
+  isBundledSource(url) {
+    let file
+    try { file = this.#canonicalFile(url) } catch { return false }
+    return this.sources.has(file)
+  }
+
+  // Attest every executed-but-never-captured file from disk. A resolve-only edge stays byte-less
+  // by design (see #backfillBeforeWrite), but an EXECUTED file the load hook never saw is a hole:
+  // leaving it silent would ship an artifact that misses code the run provably evaluated, and a
+  // frozen replay would never verify it. addFile re-checks bytes against the lockfile/bundle in
+  // frozen modes, so tampering still fails the run -- at write time, but loudly.
+  #backfillExecutedFiles() {
+    for (const file of this.#executedFiles) {
+      // "Captured this run", NOT this.hashes: a lockfile-seeded hash must still be VERIFIED
+      // against disk here when the run executed the file without the load hook observing it.
+      if (this.#filesCapturedThisRun.has(file)) continue
+      // A require()d native addon never passes the load hook and is deliberately not captured
+      // (non-deterministic across installs, like the rest of NATIVE_ARTIFACT_EXTS).
+      if (isNativeArtifact(file)) continue
+      const url = pathToFileURL(resolve(this.root, file)).toString()
+      if (!this.config.full && !this.inNodeModules(url)) continue
+      this.addFile(url, { reason: 'run' })
+    }
+  }
+
   // Backfill edges the live resolve hook never observed (require.resolve()/native CJS require()).
   // The resolution is attested but its bytes are NOT seeded -- that would widen trust to everything
   // that merely resolves. Skips out-of-scope targets and dedups across all condition buckets.
@@ -1549,6 +1601,7 @@ export class State {
     // BEFORE the stasis-core BFS: a resolve-only edge to a stasis-core submodule is added only here,
     // and the BFS must see it to seed the file's bytes, else the bundle ships a dangling edge.
     this.#backfillObservedResolutions()
+    this.#backfillExecutedFiles()
     this.#backfillBeforeWrite()
     // AFTER the backfills, so buckets they create are covered too.
     if (this.config.writeBundle && this.config.packageJSON) this.includePackageJson()
@@ -1584,6 +1637,7 @@ export class State {
   // omitted -- the root re-reads bytes from disk.
   shardSnapshot() {
     this.#backfillObservedResolutions()
+    this.#backfillExecutedFiles()
     this.#backfillBeforeWrite()
     // Only what THIS process observed, never the seeded baseline (shard-size bloat). Entries are
     // dropped: a child's "entry" is its fork target, not a root's.
