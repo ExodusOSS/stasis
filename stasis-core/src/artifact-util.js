@@ -176,6 +176,9 @@ export const objectToMaps = (obj) => new Map(
 // a `..` with nothing left to pop is an escape -- normalize would keep it as a leading `..` forever.
 export function posixPathEscapes(path) {
   if (path.startsWith('/')) return true
+  // Exact prefilter: the walk below can only return true via a literal '..' segment, which needs
+  // this substring -- so the ordinary keys (the vast majority) skip the split('/') allocation.
+  if (!path.includes('..')) return false
   let depth = 0
   for (const segment of path.split('/')) {
     if (segment === '.' || segment === '') continue

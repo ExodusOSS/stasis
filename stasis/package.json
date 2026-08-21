@@ -6,6 +6,7 @@
   "exports": {
     "./esbuild": "./src/esbuild.js",
     "./webpack": "./src/webpack.js",
+    "./rollup": "./src/rollup.js",
     "./metro": "./src/metro.js",
     "./metro-transformer": "./src/metro-transformer.js",
     "./loader": "./src/loader.js",
@@ -48,6 +49,7 @@
     "src/mock.js",
     "src/parse.js",
     "src/prune.js",
+    "src/rollup.js",
     "src/sbom.js",
     "src/scan.js",
     "src/webpack.js"

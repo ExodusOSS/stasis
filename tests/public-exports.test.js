@@ -8,10 +8,12 @@ import { Lockfile } from '@exodus/stasis/lockfile'
 import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
 import { StasisEsbuild } from '@exodus/stasis/esbuild'
 import { StasisWebpack } from '@exodus/stasis/webpack'
+import { StasisRollup } from '@exodus/stasis/rollup'
 import { StasisMetro } from '@exodus/stasis/metro'
 import * as metroTransformer from '@exodus/stasis/metro-transformer'
 import { StasisEsbuild as PluginsEsbuild } from '@exodus/stasis-plugins/esbuild'
 import { StasisWebpack as PluginsWebpack } from '@exodus/stasis-plugins/webpack'
+import { StasisRollup as PluginsRollup } from '@exodus/stasis-plugins/rollup'
 import { StasisMetro as PluginsMetro } from '@exodus/stasis-plugins/metro'
 import * as pluginsMetroTransformer from '@exodus/stasis-plugins/metro-transformer'
 
@@ -20,12 +22,14 @@ test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(Bundle.VERSION, 1)
 })
 
-test('@exodus/stasis/{esbuild,webpack,metro} re-export the stasis-plugins plugins', (t) => {
+test('@exodus/stasis/{esbuild,webpack,rollup,metro} re-export the stasis-plugins plugins', (t) => {
   t.assert.equal(typeof StasisEsbuild, 'function')
   t.assert.equal(typeof StasisWebpack, 'function')
+  t.assert.equal(typeof StasisRollup, 'function')
   t.assert.equal(typeof StasisMetro, 'function')
   t.assert.equal(StasisEsbuild, PluginsEsbuild)
   t.assert.equal(StasisWebpack, PluginsWebpack)
+  t.assert.equal(StasisRollup, PluginsRollup)
   t.assert.equal(StasisMetro, PluginsMetro)
 })
 
