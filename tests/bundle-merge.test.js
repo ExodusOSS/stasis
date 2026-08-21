@@ -130,6 +130,24 @@ test('Bundle.merge unions the informational reason provenance per consumer', (t)
   t.assert.deepEqual(merged.reason.webpack, ['src/b.js'])
 })
 
+test('Bundle.merge emits reason consumers in sorted order, not merge order', (t) => {
+  // Appending the incoming side's consumers would leave the map's shape dependent on merge
+  // history; a later rewrite through state's #bundleReason (sorted) would then reshuffle it.
+  const a = jsBundle({
+    entries: ['src/a.js'],
+    modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/a.js': 'A' } }]],
+    formats: [['src/a.js', 'module']],
+    reason: { webpack: ['src/a.js'] },
+  })
+  const b = jsBundle({
+    entries: ['src/a.js'],
+    modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/a.js': 'A' } }]],
+    formats: [['src/a.js', 'module']],
+    reason: { add: ['src/a.js'] },
+  })
+  t.assert.deepEqual(Object.keys(a.merge(b).reason), ['add', 'webpack'])
+})
+
 test('Bundle.merge throws on a scope mismatch', (t) => {
   const full = jsBundle({
     entries: ['src/a.js'],
@@ -279,6 +297,35 @@ test('Bundle.withReason unions with an existing attribution instead of replacing
   })
   const stamped = b.withReason('bundle')
   t.assert.deepEqual(stamped.reason, { run: ['src/a.js'], bundle: ['src/a.js'] })
+})
+
+test('Bundle.withReason emits a path-sorted file list, not discovery order', (t) => {
+  // Sources land in scan-traversal order (entry first here); the stamp must not preserve it, or a
+  // committed bundle's reason list reshuffles whenever an unrelated import changes the traversal.
+  const b = jsBundle({
+    entries: ['src/z.js'],
+    modules: [['.', { name: 'app', version: '1.0.0', files: { 'src/z.js': 'Z', 'src/a.js': 'A' } }]],
+    formats: [['src/z.js', 'module'], ['src/a.js', 'module']],
+  })
+  t.assert.deepEqual(b.withReason('bundle').reason, { bundle: ['src/a.js', 'src/z.js'] })
+})
+
+test('Bundle.serialize canonicalizes reason: consumers sorted, files deduped and path-sorted', (t) => {
+  // An artifact written by an older tool may carry reason in record order; a rewrite re-sorts it
+  // like every other field instead of preserving the stale order byte-for-byte.
+  const raw = JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { '.': { name: 'app', version: '1.0.0', files: { 'src/a.js': 'A', 'src/b.js': 'B' } } },
+    modules: {},
+    formats: { 'src/a.js': 'module', 'src/b.js': 'module' },
+    imports: {},
+    reason: { run: ['src/b.js', 'src/a.js', 'src/b.js'], add: ['src/b.js'] },
+  })
+  const out = JSON.parse(Bundle.parse(raw).serialize())
+  t.assert.deepEqual(Object.keys(out.reason), ['add', 'run'])
+  t.assert.deepEqual(out.reason, { add: ['src/b.js'], run: ['src/a.js', 'src/b.js'] })
 })
 
 // --- Bundle.parse -----------------------------------------------------------

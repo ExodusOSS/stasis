@@ -30,16 +30,23 @@ const normalize = ({ name, version, ecosystem, files }) => {
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
 
+// Union of the informational `reason` maps in canonical form: consumers sorted, each file list
+// deduped and path-sorted. Canonical even when only one side is given, so a fresh withReason()
+// stamp or a parsed artifact can't leak discovery/record order into the map (state's
+// #bundleReason sorts the same way). A non-array list (unvalidated -- informational) is dropped.
 const mergeReason = (a, b) => {
-  if (a === undefined) return b
-  if (b === undefined) return a
-  const out = {}
+  if (a === undefined && b === undefined) return undefined
+  // Accumulated in a Map: on a plain object a '__proto__' consumer key would hit the prototype.
+  const merged = new Map()
   for (const src of [a, b]) {
-    for (const [consumer, files] of Object.entries(src)) {
-      out[consumer] = fileSetToObject(new Set([...(out[consumer] ?? []), ...files]))
+    for (const [consumer, files] of Object.entries(src ?? {})) {
+      if (!Array.isArray(files)) continue
+      let set = merged.get(consumer)
+      if (set === undefined) merged.set(consumer, (set = new Set()))
+      for (const file of files) set.add(file)
     }
   }
-  return out
+  return fromEntries([...merged.keys()].toSorted().map((c) => [c, fileSetToObject(merged.get(c))]))
 }
 
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
@@ -233,7 +240,8 @@ export class Bundle {
       what: 'bundle', modules: this.modules, formats: this.formats, scope: this.config.scope,
     })
     if (executable !== undefined) data.executable = executable
-    if (this.reason !== undefined) data.reason = this.reason
+    // Canonicalized like every sorted field above, so a parsed artifact's order can't leak into the bytes.
+    if (this.reason !== undefined) data.reason = mergeReason(this.reason, undefined)
     return JSON.stringify(data, undefined, 2)
   }
 

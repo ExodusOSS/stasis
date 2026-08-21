@@ -181,8 +181,8 @@ function expandDirectories(baseDir, rels, outputs) {
       const fileStats = statSync(fileAbs, { throwIfNoEntry: false })
       if (fileStats?.isFile()) found.push([toPosix(relative(baseDir, fileAbs)), match, fileStats])
     }
-    // Sorted because serialize() emits `reason` in insertion order (everything else it re-sorts):
-    // without this, the attested bundle's BYTES would depend on readdir order.
+    // Sorted so the sweep is deterministic regardless of readdir order: artifact bytes are
+    // canonicalized by serialize() either way, but multi-file diagnostics keep a stable order.
     for (const [file, match, fileStats] of found.toSorted(([a], [b]) => sortPaths(a, b))) {
       if (toPosix(match).split('/').slice(0, -1).some(isAutoExcludedDir)
         || outputs.has(file) || isAutoExcludedFile(file)) excluded.add(file)
