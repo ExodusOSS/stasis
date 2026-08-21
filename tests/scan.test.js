@@ -351,18 +351,33 @@ test('scan records `import x = require(...)` edges (TS-only CJS import form)', w
   t.assert.deepEqual(result.unresolved, [])
 }))
 
-test('scan skips type-only imports/re-exports (erased before runtime, never loaded by Node)', withTmp((t, tmp) => {
+test('scan erases statement-level type imports only, like Node type stripping (verbatimModuleSyntax)', withTmp((t, tmp) => {
+  // `import type` / `export type` statements are erased whole, so no edge. A statement that
+  // merely lists inline `type` specifiers (`import { type A }` runs as `import {}`) -- or none
+  // at all (`import {}`, `export {} from`) -- still loads its module at runtime, so its edge is
+  // recorded: exactly the set Node evaluates after stripping types.
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'ts-type-only', version: '0.0.0', type: 'module' }))
   writeFileSync(join(tmp, 'entry.ts'),
     'import type { A } from "./types-only.ts"\n' +
     'export type { B } from "./types-only.ts"\n' +
+    'export type * from "./types-only.ts"\n' +
     'import { type C, real } from "./mixed.ts"\n' +
+    'import { type D } from "./inline-only.ts"\n' +
+    'import {} from "./empty.ts"\n' +
+    'export { type E } from "./export-inline.ts"\n' +
+    'export {} from "./export-empty.ts"\n' +
     'export const a: A | null = null\nreal()\n')
   writeFileSync(join(tmp, 'types-only.ts'), 'export interface A {}\nexport interface B {}\n')
   writeFileSync(join(tmp, 'mixed.ts'), 'export interface C {}\nexport const real = (): void => {}\n')
+  writeFileSync(join(tmp, 'inline-only.ts'), 'export interface D {}\nexport const sideEffect: number = 1\n')
+  writeFileSync(join(tmp, 'empty.ts'), 'export const sideEffect: number = 2\n')
+  writeFileSync(join(tmp, 'export-inline.ts'), 'export interface E {}\nexport const sideEffect: number = 3\n')
+  writeFileSync(join(tmp, 'export-empty.ts'), 'export const sideEffect: number = 4\n')
   const result = scan([join(tmp, 'entry.ts')]).toRelative(tmp)
-  t.assert.ok(!result.files.has('types-only.ts'), 'type-only target must not be bundled')
-  t.assert.ok(result.files.has('mixed.ts'), 'mixed type+value import still loads at runtime')
+  t.assert.ok(!result.files.has('types-only.ts'), 'a statement-level type import/re-export must not be bundled')
+  for (const loaded of ['mixed.ts', 'inline-only.ts', 'empty.ts', 'export-inline.ts', 'export-empty.ts']) {
+    t.assert.ok(result.files.has(loaded), `${loaded} still loads at runtime, so it must be bundled`)
+  }
   t.assert.deepEqual(result.unresolved, [])
 }))
 

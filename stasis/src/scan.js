@@ -325,19 +325,21 @@ export class Scan {
     }
 
     const specs = []
-    // Type-only edges (`import type`, `export type`) are erased before runtime — skip them so the
-    // bundle matches Node's load graph. Mixed (`{ type A, B }`) and bare side-effect imports are kept.
-    if (parsed.module?.staticImports) {
-      for (const imp of parsed.module.staticImports) {
-        if (imp.entries.length > 0 && imp.entries.every((e) => e.isType)) continue
-        specs.push({ kind: 'import', spec: imp.moduleRequest.value })
-      }
-    }
-    if (parsed.module?.staticExports) {
-      for (const exp of parsed.module.staticExports) {
-        for (const entry of exp.entries) {
-          if (entry.moduleRequest && !entry.isType) specs.push({ kind: 'export-from', spec: entry.moduleRequest.value })
-        }
+    // STATEMENT-level type-ness decides an edge, matching what survives type erasure at runtime
+    // (verbatimModuleSyntax / Node's own type stripping): an `import type` / `export type`
+    // statement is erased whole, so no edge; a statement that merely lists inline `type`
+    // specifiers (`import { type A }`, `export { type B } from`) -- or none at all (`import {}`,
+    // `export {} from`) -- still loads its module, so its edge is real. oxc's module records
+    // can't draw that line (`import type { A }` and `import { type A }` yield identical
+    // all-isType entries, and `export {} from` yields no entry at all), so the statements are
+    // read off the AST, where importKind/exportKind carry it.
+    for (const node of parsed.program.body) {
+      if (node.type === 'ImportDeclaration') {
+        if (node.importKind !== 'type') specs.push({ kind: 'import', spec: node.source.value })
+      } else if (node.type === 'ExportNamedDeclaration') {
+        if (node.source != null && node.exportKind !== 'type') specs.push({ kind: 'export-from', spec: node.source.value })
+      } else if (node.type === 'ExportAllDeclaration') {
+        if (node.exportKind !== 'type') specs.push({ kind: 'export-from', spec: node.source.value })
       }
     }
     findCallSpecifiers(parsed.program, (s) => specs.push(s))
