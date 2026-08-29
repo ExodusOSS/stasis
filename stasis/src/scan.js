@@ -122,7 +122,11 @@ export class Scan {
   parseErrors = []
   entries = new Set()
 
-  // `conditions` is additive on top of the edge-context base set. `resolve` optionally
+  // `conditions` is additive on top of the edge-context base set. `dropConditions` removes
+  // entries from that BASE (e.g. 'node' for a browser-compiler pass, whose resolution must not
+  // match node-gated `exports`); only meaningful with a custom `resolve` -- under the built-in
+  // resolver the recorded condition keys must keep matching the runtime hooks' sets exactly, so
+  // narrowing the base there would corrupt the lookup keys. `resolve` optionally
   // replaces Node's resolver (resolve-fields.js): returns `{ url } | { empty } | { builtin } | null`
   // (`empty` = a browser/react-native `false` redirect) and owns builtin handling when set.
   // `jsx` opts the .js/.cjs/.mjs family into JSX syntax (React Native's JSX-in-.js convention);
@@ -134,8 +138,11 @@ export class Scan {
   // `resources` (a `parseResourcesOption` Set of extensions/filenames): reached files matching it
   // are carried as opaque resources (bytes only) rather than rejected as un-carryable -- for graphs
   // that aren't fully loadable in JS (e.g. Metro consuming .png/.svg assets).
-  constructor({ conditions = [], resolve = null, jsx = false, flow = false, typescript = false, typescriptPaths = null, resources = new Set() } = {}) {
+  constructor({ conditions = [], dropConditions = [], resolve = null, jsx = false, flow = false, typescript = false, typescriptPaths = null, resources = new Set() } = {}) {
     this.extraConditions = [...conditions]
+    this.dropConditions = new Set(dropConditions)
+    assert.ok(this.dropConditions.size === 0 || resolve !== null,
+      'Scan: dropConditions requires a custom resolver (the built-in path must record the runtime condition sets verbatim)')
     this.customResolve = resolve
     this.jsx = jsx
     this.flow = flow
@@ -176,10 +183,13 @@ export class Scan {
   // Must match the runtime resolver's condition set (omitting one resolves `exports`-gated
   // packages to a different file) AND its order: the recorded key must equal the runtime
   // hooks' string for exact lookups. Extras go where Node puts user conditions in each set.
+  // dropConditions narrows the base for custom-resolver passes only (see the constructor).
   #conditionSet(context) {
-    return context === 'import'
+    const set = context === 'import'
       ? new Set(['node', 'import', 'module-sync', 'node-addons', ...this.extraConditions])
       : new Set(['require', 'node', 'node-addons', ...this.extraConditions, 'module-sync'])
+    for (const c of this.dropConditions) set.delete(c)
+    return set
   }
 
   // `recovered`: false = parser crashed, nothing salvaged; true = oxc returned but we

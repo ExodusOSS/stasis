@@ -604,15 +604,23 @@ const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
 // `--nextjs` models Next's compilers as two resolution passes over one project: the node server
 // compiler (Next sets resolve.mainFields ['main', 'module'], no browser-field redirects) and the
 // client compiler (['browser', 'module', 'main'] + the `browser` exports condition + browser-field
-// redirects). Suffix probing stays off -- Next has no `.ios.js`-style platform suffixes. Divergent
+// redirects). The client pass also DROPS the `node`/`node-addons` base conditions: webpack's web
+// target never asserts them, so a node-first exports map ({ node: ..., browser: ... }) must land
+// on its browser half there -- keeping `node` would silently attest the server file as the client
+// resolution. Suffix probing stays off -- Next has no `.ios.js`-style platform suffixes. Divergent
 // resolutions are recorded per pass key ({ client: ..., server: ... }), like --metro's platforms.
 // KNOWN APPROXIMATIONS: the edge runtime isn't a separate pass (middleware resolves like the
 // server), the RSC layers' `react-server` condition and Next's vendored react/react-dom aliases
 // aren't modeled, and the `webpack` exports condition isn't asserted.
 const NEXTJS_PASSES = [
-  { key: 'server', mainFields: ['main', 'module'], extras: [] },
-  { key: 'client', mainFields: ['browser', 'module', 'main'], extras: ['browser'] },
+  { key: 'server', mainFields: ['main', 'module'], extras: [], drop: [] },
+  { key: 'client', mainFields: ['browser', 'module', 'main'], extras: ['browser'], drop: ['node', 'node-addons'] },
 ]
+// Next's resolve.extensions, in Next's order, minus '.wasm' (a source bundle can't carry it, so
+// leaving it unprobed keeps the failure an ordinary unresolved-import report). Order matters
+// twice: '.mjs' resolves before '.js' and -- unlike SOURCE_EXTS_JSX -- '.tsx' beats '.jsx', so an
+// extensionless import with both twins on disk attests the file Next actually compiles.
+const NEXTJS_SOURCE_EXTS = ['mjs', 'js', 'tsx', 'ts', 'jsx', 'json']
 // Synthetic path for the empty module a browser/react-native `false` redirect resolves to,
 // carried as a real empty CJS file so the edge points at attestable bytes.
 const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
@@ -694,8 +702,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // Normalize conditions (drop stray ''/whitespace) so a sloppy caller can't push a bogus token into the resolver.
   const scanConditions = conditions.map((c) => (typeof c === 'string' ? c.trim() : c)).filter(Boolean)
 
-  // Under --jsx the resolver probes .jsx/.tsx too, matching scan's jsx-widened carryable set.
-  const sourceExts = jsx ? SOURCE_EXTS_JSX : SOURCE_EXTS
+  // Under --jsx the resolver probes .jsx/.tsx too, matching scan's jsx-widened carryable set;
+  // --nextjs uses Next's own extension list and order instead (see NEXTJS_SOURCE_EXTS).
+  const sourceExts = nextjs ? NEXTJS_SOURCE_EXTS : jsx ? SOURCE_EXTS_JSX : SOURCE_EXTS
   // --typescript's tsconfig `paths` matcher, shared by every resolver pass below. Next honours
   // jsconfig.json (the same compilerOptions.paths shape) for JS-only apps, so --nextjs falls back
   // to it when no tsconfig.json exists and none was named explicitly.
@@ -731,6 +740,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
         preferNative: false,
         mainFields: p.mainFields,
         extras: p.extras,
+        drop: p.drop,
         entries: p.key === 'server'
           ? () => absEntries
           : () => [...new Set([...nextjsClientAbs, ...useClientAbs])],
@@ -743,6 +753,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
         mainFields,
         // --metro asserts the RN conditions (+ browser on web); --mainFields (platform null) carries the user's --conditions.
         extras: metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : scanConditions,
+        drop: [],
         entries: () => absEntries,
       }))
 
@@ -761,7 +772,8 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           platform: pass.platform,
           preferNative: pass.preferNative,
           sourceExts,
-          conditions: resolveConditions('commonjs', pass.extras),
+          // Same set scan hands the resolver per edge: base + extras, minus the pass's drops.
+          conditions: resolveConditions('commonjs', pass.extras).filter((c) => !pass.drop.includes(c)),
           // Opt into Metro's package-entry browser-field quirks only on the --metro path.
           metro,
           // --typescript: tsc's mapping, inside the field resolver (the scanner's own fallback
@@ -770,7 +782,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           typescript,
           typescriptPaths,
         })
-    const scanner = scan(passEntries, { conditions: pass.extras, resolve: resolver, jsx, flow, resources: resourceSet })
+    const scanner = scan(passEntries, { conditions: pass.extras, dropConditions: pass.drop, resolve: resolver, jsx, flow, resources: resourceSet })
     reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir, label: pass.label })
 
     const passKey = pass.key
@@ -783,7 +795,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       // --nextjs: sniff reached code files (dependencies included -- packages ship client
       // components too) for the 'use client' prologue, seeding the client pass. Parse-refused
       // files still get sniffed; only resources are skipped (opaque bytes, never a boundary).
-      if (nextjs && !info.resource && !useClientAbs.has(abs) && hasUseClientDirective(readFileSync(abs, 'utf8'))) {
+      // Server pass only: the client pass consumed useClientAbs at its start, so a sniff there
+      // would be a full re-read per file with no consumer.
+      if (nextjs && pass.key === 'server' && !info.resource && !useClientAbs.has(abs) && hasUseClientDirective(readFileSync(abs, 'utf8'))) {
         useClientAbs.add(abs)
       }
       for (const e of info.edges) {

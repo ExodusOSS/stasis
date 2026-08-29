@@ -11,20 +11,25 @@ import { join } from 'node:path'
 const PAGE_EXTS = new Set(['.js', '.jsx', '.ts', '.tsx'])
 
 // app/ router files that become compiler entries; everything else under app/ is reached through
-// imports. `default` is the parallel-route fallback; sitemap/robots/manifest and the icon/image
-// group are the code-flavored metadata routes (their static .png/.ico/.txt siblings simply don't
-// match PAGE_EXTS).
+// imports. `default` is the parallel-route fallback; not-found/forbidden/unauthorized are the
+// HTTP-access fallbacks and global-error/global-not-found their app-wide twins (Next's
+// next-app-loader FILE_TYPES); sitemap/robots/manifest and the icon/image group are the
+// code-flavored metadata routes (their static .png/.ico/.txt siblings simply don't match PAGE_EXTS).
 const APP_ENTRY_NAMES = new Set([
-  'page', 'layout', 'template', 'loading', 'error', 'not-found', 'global-error', 'default',
-  'route', 'forbidden', 'unauthorized', 'sitemap', 'robots', 'manifest',
+  'page', 'layout', 'template', 'loading', 'error', 'not-found', 'global-error',
+  'global-not-found', 'default', 'route', 'forbidden', 'unauthorized',
+  'sitemap', 'robots', 'manifest',
 ])
-// Multiple icons/images are allowed via a numeric suffix (icon1.tsx, opengraph-image2.tsx).
-const APP_ENTRY_IMAGE = /^(?:icon|apple-icon|opengraph-image|twitter-image)\d*$/u
+// One optional digit exactly, matching Next's metadata-route variantsMatcher: icon1.tsx counts,
+// icon12.tsx does not.
+const APP_ENTRY_IMAGE = /^(?:icon|apple-icon|opengraph-image|twitter-image)\d?$/u
 
 // Root-level singleton entries, probed at the project root and under src/ (same lookup Next
-// does). `proxy` is middleware's newer name.
+// does). `proxy` is middleware's newer name. Next matches these against pageExtensions
+// (getPossibleMiddlewareFilenames), so the probe list and order mirror PAGE_EXTS -- a
+// middleware.tsx counts, a middleware.mjs does not.
 const ROOT_ENTRY_NAMES = ['middleware', 'proxy', 'instrumentation', 'instrumentation-client']
-const ROOT_ENTRY_EXTS = ['.ts', '.js', '.mjs']
+const ROOT_ENTRY_EXTS = ['.tsx', '.ts', '.jsx', '.js']
 
 const splitName = (file) => {
   const dot = file.lastIndexOf('.')
@@ -77,9 +82,10 @@ function conventionDir(baseDir, name) {
 // Discover the Next.js convention entries under `baseDir`. Returns project-relative posix paths:
 // `entries` -- every compiler entry (the bundle's runnable roots), sorted;
 // `clientEntries` -- the subset that seeds the CLIENT resolution pass: pages/ routes minus
-//   pages/api/** and _document.* (server-only). app/ files are server components until a
-//   'use client' directive says otherwise, so none seed the client pass here -- the resolution
-//   passes promote reached directive-carrying files instead (see hasUseClientDirective).
+//   pages/api/** and _document.* (server-only), plus instrumentation-client (browser-run).
+//   app/ files are server components until a 'use client' directive says otherwise, so none
+//   seed the client pass here -- the resolution passes promote reached directive-carrying
+//   files instead (see hasUseClientDirective).
 export function discoverNextEntries(baseDir) {
   const entries = []
   const clientEntries = []
@@ -121,6 +127,9 @@ export function discoverNextEntries(baseDir) {
       const hit = ROOT_ENTRY_EXTS.map((ext) => `${prefix}${name}${ext}`).find(isFile)
       if (hit) {
         entries.push(hit)
+        // instrumentation-client is compiled by the CLIENT compiler (it runs in the browser
+        // before hydration), so it seeds the client pass; the other roots resolve server-side.
+        if (name === 'instrumentation-client') clientEntries.push(hit)
         break // root beats src/, matching Next's lookup order
       }
     }
@@ -145,6 +154,11 @@ export function hasUseClientDirective(source) {
     if (nl === -1) return false
     i = nl + 1
   }
+  // A ';' is consumable only as the terminator of the directive statement just scanned (comments
+  // and even line breaks may sit between the closing quote and its ';' -- ExpressionStatement has
+  // no restricted production there). A ';' anywhere else is an EmptyStatement, which ends the
+  // prologue per the grammar.
+  let afterDirective = false
   while (i < len) {
     const c = s[i]
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f' || c === '\u00A0' || c === '\uFEFF') {
@@ -157,6 +171,9 @@ export function hasUseClientDirective(source) {
       const end = s.indexOf('*/', i + 2)
       if (end === -1) return false
       i = end + 2
+    } else if (c === ';' && afterDirective) {
+      afterDirective = false
+      i += 1
     } else if (c === '"' || c === "'") {
       let j = i + 1
       let escaped = false
@@ -173,8 +190,7 @@ export function hasUseClientDirective(source) {
       // directive match for React either.
       if (s.slice(i + 1, j) === 'use client') return true
       i = j + 1
-      while (i < len && (s[i] === ' ' || s[i] === '\t')) i += 1
-      if (s[i] === ';') i += 1 // optional terminator; ASI otherwise ends the statement
+      afterDirective = true
     } else {
       return false // first non-directive token -- prologue over
     }

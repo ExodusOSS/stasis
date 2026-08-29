@@ -49,9 +49,10 @@ Refused, loudly, rather than silently under-attesting:
   its own process and clobber the others' artifact. Verify/load modes stay allowed. (Next only
   auto-enables the worker when there is no custom webpack hook; this wrapper is one.)
 - **Turbopack** — it never calls the webpack hooks, so nothing can be captured. The wrapper
-  throws at config load when stasis is active and the Next CLI exported `TURBOPACK` (drop
-  `--turbopack`; on Next 16+ pass `--webpack`). This detection is best-effort: keep stasis builds
-  on webpack.
+  throws at config load when stasis is active and the Next CLI exported `TURBOPACK`, which
+  Next 13.4–15 set for `--turbopack`/`--turbo` and Next 16 sets even for its flagless Turbopack
+  default — so a Next 16 `next build` under stasis fails closed until you pass `--webpack`.
+  Still best-effort against future Next versions: keep stasis builds on webpack.
 
 A non-code import (CSS, images, fonts) fails the capture until its extension is allowlisted via
 `resources` (option or `EXODUS_STASIS_RESOURCES`) — the same rule as every stasis bundler plugin.
@@ -66,18 +67,22 @@ stasis bundle --nextjs server.js                         # extra entries (a cust
 
 No entry positionals needed: the file system is Next's entry list, and `--nextjs` enumerates it —
 `pages/**` (API routes and `_app`/`_document`/`_error` included), the `app/` special files
-(`page`, `layout`, `template`, `loading`, `error`, `not-found`, `global-error`, `default`,
-`route`, `forbidden`, `unauthorized`, the sitemap/robots/manifest/icon/image metadata routes),
-`middleware`/`proxy`, `instrumentation`, `instrumentation-client`, each also under `src/` (root
-wins). `app/` folders prefixed `_` are private and skipped.
+(`page`, `layout`, `template`, `loading`, `error`, `not-found`, `global-error`,
+`global-not-found`, `default`, `route`, `forbidden`, `unauthorized`, the
+sitemap/robots/manifest/icon/image metadata routes), `middleware`/`proxy`, `instrumentation`,
+`instrumentation-client`, each also under `src/` (root wins). `app/` folders prefixed `_` are
+private and skipped.
 
 Resolution runs twice, modeling Next's compilers:
 
 - **server pass** — all entries; `mainFields: ['main', 'module']`, Node conditions.
-- **client pass** — the `pages/` routes (minus `pages/api/**` and `_document`) **plus every
-  reached file whose directive prologue declares `'use client'`** (dependencies included), the
-  boundaries Next's client compiler starts from; `mainFields: ['browser', 'module', 'main']`, the
-  `browser` condition, browser-field redirects.
+- **client pass** — the `pages/` routes (minus `pages/api/**` and `_document`), the browser-run
+  `instrumentation-client`, **plus every reached file whose directive prologue declares
+  `'use client'`** (dependencies included), the boundaries Next's client compiler starts from;
+  `mainFields: ['browser', 'module', 'main']`, the `browser` condition **without** the `node`
+  condition (a node-first `exports` map lands on its browser half, as under webpack's web
+  target), browser-field redirects. Extensionless imports probe Next's own extension order
+  (`.mjs`, `.js`, `.tsx`, `.ts`, `.jsx`, `.json`) in both passes.
 
 Where the two passes agree an edge is recorded flat; where they diverge it's recorded per pass —
 `"dual-pkg": { "client": "…/browser.js", "server": "…/node.js" }` — the same per-key shape
