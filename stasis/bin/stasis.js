@@ -22,11 +22,11 @@ function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--package-json] [--mock] [--import=module ...] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  (--import forwards extra preload modules (repeatable) to the node process running the entry,
-  e.g. --import=tsx to run TypeScript through the project's tsx; a preload's own module graph is
-  runner infrastructure like stasis's loader itself, so it stays out of the lockfile/bundle --
-  except modules the app graph also reaches, which are attested like any other app code;
-  with --mock, preloads run under the mock's side-effect denials, so a transforming preload
-  that spawns helpers (tsx's esbuild service) cannot work there)
+  e.g. --import=./instrument.mjs for a setup/instrumentation preload; a preload's own module
+  graph is runner infrastructure like stasis's loader itself, so it stays out of the
+  lockfile/bundle -- except modules the app graph also reaches, which are attested like any
+  other app code; with --mock, preloads run under the mock's side-effect denials, so a preload
+  that spawns helper processes cannot work there)
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -122,14 +122,14 @@ if (command === '-v' || command === '--version') {
       usage(`Error: ${cause.message}`)
     }
   }
-  // --import: extra preload module(s) passed through to the spawned node (e.g. --import=tsx).
-  // Node resolves each against the project cwd; they ride AFTER stasis's own loader import.
+  // --import: extra preload module(s) passed through to the spawned node. Node resolves each
+  // against the project cwd; they ride AFTER stasis's own loader import.
   const imports = values.import ?? []
-  if (imports.some((s) => s === '')) usage('Error: --import requires a module specifier (e.g. --import=tsx)')
-  // Not a usage error: strip-only/instrumentation preloads still work under the mock; only ones
-  // that need the denied surfaces (tsx spawns its esbuild service) die, and they do so loudly.
+  if (imports.some((s) => s === '')) usage('Error: --import requires a module specifier (e.g. --import=./instrument.mjs)')
+  // Not a usage error: plain instrumentation/setup preloads still work under the mock; only ones
+  // that need the denied surfaces (spawning helper processes, network) die, and they do so loudly.
   if (values.mock && imports.length > 0) {
-    console.warn("[stasis] Warning: --import preloads run under --mock's side-effect denials; a transforming preload that spawns helpers (e.g. tsx) will fail there")
+    console.warn("[stasis] Warning: --import preloads run under --mock's side-effect denials; a preload that spawns helper processes will fail there")
   }
   // --child-process: forward forked-child (e.g. Metro worker) capture to the root via per-pid shards.
   const childProcess = values['child-process'] ? '1' : ''

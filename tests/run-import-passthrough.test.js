@@ -11,6 +11,15 @@
 // preload-transplanted require() pipeline (tsx's CJS '.ts' handler, babel-register-style '.js'
 // wrappers) is reconciled at write time; and under --bundle=load a preload-cached instance is
 // served only when its bytes match the attested ones. Eval entries keep failing closed.
+//
+// The tsx tests below pin the verified envelope, which is real but PARTIAL -- which is why the
+// usage text and README document --import with a plain instrumentation preload, not tsx:
+// capture, frozen verify/tamper-reject, and bundle=load all work WITH sources on disk, for
+// explicit-.ts imports, '.js'-suffixed imports, tsconfig paths, JSX, and CJS-flavored TS alike.
+// But whenever the transformer REWRITES a specifier ('.js'->' .ts', aliases, extensionless),
+// the artifacts record the rewrite, and a SOURCE-LESS bundle replay cannot re-derive it (tsx's
+// resolver probes the filesystem): "run from the bundle alone" holds only for projects whose
+// import specifiers match the recorded ones literally, and fails closed everywhere else.
 
 import { before, describe, test } from 'node:test'
 import { spawn } from 'node:child_process'
@@ -451,6 +460,36 @@ describe('stasis run --import passthrough (spawned, concurrent)', { concurrency:
     t.assert.match(r.stderr, /\[pre\] loaded/)
     const lock = await readLock(tmp)
     t.assert.deepEqual(Object.keys(lock.sources['.'].files), ['src/entry.mjs'])
+  }))
+
+  test("'.js'-suffixed TS imports work on disk; a source-less bundle replay fails closed", withTmp(async (t, tmp) => {
+    // The standard nodenext convention: `import './util.js'` resolving to util.ts. tsx rewrites
+    // the specifier BEFORE stasis's inner hook, so the artifacts record './util.ts'. With the
+    // sources on disk every lane works; a bundle-ALONE replay cannot re-derive the rewrite (tsx
+    // probes the filesystem), so that lane must fail closed rather than misresolve.
+    await mkdir(join(tmp, 'src'))
+    await mkdir(join(tmp, 'node_modules'))
+    await symlink(join(fixture, 'node_modules', 'tsx'), join(tmp, 'node_modules', 'tsx'))
+    await writeFile(join(tmp, 'package.json'), '{"name":"js-suffix","version":"1.0.0","private":true,"type":"module"}\n')
+    await writeFile(join(tmp, 'src', 'entry.ts'),
+      "import { Color, greet } from './util.js'\nconst c: Color = Color.Green\nconsole.log(greet(c))\n")
+    await writeFile(join(tmp, 'src', 'util.ts'),
+      'export enum Color { Red = 1, Green = 2 }\nexport const greet = (c: Color): string => `color:${c}`\n')
+
+    const cap = await run(['run', '--lock=add', '--bundle=add', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.equal(cap.status, 0, `capture stderr: ${cap.stderr}`)
+    t.assert.equal(cap.stdout, expectedOutput)
+    const lock = await readLock(tmp)
+    t.assert.equal(flatImports(lock)['src/entry.ts']?.['./util.ts'], 'src/util.ts',
+      "the recorded edge keys tsx's rewritten './util.ts', not the source's './util.js'")
+
+    const onDisk = await run(['run', '--lock=frozen', '--bundle=load', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.equal(onDisk.status, 0, `on-disk replay stderr: ${onDisk.stderr}`)
+    t.assert.equal(onDisk.stdout, expectedOutput)
+
+    await rm(join(tmp, 'src'), { recursive: true })
+    const alone = await run(['run', '--lock=frozen', '--bundle=load', '--import', 'tsx', 'src/entry.ts'], { cwd: tmp })
+    t.assert.notEqual(alone.status, 0, 'a source-less replay of a rewritten-specifier project must fail closed')
   }))
 
   test('the stasis-core CLI forwards --import with the same promotion semantics', withTmp(async (t, tmp) => {

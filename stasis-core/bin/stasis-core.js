@@ -22,9 +22,10 @@ function usage(prefix = '') {
   console.error(`${prefix}\nUsage:
  stasis-core run --lock=(add|replace|frozen|ignore) [--bundle=(add|replace|load|frozen|ignore)] [--bundle-file=path/to/bundle.br] [--resources-bundle-file=path/to/resources.br] [--dependencies] [--child-process] [--import=module ...] [--fs=(sync|async)] [--resources=ext,ext] [--brotli-quality=0..11] path/to/file.js ...
  (--import forwards extra preload modules (repeatable) to the node process running the entry,
-  e.g. --import=tsx to run TypeScript through the project's tsx; a preload's own module graph is
-  runner infrastructure like stasis's loader itself, so it stays out of the lockfile/bundle --
-  except modules the app graph also reaches, which are attested like any other app code)
+  e.g. --import=./instrument.mjs for a setup/instrumentation preload; a preload's own module
+  graph is runner infrastructure like stasis's loader itself, so it stays out of the
+  lockfile/bundle -- except modules the app graph also reaches, which are attested like any
+  other app code)
  stasis-core add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -90,10 +91,10 @@ if (command === '-v' || command === '--version') {
     }
   }
   const childProcess = values['child-process'] ? '1' : ''
-  // --import: extra preload module(s) passed through to the spawned node (e.g. --import=tsx).
-  // Node resolves each against the project cwd; they ride AFTER stasis's own loader import.
+  // --import: extra preload module(s) passed through to the spawned node. Node resolves each
+  // against the project cwd; they ride AFTER stasis's own loader import.
   const imports = values.import ?? []
-  if (imports.some((s) => s === '')) usage('Error: --import requires a module specifier (e.g. --import=tsx)')
+  if (imports.some((s) => s === '')) usage('Error: --import requires a module specifier (e.g. --import=./instrument.mjs)')
   console.warn('[stasis-core] Running stasis with config:', { lock, scope, bundle, ...(bundleFile && { bundleFile }), ...(resourcesBundleFile && { resourcesBundleFile }), ...(childProcess && { childProcess: true }), ...(imports.length > 0 && { import: imports }), ...(values.fs && { fs: values.fs }), ...(resources && { resources }), ...(brotliQuality !== undefined && { brotliQuality }) })
   if (debug) console.warn(`[stasis-core] Warning: stasis debug mode active`)
   setEnv('EXODUS_STASIS_LOCK', lock)
