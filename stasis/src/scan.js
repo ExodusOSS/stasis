@@ -1,10 +1,11 @@
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { extname, resolve as resolvePath, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire, isBuiltin } from 'node:module'
 import assert from 'node:assert/strict'
 import { packageType } from '@exodus/stasis-core/bundle-util'
 import { classifyExtension, classifyFormat } from '@exodus/stasis-core/util'
+import { resolveTypescriptFallback } from './resolve-typescript.js'
 
 // Static require/import graph walker: parses source, never loads or executes user code.
 // Dynamic specifiers (`require(name)`, `import('./'+x)`) are recorded as unresolved.
@@ -127,14 +128,19 @@ export class Scan {
   // `jsx` opts the .js/.cjs/.mjs family into JSX syntax (React Native's JSX-in-.js convention);
   // off by default because oxc, like tsc, only auto-enables JSX for .jsx/.tsx by extension.
   // `flow`: strip Flow type syntax from JS-family sources before parsing (see #scanFile).
+  // `typescript`: retry a failed resolution with tsc's mapping (see #typescriptResolve), with
+  // `typescriptPaths` (a loadTsconfigPaths matcher) adding tsconfig alias support; only consulted
+  // on the built-in (Node) resolver -- a custom `resolve` owns its own TS handling.
   // `resources` (a `parseResourcesOption` Set of extensions/filenames): reached files matching it
   // are carried as opaque resources (bytes only) rather than rejected as un-carryable -- for graphs
   // that aren't fully loadable in JS (e.g. Metro consuming .png/.svg assets).
-  constructor({ conditions = [], resolve = null, jsx = false, flow = false, resources = new Set() } = {}) {
+  constructor({ conditions = [], resolve = null, jsx = false, flow = false, typescript = false, typescriptPaths = null, resources = new Set() } = {}) {
     this.extraConditions = [...conditions]
     this.customResolve = resolve
     this.jsx = jsx
     this.flow = flow
+    this.typescript = typescript
+    this.typescriptPaths = typescriptPaths
     this.resources = resources
     // --jsx widens the script/resolvable extension sets to include .jsx/.tsx, so those files are
     // parsed (not left as opaque leaves) and queued when reached. Off by default the base sets apply.
@@ -181,6 +187,27 @@ export class Scan {
   #recordParseError(url, format, message, recovered) {
     this.files.set(url, { format, edges: [], parseError: message })
     this.parseErrors.push({ url, format, message, recovered })
+  }
+
+  // --typescript: resolve `spec` the way tsc maps TS sources, invoked only AFTER Node's own
+  // resolution missed -- so an on-disk `.js` (or any Node-resolvable target) always wins, and the
+  // mapping only completes a failed resolution, never rewrites a successful one. The rules
+  // (extension substitution, extensionless/index completion, manifest-target and tsconfig-paths
+  // mapping) live in the shared dispatcher (resolve-typescript.js), so this resolver and the
+  // legacy-field one cannot drift. The hit is realpathed to match req.resolve's canonical output
+  // (every other recorded edge is a realpath).
+  #typescriptResolve(parentFile, spec, conditions) {
+    const hit = resolveTypescriptFallback(parentFile, spec, {
+      conditions,
+      tsx: this.jsx,
+      paths: this.typescriptPaths,
+    })
+    if (hit == null) return null
+    try {
+      return realpathSync(hit)
+    } catch {
+      return null
+    }
   }
 
   // Strip Flow type syntax to plain JS via the optional flow-remove-types dep (resolved lazily; a
@@ -298,19 +325,21 @@ export class Scan {
     }
 
     const specs = []
-    // Type-only edges (`import type`, `export type`) are erased before runtime — skip them so the
-    // bundle matches Node's load graph. Mixed (`{ type A, B }`) and bare side-effect imports are kept.
-    if (parsed.module?.staticImports) {
-      for (const imp of parsed.module.staticImports) {
-        if (imp.entries.length > 0 && imp.entries.every((e) => e.isType)) continue
-        specs.push({ kind: 'import', spec: imp.moduleRequest.value })
-      }
-    }
-    if (parsed.module?.staticExports) {
-      for (const exp of parsed.module.staticExports) {
-        for (const entry of exp.entries) {
-          if (entry.moduleRequest && !entry.isType) specs.push({ kind: 'export-from', spec: entry.moduleRequest.value })
-        }
+    // STATEMENT-level type-ness decides an edge, matching what survives type erasure at runtime
+    // (verbatimModuleSyntax / Node's own type stripping): an `import type` / `export type`
+    // statement is erased whole, so no edge; a statement that merely lists inline `type`
+    // specifiers (`import { type A }`, `export { type B } from`) -- or none at all (`import {}`,
+    // `export {} from`) -- still loads its module, so its edge is real. oxc's module records
+    // can't draw that line (`import type { A }` and `import { type A }` yield identical
+    // all-isType entries, and `export {} from` yields no entry at all), so the statements are
+    // read off the AST, where importKind/exportKind carry it.
+    for (const node of parsed.program.body) {
+      if (node.type === 'ImportDeclaration') {
+        if (node.importKind !== 'type') specs.push({ kind: 'import', spec: node.source.value })
+      } else if (node.type === 'ExportNamedDeclaration') {
+        if (node.source != null && node.exportKind !== 'type') specs.push({ kind: 'export-from', spec: node.source.value })
+      } else if (node.type === 'ExportAllDeclaration') {
+        if (node.exportKind !== 'type') specs.push({ kind: 'export-from', spec: node.source.value })
       }
     }
     findCallSpecifiers(parsed.program, (s) => specs.push(s))
@@ -360,17 +389,24 @@ export class Scan {
         edges.push({ ...s, builtin: true })
         continue
       }
+      let childPath
       try {
-        const childPath = req.resolve(s.spec, { conditions })
-        const childURL = pathToFileURL(childPath).toString()
-        edges.push({ ...s, child: childURL })
-        record(key, s.spec, childURL)
-        const childExt = extname(childPath)
-        if (this.resolvableExts.has(childExt) || this.#isResource(childPath)) queue.push(childURL)
+        childPath = req.resolve(s.spec, { conditions })
       } catch (cause) {
-        edges.push({ ...s, error: cause.code ?? cause.message })
-        this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason: cause.code ?? cause.message })
+        // --typescript: complete the miss with tsc's mapping (see #typescriptResolve); the edge
+        // stays keyed by the ORIGINAL specifier -- only the target is the mapped file.
+        if (this.typescript) childPath = this.#typescriptResolve(file, s.spec, conditions)
+        if (childPath == null) {
+          const reason = cause.code ?? cause.message
+          edges.push({ ...s, error: reason })
+          this.unresolved.push({ parentURL: url, kind: s.kind, spec: s.spec, reason })
+          continue
+        }
       }
+      const childURL = pathToFileURL(childPath).toString()
+      edges.push({ ...s, child: childURL })
+      record(key, s.spec, childURL)
+      if (this.resolvableExts.has(extname(childPath)) || this.#isResource(childPath)) queue.push(childURL)
     }
 
     for (const [key, specMap] of specMaps) {

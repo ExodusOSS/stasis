@@ -1,9 +1,17 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createRequire, isBuiltin } from 'node:module'
-import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { isTypeDeclaration, stripTypeDeclaration } from '@exodus/stasis-core/util'
+import {
+  isDir,
+  isFile,
+  locatePackage,
+  nearestPackage,
+  readJson,
+  resolveTypescriptFallback,
+  typescriptSiblings,
+} from './resolve-typescript.js'
 
 // Static module resolver for legacy package fields (`react-native`/`browser`/`main` + browser-spec
 // redirect maps) and platform suffixes (`.ios`/`.android`/`.native`), reproducing Metro/React-Native
@@ -26,73 +34,6 @@ import { isTypeDeclaration, stripTypeDeclaration } from '@exodus/stasis-core/uti
 // affects the `--metro` path; the `--mainFields` path always empties (matching esbuild).
 // Tests can override per-resolver via createFieldResolver's `metroKeepEntryOnBrowserFalse`.
 const METRO_KEEP_ENTRY_ON_BROWSER_FALSE = true
-
-function readJson(file) {
-  let text
-  try {
-    text = readFileSync(file, 'utf8')
-  } catch {
-    return null // absent / unreadable -- no package manifest here
-  }
-  // A manifest that EXISTS but is malformed must fail closed (Node throws rather than resolving past it).
-  try {
-    return JSON.parse(text)
-  } catch (cause) {
-    throw new Error(`Invalid package.json: ${file}`, { cause })
-  }
-}
-
-function isFile(p) {
-  try {
-    return statSync(p).isFile()
-  } catch {
-    return false
-  }
-}
-
-function isDir(p) {
-  try {
-    return statSync(p).isDirectory()
-  } catch {
-    return false
-  }
-}
-
-// Nearest node_modules/<pkg> up from `fromDir` (handles @scope/name). Returns { pkgDir, subpath }
-// (subpath '' = bare package import), or null if not installed up the tree.
-function locatePackage(fromDir, spec) {
-  const parts = spec.split('/')
-  const pkgLen = spec.startsWith('@') ? 2 : 1
-  if (parts.length < pkgLen || parts.slice(0, pkgLen).some((p) => !p)) return null
-  const pkgName = parts.slice(0, pkgLen).join('/')
-  const subpath = parts.slice(pkgLen).join('/')
-  let dir = fromDir
-  while (true) {
-    // Skip a dir literally named node_modules (basename, not endsWith — `my-node_modules` must not match).
-    if (basename(dir) !== 'node_modules') {
-      const pkgDir = join(dir, 'node_modules', pkgName)
-      if (isDir(pkgDir)) return { pkgDir, subpath }
-    }
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
-  }
-}
-
-// Nearest package.json at/above `file`'s dir — the package whose browser/RN map governs its imports.
-function nearestPackage(file) {
-  let dir = dirname(file)
-  while (true) {
-    const pkgPath = join(dir, 'package.json')
-    if (existsSync(pkgPath)) {
-      const pkg = readJson(pkgPath)
-      if (pkg) return { pkgDir: dir, pkg }
-    }
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
-  }
-}
 
 // First mainFields entry that's a non-empty string, else `index` (object-valued fields are redirect maps).
 function packageEntry(pkg, mainFields) {
@@ -204,10 +145,9 @@ function resolveSourceFile(base, opts) {
     if (typeof r === 'string') return isAbsolute(r) ? r : resolvePath(scope.pkgDir, r)
     return p
   }
-  // `suffix` is everything appended to `base`; Metro redirect-checks suffixed candidates only.
-  const probe = (suffix) => {
-    let p = `${base}${suffix}`
-    if (opts.metro && suffix !== '') {
+  // `derived` marks a candidate that is not the literal base; Metro redirect-checks those only.
+  const probePath = (p, derived) => {
+    if (opts.metro && derived) {
       const r = redirectCandidate(p)
       if (r === false) return { empty: true }
       p = r
@@ -217,6 +157,8 @@ function resolveSourceFile(base, opts) {
     if (isTypeDeclaration(p)) return null
     return isFile(p) ? p : null
   }
+  // `suffix` is everything appended to `base`.
+  const probe = (suffix) => probePath(`${base}${suffix}`, suffix !== '')
   const tryExt = (sourceExt) => {
     if (opts.platform) {
       const hit = probe(`.${opts.platform}${sourceExt}`)
@@ -230,6 +172,18 @@ function resolveSourceFile(base, opts) {
   }
   const bare = tryExt('')
   if (bare) return bare
+  // --typescript: tsc's extension substitution. A base naming a JS output extension probes its TS
+  // source siblings once the literal file (the bare probe above) is absent, so the on-disk `.js`
+  // always wins over its `.ts` twin. Literal siblings only -- no platform suffixes (tsc has none);
+  // extensionless bases keep going through the appended-extension loop below (sourceExts carries
+  // ts, and tsx under --jsx). Placed before that loop so `x.js` -> `x.ts` beats a pathological
+  // `x.js.<ext>`, matching tsc's candidate order.
+  if (opts.typescript) {
+    for (const cand of typescriptSiblings(base, { tsx: opts.sourceExts.includes('tsx') })) {
+      const hit = probePath(cand, true)
+      if (hit) return hit
+    }
+  }
   for (const ext of opts.sourceExts) {
     const hit = tryExt(`.${ext}`)
     if (hit) return hit
@@ -266,7 +220,10 @@ function resolveFileOrDir(base, opts) {
 // `mainFields`/`platform`/`preferNative`/`sourceExts` drive the legacy-field + suffix probing.
 // `metro` opts into Metro's package-entry + candidate-redirect semantics (see
 // resolveEntryThroughMap and resolveSourceFile); leave it off for the esbuild-parity
-// `--mainFields` path. `metroKeepEntryOnBrowserFalse` overrides the module-level toggle
+// `--mainFields` path. `typescript` adds tsc's extension substitution (a missing `x.js` probes
+// its `x.ts` sibling; see resolveSourceFile) plus the shared miss fallback (see below), and
+// `typescriptPaths` (a loadTsconfigPaths matcher) its tsconfig alias mapping.
+// `metroKeepEntryOnBrowserFalse` overrides the module-level toggle
 // (METRO_KEEP_ENTRY_ON_BROWSER_FALSE) per resolver -- primarily so tests can cover both branches.
 export function createFieldResolver({
   conditions = [],
@@ -275,12 +232,14 @@ export function createFieldResolver({
   preferNative = false,
   sourceExts = ['js', 'json', 'ts'],
   metro = false,
+  typescript = false,
+  typescriptPaths = null,
   metroKeepEntryOnBrowserFalse = METRO_KEEP_ENTRY_ON_BROWSER_FALSE,
 } = {}) {
-  const opts = { platform, preferNative, sourceExts, mainFields, metro, metroKeepEntryOnBrowserFalse }
+  const opts = { platform, preferNative, sourceExts, mainFields, metro, typescript, metroKeepEntryOnBrowserFalse }
   // `callConditions` (from scan) is the parent's format-driven condition set, so `exports`
   // delegation matches Node resolving from THAT file; falls back to configured `conditions`.
-  return function resolve(parentFile, specifier, callConditions) {
+  const resolve = function resolve(parentFile, specifier, callConditions) {
     const conds = new Set(callConditions ?? conditions)
     // `#name` subpath imports use the `imports` field + conditions; Node handles them.
     if (specifier.startsWith('#')) {
@@ -343,6 +302,23 @@ export function createFieldResolver({
     if (r === false) return { empty: true }
     const target = typeof r === 'string' ? r : sub
     return resolveFileOrDir(join(loc.pkgDir, target), opts)
+  }
+  if (!typescript) return resolve
+  // --typescript: when the whole field flow leaves the specifier unresolved, give tsc's mapping
+  // the same shot the scanner's fallback gets, via the shared dispatcher. On this path it covers
+  // the layers the field resolver delegates to Node -- `exports`-bearing packages and `#` subpath
+  // imports, whose targets may name compiled files existing only as TS source -- plus tsconfig
+  // `paths` aliases; misses only, so no field/redirect/suffix resolution is ever overridden.
+  // (Relative paths re-probe tsc-style too -- redundant after resolveSourceFile, but harmless.)
+  return function resolveWithTypescriptFallback(parentFile, specifier, callConditions) {
+    const resolved = resolve(parentFile, specifier, callConditions)
+    if (resolved) return resolved
+    const hit = resolveTypescriptFallback(parentFile, specifier, {
+      conditions: new Set(callConditions ?? conditions),
+      tsx: sourceExts.includes('tsx'),
+      paths: typescriptPaths,
+    })
+    return hit == null ? null : { url: pathToFileURL(hit).toString() }
   }
 }
 
