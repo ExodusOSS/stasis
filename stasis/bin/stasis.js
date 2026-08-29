@@ -25,6 +25,7 @@ function usage(prefix = '') {
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --nextjs [--tsconfig=path/to/tsconfig.json] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] [path/to/extra-entry.(js|ts|jsx|tsx) ...]
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
@@ -36,7 +37,11 @@ function usage(prefix = '') {
    honouring tsconfig compilerOptions.paths aliases (from ./tsconfig.json, or --tsconfig=path);
    not with --metro-resolver;
   --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them;
-  --package-json auto-includes each bundled module's package.json, even ones the scan never reached))
+  --package-json auto-includes each bundled module's package.json, even ones the scan never reached;
+  --nextjs discovers the Next.js entries itself (pages/, app/ special files, middleware,
+   instrumentation, plus src/ variants; extra entry positionals are optional) and resolves them
+   the way Next's server and client compilers do (per-pass mainFields + browser condition,
+   'use client' boundaries seed the client pass); implies --jsx and --typescript))
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -184,6 +189,7 @@ if (command === '-v' || command === '--version') {
     mainFields: { type: 'string' },
     metro: { type: 'boolean' },
     'metro-resolver': { type: 'boolean' },
+    nextjs: { type: 'boolean' },
     platforms: { type: 'string', multiple: true },
     jsx: { type: 'boolean' },
     flow: { type: 'boolean' },
@@ -198,12 +204,18 @@ if (command === '-v' || command === '--version') {
     valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--brotli-quality', '-o'],
     onError: usage,
   })
-  if (argv.length === 0) usage('Nothing to bundle: no entry file given')
+  // --nextjs discovers the Next.js convention entries itself, so entry positionals become
+  // optional extras (and may be .jsx/.tsx -- --nextjs implies --jsx).
+  const nextjs = Boolean(values.nextjs)
+  if (argv.length === 0 && !nextjs) usage('Nothing to bundle: no entry file given')
   const allSol = argv.every((f) => f.endsWith('.sol'))
   const allPhp = argv.every((f) => f.endsWith('.php'))
-  const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
+  const allJs = argv.every((f) => (nextjs ? /\.(?:js|cjs|mjs|ts|cts|mts|jsx|tsx)$/u : /\.(?:js|cjs|mjs|ts|cts|mts)$/u).test(f))
   const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))
   const allRust = argv.every((f) => f.endsWith('.rs'))
+  if (nextjs && !allJs) {
+    usage('Error: --nextjs entries must be .js/.cjs/.mjs/.ts/.cts/.mts/.jsx/.tsx files')
+  }
   if (!allSol && !allPhp && !allJs && !allBash && !allRust) {
     usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
   }
@@ -213,9 +225,9 @@ if (command === '-v' || command === '--version') {
     usage('Error: --scope must be node_modules or full')
   }
   if (values.lockfile && !allJs) usage('Error: --lockfile is only valid for JS bundles')
-  // --mainFields/--metro always emit a full-scope bundle, so they'd silently ignore --scope.
-  if (values.scope !== undefined && (values.mainFields !== undefined || values.metro)) {
-    usage('Error: --scope is not supported with --mainFields or --metro')
+  // --mainFields/--metro/--nextjs always emit a full-scope bundle, so they'd silently ignore --scope.
+  if (values.scope !== undefined && (values.mainFields !== undefined || values.metro || nextjs)) {
+    usage('Error: --scope is not supported with --mainFields, --metro, or --nextjs')
   }
   // --conditions: extra exports/imports resolution conditions merged onto Node's defaults;
   // they don't honour legacy `mainFields` or platform suffixes (see --mainFields).
@@ -234,8 +246,9 @@ if (command === '-v' || command === '--version') {
   if (values.typescript && !allJs) usage('Error: --typescript is only valid for JS bundles')
   const typescript = Boolean(values.typescript)
   // --tsconfig: the config whose compilerOptions.paths aliases --typescript honours (default:
-  // the project root's tsconfig.json when present). Meaningless without --typescript.
-  if (values.tsconfig !== undefined && !typescript) usage('Error: --tsconfig is only valid with --typescript')
+  // the project root's tsconfig.json when present). Meaningless without --typescript -- which
+  // --nextjs implies, so it stays valid there.
+  if (values.tsconfig !== undefined && !typescript && !nextjs) usage('Error: --tsconfig is only valid with --typescript')
   // --mainFields: legacy package entry fields (e.g. react-native,browser,main) for the non-exports resolver.
   if (values.mainFields !== undefined && !allJs) usage('Error: --mainFields is only valid for JS bundles')
   const mainFields = values.mainFields === undefined
@@ -280,6 +293,13 @@ if (command === '-v' || command === '--version') {
   } catch (cause) {
     usage(`Error: ${cause.message}`)
   }
+  // --nextjs presets its own two resolution passes, so the resolver-shaping flags conflict.
+  if (nextjs) {
+    if (metro || metroResolver) usage("Error: --nextjs can't be combined with --metro (each presets its own resolution)")
+    if (conditions.length > 0) usage("Error: --conditions can't be combined with --nextjs (it sets its own conditions per compiler pass)")
+    if (mainFields !== undefined) usage("Error: --mainFields can't be combined with --nextjs (it sets its own mainFields per compiler pass)")
+    if (platforms.length > 0) usage('Error: --platforms is only valid with --metro (--nextjs always runs its server + client passes)')
+  }
   if (metro) {
     if (conditions.length > 0) usage("Error: --conditions can't be combined with --metro (it sets its own conditions)")
     if (mainFields !== undefined) usage("Error: --mainFields can't be combined with --metro (it sets its own mainFields)")
@@ -314,6 +334,7 @@ if (command === '-v' || command === '--version') {
     mainFields,
     metro,
     metroResolver,
+    nextjs,
     platforms,
     jsx,
     flow,

@@ -64,14 +64,29 @@ export class StasisWebpack {
   // N for a MultiCompiler. Only the multi case accumulates across N `done`s and defers its write.
   #captureApplyCount = 0
 
+  // Set by a wrapper that KNOWS several compilers will share this instance but can't have applied
+  // them all yet (Next.js runs client/server/edge as SEQUENTIAL webpack() calls, so compiler #1's
+  // `done` fires at apply-count 1): defer every write to the single exit flush, or that first
+  // `done` would put a partial artifact on disk mid-build.
+  #multiCompiler
+
   // Deferred-write bookkeeping for the multi-compiler case (see #deferWrite). #armed: the single
-  // flush pair is registered; #dirty: a clean build completed since the last flush.
+  // flush pair is registered; #dirty: a clean build completed since the last flush; #failed: a
+  // compiler in the set finished with errors, so the flush is poisoned -- the session's capture is
+  // incomplete, and writing it would overwrite a good artifact with a partial one (the same
+  // clean-build rule the immediate write applies per compiler).
   #deferredWriteArmed = false
   #deferredWriteDirty = false
+  #deferredWriteFailed = false
 
-  constructor(options = {}) {
-    const { state } = resolvePluginState('StasisWebpack', options, process.cwd())
+  constructor(options = {}, { multiCompiler = false } = {}) {
+    // A caller that owns a State (e.g. the Next.js wrapper) can pass it directly; a foreign-copy
+    // State fails closed via the instanceof miss.
+    const state = options instanceof State
+      ? options
+      : resolvePluginState('StasisWebpack', options, process.cwd()).state
     this.#state = state  // null when plugin should be inert
+    this.#multiCompiler = multiCompiler
     // Cache the resolved resources Set for the per-file classify hot path.
     this.#resources = state?.config.resources ?? new Set()
   }
@@ -323,10 +338,17 @@ export class StasisWebpack {
     // finish -- only on a clean build (a partial one would overwrite a good lockfile).
     if (this.#state !== State.preload) {
       compiler.hooks.done.tap('Stasis', (stats) => {
-        if (stats.hasErrors()) return
+        if (stats.hasErrors()) {
+          // In a multi-compiler set, a failed sibling makes the WHOLE session's capture partial:
+          // poison the deferred flush so a clean sibling's `done` can't schedule a write of it.
+          this.#deferredWriteFailed = true
+          return
+        }
         // Single compiler: write now (one `done`). Multi-compiler: defer -- `done` fires per child,
-        // so writing each time pays N super-linear brotli passes over a growing bundle; coalesce to one.
-        if (this.#captureApplyCount === 1) this.#state.write()
+        // so writing each time pays N super-linear brotli passes over a growing bundle; coalesce to
+        // one. The #multiCompiler wiring hint forces the deferral for compilers applied one at a
+        // time (see its declaration), where the first `done` still sees apply-count 1.
+        if (this.#captureApplyCount === 1 && !this.#multiCompiler) this.#state.write()
         else this.#deferWrite()
       })
     }
@@ -341,6 +363,7 @@ export class StasisWebpack {
     if (this.#deferredWriteArmed) return
     this.#deferredWriteArmed = true
     const flush = () => {
+      if (this.#deferredWriteFailed) return  // a sibling compiler failed -- the capture is partial
       if (!this.#deferredWriteDirty) return  // already flushed; exit backstop is a no-op
       this.#state.write()                    // sync write; on throw, dirty stays set so exit retries
       this.#deferredWriteDirty = false       // clear ONLY after a successful write

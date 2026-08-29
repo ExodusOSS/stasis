@@ -62,7 +62,7 @@ const FAILED = { hasErrors: () => true }
 // flushExit() -- the in-test stand-ins for each exit path. opts.throwWritesUntil makes the first N
 // State.write() calls throw, to exercise the retry-after-failure path.
 const withPlugin = (t, opts = {}) => {
-  const { throwWritesUntil = 0 } = opts
+  const { throwWritesUntil = 0, multiCompiler = false, passState = false } = opts
   const dir = mkdtempSync(join(tmpdir(), 'stasis-defer-'))
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fx', version: '0.0.0' }))
   const bundleFile = join(dir, 'sources.br')
@@ -88,7 +88,12 @@ const withPlugin = (t, opts = {}) => {
   process.chdir(dir)
   let plugin
   try {
-    plugin = new StasisWebpack({ lock: 'none', bundle: 'add', bundleFile })
+    // passState mirrors the Next.js wrapper's wiring: it resolves the State itself and hands it
+    // in (the constructor's instanceof branch), rather than passing options through.
+    const optionsOrState = passState
+      ? new State(dir, { lock: 'none', bundle: 'add', bundleFile })
+      : { lock: 'none', bundle: 'add', bundleFile }
+    plugin = new StasisWebpack(optionsOrState, { multiCompiler })
   } finally {
     process.chdir(cwd)
   }
@@ -201,6 +206,78 @@ test('failed build schedules no deferred write', (t) => {
   flushExit()
   t.assert.equal(writes(), 0, 'a build with errors never writes, even at exit')
   t.assert.ok(!existsSync(bundleFile))
+})
+
+test('a failed SIBLING poisons the deferred write scheduled by a clean compiler', (t) => {
+  // Child A completes clean (defer armed + dirty), child B fails: the session's capture is
+  // partial, so the flush must be poisoned -- writing would replace a good artifact with one
+  // missing B's whole graph. Same clean-build rule the immediate write applies per compiler.
+  const { plugin, bundleFile, writes, flushBeforeExit, flushExit } = withPlugin(t)
+  const compilers = [fakeCompiler(), fakeCompiler()]
+  for (const c of compilers) c.applyTo(plugin)
+
+  compilers[0].hooks.done.call(CLEAN)
+  compilers[1].hooks.done.call(FAILED)
+  flushBeforeExit()
+  flushExit()
+  t.assert.equal(writes(), 0, 'the clean sibling\'s deferred write is poisoned')
+  t.assert.ok(!existsSync(bundleFile))
+})
+
+test('multiCompiler wiring hint: sequential compilers defer even at apply-count 1', (t) => {
+  // Next.js runs client/server/edge as SEQUENTIAL webpack() calls: compiler #1's `done` fires
+  // while it is the only compiler applied so far. Without the hint that first `done` would write
+  // a partial artifact mid-build; with it, everything coalesces into the one exit flush.
+  const { plugin, bundleFile, writes, flushBeforeExit } = withPlugin(t, { multiCompiler: true })
+
+  const first = fakeCompiler()
+  first.applyTo(plugin)
+  first.hooks.done.call(CLEAN) // apply-count is 1 HERE -- the un-hinted path would write now
+  t.assert.equal(writes(), 0, 'no mid-build write while later compilers are still coming')
+  t.assert.ok(!existsSync(bundleFile))
+
+  const second = fakeCompiler()
+  second.applyTo(plugin)
+  second.hooks.done.call(CLEAN)
+  t.assert.equal(writes(), 0)
+
+  flushBeforeExit()
+  t.assert.equal(writes(), 1, 'exactly one write at process exit')
+  t.assert.ok(existsSync(bundleFile))
+})
+
+test('multiCompiler hint + failed later compiler: nothing is ever written', (t) => {
+  const { plugin, bundleFile, writes, flushBeforeExit, flushExit } = withPlugin(t, { multiCompiler: true })
+
+  const first = fakeCompiler()
+  first.applyTo(plugin)
+  first.hooks.done.call(CLEAN)
+  const second = fakeCompiler()
+  second.applyTo(plugin)
+  second.hooks.done.call(FAILED)
+
+  flushBeforeExit()
+  flushExit()
+  t.assert.equal(writes(), 0, 'no partial artifact from the sequential-compiler session')
+  t.assert.ok(!existsSync(bundleFile))
+})
+
+test('a directly-passed State drives the plugin like resolved options (the wrapper wiring)', (t) => {
+  const { plugin, dir, bundleFile, writes, flushBeforeExit } = withPlugin(t, { passState: true, multiCompiler: true })
+  const entry = join(dir, 'entry.js')
+  const source = 'export const answer = 42\n'
+  writeFileSync(entry, source)
+
+  const c = fakeCompiler()
+  c.applyTo(plugin)
+  c.captureEntry(entry)
+  c.hooks.done.call(CLEAN)
+  t.assert.equal(writes(), 0, 'deferred by the hint even for a lone compiler')
+
+  flushBeforeExit()
+  t.assert.equal(writes(), 1)
+  const decoded = JSON.parse(brotliDecompressSync(readFileSync(bundleFile)).toString('utf-8'))
+  t.assert.equal(decoded.sources['.'].files['entry.js'], source, 'captured through the passed-in State')
 })
 
 test('the deferred multi-compiler write produces the correct final bundle bytes', (t) => {

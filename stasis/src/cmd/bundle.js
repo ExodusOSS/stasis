@@ -10,6 +10,7 @@ import { scan } from '../scan.js'
 import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
 import { discoverTsconfig, loadTsconfigPaths } from '../resolve-typescript.js'
 import { createMetroResolver } from '../metro-resolver.js'
+import { discoverNextEntries, hasUseClientDirective } from '../nextjs-entries.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
@@ -600,6 +601,18 @@ const SOURCE_EXTS = ['js', 'json', 'ts']
 const SOURCE_EXTS_JSX = ['js', 'jsx', 'json', 'ts', 'tsx']
 // React Native preset mainFields for `--metro` (which also sets the RN conditions + platform suffixes).
 const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
+// `--nextjs` models Next's compilers as two resolution passes over one project: the node server
+// compiler (Next sets resolve.mainFields ['main', 'module'], no browser-field redirects) and the
+// client compiler (['browser', 'module', 'main'] + the `browser` exports condition + browser-field
+// redirects). Suffix probing stays off -- Next has no `.ios.js`-style platform suffixes. Divergent
+// resolutions are recorded per pass key ({ client: ..., server: ... }), like --metro's platforms.
+// KNOWN APPROXIMATIONS: the edge runtime isn't a separate pass (middleware resolves like the
+// server), the RSC layers' `react-server` condition and Next's vendored react/react-dom aliases
+// aren't modeled, and the `webpack` exports condition isn't asserted.
+const NEXTJS_PASSES = [
+  { key: 'server', mainFields: ['main', 'module'], extras: [] },
+  { key: 'client', mainFields: ['browser', 'module', 'main'], extras: ['browser'] },
+]
 // Synthetic path for the empty module a browser/react-native `false` redirect resolves to,
 // carried as a real empty CJS file so the edge points at attestable bytes.
 const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
@@ -660,9 +673,12 @@ function nativeModuleFiles(pkgAbs) {
 }
 
 // Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
-// `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
-// have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false }) {
+// `--metro`/`--nextjs`). Scanned once per pass (a platform, or a Next compiler); each edge is
+// recorded flat when the passes that have it agree, or as a `{ passKey: target }` map where they
+// diverge. Returns { bundle, lockfile }. `--nextjs` runs the NEXTJS_PASSES pair: the client pass
+// walks `nextjsClientEntries` plus every reached file carrying a 'use client' directive (the
+// boundaries Next's client compiler starts from), discovered while the server pass collects files.
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, nextjs = false, nextjsClientEntries = [], jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -680,34 +696,72 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 
   // Under --jsx the resolver probes .jsx/.tsx too, matching scan's jsx-widened carryable set.
   const sourceExts = jsx ? SOURCE_EXTS_JSX : SOURCE_EXTS
-  // --typescript's tsconfig `paths` matcher, shared by every per-platform resolver below.
-  const typescriptPaths = typescript ? loadTsconfigPaths(discoverTsconfig(baseDir, tsconfig)) : null
+  // --typescript's tsconfig `paths` matcher, shared by every resolver pass below. Next honours
+  // jsconfig.json (the same compilerOptions.paths shape) for JS-only apps, so --nextjs falls back
+  // to it when no tsconfig.json exists and none was named explicitly.
+  const pathsConfig = discoverTsconfig(baseDir, tsconfig)
+    ?? (nextjs && existsSync(join(baseDir, 'jsconfig.json')) ? join(baseDir, 'jsconfig.json') : null)
+  const typescriptPaths = typescript ? loadTsconfigPaths(pathsConfig) : null
   // --resources: extensions/filenames carried as opaque assets instead of failing "can't carry".
   const resourceSet = parseResourcesOption('buildResolvedJsBundle', resources)
 
   const formatsByRel = new Map()
   // Reached files the scanner tagged as resources (rel keys); read as bytes below, not UTF-8 source.
   const resourceRels = new Set()
-  // parentRel -> specifier -> Map<platformKey, targetRel>; collapsed after all platforms scanned.
+  // parentRel -> specifier -> Map<passKey, targetRel>; collapsed after all passes scanned.
   const edges = new Map()
-  const reached = new Set() // absolute paths reached on any platform
+  const reached = new Set() // absolute paths reached on any pass
   let usesEmpty = false
 
-  for (const platform of platforms) {
-    // --metro asserts the RN conditions (+ browser on web); --mainFields (platform null) carries the user's --conditions.
-    const extras = metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : scanConditions
+  // --nextjs: absolute paths of reached files carrying a 'use client' directive. Filled by the
+  // server pass (which runs first and reaches the full graph), consumed by the client pass's
+  // lazy entry set -- Next's client compiler starts exactly at these boundary modules.
+  const useClientAbs = new Set()
+  const nextjsClientAbs = nextjsClientEntries.map((e) => resolve(baseDir, e))
+
+  // Pass descriptors: what to scan and how to resolve it. --metro/--mainFields map platforms to
+  // passes 1:1 (the pass key IS the platform); --nextjs runs the fixed server/client pair over
+  // per-pass entry sets, with platform suffix probing off. `entries` is lazy so the client pass
+  // sees the boundaries the server pass discovered.
+  const passes = nextjs
+    ? NEXTJS_PASSES.map((p) => ({
+        key: p.key,
+        label: p.key,
+        platform: null,
+        preferNative: false,
+        mainFields: p.mainFields,
+        extras: p.extras,
+        entries: p.key === 'server'
+          ? () => absEntries
+          : () => [...new Set([...nextjsClientAbs, ...useClientAbs])],
+      }))
+    : platforms.map((platform) => ({
+        key: platform ?? '*', // '*' is a private placeholder for the single mainFields pass; it never unflattens
+        label: platform ?? 'mainFields',
+        platform,
+        preferNative: platform !== null && platform !== 'web',
+        mainFields,
+        // --metro asserts the RN conditions (+ browser on web); --mainFields (platform null) carries the user's --conditions.
+        extras: metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : scanConditions,
+        entries: () => absEntries,
+      }))
+
+  for (const pass of passes) {
+    const passEntries = pass.entries()
+    // A Next app with no pages/ routes and no 'use client' boundary has no client graph to walk.
+    if (passEntries.length === 0) continue
     // --metro --metro-resolver delegates to the project's own metro-resolver for byte-for-byte Metro
     // fidelity; otherwise the built-in field/suffix resolver (resolve-fields.js) reproduces it.
     // metro-resolver derives default/require|import/platform conditions itself, so it takes only the
     // extra `react-native` condition (browser comes from its per-platform map, keyed on `web`).
     const resolver = metroResolver
-      ? createMetroResolver({ projectDir: baseDir, platform, sourceExts, mainFields, conditionNames: ['react-native'] })
+      ? createMetroResolver({ projectDir: baseDir, platform: pass.platform, sourceExts, mainFields, conditionNames: ['react-native'] })
       : createFieldResolver({
-          mainFields,
-          platform,
-          preferNative: platform !== null && platform !== 'web',
+          mainFields: pass.mainFields,
+          platform: pass.platform,
+          preferNative: pass.preferNative,
           sourceExts,
-          conditions: resolveConditions('commonjs', extras),
+          conditions: resolveConditions('commonjs', pass.extras),
           // Opt into Metro's package-entry browser-field quirks only on the --metro path.
           metro,
           // --typescript: tsc's mapping, inside the field resolver (the scanner's own fallback
@@ -716,15 +770,22 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           typescript,
           typescriptPaths,
         })
-    const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx, flow, resources: resourceSet })
-    reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir, label: platform ?? 'mainFields' })
+    const scanner = scan(passEntries, { conditions: pass.extras, resolve: resolver, jsx, flow, resources: resourceSet })
+    reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir, label: pass.label })
 
-    const platformKey = platform ?? '*' // '*' is a private placeholder for the single mainFields pass; it never unflattens
+    const passKey = pass.key
     for (const [url, info] of scanner.files) {
-      const rel = toRel(fileURLToPath(url))
-      reached.add(fileURLToPath(url))
+      const abs = fileURLToPath(url)
+      const rel = toRel(abs)
+      reached.add(abs)
       if (info.resource) resourceRels.add(rel)
       formatsByRel.set(rel, info.format)
+      // --nextjs: sniff reached code files (dependencies included -- packages ship client
+      // components too) for the 'use client' prologue, seeding the client pass. Parse-refused
+      // files still get sniffed; only resources are skipped (opaque bytes, never a boundary).
+      if (nextjs && !info.resource && !useClientAbs.has(abs) && hasUseClientDirective(readFileSync(abs, 'utf8'))) {
+        useClientAbs.add(abs)
+      }
       for (const e of info.edges) {
         if (e.builtin || e.dynamic) continue
         let target
@@ -734,7 +795,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
         if (!edges.has(rel)) edges.set(rel, new Map())
         const bySpec = edges.get(rel)
         if (!bySpec.has(e.spec)) bySpec.set(e.spec, new Map())
-        bySpec.get(e.spec).set(platformKey, target)
+        bySpec.get(e.spec).set(passKey, target)
       }
     }
   }
@@ -909,12 +970,34 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON }) {
-  if (!Array.isArray(entries) || entries.length === 0) {
-    throw new Error(`${name}: at least one entry file is required`)
-  }
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, nextjs, jsx, flow, typescript, tsconfig, resources, packageJSON }) {
   let kind
-  if (entries.every((e) => e.endsWith('.sol'))) kind = 'sol'
+  if (nextjs) {
+    // --nextjs discovers the convention entries (pages/, app/, middleware, ...) itself, so
+    // explicit entries are optional EXTRAS (a custom server, a worker); .jsx/.tsx are accepted
+    // because --nextjs implies --jsx (Next apps are JSX-first).
+    for (const e of entries ?? []) {
+      if (!JS_EXTS.has(extname(e)) && !['.jsx', '.tsx'].includes(extname(e))) {
+        throw new Error(`${name}: not a JS/TS/JSX file: ${e}`)
+      }
+    }
+    kind = 'js'
+    // --nextjs presets its own resolution passes, so the other resolver-shaping flags conflict.
+    if (metro || metroResolver) {
+      throw new Error(`${name}: --nextjs can't be combined with --metro (each presets its own resolution)`)
+    }
+    if (Array.isArray(conditions) && conditions.length > 0) {
+      throw new Error(`${name}: --conditions can't be combined with --nextjs (it sets its own conditions per compiler pass)`)
+    }
+    if (mainFields !== undefined) {
+      throw new Error(`${name}: --mainFields can't be combined with --nextjs (it sets its own mainFields per compiler pass)`)
+    }
+    if (Array.isArray(platforms) && platforms.length > 0) {
+      throw new Error(`${name}: --platforms is only valid with --metro (--nextjs always runs its server + client passes)`)
+    }
+  } else if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error(`${name}: at least one entry file is required`)
+  } else if (entries.every((e) => e.endsWith('.sol'))) kind = 'sol'
   else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
   else if (entries.every((e) => JS_EXTS.has(extname(e)))) kind = 'js'
   else if (entries.every((e) => BASH_EXTS.has(extname(e)))) kind = 'bash'
@@ -1000,31 +1083,57 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (typescript && metroResolver) {
     throw new Error(`${name}: --typescript is not supported with --metro-resolver (the project's metro-resolver doesn't substitute .js -> .ts)`)
   }
-  // The field resolver always emits full-scope, so --scope with --mainFields/--metro would be silently ignored -- reject it.
-  if (scope !== undefined && (mainFields !== undefined || metro)) {
-    throw new Error(`${name}: --scope is not supported with --mainFields or --metro`)
+  // The field resolver always emits full-scope, so --scope with --mainFields/--metro/--nextjs would be silently ignored -- reject it.
+  if (scope !== undefined && (mainFields !== undefined || metro || nextjs)) {
+    throw new Error(`${name}: --scope is not supported with --mainFields, --metro, or --nextjs`)
   }
   return kind
 }
 
+// Discover the Next.js convention entries and merge explicit extras (a custom server, a worker
+// script), shared by buildBundle and bundleCommand. Explicit extras join the server pass only --
+// the 'use client' sniff in buildResolvedJsBundle still promotes any of them (or their reach)
+// into the client pass when they declare the directive.
+function resolveNextJsEntries(name, cwd, explicit = []) {
+  const discovered = discoverNextEntries(resolve(cwd))
+  const entries = [...new Set([...discovered.entries, ...normalizeEntries(explicit, cwd)])]
+  if (entries.length === 0) {
+    throw new Error(
+      `${name}: no Next.js entries found under ${resolve(cwd)} (looked for pages/, app/, ` +
+      'src/pages/, src/app/, middleware, instrumentation) and none were passed explicitly'
+    )
+  }
+  return { entries, clientEntries: discovered.clientEntries }
+}
+
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
-// (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow|--typescript/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })
+// (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--nextjs|--jsx|--flow|--typescript/JS) is enforced by classifyEntries.
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, nextjs = false, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false } = {}) {
+  // --nextjs implies --jsx (Next apps are JSX-first) and --typescript (tsconfig/jsconfig `paths`
+  // aliases are first-class in Next; the tsc substitution is inert without TS sources on disk).
+  if (nextjs) {
+    entries ??= []
+    jsx = true
+    typescript = true
+  }
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, nextjs, jsx, flow, typescript, tsconfig, resources, packageJSON })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
   if (kind === 'rust') return buildRustBundle({ cwd, entries })
-  if (metro || mainFields !== undefined) {
+  if (nextjs || metro || mainFields !== undefined) {
+    const nextEntries = nextjs ? resolveNextJsEntries('buildBundle', cwd, entries) : null
     const { bundle } = await buildResolvedJsBundle({
       cwd,
-      entries,
+      entries: nextjs ? nextEntries.entries : entries,
       mainFields: metro ? METRO_MAIN_FIELDS : mainFields,
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
       metroResolver: Boolean(metroResolver),
+      nextjs,
+      nextjsClientEntries: nextjs ? nextEntries.clientEntries : [],
       jsx,
       flow,
       typescript,
@@ -1049,8 +1158,14 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, nextjs = false, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, brotliQuality, add = false } = {}) {
+  // --nextjs implies --jsx and --typescript, exactly as in buildBundle.
+  if (nextjs) {
+    entries ??= []
+    jsx = true
+    typescript = true
+  }
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, nextjs, jsx, flow, typescript, tsconfig, resources, packageJSON })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -1060,17 +1175,20 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
 
   let bundle
   let lockData
-  if (kind === 'js' && (metro || mainFields !== undefined)) {
-    // The legacy-field resolver builds Bundle + Lockfile directly (per-platform edges + a
+  if (kind === 'js' && (nextjs || metro || mainFields !== undefined)) {
+    // The legacy-field resolver builds Bundle + Lockfile directly (per-pass edges + a
     // synthetic empty module State's addFile can't represent).
+    const nextEntries = nextjs ? resolveNextJsEntries('bundleCommand', cwd, entries) : null
     const built = await buildResolvedJsBundle({
       cwd,
-      entries,
+      entries: nextjs ? nextEntries.entries : entries,
       mainFields: metro ? METRO_MAIN_FIELDS : mainFields,
       platforms: metro ? platforms : [null],
       conditions,
       metro: Boolean(metro),
       metroResolver: Boolean(metroResolver),
+      nextjs,
+      nextjsClientEntries: nextjs ? nextEntries.clientEntries : [],
       jsx,
       flow,
       typescript,

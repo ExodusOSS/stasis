@@ -1,19 +1,21 @@
 {
   "name": "@exodus/stasis-plugins",
   "version": "1.0.0-beta.4",
-  "description": "Bundler plugins (webpack, esbuild, Rollup, Metro) for @exodus/stasis-core",
+  "description": "Bundler plugins (webpack, esbuild, Rollup, Metro, Next.js) for @exodus/stasis-core",
   "type": "module",
   "exports": {
     "./webpack": "./src/webpack.js",
     "./esbuild": "./src/esbuild.js",
     "./rollup": "./src/rollup.js",
     "./metro": "./src/metro.js",
-    "./metro-transformer": "./src/metro-transformer.js"
+    "./metro-transformer": "./src/metro-transformer.js",
+    "./nextjs": "./src/nextjs.js"
   },
   "files": [
     "src/esbuild.js",
     "src/metro.js",
     "src/metro-transformer.js",
+    "src/nextjs.js",
     "src/plugins.js",
     "src/rollup.js",
     "src/webpack.js"

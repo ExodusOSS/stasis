@@ -11,11 +11,13 @@ import { StasisWebpack } from '@exodus/stasis/webpack'
 import { StasisRollup } from '@exodus/stasis/rollup'
 import { StasisMetro } from '@exodus/stasis/metro'
 import * as metroTransformer from '@exodus/stasis/metro-transformer'
+import { withStasis as withStasisNextJs } from '@exodus/stasis/nextjs'
 import { StasisEsbuild as PluginsEsbuild } from '@exodus/stasis-plugins/esbuild'
 import { StasisWebpack as PluginsWebpack } from '@exodus/stasis-plugins/webpack'
 import { StasisRollup as PluginsRollup } from '@exodus/stasis-plugins/rollup'
 import { StasisMetro as PluginsMetro } from '@exodus/stasis-plugins/metro'
 import * as pluginsMetroTransformer from '@exodus/stasis-plugins/metro-transformer'
+import { withStasis as pluginsWithStasisNextJs } from '@exodus/stasis-plugins/nextjs'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
@@ -31,6 +33,11 @@ test('@exodus/stasis/{esbuild,webpack,rollup,metro} re-export the stasis-plugins
   t.assert.equal(StasisWebpack, PluginsWebpack)
   t.assert.equal(StasisRollup, PluginsRollup)
   t.assert.equal(StasisMetro, PluginsMetro)
+})
+
+test('@exodus/stasis/nextjs re-exports the stasis-plugins Next.js wrapper', (t) => {
+  t.assert.equal(typeof withStasisNextJs, 'function')
+  t.assert.equal(withStasisNextJs, pluginsWithStasisNextJs)
 })
 
 test('@exodus/stasis/metro-transformer re-exports the stasis-plugins worker transformer', (t) => {
