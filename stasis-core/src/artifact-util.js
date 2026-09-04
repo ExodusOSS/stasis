@@ -27,6 +27,12 @@ export const KNOWN_FORMATS = new Set([
 // Payload-free stat records: attest a path's KIND, no content, and yield to a real format.
 export const isStatFormat = (format) => STAT_FORMATS.has(format)
 
+// The post-erasure family of a '-typescript' loader format ('module-typescript' -> 'module'): a
+// transforming preload (`stasis run --import tsx`) resolves/serves a TypeScript file as the JS
+// family it transpiles to, while the attestation keeps the on-disk format. undefined otherwise.
+export const erasedTypeScriptFormat = (format) =>
+  format === 'module-typescript' ? 'module' : format === 'commonjs-typescript' ? 'commonjs' : undefined
+
 // Gates reconcileFormat: a stat record only reconciles with a real format of the SAME kind.
 const formatKind = (format) => (format === 'directory' || format === 'stat:directory' ? 'directory' : 'file')
 

@@ -58,6 +58,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis run --lock=add --bundle=add --mock app.js` | build without the app's side effects (network, fs writes) |
 | `stasis run --lock=add --child-process app.js` | also attest modules loaded in forked child processes (e.g. Metro transform workers) |
 | `stasis run --bundle=add --fs=sync app.js` | build a bundle that also captures sync `fs.readFileSync`/`readdirSync` reads |
+| `stasis run --lock=add --import=./instrument.mjs app.js` | forward extra preload modules (repeatable) to the node process running the entry: a preload's own module graph is runner infrastructure like stasis's loader itself — evaluated, but not captured. Modules the app graph *also* reaches (or that execute through a preload-transplanted `require()` pipeline) are still attested like any other app code, so frozen replays and `--bundle=load` stay fail-closed |
 | `stasis bundle src/index.js` | build a bundle statically, without executing it |
 | `stasis bundle --add src/worker.js` | merge more entries (and their import graph) into an existing `stasis.code.br` instead of replacing it |
 | `stasis add a.js icon.svg` | add the listed files to the project's bundles (config-driven), with no dependency resolution |

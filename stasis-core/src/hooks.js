@@ -14,6 +14,7 @@ import {
   RESOURCE_FORMATS,
   SOURCE_LANGUAGE_FORMATS as NON_NODE_SOURCE_LANGUAGES,
   STAT_FORMATS,
+  erasedTypeScriptFormat,
 } from './util.js'
 
 // Snapshot off the namespace so `--fs` can't redirect stasis's own capture/shard reads.
@@ -139,6 +140,32 @@ let aborted = false
 let loadingModule = 0
 // True until the first non-builtin load hook fires (entry detection).
 let entryUnseen = true
+// True until the first parent-less resolution -- the CLI entry. Extra preloads (`stasis run
+// --import tsx`) resolve against a DIRECTORY parent (the cwd URL, '/'-terminated -- never a
+// loadable module) and load BEFORE it: they are runner infrastructure like stasis's own loader.
+// Capturing them would misfile the first preload as the entry (initState from ITS package root)
+// and pollute the artifact with toolchain files; gating them would break --bundle=load (the
+// preload itself must keep loading from disk). Any OTHER pre-entry parent (an [eval] wrapper's
+// import) falls through to the normal path and fails closed on assert.ok(state), like a run
+// without preloads.
+let entryUnresolved = true
+// The runner-infrastructure module graph: every URL the preload phase resolved or loaded, plus
+// its post-entry descendants (a transformer lazy-loading a plugin). Members pass both hooks
+// through unobserved -- but NOT unforgotten:
+// - infraSources stashes each infra load's raw {source, format} and infraEdges its outgoing
+//   resolutions, so that when the APP graph reaches an infra module (its load hook can never
+//   re-fire -- the module instance is cached) it is PROMOTED into the capture with the exact
+//   bytes that executed, its own edges replayed transitively. Without promotion the artifact
+//   would ship a dangling edge and a frozen replay would never verify the file.
+// - under --bundle=load, an app edge landing on an infra URL means the cached disk-loaded
+//   instance shadows the attested bundle bytes: allowed only when they are identical.
+const infraUrls = new Set()
+const infraSources = new Map()
+const infraEdges = new Map()
+// URLs the bundle=load load hook actually served, so the CJS shim can detect a require() that
+// executed an attested file from DISK instead (a transplanted require.extensions handler, e.g.
+// tsx's '.ts' pipeline, reads and compiles the file itself -- the load hook never fires).
+const servedFromBundle = new Set()
 
 // EXODUS_STASIS_PID = the root stasis's pid; on mismatch we're a child and must not write the
 // bundle/lockfile (root owns the artifact; a 2nd writer races). A forked child also relaxes assertEntry.
@@ -319,6 +346,22 @@ function initState(root) {
 function load(url, context, nextLoad) {
   assert.equal(typeof url, 'string')
 
+  // Runner-infrastructure passthrough (see entryUnresolved): a preload's module graph loads
+  // before the entry (or lazily after, from an infra parent). Stash the raw result so a later
+  // app-graph edge can promote the module with the exact bytes that executed.
+  if ((entryUnresolved || infraUrls.has(url)) && !url.startsWith('node:')) {
+    infraUrls.add(url)
+    loadingModule++
+    let result
+    try {
+      result = nextLoad(url, context)
+    } finally {
+      loadingModule--
+    }
+    if (!infraSources.has(url)) infraSources.set(url, { source: result.source, format: result.format })
+    return result
+  }
+
   if (url.startsWith('node:')) {
     const result = nextLoad(url, context)
     assert.equal(result.format, 'builtin')
@@ -332,15 +375,22 @@ function load(url, context, nextLoad) {
     }
     const { source, format } = state.getFile(url)
     // Cross-check format only when the resolve chain set it; the formats map is itself attested
-    // against the lockfile at construction.
-    if (context.format != null) assert.equal(format, context.format)
+    // against the lockfile at construction. A transforming preload (`stasis run --import tsx`)
+    // legitimately asks for an attested '-typescript' file as its post-erasure family -- serve
+    // the chain's view then (the transformer above us turns the raw source into it).
+    let serveFormat = format
+    if (context.format != null) {
+      if (context.format === erasedTypeScriptFormat(format)) serveFormat = context.format
+      else assert.equal(format, context.format)
+    }
     // Trust gate: only serve a file whose attested format Node can execute; everything else fails closed.
     if (!NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
+    servedFromBundle.add(url)
     // node:59666: a load-hook-supplied CJS source gets a re-invented require() missing .cache/.extensions.
     if (CJS_FORMATS.has(format)) {
-      return { source: repairCjsRequire(source), format, shortCircuit: true }
+      return { source: repairCjsRequire(source), format: serveFormat, shortCircuit: true }
     }
-    return { source, format, shortCircuit: true }
+    return { source, format: serveFormat, shortCircuit: true }
   }
 
   loadingModule++
@@ -377,7 +427,84 @@ function load(url, context, nextLoad) {
   return result
 }
 
+// Fold a runner-infrastructure module into the capture: an app-graph edge reached a module the
+// preload phase already executed, so its load hook can never re-fire (the instance is cached) and
+// skipping it would ship a dangling edge a frozen replay never verifies. addFile re-verifies the
+// stashed bytes against disk (and against the lockfile/bundle in frozen modes), and the module's
+// own remembered resolutions replay transitively so its dependencies aren't dangling either.
+function promoteInfraUrl(url, { isEntry = false } = {}) {
+  if (!infraUrls.delete(url)) return
+  const stashed = infraSources.get(url)
+  infraSources.delete(url)
+  let source = stashed?.source
+  // Same disk fallback as the live load path: Node's CJS loader may return source=null.
+  if (source == null) source = readFileSync(fileURLToPath(url))
+  try {
+    state.addFile(url, { source, format: stashed?.format ?? undefined, isEntry })
+  } catch (err) {
+    aborted = true
+    throw err
+  }
+  const edges = infraEdges.get(url)
+  infraEdges.delete(url)
+  for (const [specifier, edge] of edges ?? []) {
+    try {
+      state.addImport(url, specifier, edge.url, edge.context)
+    } catch (err) {
+      aborted = true
+      throw err
+    }
+    if (infraSources.has(edge.url)) promoteInfraUrl(edge.url)
+    else infraUrls.delete(edge.url) // resolved but never loaded: a live load would capture it
+  }
+}
+
+// Under --bundle=load, an app edge landing on a module the preload phase already loaded means the
+// CACHED disk-loaded instance shadows whatever the hooks would serve from the bundle: allowed
+// only when the executed bytes and the attested bytes are identical, else fail closed.
+function assertInfraMatchesBundle(url) {
+  if (!infraUrls.has(url)) return
+  const stashed = infraSources.get(url)
+  if (stashed === undefined) { infraUrls.delete(url); return } // resolved but never loaded: the hooks will serve it
+  let executed = stashed.source
+  if (executed == null) executed = readFileSync(fileURLToPath(url))
+  const executedBuf = Buffer.isBuffer(executed) ? executed : Buffer.from(executed)
+  const { source } = state.getFile(url)
+  if (!executedBuf.equals(Buffer.isBuffer(source) ? source : Buffer.from(source))) {
+    throw new Error(
+      `[stasis] cannot serve '${url}' from the bundle: a preload already executed it from disk ` +
+      `before the entry, and those bytes differ from the attested ones -- refusing the divergent ` +
+      `cached instance`
+    )
+  }
+}
+
 function resolve(specifier, context, nextResolve) {
+  // Runner-infrastructure passthrough (see entryUnresolved): a preload's graph resolves from a
+  // DIRECTORY parent (the cwd URL Node uses for each `--import` specifier -- a directory is never
+  // a loadable module, so this cannot shadow an app parent) or from a module already tracked as
+  // infrastructure. The first parent-less resolution is still the entry, and any other pre-entry
+  // parent (an [eval] wrapper's import) falls through to fail closed below. Each passed-through
+  // edge is remembered -- not recorded -- so promoteInfraUrl can replay it if the app graph
+  // reaches this module later.
+  const infraParent = context.parentURL !== undefined
+    && (infraUrls.has(context.parentURL) || (entryUnresolved && context.parentURL.endsWith('/')))
+  if (infraParent) {
+    const res = nextResolve(specifier)
+    if (!res.url.startsWith('node:')) {
+      infraUrls.add(res.url)
+      if (infraUrls.has(context.parentURL)) {
+        let edges = infraEdges.get(context.parentURL)
+        if (edges === undefined) infraEdges.set(context.parentURL, (edges = new Map()))
+        // Last-write-wins per specifier, like observeResolution: only the final target can be the
+        // one a cached instance pins.
+        edges.set(specifier, { url: res.url, context: { conditions: context.conditions, format: res.format, importAttributes: context.importAttributes } })
+      }
+    }
+    return res
+  }
+  if (entryUnresolved && !context.parentURL) entryUnresolved = false
+
   if (isBuiltin(specifier)) {
     const res = nextResolve(specifier)
     assert.equal(res.url, specifier.startsWith('node:') ? specifier : `node:${specifier}`)
@@ -409,6 +536,7 @@ function resolve(specifier, context, nextResolve) {
       const { url, format } = state.getImport(parentURL, specifier, { conditions, importAttributes })
       // Friendlier error at resolve time; the load gate is the load-bearing one.
       if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
+      assertInfraMatchesBundle(url)
       return { url, format, importAttributes: undefined, shortCircuit: true }
     }
     const url = specifier.startsWith('file:')
@@ -419,6 +547,7 @@ function resolve(specifier, context, nextResolve) {
     if (!parentURL && state.config.full && !forkedChild) state.assertEntry(url)
     const format = state.getFormat(url)
     if (format != null && !NODEJS_FORMATS.has(format)) refuseNonNodeFormat(format, url)
+    assertInfraMatchesBundle(url)
     return { url, format, importAttributes: undefined, shortCircuit: true }
   }
 
@@ -427,7 +556,28 @@ function resolve(specifier, context, nextResolve) {
 
   assert.equal(res.importAttributes, undefined) // unsupported yet
   if (parentURL) assert.ok(state)
-  if (state) {
+  // The app graph reached a module the preload phase already loaded: fold it (and transitively
+  // its own graph) into the capture, since its load hook can never re-fire.
+  if (infraUrls.has(url)) {
+    if (infraSources.has(url)) {
+      if (!state) {
+        // The ENTRY itself was preloaded (a wrapper importing the app): init from its package
+        // root exactly as its live load would have.
+        const pkg = findPackageJSON(url)
+        assert.equal(basename(pkg), 'package.json')
+        initState(dirname(pkg))
+      }
+      const isEntry = !parentURL && entryUnseen
+      if (isEntry) entryUnseen = false
+      promoteInfraUrl(url, { isEntry })
+    } else {
+      // Resolved during the preload phase but never loaded: the app's own load will capture it.
+      infraUrls.delete(url)
+    }
+  }
+  // Parent-less = the entry: recorded via addFile/promotion above, never as an edge (addImport
+  // requires a parent, and state can exist here after an entry promotion).
+  if (state && parentURL) {
     try {
       state.addImport(parentURL, specifier, url, { conditions, format, importAttributes })
     } catch (err) {
@@ -471,7 +621,10 @@ function patchCjsResolution() {
         const parentURL = pathToFileURL(parent.filename).toString()
         if (state.config.full || state.inNodeModules(parentURL)) {
           const resolved = state.resolveBundled(parentURL, request)
-          if (resolved !== undefined) return resolved
+          if (resolved !== undefined) {
+            assertInfraMatchesBundle(pathToFileURL(resolved).toString())
+            return resolved
+          }
         }
       } else if (isAbsolute(request)) {
         // NO parent, absolute request: Node's ESM<->CJS interop re-enters the CJS loader with hooks
@@ -480,6 +633,7 @@ function patchCjsResolution() {
         // re-resolve here every commonjs-sync eval; the no-parent shape survives on >=24.18 too.
         const url = pathToFileURL(request).toString()
         if ((state.config.full || state.inNodeModules(url)) && state.hasFsFileContent(url)) {
+          assertInfraMatchesBundle(url)
           return resolvePath(request)
         }
       }
@@ -493,14 +647,39 @@ function patchCjsResolution() {
     return resolved
   }
 
-  // Capture: Module._load's cache fast path can skip _resolveFilename, so a second require() of the
-  // same target goes unrecorded. Force it through the PROPERTY (our shim) to observe the edge.
+  // Module._load's cache fast path can skip _resolveFilename, so a second require() of the same
+  // target goes unrecorded: force it through the PROPERTY (our shim) to observe the edge. This is
+  // also the one spot that sees every ACTUAL CJS execution, hook-served or not, so it anchors the
+  // executed-file reconciliation for transplanted require.extensions handlers (a transforming
+  // preload's CJS pipeline, e.g. `--import tsx` compiling .ts, reads and compiles files itself --
+  // the load hook chain never fires for them).
   const originalLoad = Module._load
   Module._load = function (request, parent, ...rest) {
-    if (state && !state.config.loadBundle && typeof request === 'string'
-        && !isBuiltin(request) && typeof parent?.filename === 'string') {
-      try { Module._resolveFilename(request, parent, ...rest) } catch { /* original _load raises the real error */ }
+    let resolvedUrl
+    if (state && typeof request === 'string' && !isBuiltin(request) && typeof parent?.filename === 'string') {
+      let resolved
+      try { resolved = Module._resolveFilename(request, parent, ...rest) } catch { /* original _load raises the real error */ }
+      if (typeof resolved === 'string' && isAbsolute(resolved)) resolvedUrl = pathToFileURL(resolved).toString()
     }
-    return originalLoad.call(this, request, parent, ...rest)
+    if (resolvedUrl !== undefined && !state.config.loadBundle) {
+      // A require() executes its target: remember it so write() can attest/verify anything the
+      // load hook never saw, and fold in a module the preload phase already executed.
+      state.observeExecution(resolvedUrl)
+      if (infraSources.has(resolvedUrl)) promoteInfraUrl(resolvedUrl)
+      else infraUrls.delete(resolvedUrl)
+    }
+    const result = originalLoad.call(this, request, parent, ...rest)
+    // Under --bundle=load, an attested source the load hook never served just executed from DISK
+    // (a transplanted require.extensions handler bypasses the hook chain): fail closed -- after
+    // the fact, but before anything can trust the run.
+    if (resolvedUrl !== undefined && state.config.loadBundle
+        && !servedFromBundle.has(resolvedUrl) && state.isBundledSource(resolvedUrl)) {
+      throw new Error(
+        `[stasis] '${resolvedUrl}' executed from disk, bypassing the attested bundle -- a ` +
+        `require() pipeline transplanted by a preload (e.g. tsx compiling CJS TypeScript) ` +
+        `cannot serve bundle bytes and is refused under --bundle=load`
+      )
+    }
+    return result
   }
 }

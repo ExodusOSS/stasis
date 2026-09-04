@@ -1,0 +1,9 @@
+{
+  "name": "stasis-cli-run-import-tsx",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "tsx": "4.23.12"
+  }
+}
