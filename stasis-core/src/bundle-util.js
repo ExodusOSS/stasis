@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { findPackageJSON } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
-import { assertRealPathWithinBase, toPosix } from './util.js'
+import { assertRealPathWithinBase, hasNodeModulesSegment, toPosix } from './util.js'
 
 export function packageType(file) {
   const pkg = findPackageJSON(pathToFileURL(file).toString())
@@ -17,7 +17,10 @@ export function packageType(file) {
   }
 }
 
-// Nearest package.json (walking up) with both name and version; pkgDir is relative to baseDir ("." at the root). Null if none.
+// Nearest package.json (walking up) that identifies a bucket; pkgDir is relative to baseDir ("."
+// at the root). Inside node_modules both name and version are required; a workspace package
+// outside node_modules may omit version (the name alone claims the bucket, matching
+// State#locateModule). Null if none.
 export function findPackageMetadata(baseDir, fileRelPath) {
   let dir = dirname(fileRelPath)
   while (true) {
@@ -25,7 +28,9 @@ export function findPackageMetadata(baseDir, fileRelPath) {
     if (existsSync(pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
-        if (pkg.name && pkg.version) return { pkgDir: dir, name: pkg.name, version: pkg.version }
+        if (pkg.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
+          return { pkgDir: dir, name: pkg.name, version: pkg.version }
+        }
       } catch { /* malformed -- keep walking */ }
     }
     if (dir === '.' || dir === '/' || dir === '') return null

@@ -139,7 +139,8 @@ export class Bundle {
         for (const [dir, info] of Object.entries(json.sources)) {
           assert(!hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
-          assert(info?.name && info.version && info.files)
+          // A workspace bucket may omit version (a private/unpublished package.json can lack one).
+          assert(info?.name && info.files)
           modules.set(dir, normalize(info))
         }
         // Empty entries are valid (`stasis add` attests files without making them entry points); state.assertEntry fails closed on an empty set.
