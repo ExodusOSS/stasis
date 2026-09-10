@@ -481,7 +481,9 @@ export class State {
       // Mutate in place: this.entries may be shared by reference with a sidecar's parent.
       for (const e of bundle.entries) this.entries.add(e)
       for (const [dir, info] of bundle.modules) {
-        if (!info.name || !info.version) continue // partial metadata
+        // Skip v0 partial metadata (nameless workspace buckets, version-less node_modules
+        // buckets); a v1 workspace bucket may omit version, so its identity is absorbed anyway.
+        if (!info.name || (!info.version && hasNodeModulesSegment(dir))) continue
         if (this.modules.has(dir)) {
           // A dir may be added twice (code + resource entries), and both must agree.
           const existing = this.modules.get(dir)
@@ -752,7 +754,9 @@ export class State {
       pkgAbsolute = closestPkgAbsolute
       let json = closestPkg
       while (true) {
-        if (json.name !== undefined && json.version !== undefined) {
+        // A workspace package outside node_modules may omit version (private/unpublished): the
+        // name alone claims the bucket. node_modules buckets (above) still require both.
+        if (json.name !== undefined) {
           ;({ name, version } = json)
           break
         }
@@ -760,7 +764,7 @@ export class State {
         const next = findPackageJSON('..', pathToFileURL(pkgAbsolute))
         assert.ok(
           next && !relative(this.root, next).startsWith('..'),
-          `No package.json with name+version found for ${file}`
+          `No package.json with a name found for ${file}`
         )
         pkgAbsolute = next
         json = readPackageJSON(pkgAbsolute)
