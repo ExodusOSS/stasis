@@ -106,6 +106,25 @@ test('scanRustItems matches a mod with its attribute on the same line', (t) => {
   t.assert.deepEqual(mods.map((m) => [m.name, m.conditional]), [['macros', false], ['unix', true], ['hidden', false]])
 })
 
+test('scanRustItems marks a mod inside a macro invocation body conditional (cfg_if!, generate_guide!, macro_rules!)', (t) => {
+  const { mods } = scanRustItems([
+    'cfg_if::cfg_if! {', '    if #[cfg(unix)] {', '        mod imp_unix;', '    } else {', '        mod imp_other;', '    }', '}',
+    'generate_guide! {', '    pub mod guide {', '        @code pub mod feature_flags;', '        pub mod serde_as;', '    }', '}',
+    'macro_rules! templated { () => { mod from_template; }; }',
+    'let x = !flag; if !(a || b) { mod not_a_macro; }',
+    'mod real;',
+  ].join('\n'))
+  t.assert.deepEqual(mods.map((m) => [m.name, m.inlinePath, m.conditional]), [
+    ['imp_unix', [], true],
+    ['imp_other', [], true],
+    ['feature_flags', ['guide'], true], // the macro's `pub mod guide {` still nests like an inline module
+    ['serde_as', ['guide'], true],
+    ['from_template', [], true],
+    ['not_a_macro', [], false], // a unary `!` is not a macro invocation
+    ['real', [], false],
+  ])
+})
+
 test('scanRustItems extracts #[path] and #[cfg_attr(…, path)] targets', (t) => {
   const { mods } = scanRustItems([
     '#[doc(hidden)]', '#[path = "private/mod.rs"]', 'pub mod __private;',
@@ -475,6 +494,20 @@ test('buildRustTree records #[cfg_attr(…, path)] variants as a cfg-keyed map w
   t.assert.ok(!('mod exotic' in lib)) // cfg_attr with nothing on disk: omitted, not missing
   t.assert.equal(resolutions.get('src/parse.rs').get('mod discouraged'), 'src/discouraged.rs')
   t.assert.deepEqual(edges(resolutions.get('src/de.rs')), { 'crate::__private::helper': 'src/private/mod.rs', 'super::seed::Seed': 'src/de/seed.rs' })
+})
+
+test('buildRustTree follows a mod inside a macro body when its file exists and tolerates it when it does not', async (t) => {
+  const sources = await collectRustFilesFromDisk(join(fixtures, 'macro-mods'), ['src/main.rs'])
+  // cfg_if!'s modules are bundled; serde_with's guide "modules" have only .md docs, never .rs files.
+  t.assert.deepEqual([...sources.keys()].toSorted(), ['src/imp_other.rs', 'src/imp_unix.rs', 'src/main.rs', 'src/real.rs'])
+  const { result: tree, warnings } = captureWarnings(() => buildRustTree(sources, { roots: ['src/main.rs'] }))
+  t.assert.deepEqual(tree.missing, [])
+  t.assert.deepEqual(warnings, [])
+  const main = edges(tree.resolutions.get('src/main.rs'))
+  t.assert.equal(main['mod imp_unix'], 'src/imp_unix.rs')
+  t.assert.equal(main['mod imp_other'], 'src/imp_other.rs')
+  t.assert.equal(main['mod real'], 'src/real.rs')
+  t.assert.ok(!('mod guide::feature_flags' in main))
 })
 
 test('buildRustTree records an unresolvable mod declaration in `missing`', async (t) => {

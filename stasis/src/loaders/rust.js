@@ -276,9 +276,10 @@ export function parseUseTree(body) {
 
 // Statically scan one file's items. Returns
 //   mods:         external `mod` declarations `{ name, inlinePath, conditional, paths }` -- `inlinePath`
-//                 is the chain of inline `mod x { … }` blocks it sits in, `conditional` marks a
-//                 `#[cfg(…)]`/`#[cfg_attr(…)]`-gated one (or an inline ancestor so gated), `paths`
-//                 the explicit file paths its attributes name (see parseAttr);
+//                 is the chain of inline `mod x { … }` blocks it sits in, `conditional` marks one
+//                 that may not exist as an item (`#[cfg(…)]`/`#[cfg_attr(…)]`-gated, an inline
+//                 ancestor so gated, or inside a macro invocation body), `paths` the explicit file
+//                 paths its attributes name (see parseAttr);
 //   refs:         path references `{ spec, segments, absolute, inlinePath }` -- flattened `use` trees
 //                 plus expression-position `crate::`/`self::`/`super::`/`lead::…` paths;
 //   externCrates: `extern crate x [as y];` names, with their inlinePath.
@@ -293,6 +294,12 @@ export function scanRustItems(content) {
   const stack = [] // open inline modules: { name, depth, conditional, start }
   let depth = 0
   let pending = [] // outer attributes waiting for their item
+  // End of the outermost macro invocation body being scanned (`m! { … }`, `m!( … )`,
+  // `macro_rules! m { … }`). Its tokens are macro input: a `mod x;` there only becomes an item if
+  // the macro emits it (cfg_if! does; serde_with's generate_guide! turns it into an inline module
+  // documented from a .md file), so such declarations are followed when their file exists and
+  // tolerated when it doesn't -- the same footing as a `#[cfg]`-gated one.
+  let macroUntil = -1
 
   const inlinePath = () => stack.map((s) => s.name)
   const closeTo = (targetDepth, at) => {
@@ -347,6 +354,18 @@ export function scanRustItems(content) {
       i++
       continue
     }
+    // `name!` followed by a bracket opens a macro invocation body (`macro_rules! name` too).
+    const bang = skipWs(i + word.length)
+    if (masked[bang] === '!') {
+      let open = skipWs(bang + 1)
+      if (word === 'macro_rules') {
+        const name = readWord(open)
+        if (name !== null) open = skipWs(open + name.length)
+      }
+      if (masked[open] === '{' || masked[open] === '(' || masked[open] === '[') {
+        macroUntil = Math.max(macroUntil, matchClose(masked, open))
+      }
+    }
     if (word === 'pub') {
       // Visibility sits between an item's attributes and its keyword; `pub(crate)` etc. included.
       i = skipWs(i + 3)
@@ -365,7 +384,7 @@ export function scanRustItems(content) {
       const k = skipWs(j + name.length)
       const attrs = pending.map(parseAttr)
       pending = []
-      const conditional = attrs.some((a) => a.conditional) || stack.some((s) => s.conditional)
+      const conditional = attrs.some((a) => a.conditional) || stack.some((s) => s.conditional) || i < macroUntil
       if (masked[k] === ';') {
         mods.push({ name, inlinePath: inlinePath(), conditional, paths: attrs.flatMap((a) => a.paths) })
         i = k + 1

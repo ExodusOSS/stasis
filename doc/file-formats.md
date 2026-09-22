@@ -304,7 +304,7 @@ What counts as a fatal unresolved reference differs by language:
 | Solidity | every `import` | — |
 | PHP | every literal `require`/`include` path | Composer-autoloaded class refs (unresolved ones usually built-in/extension classes); a dynamic include with a static dir prefix pulls in that dir's `.php` files as candidates |
 | Bash | every in-root `.sh`/`.bash` reference | PATH commands, `$VAR`/absolute/system paths, `../`-escaping sources (external); dynamic `source "${VAR}/x.sh"` followed via `# shellcheck source=` when present |
-| Rust | every unconditional `mod foo;` (incl. one whose `#[path]` names no file, or escapes the bundle root) | `#[cfg(...)]`/`#[cfg_attr(...)]`-gated `mod`; every path edge (`crate::`/`self::`/`super::`/relative `use`s, recorded best-effort and never widening the walk); crates not in-tree (unvendored registry deps: dropped) |
+| Rust | every unconditional `mod foo;` (incl. one whose `#[path]` names no file, or escapes the bundle root) | `#[cfg(...)]`/`#[cfg_attr(...)]`-gated `mod`; a `mod` inside a macro invocation body (`cfg_if! { … }` emits real ones, other macros may not — followed when the file exists); every path edge (`crate::`/`self::`/`super::`/relative `use`s, recorded best-effort and never widening the walk); crates not in-tree (unvendored registry deps: dropped); `include_str!`/`include_bytes!` assets |
 
 A missing entry is always fatal.
 

@@ -2925,6 +2925,16 @@ test('buildRustBundle resolves a mod declared inside inline modules under their 
   t.assert.equal(main.get('outer::inner::go'), 'src/outer/inner.rs')
 })
 
+test('buildRustBundle follows cfg_if!-style mods and tolerates macro-generated ones with no .rs file', async (t) => {
+  const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'macro-mods'), entries: ['src/main.rs'] }))
+  t.assert.deepEqual(warnings, [])
+  // The .md files behind serde_with's generate_guide! are docs, not modules: not bundled, not an error.
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/imp_other.rs', 'src/imp_unix.rs', 'src/main.rs', 'src/real.rs'])
+  const main = bundle.imports.get('rust').get('src/main.rs')
+  t.assert.equal(main.get('mod imp_unix'), 'src/imp_unix.rs')
+  t.assert.equal(main.get('mod imp_other'), 'src/imp_other.rs')
+})
+
 test('buildRustBundle records edges for grouped/multi-line use trees, super::/self:: paths and one-line attributes', async (t) => {
   const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'use-groups'), entries: ['src/main.rs'] })
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
