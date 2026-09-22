@@ -1,8 +1,9 @@
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 
 import { isTypeDeclaration } from '@exodus/stasis-core/util'
+import { diskHost } from './pnpm/vfs.js'
 
 // tsc-style module resolution (`--typescript`), shared by BOTH JS resolvers -- scan.js's built-in
 // Node resolver and resolve-fields.js's legacy-field resolver -- so the flag means one thing
@@ -50,26 +51,20 @@ export function typescriptSiblings(name, { tsx = false } = {}) {
 // completed like an extensionless name, matching tsc's candidate list.
 const NO_COMPLETION_EXTS = new Set([...JS_OUTPUT_EXTS, '.ts', '.tsx', '.mts', '.cts', '.json'])
 
-export function isFile(p) {
-  try {
-    return statSync(p).isFile()
-  } catch {
-    return false
-  }
+// Every filesystem probe below takes an optional `host` (the view of `stasis bundle --pnpm`'s
+// in-memory node_modules; see pnpm/vfs.js) and reads the real disk without one.
+export function isFile(p, host = diskHost) {
+  return host.stat(p)?.isFile() ?? false
 }
 
-export function isDir(p) {
-  try {
-    return statSync(p).isDirectory()
-  } catch {
-    return false
-  }
+export function isDir(p, host = diskHost) {
+  return host.stat(p)?.isDirectory() ?? false
 }
 
-export function readJson(file) {
+export function readJson(file, host = diskHost) {
   let text
   try {
-    text = readFileSync(file, 'utf8')
+    text = host.readFile(file).toString('utf8')
   } catch {
     return null // absent / unreadable -- no manifest here
   }
@@ -83,7 +78,7 @@ export function readJson(file) {
 
 // Nearest node_modules/<pkg> up from `fromDir` (handles @scope/name). Returns { pkgDir, subpath }
 // (subpath '' = bare package import), or null if not installed up the tree.
-export function locatePackage(fromDir, spec) {
+export function locatePackage(fromDir, spec, host = diskHost) {
   const parts = spec.split('/')
   const pkgLen = spec.startsWith('@') ? 2 : 1
   if (parts.length < pkgLen || parts.slice(0, pkgLen).some((p) => !p)) return null
@@ -94,7 +89,7 @@ export function locatePackage(fromDir, spec) {
     // Skip a dir literally named node_modules (basename, not endsWith — `my-node_modules` must not match).
     if (basename(dir) !== 'node_modules') {
       const pkgDir = join(dir, 'node_modules', pkgName)
-      if (isDir(pkgDir)) return { pkgDir, subpath }
+      if (isDir(pkgDir, host)) return { pkgDir, subpath }
     }
     const parent = dirname(dir)
     if (parent === dir) return null
@@ -104,12 +99,12 @@ export function locatePackage(fromDir, spec) {
 
 // Nearest package.json at/above `file`'s dir — the package whose fields (browser/RN map, imports)
 // govern the file's own imports.
-export function nearestPackage(file) {
+export function nearestPackage(file, host = diskHost) {
   let dir = dirname(file)
   while (true) {
     const pkgPath = join(dir, 'package.json')
-    if (isFile(pkgPath)) {
-      const pkg = readJson(pkgPath)
+    if (isFile(pkgPath, host)) {
+      const pkg = readJson(pkgPath, host)
       if (pkg) return { pkgDir: dir, pkg }
     }
     const parent = dirname(dir)
@@ -120,13 +115,13 @@ export function nearestPackage(file) {
 
 // A probe candidate is a target only if it names a real file that is not a type declaration
 // (a `.d.ts` is types-only, erased at runtime -- tsc records it for types, never for emit).
-const probe = (p) => (!isTypeDeclaration(p) && isFile(p) ? p : null)
+const probe = (p, host) => (!isTypeDeclaration(p) && isFile(p, host) ? p : null)
 
 // LOAD_INDEX with TS completions: dir/index.ts (+ index.tsx under tsx). Node/tsc already probed
 // the .js/.json indexes before the fallback ever runs.
-function probeIndex(dir, exts) {
+function probeIndex(dir, exts, host) {
   for (const ext of exts) {
-    const hit = probe(join(dir, `index${ext}`))
+    const hit = probe(join(dir, `index${ext}`), host)
     if (hit) return hit
   }
   return null
@@ -140,33 +135,33 @@ function probeIndex(dir, exts) {
 // directory-only ('.', '..', a trailing '/'), so './' never probes the pathological '.ts' dotfile.
 // `completion`/`dir` are off for exports/imports targets: Node requires those to name exact files,
 // so only substitution applies (matching tsc's node16 rules).
-export function probeTypescriptTarget(base, { tsx = false, dirOnly = false, completion = true, dir = true } = {}) {
+export function probeTypescriptTarget(base, { tsx = false, dirOnly = false, completion = true, dir = true, host = diskHost } = {}) {
   const exts = tsx ? ['.ts', '.tsx'] : ['.ts']
   if (!dirOnly) {
-    const literal = probe(base)
+    const literal = probe(base, host)
     if (literal) return literal
     for (const cand of typescriptSiblings(base, { tsx })) {
-      const hit = probe(cand)
+      const hit = probe(cand, host)
       if (hit) return hit
     }
     if (completion && !NO_COMPLETION_EXTS.has(extname(base))) {
       for (const ext of exts) {
-        const hit = probe(`${base}${ext}`)
+        const hit = probe(`${base}${ext}`, host)
         if (hit) return hit
       }
     }
   }
-  if (dir && isDir(base)) {
-    const pkg = readJson(join(base, 'package.json'))
+  if (dir && isDir(base, host)) {
+    const pkg = readJson(join(base, 'package.json'), host)
     const main = typeof pkg?.main === 'string' && pkg.main.length > 0 ? pkg.main : null
     if (main) {
       // LOAD_AS_FILE(main) with substitution/completion, then LOAD_INDEX(main); a broken main
       // falls through to the package index, like Node.
       const entry = resolvePath(base, main)
-      const hit = probeTypescriptTarget(entry, { tsx, dir: false }) ?? probeIndex(entry, exts)
+      const hit = probeTypescriptTarget(entry, { tsx, dir: false, host }) ?? probeIndex(entry, exts, host)
       if (hit) return hit
     }
-    return probeIndex(base, exts)
+    return probeIndex(base, exts, host)
   }
   return null
 }
@@ -396,41 +391,41 @@ const IN_NODE_MODULES = /(?:^|[\\/])node_modules[\\/]/u
 //   bare           -> tsconfig paths aliases first (tsc consults them before node_modules), then
 //                     the named package: its `exports` targets (substitution only) when it has
 //                     them, else its `main`/index (bare root) or subpath (substitution/completion).
-export function resolveTypescriptFallback(parentFile, spec, { conditions = new Set(), tsx = false, paths = null } = {}) {
+export function resolveTypescriptFallback(parentFile, spec, { conditions = new Set(), tsx = false, paths = null, host = diskHost } = {}) {
   if (spec.startsWith('#')) {
-    const scope = nearestPackage(parentFile)
+    const scope = nearestPackage(parentFile, host)
     if (!scope?.pkg.imports) return null
     for (const target of manifestTargets(scope.pkg.imports, spec, conditions)) {
-      const hit = probeTypescriptTarget(resolvePath(scope.pkgDir, target), { tsx, completion: false, dir: false })
+      const hit = probeTypescriptTarget(resolvePath(scope.pkgDir, target), { tsx, completion: false, dir: false, host })
       if (hit) return hit
     }
     return null
   }
   if (spec.startsWith('./') || spec.startsWith('../') || spec === '.' || spec === '..' || isAbsolute(spec)) {
     const base = isAbsolute(spec) ? spec : resolvePath(dirname(parentFile), spec)
-    return probeTypescriptTarget(base, { tsx, dirOnly: DIR_ONLY_SPEC.test(spec) })
+    return probeTypescriptTarget(base, { tsx, dirOnly: DIR_ONLY_SPEC.test(spec), host })
   }
   if (paths && !IN_NODE_MODULES.test(parentFile)) {
     for (const target of paths.matchPaths(spec)) {
-      const hit = probeTypescriptTarget(target, { tsx, dirOnly: target.endsWith('/') })
+      const hit = probeTypescriptTarget(target, { tsx, dirOnly: target.endsWith('/'), host })
       if (hit) return hit
     }
   }
-  const loc = locatePackage(dirname(parentFile), spec)
+  const loc = locatePackage(dirname(parentFile), spec, host)
   if (!loc) return null
-  const pkg = readJson(join(loc.pkgDir, 'package.json')) ?? {}
+  const pkg = readJson(join(loc.pkgDir, 'package.json'), host) ?? {}
   if (pkg.exports != null) {
     // `exports` fully governs a bare import (main is not a fallback); targets name exact files.
     const key = loc.subpath === '' ? '.' : `./${loc.subpath}`
     for (const target of manifestTargets(pkg.exports, key, conditions)) {
-      const hit = probeTypescriptTarget(resolvePath(loc.pkgDir, target), { tsx, completion: false, dir: false })
+      const hit = probeTypescriptTarget(resolvePath(loc.pkgDir, target), { tsx, completion: false, dir: false, host })
       if (hit) return hit
     }
     return null
   }
   if (loc.subpath === '') {
     // Bare package root: LOAD_AS_DIRECTORY only (never `node_modules/dep.ts`).
-    return probeTypescriptTarget(loc.pkgDir, { tsx, dirOnly: true })
+    return probeTypescriptTarget(loc.pkgDir, { tsx, dirOnly: true, host })
   }
-  return probeTypescriptTarget(join(loc.pkgDir, loc.subpath), { tsx, dirOnly: DIR_ONLY_SPEC.test(spec) })
+  return probeTypescriptTarget(join(loc.pkgDir, loc.subpath), { tsx, dirOnly: DIR_ONLY_SPEC.test(spec), host })
 }

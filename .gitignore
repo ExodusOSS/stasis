@@ -7,4 +7,5 @@ package-lock.json
 coverage
 playground
 *.tgz
+tests/fixtures/pnpm-bundle/node_modules
 tests.dist

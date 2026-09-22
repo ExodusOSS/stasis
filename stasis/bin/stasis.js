@@ -29,12 +29,17 @@ function usage(prefix = '') {
   that spawns helper processes cannot work there)
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
- stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
- stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--pnpm [--pnpm-cache=dir] [--pnpm-offline]] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
+ stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--pnpm [--pnpm-cache=dir] [--pnpm-offline]] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
+  --pnpm resolves dependencies from pnpm-lock.yaml instead of the on-disk node_modules: every
+   package tarball is downloaded into a cache (--pnpm-cache=dir, default ~/.cache/stasis/pnpm-tarballs
+   or $STASIS_PNPM_CACHE), integrity-verified, read into memory and laid out as pnpm's virtual
+   node_modules, never unpacked to disk and with no package script run; --pnpm-offline refuses to
+   download (the cache must already hold every tarball); not with --metro-resolver;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
   --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep);
   --typescript resolves TS the way tsc does: an import of ./x.js lands on ./x.ts when no .js is on disk
@@ -211,11 +216,14 @@ if (command === '-v' || command === '--version') {
     tsconfig: { type: 'string' },
     resources: { type: 'string' },
     'package-json': { type: 'boolean' },
+    pnpm: { type: 'boolean' },
+    'pnpm-cache': { type: 'string' },
+    'pnpm-offline': { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
   const values = parseLeadingOptions(argv, options, {
-    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--brotli-quality', '-o'],
+    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--pnpm-cache', '--brotli-quality', '-o'],
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
@@ -310,6 +318,15 @@ if (command === '-v' || command === '--version') {
   if (metroResolver && !metro) usage('Error: --metro-resolver is only valid with --metro')
   // metro-resolver can't substitute .js -> .ts, so --typescript would silently not apply -- reject it.
   if (typescript && metroResolver) usage("Error: --typescript is not supported with --metro-resolver (the project's metro-resolver doesn't substitute .js -> .ts)")
+  // --pnpm: dependencies come from pnpm-lock.yaml (tarballs fetched + verified into a cache, laid
+  // out in memory), never from the on-disk node_modules. JS-only; its knobs need it.
+  const pnpm = Boolean(values.pnpm)
+  if (pnpm && !allJs) usage('Error: --pnpm is only valid for JS bundles')
+  if (values['pnpm-cache'] !== undefined && !pnpm) usage('Error: --pnpm-cache is only valid with --pnpm')
+  if (values['pnpm-cache'] === '') usage('Error: --pnpm-cache requires a directory path')
+  if (values['pnpm-offline'] && !pnpm) usage('Error: --pnpm-offline is only valid with --pnpm')
+  // The project's metro-resolver reads the real node_modules, which --pnpm masks.
+  if (pnpm && metroResolver) usage("Error: --metro-resolver is not supported with --pnpm (the project's metro-resolver resolves against the on-disk node_modules)")
   // --brotli-quality: valid for every entry language (no allJs gate).
   let brotliQuality
   if (values['brotli-quality'] !== undefined) {
@@ -341,6 +358,9 @@ if (command === '-v' || command === '--version') {
     tsconfig: values.tsconfig,
     resources,
     packageJSON,
+    pnpm,
+    pnpmCache: values['pnpm-cache'],
+    pnpmOffline: Boolean(values['pnpm-offline']),
     brotliQuality,
     add,
   })
