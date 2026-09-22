@@ -17,8 +17,9 @@ const { root, tree, summary } = await loadPnpmNodeModules({ cwd, cacheDir, offli
 const host = createOverlayHost({ root, tree, makeResolver })
 ```
 
-Subpath exports (`/lockfile`, `/yaml`, `/dep-path`, `/tar`, `/fetch`, `/settings`, `/layout`,
-`/vfs`) expose the pieces. Zero dependencies.
+Subpath exports (`/lockfile`, `/dep-path`, `/tar`, `/fetch`, `/settings`, `/layout`, `/vfs`)
+expose the pieces. Its only dependency is [`@preventive/yaml`](https://npmjs.com/package/@preventive/yaml),
+the strict parser for the YAML subset pnpm writes.
 
 ## License
 

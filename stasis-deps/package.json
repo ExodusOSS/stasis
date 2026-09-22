@@ -11,8 +11,7 @@
     "./lockfile": "./src/lockfile.js",
     "./settings": "./src/settings.js",
     "./tar": "./src/tar.js",
-    "./vfs": "./src/vfs.js",
-    "./yaml": "./src/yaml.js"
+    "./vfs": "./src/vfs.js"
   },
   "files": [
     "src/dep-path.js",
@@ -23,8 +22,7 @@
     "src/semver.cjs",
     "src/settings.js",
     "src/tar.js",
-    "src/vfs.js",
-    "src/yaml.js"
+    "src/vfs.js"
   ],
   "engines": {
     "node": ">=24.14.0"
@@ -39,5 +37,8 @@
   "bugs": {
     "url": "https://github.com/ExodusOSS/stasis/issues"
   },
-  "homepage": "https://github.com/ExodusOSS/stasis#readme"
+  "homepage": "https://github.com/ExodusOSS/stasis#readme",
+  "dependencies": {
+    "@preventive/yaml": "^1.0.0-beta.0"
+  }
 }

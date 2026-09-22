@@ -231,6 +231,13 @@ test('loadPnpmSettings layers ~/.npmrc, pnpm-workspace.yaml and the project .npm
   writeFileSync(join(root, '.npmrc'), '')
   writeFileSync(join(root, 'pnpm-workspace.yaml'), 'lockfileIncludeTarballUrl: true\n')
   t.assert.equal(loadPnpmSettings({ root, home: null }).lockfileIncludeTarballUrl, true)
+  // An empty or comment-only pnpm-workspace.yaml (a common marker file) carries no settings.
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), '')
+  t.assert.equal(loadPnpmSettings({ root, home: null }).lockfileIncludeTarballUrl, false)
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), '# nothing here\n\n')
+  t.assert.equal(loadPnpmSettings({ root, home: null }).virtualStoreDir, 'node_modules/.pnpm')
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), '- not\n- a mapping\n')
+  t.assert.throws(() => loadPnpmSettings({ root, home: null }), /expected a mapping of settings/u)
   const defaults = loadPnpmSettings({ root: join(tmp, 'nowhere'), home: null })
   t.assert.deepEqual(defaults.publicHoistPattern, [])
   t.assert.deepEqual(defaults.hoistPattern, ['*'])

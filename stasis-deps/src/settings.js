@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { parseYaml } from './yaml.js'
+import { parseYaml } from '@preventive/yaml'
+
 import { DEFAULT_REGISTRY, DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH } from './dep-path.js'
 
 // The pnpm settings that shape a node_modules layout or a tarball fetch, read the way pnpm reads
@@ -133,8 +134,11 @@ export function loadPnpmSettings({ root, env = process.env, home = homedir() } =
   const applyWorkspaceYaml = (file) => {
     const text = readMaybe(file)
     if (text === null) return
+    // An empty (or comment-only) pnpm-workspace.yaml is a common marker file and carries no settings;
+    // the strict parser would refuse it as an empty document.
+    if (text.split('\n').every((line) => /^\s*(?:#|$)/u.test(line))) return
     const doc = parseYaml(text)
-    if (doc === null || typeof doc !== 'object') return
+    if (Array.isArray(doc)) throw new Error(`${file}: expected a mapping of settings, found a sequence`)
     for (const camel of KEBAB_TO_CAMEL.values()) {
       if (doc[camel] !== undefined && doc[camel] !== null) settings[camel] = coerce(camel, doc[camel], file)
     }

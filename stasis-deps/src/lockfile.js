@@ -1,4 +1,5 @@
-import { parseYaml } from './yaml.js'
+import { parseYamlStream } from '@preventive/yaml'
+
 import { parseDepPath, refToDepPath, stripPeerSuffix } from './dep-path.js'
 
 // pnpm-lock.yaml (lockfileVersion 9, pnpm >= 9) into a typed model:
@@ -43,7 +44,12 @@ function toImporterDeps(obj, where) {
 }
 
 export function parsePnpmLockfile(text) {
-  const doc = parseYaml(text)
+  // @preventive/yaml reads exactly the subset pnpm writes (strict: anchors, tabs, duplicate keys and
+  // ambiguous scalars are refused). A pnpm 12 lockfile for a project that pins its package manager
+  // is a two-document stream -- the manager's own lockfile first, the project's second -- so the
+  // project's is the last document.
+  const docs = parseYamlStream(text)
+  const doc = docs.at(-1)
   if (!isObject(doc)) throw new Error('pnpm-lock.yaml: not a mapping')
   const version = String(doc.lockfileVersion ?? '')
   const major = Number.parseInt(version, 10)
