@@ -354,8 +354,8 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   if (unresolvedCrates.size > 0 && !existsSync(join(baseDir, CARGO_VENDOR_DIR))) {
     const names = [...unresolvedCrates].toSorted()
     const shown = names.slice(0, 10).join(', ') + (names.length > 10 ? `, ... and ${names.length - 10} more` : '')
-    console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not found in the bundle root (${shown}). ` +
-      `Registry dependencies are bundled only when vendored in-tree: run \`cargo vendor\` in ${cwd} and re-bundle.`)
+    console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not found in the bundle root: ${shown}`)
+    console.warn('[stasis] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first.')
   }
 
   return assembleCodeBundle({
