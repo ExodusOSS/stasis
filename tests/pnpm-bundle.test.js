@@ -217,6 +217,40 @@ describe('stasis bundle --pnpm', { concurrency: 1 }, () => {
     t.assert.ok(!existsSync(join(tmp, 'v.br')))
   }))
 
+  test('tarball URLs recorded in the lockfile (lockfileIncludeTarballUrl) are asserted against the registry, then used', withTmp(async (t, tmp) => {
+    await bareCopy(tmp)
+    const lock = await readFile(join(tmp, 'pnpm-lock.yaml'), 'utf-8')
+    // Rewrite every resolution the way `lockfileIncludeTarballUrl: true` records it.
+    const withUrls = lock.replaceAll(/^ {2}'?(@?[^'\n]+?)@([^'(\n]+)'?:\n {4}resolution: \{integrity: ([^}]+)\}/gmu, (m, name, version, integrity) => {
+      const basename = name.startsWith('@') ? name.slice(name.indexOf('/') + 1) : name
+      return `  ${name.startsWith('@') ? `'${name}@${version}'` : `${name}@${version}`}:\n    resolution: {integrity: ${integrity}, tarball: https://registry.npmjs.org/${name}/-/${basename}-${version}.tgz}`
+    })
+    t.assert.equal((withUrls.match(/tarball: https:\/\//gu) ?? []).length, 86, 'every package got a URL')
+    await writeFile(join(tmp, 'pnpm-lock.yaml'), withUrls)
+    await writeFile(join(tmp, 'pnpm-workspace.yaml'), 'lockfileIncludeTarballUrl: true\n')
+    const ok = await run(['bundle', '--pnpm', '--pnpm-offline', `--pnpm-cache=${cacheDir}`, '--scope=full', `--output=${join(tmp, 'v.br')}`, 'src/entry.js'], { cwd: tmp })
+    t.assert.equal(ok.status, 0, `stderr: ${ok.stderr}`)
+    t.assert.match(ok.stderr, /86 tarball URLs recorded in the lockfile, asserted/u)
+    t.assert.equal(decode(await readFile(join(tmp, 'v.br'))), realBundle)
+
+    // One URL pointing off the registry: the build fails before anything is fetched or written.
+    await writeFile(join(tmp, 'pnpm-lock.yaml'), withUrls.replace('https://registry.npmjs.org/ms/-/ms-2.1.3.tgz', 'https://evil.example/ms/-/ms-2.1.3.tgz'))
+    const foreign = await run(['bundle', '--pnpm', '--pnpm-offline', `--pnpm-cache=${cacheDir}`, '--scope=full', `--output=${join(tmp, 'v2.br')}`, 'src/entry.js'], { cwd: tmp })
+    t.assert.notEqual(foreign.status, 0)
+    t.assert.match(foreign.stderr, /'ms@2\.1\.3' records a tarball URL outside its registry: https:\/\/evil\.example/u)
+    t.assert.ok(!existsSync(join(tmp, 'v2.br')))
+    // One URL naming another package's tarball.
+    await writeFile(join(tmp, 'pnpm-lock.yaml'), withUrls.replace('https://registry.npmjs.org/ms/-/ms-2.1.3.tgz', 'https://registry.npmjs.org/ms/-/ms-2.1.2.tgz'))
+    const swapped = await run(['bundle', '--pnpm', '--pnpm-offline', `--pnpm-cache=${cacheDir}`, '--scope=full', `--output=${join(tmp, 'v3.br')}`, 'src/entry.js'], { cwd: tmp })
+    t.assert.notEqual(swapped.status, 0)
+    t.assert.match(swapped.stderr, /'ms@2\.1\.3' records a tarball URL that does not name ms@2\.1\.3/u)
+    // The setting promises URLs the (original) lockfile lacks: stale lockfile, fail closed.
+    await writeFile(join(tmp, 'pnpm-lock.yaml'), lock)
+    const stale = await run(['bundle', '--pnpm', '--pnpm-offline', `--pnpm-cache=${cacheDir}`, '--scope=full', `--output=${join(tmp, 'v4.br')}`, 'src/entry.js'], { cwd: tmp })
+    t.assert.notEqual(stale.status, 0)
+    t.assert.match(stale.stderr, /lockfileIncludeTarballUrl is enabled but 'accepts@1\.3\.8' records no tarball URL/u)
+  }))
+
   test('the programmatic API takes the same options', withTmp(async (t, tmp) => {
     await bareCopy(tmp)
     const bundle = await buildBundle({ cwd: tmp, entries: ['src/entry.js'], scope: 'full', pnpm: true, pnpmCache: cacheDir, pnpmOffline: true })

@@ -17,7 +17,7 @@ import { readPackageTarball } from '../stasis/src/pnpm/tar.js'
 import { MemoryTree, createOverlayHost, diskHost } from '../stasis/src/pnpm/vfs.js'
 import { authHeadersFor, loadPnpmSettings, parseNpmrc, registryFor } from '../stasis/src/pnpm/settings.js'
 import { parsePnpmLockfile } from '../stasis/src/pnpm/lockfile.js'
-import { buildLayout, computeHoisted, computeSkipped, createHoistMatcher, packageIsInstallable, planTarballs } from '../stasis/src/pnpm/layout.js'
+import { assertTarballUrl, buildLayout, computeHoisted, computeSkipped, createHoistMatcher, packageIsInstallable, planTarballs } from '../stasis/src/pnpm/layout.js'
 import { cachePathFor, fetchTarballs, integrityOf, parseIntegrity } from '../stasis/src/pnpm/fetch.js'
 import { createNodeResolver } from '../stasis/src/resolve-node.js'
 
@@ -225,9 +225,15 @@ test('loadPnpmSettings layers ~/.npmrc, pnpm-workspace.yaml and the project .npm
   t.assert.equal(s2.nodeLinker, 'hoisted')
   writeFileSync(join(root, '.npmrc'), 'hoist=false\n')
   t.assert.deepEqual(loadPnpmSettings({ root, home: null }).hoistPattern, [])
+  writeFileSync(join(root, '.npmrc'), 'lockfile-include-tarball-url=true\n')
+  t.assert.equal(loadPnpmSettings({ root, home: null }).lockfileIncludeTarballUrl, true)
+  writeFileSync(join(root, '.npmrc'), '')
+  writeFileSync(join(root, 'pnpm-workspace.yaml'), 'lockfileIncludeTarballUrl: true\n')
+  t.assert.equal(loadPnpmSettings({ root, home: null }).lockfileIncludeTarballUrl, true)
   const defaults = loadPnpmSettings({ root: join(tmp, 'nowhere'), home: null })
   t.assert.deepEqual(defaults.publicHoistPattern, [])
   t.assert.deepEqual(defaults.hoistPattern, ['*'])
+  t.assert.equal(defaults.lockfileIncludeTarballUrl, false)
   t.assert.deepEqual([...parseNpmrc('a=1\n; c\n# d\nb[]=x\nb[]=y\nq="quoted"\n')], [['a', '1'], ['b', ['x', 'y']], ['q', 'quoted']])
 }))
 
@@ -411,6 +417,40 @@ test('buildLayout lays out pnpm\'s isolated tree: store dirs, dependency links, 
   t.assert.equal(tree2.get('/proj/node_modules/ms').target, '.pnpm/ms@2.1.2/node_modules/ms')
   t.assert.equal(tree2.has(`${store}/node_modules/ms`), false)
   t.assert.deepEqual([...computeHoisted(lock, { skipped, settings: { ...settings, hoistPattern: [] }, workspaceDirs }).keys()], [])
+})
+
+test('planTarballs asserts recorded tarball URLs (lockfileIncludeTarballUrl) and requires them when the setting is on', (t) => {
+  const settings = loadPnpmSettings({ root: '/nonexistent', home: null })
+  const pkg = { name: 'ms', version: '2.1.3' }
+  // The canonical registry layout on the configured registry passes; a registry with its own
+  // download layout passes when the path names the package and version.
+  assertTarballUrl('https://registry.npmjs.org/ms/-/ms-2.1.3.tgz', pkg, 'ms@2.1.3', settings)
+  const scoped = { ...settings, scopedRegistries: new Map([['@acme', 'https://npm.pkg.github.com/']]) }
+  assertTarballUrl('https://npm.pkg.github.com/@acme/x/-/x-1.0.0.tgz', { name: '@acme/x', version: '1.0.0' }, '@acme/x@1.0.0', scoped)
+  assertTarballUrl('https://npm.pkg.github.com/download/@acme/x/1.0.0/abcdef', { name: '@acme/x', version: '1.0.0' }, '@acme/x@1.0.0', scoped)
+  // Everything else fails closed.
+  t.assert.throws(() => assertTarballUrl('https://evil.example/ms/-/ms-2.1.3.tgz', pkg, 'ms@2.1.3', settings), /tarball URL outside its registry/u)
+  t.assert.throws(() => assertTarballUrl('http://registry.npmjs.org/ms/-/ms-2.1.3.tgz', pkg, 'ms@2.1.3', settings), /outside its registry/u)
+  t.assert.throws(() => assertTarballUrl('https://registry.npmjs.org/ms/-/ms-2.1.2.tgz', pkg, 'ms@2.1.3', settings), /does not name ms@2\.1\.3/u)
+  t.assert.throws(() => assertTarballUrl('https://registry.npmjs.org/lodash/-/lodash-2.1.3.tgz', pkg, 'ms@2.1.3', settings), /does not name ms@2\.1\.3/u)
+  t.assert.throws(() => assertTarballUrl('https://registry.npmjs.org/ms/-/ms-2.1.3.tgz', { name: '@acme/x', version: '1.0.0' }, '@acme/x@1.0.0', scoped), /outside its registry/u)
+  t.assert.throws(() => assertTarballUrl('ftp://registry.npmjs.org/ms/-/ms-2.1.3.tgz', pkg, 'ms@2.1.3', settings), /unsupported scheme/u)
+  t.assert.throws(() => assertTarballUrl('ms/-/ms-2.1.3.tgz', pkg, 'ms@2.1.3', settings), /invalid tarball URL/u)
+
+  const base = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      ms:\n        specifier: 2.1.3\n        version: 2.1.3\npackages:\n  ms@2.1.3:\n    resolution: RESOLUTION\nsnapshots:\n  ms@2.1.3: {}\n"
+  const plan = (resolution, s = settings) => planTarballs(parsePnpmLockfile(base.replace('RESOLUTION', resolution)), { skipped: new Set(), settings: s, root: '/p' })
+  // Recorded and vetted: used as-is, flagged as recorded.
+  const recorded = plan('{integrity: sha512-x, tarball: https://registry.npmjs.org/ms/-/ms-2.1.3.tgz}')
+  t.assert.equal(recorded[0].url, 'https://registry.npmjs.org/ms/-/ms-2.1.3.tgz')
+  t.assert.equal(recorded[0].recorded, true)
+  // None recorded: derived from the registry layout -- unless the setting promises one.
+  const derived = plan('{integrity: sha512-x}')
+  t.assert.equal(derived[0].url, 'https://registry.npmjs.org/ms/-/ms-2.1.3.tgz')
+  t.assert.equal(derived[0].recorded, false)
+  t.assert.throws(() => plan('{integrity: sha512-x}', { ...settings, lockfileIncludeTarballUrl: true }), /lockfileIncludeTarballUrl is enabled but 'ms@2\.1\.3' records no tarball URL/u)
+  t.assert.throws(() => plan('{integrity: sha512-x, tarball: https://mirror.example/ms/-/ms-2.1.3.tgz}'), /outside its registry/u)
+  // A mirror the settings designate is fine.
+  t.assert.equal(plan('{integrity: sha512-x, tarball: https://mirror.example/npm/ms/-/ms-2.1.3.tgz}', { ...settings, registry: 'https://mirror.example/npm' })[0].recorded, true)
 })
 
 test('planTarballs refuses git, directory and patched dependencies rather than guessing their bytes', (t) => {

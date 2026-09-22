@@ -40,7 +40,8 @@ export async function createPnpmHost({ cwd = process.cwd(), cacheDir, offline = 
   const plan = planTarballs(lockfile, { skipped, settings, root })
   cacheDir = resolve(cacheDir ?? defaultCacheDir())
 
-  log?.(`[stasis] pnpm: ${lockfile.snapshots.size} snapshot${lockfile.snapshots.size === 1 ? '' : 's'} in ${LOCKFILE_NAME}, ${plan.length} tarball${plan.length === 1 ? '' : 's'} to verify${skipped.size > 0 ? ` (${skipped.size} optional skipped on ${platform.os}-${platform.cpu})` : ''}; cache ${cacheDir}`)
+  const recorded = plan.filter((entry) => entry.recorded).length
+  log?.(`[stasis] pnpm: ${lockfile.snapshots.size} snapshot${lockfile.snapshots.size === 1 ? '' : 's'} in ${LOCKFILE_NAME}, ${plan.length} tarball${plan.length === 1 ? '' : 's'} to verify${recorded > 0 ? ` (${recorded} tarball URL${recorded === 1 ? '' : 's'} recorded in the lockfile, asserted)` : ''}${skipped.size > 0 ? ` (${skipped.size} optional skipped on ${platform.os}-${platform.cpu})` : ''}; cache ${cacheDir}`)
   const { tarballs, downloaded, cached } = await fetchTarballs(plan, { cacheDir, offline, fetchImpl, concurrency })
   log?.(`[stasis] pnpm: ${downloaded} downloaded, ${cached} from cache, all integrity-verified`)
 

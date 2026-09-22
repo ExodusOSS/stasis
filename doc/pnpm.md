@@ -28,14 +28,27 @@ deliberately masks).
    along with the layout-relevant settings from `~/.npmrc`, `pnpm-workspace.yaml`
    and the project `.npmrc` (`virtual-store-dir`, `virtual-store-dir-max-length`,
    `hoist`, `hoist-pattern`, `public-hoist-pattern`, `shamefully-hoist`,
-   `hoist-workspace-packages`, `registry`, `@scope:registry`,
-   `//host/:_authToken`).
+   `hoist-workspace-packages`, `lockfile-include-tarball-url`, `registry`,
+   `@scope:registry`, `//host/:_authToken`).
 2. **Downloads every needed tarball into the cache** — content-addressed by the
    lockfile's SRI integrity (`<cache>/sha512/<hex>.tgz`) — and **verifies** each
    against that integrity. A cached tarball is re-verified on every read; a
    mismatch (download or cache) evicts it and fails the build. Tarballs are never
    unpacked onto disk. Optional dependencies pnpm would skip on this platform
    (`os`/`cpu`/`libc`/`engines` mismatch) are neither downloaded nor laid out.
+
+   The download URL is the registry layout (`<registry>/<name>/-/<basename>-<version>.tgz`)
+   for the package's configured registry — unless the lockfile records one
+   (`lockfileIncludeTarballUrl: true` in `pnpm-workspace.yaml`, or
+   `lockfile-include-tarball-url=true` in `.npmrc`, adds `tarball:` to every
+   resolution). A recorded URL is treated as an attestation of provenance and
+   **asserted before use**: it must be an absolute http(s) URL on the registry the
+   settings designate for that package (`registry` / `@scope:registry`), and it must
+   name exactly that `name@version` (the canonical layout, or — for registries with
+   their own download paths — the name and version as path segments). A URL on a
+   foreign host, or one pointing at a different package or version, fails the build
+   before anything is fetched. With the setting enabled, a package that records no
+   URL is a stale lockfile and fails too (`pnpm install` refreshes it).
 3. **Unpacks in memory** and lays out pnpm's isolated tree:
    `node_modules/.pnpm/<name>@<version>(<peers>)/node_modules/<name>/…` (directory
    names escaped and, when too long, hashed exactly as pnpm 10 does), dependency

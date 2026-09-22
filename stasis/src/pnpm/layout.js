@@ -201,9 +201,50 @@ export function computeHoisted(lockfile, { skipped, settings, workspaceDirs }) {
 
 // --- the tarballs an install needs ---
 
+// A `resolution.tarball` the lockfile records (`lockfileIncludeTarballUrl`) is an attestation of
+// where the package came from, so it is checked, not merely used: an absolute http(s) URL, on the
+// registry the settings designate for that package (`registry` / `@scope:registry`), naming this
+// very name@version -- exactly the registry layout for the common case, or at least the name and
+// version as path segments for registries with their own download paths. Anything else is a
+// stale, edited or foreign lockfile entry, and fails closed.
+export function assertTarballUrl(url, { name, version }, key, settings) {
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error(`stasis --pnpm: '${key}' records an invalid tarball URL in pnpm-lock.yaml: ${url}`)
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`stasis --pnpm: '${key}' records a tarball URL with an unsupported scheme: ${url}`)
+  }
+  const configured = registryFor(settings, name)
+  let registry
+  try {
+    registry = new URL(configured).href
+  } catch {
+    throw new Error(`stasis --pnpm: the registry configured for ${name} is not a valid URL: ${configured}`)
+  }
+  const base = registry.endsWith('/') ? registry : `${registry}/`
+  if (!url.startsWith(base)) {
+    throw new Error(`stasis --pnpm: '${key}' records a tarball URL outside its registry: ${url} (the registry for ${name} is ${base}; point registry/@scope:registry at the registry the lockfile was written against, or refresh the lockfile)`)
+  }
+  if (url === registryTarballUrl(name, version, base)) return
+  let path
+  try {
+    path = decodeURIComponent(parsed.pathname)
+  } catch {
+    path = parsed.pathname
+  }
+  if (!path.includes(`/${name}/`) || !path.split('/').includes(version)) {
+    throw new Error(`stasis --pnpm: '${key}' records a tarball URL that does not name ${name}@${version}: ${url}`)
+  }
+}
+
 // One fetch entry per `packages` key some non-skipped snapshot uses. Only registry/URL tarballs
 // with an integrity are fetchable; a git or directory resolution has no attested archive, so it
-// is refused (a bundle built from unverifiable bytes would attest the wrong thing).
+// is refused (a bundle built from unverifiable bytes would attest the wrong thing). A recorded
+// tarball URL is asserted (see assertTarballUrl) and then used; with `lockfileIncludeTarballUrl`
+// on, every registry package must record one.
 export function planTarballs(lockfile, { skipped, settings, root }) {
   const needed = new Map()
   for (const [depPath, snapshot] of lockfile.snapshots) {
@@ -220,19 +261,31 @@ export function planTarballs(lockfile, { skipped, settings, root }) {
     if (resolution.type === 'directory' || resolution.directory !== undefined) {
       throw new Error(`stasis --pnpm: '${snapshot.packageKey}' resolves from a local directory (${resolution.directory}); directory dependencies are not supported (use a workspace link:)`)
     }
-    let url = typeof resolution.tarball === 'string' ? resolution.tarball : registryTarballUrl(pkg.name, pkg.version, registryFor(settings, pkg.name))
+    let url
     let local = null
-    if (url.startsWith('file:')) {
-      local = resolve(root, url.slice('file:'.length))
-    } else if (!/^https?:\/\//u.test(url)) {
-      // pnpm may store a registry-relative tarball path; anchor it on the package's registry.
-      url = new URL(url, registryFor(settings, pkg.name)).href
+    if (typeof resolution.tarball === 'string') {
+      url = resolution.tarball
+      if (url.startsWith('file:')) {
+        // A local tarball (`file:../x.tgz`): read from disk relative to the lockfile dir, verified like any other.
+        local = resolve(root, url.slice('file:'.length))
+      } else {
+        assertTarballUrl(url, pkg, snapshot.packageKey, settings)
+      }
+    } else if (resolution.tarball !== undefined) {
+      throw new Error(`stasis --pnpm: '${snapshot.packageKey}' records a non-string tarball in pnpm-lock.yaml`)
+    } else {
+      if (settings.lockfileIncludeTarballUrl) {
+        throw new Error(`stasis --pnpm: lockfileIncludeTarballUrl is enabled but '${snapshot.packageKey}' records no tarball URL in pnpm-lock.yaml; run \`pnpm install\` to refresh the lockfile`)
+      }
+      url = registryTarballUrl(pkg.name, pkg.version, registryFor(settings, pkg.name))
     }
     needed.set(snapshot.packageKey, {
       key: snapshot.packageKey,
       label: snapshot.packageKey,
       url,
       local,
+      // true when the lockfile itself recorded (and assertTarballUrl vetted) the URL.
+      recorded: typeof resolution.tarball === 'string',
       integrity: resolution.integrity,
       headers: local ? undefined : authHeadersFor(settings, url),
     })

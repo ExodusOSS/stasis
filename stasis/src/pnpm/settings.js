@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   publicHoistPattern: [],
   shamefullyHoist: false,
   hoistWorkspacePackages: true,
+  lockfileIncludeTarballUrl: false,
   registry: DEFAULT_REGISTRY,
 })
 
@@ -32,10 +33,11 @@ const KEBAB_TO_CAMEL = new Map([
   ['public-hoist-pattern', 'publicHoistPattern'],
   ['shamefully-hoist', 'shamefullyHoist'],
   ['hoist-workspace-packages', 'hoistWorkspacePackages'],
+  ['lockfile-include-tarball-url', 'lockfileIncludeTarballUrl'],
   ['registry', 'registry'],
 ])
 const LIST_KEYS = new Set(['hoistPattern', 'publicHoistPattern'])
-const BOOL_KEYS = new Set(['hoist', 'shamefullyHoist', 'hoistWorkspacePackages'])
+const BOOL_KEYS = new Set(['hoist', 'shamefullyHoist', 'hoistWorkspacePackages', 'lockfileIncludeTarballUrl'])
 
 // `${VAR}` expansion, as npm/pnpm apply to .npmrc values.
 function expandEnv(value, env) {
