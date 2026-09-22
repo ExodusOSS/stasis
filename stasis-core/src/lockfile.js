@@ -1,10 +1,12 @@
-import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './artifact-util.js'
+import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKey, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './artifact-util.js'
 
 const VERSION = 0
 
 const normalize = ({ name, version, ecosystem, files }) => {
   assert(ecosystem === undefined || typeof ecosystem === 'string')
-  return { name, version, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
+  // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
+  // identity comparisons and JSON round-trips can't split on it.
+  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
 }
 
 export class Lockfile {
@@ -59,11 +61,19 @@ export class Lockfile {
       }
     }
 
+    // Flat keys must be unique across buckets (mirrors Bundle.parse): two bucket splits can flatten
+    // to one path, and hashes/attestation lookups key on the flat path.
+    const flatKeys = new Set()
     for (const [dir, { files }] of modules) {
       assert(!posixPathEscapes(dir))
       assert(files)
       for (const name of Object.keys(files)) {
         assert(!posixPathEscapes(name))
+        const key = moduleFileKey(dir, name)
+        assert(!flatKeys.has(key), `duplicate file key '${key}' across lockfile buckets -- module ` +
+          `bucketing changed between writes (a workspace package without a version now owns its ` +
+          `own bucket); regenerate the lockfile (lock=replace)`)
+        flatKeys.add(key)
       }
     }
 

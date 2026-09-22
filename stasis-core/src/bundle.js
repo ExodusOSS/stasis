@@ -24,7 +24,9 @@ const LEGACY_VERSION = 0
 
 const normalize = ({ name, version, ecosystem, files }) => {
   assert(ecosystem === undefined || typeof ecosystem === 'string')
-  return { name, version, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
+  // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
+  // identity comparisons and JSON round-trips can't split on it.
+  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
 }
 
 const inferModuleDir = (path) =>
@@ -170,7 +172,9 @@ export class Bundle {
     for (const [dir, { files }] of modules) {
       for (const rel of Object.keys(files)) {
         const key = moduleFileKey(dir, rel)
-        assert(!flatKeys.has(key), `duplicate file key '${key}' across bundle buckets`)
+        assert(!flatKeys.has(key), `duplicate file key '${key}' across bundle buckets -- module ` +
+          `bucketing changed between writes (a workspace package without a version now owns its ` +
+          `own bucket); regenerate the artifact (bundle=replace)`)
         flatKeys.add(key)
       }
     }

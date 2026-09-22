@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { brotliDecompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { State } from '@exodus/stasis-core/state'
 import { Bundle } from '@exodus/stasis-core/bundle'
@@ -86,11 +86,13 @@ test('a no-lockfile bundle absorb seeds the version-less bucket identity', withT
 test('a version drift against the absorbed version-less bucket still fails closed', withTmp('drift', (t, dir) => {
   capture(dir)
   rmSync(join(dir, 'stasis.lock.json'))
-  // The package gains a version on disk after the bundle recorded none: identity drift, refuse.
+  // The package gains a version on disk after the bundle recorded none: identity drift, refuse --
+  // and the message names the migration remedy for artifacts written by an older stasis.
   writeFileSync(join(dir, 'pkg', 'package.json'), JSON.stringify({ name: 'pkg-noversion', version: '1.0.0' }))
 
   const st = new State(dir, { lock: 'replace', bundle: 'add' })
-  t.assert.throws(() => st.addFile(pathToFileURL(join(dir, 'pkg', 'index.js')).toString()))
+  t.assert.throws(() => st.addFile(pathToFileURL(join(dir, 'pkg', 'index.js')).toString()),
+    /module identity mismatch for 'pkg'.*regenerate/)
 }))
 
 test('findPackageMetadata claims a version-less workspace bucket but stays strict in node_modules', withTmp('meta', (t, dir) => {
@@ -103,6 +105,89 @@ test('findPackageMetadata claims a version-less workspace bucket but stays stric
   // A version-less node_modules manifest never claims the bucket; the walk continues to the root.
   t.assert.deepEqual(findPackageMetadata(dir, 'node_modules/dep/index.js'),
     { pkgDir: '.', name: 'fx', version: '0.0.0' })
+}))
+
+test('stasis add refuses to merge over an artifact bucketed by the old rule', withTmp('add-migrate', (t, dir) => {
+  writeFileSync(join(dir, 'stasis.config.json'), JSON.stringify({ scope: 'full' }))
+  // An older stasis walked past the versionless pkg/package.json (its findPackageMetadata required
+  // name+version) and bucketed the file under the root '.' bucket.
+  const old = new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(),
+    modules: new Map([['.', { name: 'fx', version: '0.0.0', files: { 'pkg/index.js': 'export const b = 2\n' } }]]),
+    formats: new Map([['pkg/index.js', 'commonjs']]),
+    imports: new Map(),
+  })
+  const bundlePath = join(dir, 'stasis.code.br')
+  writeFileSync(bundlePath, brotliCompressSync(old.serialize()))
+
+  // The same file now buckets under 'pkg': the merge must refuse loudly instead of writing an
+  // artifact that fails its own next parse on the duplicate-file-key guard.
+  t.assert.throws(() => addCommand({ cwd: dir, entries: ['pkg/index.js'], logLabel: 'test' }),
+    /bucketed under both '\.' and 'pkg'/)
+  // The refused merge must leave the on-disk artifact untouched and readable.
+  const kept = Bundle.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf-8'))
+  t.assert.ok(kept.modules.get('.').files['pkg/index.js'])
+}))
+
+test('Lockfile.parse rejects a file double-attested across buckets', (t) => {
+  // The shape an old-rule lockfile plus a new-rule lock=add merge used to produce silently.
+  const lock = {
+    version: 0,
+    config: { scope: 'full' },
+    entries: [],
+    sources: {
+      '.': { name: 'fx', version: '0.0.0', files: { 'pkg/index.js': 'sha512-a' } },
+      pkg: { name: 'pkg-noversion', files: { 'index.js': 'sha512-a' } },
+    },
+    modules: {},
+    imports: {},
+    formats: {},
+  }
+  t.assert.throws(() => Lockfile.parse(JSON.stringify(lock)),
+    /duplicate file key 'pkg\/index\.js' across lockfile buckets/)
+})
+
+test('Bundle.parse folds a null workspace version into undefined so merges cannot split on it', (t) => {
+  const base = { version: 1, config: { scope: 'full' }, entries: [], modules: {}, formats: {}, imports: {} }
+  const withNull = Bundle.parse(JSON.stringify({
+    ...base, sources: { pkg: { name: 'pkg-noversion', version: null, files: { 'a.js': 'x' } } },
+  }))
+  t.assert.equal(withNull.modules.get('pkg').version, undefined)
+  const withOmitted = Bundle.parse(JSON.stringify({
+    ...base, sources: { pkg: { name: 'pkg-noversion', files: { 'b.js': 'y' } } },
+  }))
+  const merged = withNull.merge(withOmitted).modules.get('pkg')
+  t.assert.equal(merged.version, undefined)
+  t.assert.deepEqual(Object.keys(merged.files).toSorted(), ['a.js', 'b.js'])
+})
+
+test('a legacy placeholder-version mismatch names the migration remedy', (t) => {
+  const base = { version: 1, config: { scope: 'full' }, entries: [], modules: {}, formats: {}, imports: {} }
+  // Older stasis fabricated '0.0.0' for a versionless root; newer stasis records no version.
+  const legacy = Bundle.parse(JSON.stringify({
+    ...base, sources: { '.': { name: 'fx', version: '0.0.0', files: { 'a.js': 'x' } } },
+  }))
+  const current = Bundle.parse(JSON.stringify({
+    ...base, sources: { '.': { name: 'fx', files: { 'b.js': 'y' } } },
+  }))
+  t.assert.throws(() => legacy.merge(current), /version mismatch \('0\.0\.0' vs 'undefined'\).*regenerate/)
+})
+
+test('a version-stripped bundle bucket cannot dodge the lockfile consistency check', withTmp('strip', (t, dir) => {
+  // Here the workspace package HAS a version; both artifacts record it at capture.
+  writeFileSync(join(dir, 'pkg', 'package.json'), JSON.stringify({ name: 'pkg-noversion', version: '1.0.0' }))
+  capture(dir)
+
+  // Strip the version from the bundle's bucket: the relaxed parse admits the shape, but the
+  // bundle-vs-lockfile cross-check must still flag the disagreement instead of skipping it.
+  const bundlePath = join(dir, 'stasis.code.br')
+  const json = JSON.parse(brotliDecompressSync(readFileSync(bundlePath)).toString('utf-8'))
+  t.assert.equal(json.sources.pkg.version, '1.0.0')
+  delete json.sources.pkg.version
+  writeFileSync(bundlePath, brotliCompressSync(JSON.stringify(json)))
+
+  t.assert.throws(() => new State(dir, { lock: 'frozen', bundle: 'load' }), /version mismatch with lockfile/)
 }))
 
 test('stasis add buckets a version-less workspace package under its own dir', withTmp('add-cmd', (t, dir) => {
