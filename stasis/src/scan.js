@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { packageType } from '@exodus/stasis-core/bundle-util'
 import { classifyExtension, classifyFormat } from '@exodus/stasis-core/util'
 import { resolveTypescriptFallback } from './resolve-typescript.js'
-import { diskHost } from './pnpm/vfs.js'
+import { diskHost } from './host.js'
 
 // Static require/import graph walker: parses source, never loads or executes user code.
 // Dynamic specifiers (`require(name)`, `import('./'+x)`) are recorded as unresolved.
@@ -134,7 +134,7 @@ export class Scan {
   // `resources` (a `parseResourcesOption` Set of extensions/filenames): reached files matching it
   // are carried as opaque resources (bytes only) rather than rejected as un-carryable -- for graphs
   // that aren't fully loadable in JS (e.g. Metro consuming .png/.svg assets).
-  // `host`: the filesystem the walk reads and resolves through (pnpm/vfs.js). The default is the
+  // `host`: the filesystem the walk reads and resolves through (see host.js). The default is the
   // real disk with Node's own `require.resolve`; `stasis bundle --pnpm` passes its in-memory tree.
   constructor({ conditions = [], resolve = null, jsx = false, flow = false, typescript = false, typescriptPaths = null, resources = new Set(), host = diskHost } = {}) {
     this.extraConditions = [...conditions]

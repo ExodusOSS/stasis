@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // Node's CommonJS resolution algorithm (`Module._resolveFilename` with a `conditions` set, i.e.
 // what `createRequire(parent).resolve(spec, { conditions })` computes) reimplemented over a
-// `host` (see pnpm/vfs.js) instead of the real filesystem, so the static bundler can resolve
+// `host` (see host.js) instead of the real filesystem, so the static bundler can resolve
 // through an in-memory node_modules. It mirrors lib/internal/modules/cjs/loader.js and
 // esm/resolve.js step for step: lookup paths, extension probing (Module._extensions), directory
 // `main`/index, package `exports`/`imports` with conditions and patterns, self-reference, and the

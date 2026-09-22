@@ -11,6 +11,13 @@ plain `stasis bundle` produces over a real `pnpm install` of the same lockfile.
 stasis bundle --pnpm [--pnpm-cache=dir] [--pnpm-offline] [--scope=…] [--conditions=…] [--mainFields=…] [--metro --platforms=…] [--jsx] [--flow] [--typescript] [--resources=…] [--package-json] [--lockfile=path] [--output=(path|-)] src/index.js
 ```
 
+The lockfile → in-memory `node_modules` implementation lives in the separate, zero-dependency
+[`@exodus/stasis-deps`](../stasis-deps) package, an **optional** dependency of `@exodus/stasis`
+(like `esbuild` for `stasis build`): install it alongside stasis to use `--pnpm`
+(`npm i -D @exodus/stasis-deps` / `pnpm add -D @exodus/stasis-deps`); without it, `--pnpm` fails
+with that hint. The bundling side — the scan, Node's resolution algorithm over the virtual tree,
+and the materialization — stays in `@exodus/stasis`.
+
 | Flag | Meaning |
 | - | - |
 | `--pnpm` | Resolve dependencies from `pnpm-lock.yaml` instead of the on-disk `node_modules`. JS/TS entries only. |

@@ -45,6 +45,21 @@ test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API
   t.assert.equal(typeof bundleCommand, 'function')
 })
 
+test('@exodus/stasis-deps (the optional --pnpm dependency) exports the lockfile-to-node_modules API', async (t) => {
+  // Loaded dynamically, as `stasis bundle --pnpm` does: the package is an optional peer of @exodus/stasis.
+  const deps = await import('@exodus/stasis-deps')
+  t.assert.equal(typeof deps.loadPnpmNodeModules, 'function')
+  t.assert.equal(typeof deps.createOverlayHost, 'function')
+  t.assert.equal(typeof deps.MemoryTree, 'function')
+  t.assert.equal(typeof deps.findLockfileRoot, 'function')
+  t.assert.equal(deps.LOCKFILE_NAME, 'pnpm-lock.yaml')
+  const subpaths = ['dep-path', 'fetch', 'layout', 'lockfile', 'settings', 'tar', 'vfs', 'yaml']
+  const mods = await Promise.all(subpaths.map((sub) => import(`@exodus/stasis-deps/${sub}`)))
+  for (const [i, mod] of mods.entries()) {
+    t.assert.ok(Object.keys(mod).length > 0, `@exodus/stasis-deps/${subpaths[i]} exports something`)
+  }
+})
+
 test('@exodus/stasis/cmd/build exports the build command and the lockfile-to-bundle helper', (t) => {
   t.assert.equal(typeof buildCommand, 'function')
   t.assert.equal(typeof bundleFromLockfile, 'function')

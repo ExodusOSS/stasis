@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { assertRealPathWithinBase, hasNodeModulesSegment, toPosix } from './util.js'
 
 // Several readers here take an optional `host` -- the filesystem view of `stasis bundle --pnpm`'s
-// in-memory node_modules ({ stat, readFile, realpath, exists }; see stasis/src/pnpm/vfs.js). With
+// in-memory node_modules ({ stat, readFile, realpath, exists }; see stasis/src/host.js). With
 // none given they read the real disk exactly as before.
 
 // Nearest package.json for `file` through `host`, never walking up out of a node_modules dir --

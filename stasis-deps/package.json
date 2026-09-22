@@ -1,0 +1,43 @@
+{
+  "name": "@exodus/stasis-deps",
+  "version": "1.0.0-beta.4",
+  "description": "A pnpm lockfile's node_modules reconstructed in memory (verified tarballs, no install, no scripts) for @exodus/stasis",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./dep-path": "./src/dep-path.js",
+    "./fetch": "./src/fetch.js",
+    "./layout": "./src/layout.js",
+    "./lockfile": "./src/lockfile.js",
+    "./settings": "./src/settings.js",
+    "./tar": "./src/tar.js",
+    "./vfs": "./src/vfs.js",
+    "./yaml": "./src/yaml.js"
+  },
+  "files": [
+    "src/dep-path.js",
+    "src/fetch.js",
+    "src/index.js",
+    "src/layout.js",
+    "src/lockfile.js",
+    "src/semver.cjs",
+    "src/settings.js",
+    "src/tar.js",
+    "src/vfs.js",
+    "src/yaml.js"
+  ],
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ExodusOSS/stasis.git",
+    "directory": "stasis-deps"
+  },
+  "author": "Exodus Movement, Inc.",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ExodusOSS/stasis/issues"
+  },
+  "homepage": "https://github.com/ExodusOSS/stasis#readme"
+}

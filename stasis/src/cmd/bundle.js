@@ -15,8 +15,8 @@ import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, narrowExecutable, parseResourcesOption, refineNativeCapture, splitNodeModulesPath, toPosix } from '@exodus/stasis-core/util'
-import { diskHost } from '../pnpm/vfs.js'
-import { createPnpmHost } from '../pnpm/index.js'
+import { diskHost } from '../host.js'
+import { createNodeResolver } from '../resolve-node.js'
 import {
   buildSolidityTree,
   collectSolidityFilesFromDisk,
@@ -652,23 +652,26 @@ async function buildVirtualJsBundle({ cwd = process.cwd(), host, entries, scope,
       if (!name) throw new Error(`Missing name in ${moduleFileKey(dir, 'package.json')}`)
       if (!version) throw new Error(`Missing version in ${moduleFileKey(dir, 'package.json')}`)
     } else {
-      // Walk up (staying inside root) to the nearest manifest carrying name+version; a `{ "type" }`
-      // marker is skipped, anything else without an identity is a malformed tree.
+      // Walk up (staying inside root) to the nearest manifest carrying a name -- a workspace
+      // package outside node_modules may omit version (private/unpublished), its name alone claims
+      // the bucket; a `{ "type" }` marker is skipped, anything else without a name is a malformed tree.
       let cur = dirname(join(root, rel))
       while (true) {
         const candidate = join(cur, 'package.json')
         if (host.stat(candidate)?.isFile()) {
           const json = readManifest(candidate)
-          if (json.name !== undefined && json.version !== undefined) {
-            ;({ name, version } = json)
+          if (json.name !== undefined) {
+            name = json.name
+            // A literal `"version": null` folds to undefined, the parsers' one absent-version spelling.
+            version = json.version ?? undefined
             dir = cur === root ? '.' : toRel(cur)
             break
           }
           if (!Object.keys(json).every((k) => k === 'type')) {
-            throw new Error(`No package.json with name+version found for ${rel} (${toRel(candidate)} has neither)`)
+            throw new Error(`No package.json with a name found for ${rel} (${toRel(candidate)} has none)`)
           }
         }
-        if (cur === root) throw new Error(`No package.json with name+version found for ${rel}`)
+        if (cur === root) throw new Error(`No package.json with a name found for ${rel}`)
         cur = dirname(cur)
       }
       const cached = bucketCache.get(dir)
@@ -1209,12 +1212,29 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   return kind
 }
 
+// @exodus/stasis-deps (the lockfile -> in-memory node_modules implementation) is an optional peer
+// dependency, loaded only under --pnpm: a missing install is an env error with an install hint,
+// like the other optional deps (esbuild, flow-remove-types).
+async function importStasisDeps() {
+  try {
+    return await import('@exodus/stasis-deps')
+  } catch (cause) {
+    if (cause?.code !== 'ERR_MODULE_NOT_FOUND' && cause?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw cause
+    throw new Error(
+      "--pnpm needs the optional '@exodus/stasis-deps' dependency; install it alongside @exodus/stasis (e.g. `npm i -D @exodus/stasis-deps` / `pnpm add -D @exodus/stasis-deps`)",
+      { cause }
+    )
+  }
+}
+
 // --pnpm: the filesystem view every JS read/resolution goes through -- pnpm's node_modules laid
 // out in memory from pnpm-lock.yaml (tarballs downloaded to `pnpmCache` and integrity-verified,
-// never unpacked to disk, no package script run). Whatever install sits on disk is ignored.
+// never unpacked to disk, no package script run). Whatever install sits on disk is ignored. The
+// tree comes from @exodus/stasis-deps; the resolution algorithm that reads it stays here.
 async function pnpmHostFor({ cwd, pnpmCache, pnpmOffline }) {
-  const { host } = await createPnpmHost({ cwd, cacheDir: pnpmCache, offline: Boolean(pnpmOffline) })
-  return host
+  const deps = await importStasisDeps()
+  const { root, tree } = await deps.loadPnpmNodeModules({ cwd, cacheDir: pnpmCache, offline: Boolean(pnpmOffline) })
+  return deps.createOverlayHost({ root, tree, makeResolver: createNodeResolver })
 }
 
 // Build a JS bundle (+ companion lockfile) the way the flags select: the legacy-field resolver

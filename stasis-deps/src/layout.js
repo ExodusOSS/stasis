@@ -4,7 +4,7 @@ import { depPathToFilename, registryTarballUrl } from './dep-path.js'
 import { resolveDepRef } from './lockfile.js'
 import { MemoryTree } from './vfs.js'
 import { authHeadersFor, registryFor } from './settings.js'
-import semver from '../apis/npm/semver.cjs'
+import semver from './semver.cjs'
 
 // pnpm's isolated node_modules layout, rebuilt in memory from a lockfile: every snapshot gets
 // `<virtualStore>/<depPathToFilename(key)>/node_modules/<name>/` holding its tarball's files,

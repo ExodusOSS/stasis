@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { parseYaml } from '../stasis/src/pnpm/yaml.js'
-import { parsePnpmLockfile, resolveDepRef } from '../stasis/src/pnpm/lockfile.js'
+import { parseYaml } from '@exodus/stasis-deps/yaml'
+import { parsePnpmLockfile, resolveDepRef } from '@exodus/stasis-deps/lockfile'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const rootLockfile = join(here, '..', 'pnpm-lock.yaml')

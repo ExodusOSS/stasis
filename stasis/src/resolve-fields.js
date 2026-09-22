@@ -12,7 +12,7 @@ import {
   resolveTypescriptFallback,
   typescriptSiblings,
 } from './resolve-typescript.js'
-import { diskHost } from './pnpm/vfs.js'
+import { diskHost } from './host.js'
 
 // Static module resolver for legacy package fields (`react-native`/`browser`/`main` + browser-spec
 // redirect maps) and platform suffixes (`.ios`/`.android`/`.native`), reproducing Metro/React-Native

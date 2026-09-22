@@ -2,6 +2,7 @@
 packages:
   - stasis
   - stasis-core
+  - stasis-deps
   - stasis-plugins
 
 allowBuilds:

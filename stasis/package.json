@@ -36,6 +36,7 @@
     "src/cmd/sbom.js",
     "src/diff.js",
     "src/esbuild.js",
+    "src/host.js",
     "src/loader.js",
     "src/loader-mock.js",
     "src/loaders/bash.js",
@@ -48,15 +49,6 @@
     "src/metro-transformer.js",
     "src/mock.js",
     "src/parse.js",
-    "src/pnpm/dep-path.js",
-    "src/pnpm/fetch.js",
-    "src/pnpm/index.js",
-    "src/pnpm/layout.js",
-    "src/pnpm/lockfile.js",
-    "src/pnpm/settings.js",
-    "src/pnpm/tar.js",
-    "src/pnpm/vfs.js",
-    "src/pnpm/yaml.js",
     "src/prune.js",
     "src/resolve-fields.js",
     "src/resolve-node.js",
@@ -89,10 +81,14 @@
     "oxc-parser": "^0.94.0"
   },
   "peerDependencies": {
+    "@exodus/stasis-deps": "1.0.0-beta.4",
     "esbuild": "*",
     "flow-remove-types": "*"
   },
   "peerDependenciesMeta": {
+    "@exodus/stasis-deps": {
+      "optional": true
+    },
     "esbuild": {
       "optional": true
     },

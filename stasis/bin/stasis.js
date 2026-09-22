@@ -39,7 +39,8 @@ function usage(prefix = '') {
    package tarball is downloaded into a cache (--pnpm-cache=dir, default ~/.cache/stasis/pnpm-tarballs
    or $STASIS_PNPM_CACHE), integrity-verified, read into memory and laid out as pnpm's virtual
    node_modules, never unpacked to disk and with no package script run; --pnpm-offline refuses to
-   download (the cache must already hold every tarball); not with --metro-resolver;
+   download (the cache must already hold every tarball); needs the optional @exodus/stasis-deps
+   dependency; not with --metro-resolver;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
   --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep);
   --typescript resolves TS the way tsc does: an import of ./x.js lands on ./x.ts when no .js is on disk

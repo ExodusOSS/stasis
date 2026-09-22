@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 
 import { createNodeResolver } from '../stasis/src/resolve-node.js'
-import { diskHost } from '../stasis/src/pnpm/vfs.js'
+import { diskHost } from '../stasis/src/host.js'
 
 // The host-based reimplementation of Node's CJS resolver (used by `stasis bundle --pnpm` over an
 // in-memory node_modules) checked against `require.resolve` itself on a real tree covering every

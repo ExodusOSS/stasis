@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 
 import { isTypeDeclaration } from '@exodus/stasis-core/util'
-import { diskHost } from './pnpm/vfs.js'
+import { diskHost } from './host.js'
 
 // tsc-style module resolution (`--typescript`), shared by BOTH JS resolvers -- scan.js's built-in
 // Node resolver and resolve-fields.js's legacy-field resolver -- so the flag means one thing
@@ -52,7 +52,7 @@ export function typescriptSiblings(name, { tsx = false } = {}) {
 const NO_COMPLETION_EXTS = new Set([...JS_OUTPUT_EXTS, '.ts', '.tsx', '.mts', '.cts', '.json'])
 
 // Every filesystem probe below takes an optional `host` (the view of `stasis bundle --pnpm`'s
-// in-memory node_modules; see pnpm/vfs.js) and reads the real disk without one.
+// in-memory node_modules; see host.js) and reads the real disk without one.
 export function isFile(p, host = diskHost) {
   return host.stat(p)?.isFile() ?? false
 }

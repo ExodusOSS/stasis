@@ -12,13 +12,14 @@ import {
   refToDepPath,
   registryTarballUrl,
   stripPeerSuffix,
-} from '../stasis/src/pnpm/dep-path.js'
-import { readPackageTarball } from '../stasis/src/pnpm/tar.js'
-import { MemoryTree, createOverlayHost, diskHost } from '../stasis/src/pnpm/vfs.js'
-import { authHeadersFor, loadPnpmSettings, parseNpmrc, registryFor } from '../stasis/src/pnpm/settings.js'
-import { parsePnpmLockfile } from '../stasis/src/pnpm/lockfile.js'
-import { assertTarballUrl, buildLayout, computeHoisted, computeSkipped, createHoistMatcher, packageIsInstallable, planTarballs } from '../stasis/src/pnpm/layout.js'
-import { cachePathFor, fetchTarballs, integrityOf, parseIntegrity } from '../stasis/src/pnpm/fetch.js'
+} from '@exodus/stasis-deps/dep-path'
+import { readPackageTarball } from '@exodus/stasis-deps/tar'
+import { MemoryTree, createOverlayHost } from '@exodus/stasis-deps/vfs'
+import { diskHost } from '../stasis/src/host.js'
+import { authHeadersFor, loadPnpmSettings, parseNpmrc, registryFor } from '@exodus/stasis-deps/settings'
+import { parsePnpmLockfile } from '@exodus/stasis-deps/lockfile'
+import { assertTarballUrl, buildLayout, computeHoisted, computeSkipped, createHoistMatcher, packageIsInstallable, planTarballs } from '@exodus/stasis-deps/layout'
+import { cachePathFor, fetchTarballs, integrityOf, parseIntegrity } from '@exodus/stasis-deps/fetch'
 import { createNodeResolver } from '../stasis/src/resolve-node.js'
 
 const withTmp = (fn) => async (t) => {

@@ -1,12 +1,10 @@
 import * as fs from 'node:fs'
-import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-// The filesystem view the static JS bundler reads through. Every reader the scanner, the
-// resolvers and the materializer use goes through a `host` so the same code runs over the real
-// disk (`diskHost`) or over an in-memory node_modules laid out from a pnpm lockfile
-// (`createOverlayHost`). The overlay is strict about its zone: under the project root, every
-// path with a `node_modules` segment is served from the memory tree ONLY -- whatever install
+// The in-memory filesystem a pnpm lockfile is laid out into, and the overlay host that serves it
+// to a reader (the `host` surface `@exodus/stasis`' static bundler reads through; see its
+// src/host.js for the contract). The overlay is strict about its zone: under the project root,
+// every path with a `node_modules` segment is served from the memory tree ONLY -- whatever install
 // happens to sit on disk is invisible -- while the workspace's own sources come from disk.
 //
 // Host surface (all paths absolute):
@@ -16,12 +14,11 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 //   readdir(p) -> [{ name, isFile(), isDirectory(), isSymbolicLink() }] sorted by name
 //   realpath(p) -> string                                    (throws ENOENT / ELOOP)
 //   exists(p) -> boolean
-//   resolve(parentFile, specifier, conditions: Set) -> string (Node CJS resolution; throws with .code)
-//   virtual: boolean
+//   resolve(parentFile, specifier, conditions: Set) -> string (via the injected `makeResolver`)
+//   virtual: true
 
-// Snapshot the genuine fs functions: `stasis run --fs` patches node:fs, and a host must never
-// read through a patch.
-const { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } = fs
+// Snapshot the genuine fs functions: a host must never read through a monkey-patched node:fs.
+const { lstatSync, readFileSync, readdirSync, readlinkSync, statSync } = fs
 
 function fsError(code, message, path) {
   const err = new Error(`${code}: ${message}, '${path}'`)
@@ -41,41 +38,6 @@ const dirent = (name, kind) => ({
 const fromFsDirent = (d) => dirent(d.name, d.isSymbolicLink() ? 'symlink' : d.isDirectory() ? 'dir' : d.isFile() ? 'file' : 'other')
 
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
-
-// The real filesystem, resolving through Node's own `require.resolve` (byte-for-byte what the
-// runtime does, NODE_PATH and all) -- the host the plain `stasis bundle` path always used.
-export const diskHost = {
-  virtual: false,
-  stat(p) {
-    try {
-      return statSync(p, { throwIfNoEntry: false }) ?? null
-    } catch {
-      return null
-    }
-  },
-  lstat(p) {
-    try {
-      return lstatSync(p, { throwIfNoEntry: false }) ?? null
-    } catch {
-      return null
-    }
-  },
-  readFile(p) {
-    return readFileSync(p)
-  },
-  readdir(p) {
-    return readdirSync(p, { withFileTypes: true }).map(fromFsDirent).toSorted(byName)
-  },
-  realpath(p) {
-    return realpathSync(p)
-  },
-  exists(p) {
-    return existsSync(p)
-  },
-  resolve(parentFile, specifier, conditions) {
-    return createRequire(parentFile).resolve(specifier, { conditions })
-  },
-}
 
 // An in-memory tree of files, directories and symlinks keyed by absolute path. Parent directories
 // are implied; a path can hold one node (re-adding a different kind is a layout bug, so it throws).
@@ -138,11 +100,12 @@ export class MemoryTree {
 }
 
 // A host over `tree` for the node_modules zone under `root` and the real disk everywhere else.
-// `makeResolver(host)` builds the Node-style resolver lazily (dependency injection keeps this
-// module free of the resolver's imports).
+// `makeResolver(host)` builds the module resolver lazily (the resolution algorithm belongs to the
+// bundler, so it is injected rather than imported here).
 export function createOverlayHost({ root, tree, makeResolver }) {
   root = resolve(root)
   if (sep !== '/') throw new Error('The virtual pnpm host is POSIX-only')
+  if (typeof makeResolver !== 'function') throw new TypeError('createOverlayHost: makeResolver(host) is required')
 
   // Under root AND containing a node_modules segment: memory only.
   const inVirtualZone = (p) => {
