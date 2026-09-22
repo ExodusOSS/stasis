@@ -1,0 +1,6 @@
+[package]
+name = "util"
+version = "0.2.0"
+
+[lib]
+path = "src/util_lib.rs"

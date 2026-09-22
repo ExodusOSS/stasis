@@ -254,7 +254,7 @@ invocation):
 | `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
 | `.php` | PHP | literal `require`/`include` paths + Composer-autoloaded class references (PSR-4/PSR-0/classmap/files) | `php` |
 | `.sh` `.bash` | Shell | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:`, `# shellcheck source=` | `shell` |
-| `.rs` | Rust | `mod` declarations (+ `use crate::` edges) | `rust` |
+| `.rs` | Rust | `mod` declarations (incl. `#[path = …]` / `#[cfg_attr(…, path = …)]`, inside inline modules too) + `use`/`extern crate` of a crate whose source is in-tree | `rust` |
 
 These four are **`scope = full`, produce-only artifacts** in the same
 `stasis.code.br` shape as a JS bundle, tagged with a language `format` and keyed
@@ -263,9 +263,23 @@ under a language `imports` condition. They are for external static analysis —
 `format`. Every reachable file is read from disk (symlinks whose real target
 escapes the bundle root are refused) and bucketized by the nearest `package.json`,
 except PHP, which buckets by the nearest `composer.json`
-(`vendor/<vendor>/<pkg>`, versions from `vendor/composer/installed.json`). With no
-manifest above a file, the workspace bucket gets a placeholder identity
-(`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
+(`vendor/<vendor>/<pkg>`, versions from `vendor/composer/installed.json`), and
+Rust, which buckets by the nearest `Cargo.toml` `[package]` (a workspace member
+is its own bucket; `version.workspace = true` resolves through the workspace
+root). With no manifest above a file, the workspace bucket gets a placeholder
+identity (`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
+
+Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
+`tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does.
+Each root gets its own module tree, so a lib and its bin bundled together don't
+collide on `crate::`. A `use`/`extern crate` naming a crate found in-tree pulls
+that crate's root in: the package's own lib target (`use my_app::…` from
+`main.rs`), a Cargo `path` dependency (incl. `workspace = true` ones and
+`package = …` renames, honouring `[lib] path`), or a `cargo vendor`ed crate under
+`vendor/`. Registry dependencies live in `~/.cargo/registry`, outside the bundle
+root, so they're never read: vendor them first (`cargo vendor`). When a bundle
+references crates it can't find and there is no `vendor/` dir, `stasis bundle`
+says so and suggests it.
 
 Dependency buckets carry an `ecosystem`, attributed by the install layout each
 file resolves out of:
@@ -279,7 +293,9 @@ file resolves out of:
 
 A dep under `node_modules` is `npm` whatever the language. A git submodule with no
 `package.json`/`branch`, or a Soldeer dir with no version suffix, falls back to
-`0.0.0`; the workspace bucket carries no `ecosystem`.
+`0.0.0`; the workspace bucket carries no `ecosystem`. A Rust crate reached
+through a Cargo `path` dependency is first-party (its own `Cargo.toml` bucket, no
+`ecosystem`), not a registry dep.
 
 What counts as a fatal unresolved reference differs by language:
 
@@ -288,9 +304,17 @@ What counts as a fatal unresolved reference differs by language:
 | Solidity | every `import` | — |
 | PHP | every literal `require`/`include` path | Composer-autoloaded class refs (unresolved ones usually built-in/extension classes); a dynamic include with a static dir prefix pulls in that dir's `.php` files as candidates |
 | Bash | every in-root `.sh`/`.bash` reference | PATH commands, `$VAR`/absolute/system paths, `../`-escaping sources (external); dynamic `source "${VAR}/x.sh"` followed via `# shellcheck source=` when present |
-| Rust | every unconditional `mod foo;` | `#[cfg(...)]`-gated `mod`, all `use crate::` edges |
+| Rust | every unconditional `mod foo;` (incl. one whose `#[path]` names no file, or escapes the bundle root) | `#[cfg(...)]`/`#[cfg_attr(...)]`-gated `mod`; every path edge (`crate::`/`self::`/`super::`/relative `use`s, recorded best-effort and never widening the walk); crates not in-tree (unvendored registry deps: dropped) |
 
 A missing entry is always fatal.
+
+Rust edge specs are the path as written (`crate::net::client::Client`,
+`super::config::Config`, a `use crate::{a::B, c::D}` group flattened to one edge
+per path); `mod <name>` for a module file (`mod outer::inner` when declared inside
+inline module `outer`); `use <crate>` for a crate root. A `mod` whose
+`#[cfg_attr(<pred>, path = …)]` variants name different files records a
+`{ <pred>: file, …, "*": <default file> }` map, the same shape as a JS edge that
+diverges per Metro platform.
 
 ## Resources in the bundle
 

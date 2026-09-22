@@ -2833,6 +2833,155 @@ test('buildRustBundle takes the workspace bucket name/version from package.json'
   t.assert.equal(workspace.version, '3.0.0')
 })
 
+const captureWarningsAsync = async (fn) => {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    return { result: await fn(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+
+test('buildRustBundle pulls the package\'s own lib in when main.rs uses it, bucketed by Cargo.toml', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'lib-bin'), entries: ['src/main.rs'] })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/cli.rs', 'src/config.rs', 'src/lib.rs', 'src/main.rs'])
+  t.assert.deepEqual([...bundle.modules.keys()], ['.'])
+  const workspace = bundle.modules.get('.')
+  t.assert.equal(workspace.name, 'my-app')
+  t.assert.equal(workspace.version, '0.1.0')
+  t.assert.equal(workspace.ecosystem, undefined) // first-party: no ecosystem
+  const imports = bundle.imports.get('rust')
+  t.assert.equal(imports.get('src/main.rs').get('use my_app'), 'src/lib.rs')
+  t.assert.equal(imports.get('src/lib.rs').get('mod cli'), 'src/cli.rs')
+  t.assert.equal(imports.get('src/cli.rs').get('crate::config::Config'), 'src/config.rs')
+})
+
+test('buildRustBundle treats src/bin and tests entries as crate roots (sibling modules, own lib)', async (t) => {
+  const bin = await buildRustBundle({ cwd: join(rustFixtures, 'lib-bin'), entries: ['src/bin/tool.rs'] })
+  t.assert.deepEqual([...bin.sources.keys()].toSorted(), ['src/bin/helper.rs', 'src/bin/tool.rs', 'src/cli.rs', 'src/config.rs', 'src/lib.rs'])
+  t.assert.equal(bin.imports.get('rust').get('src/bin/tool.rs').get('mod helper'), 'src/bin/helper.rs')
+  t.assert.equal(bin.imports.get('rust').get('src/bin/tool.rs').get('use my_app'), 'src/lib.rs')
+
+  const it = await buildRustBundle({ cwd: join(rustFixtures, 'lib-bin'), entries: ['tests/smoke.rs'] })
+  t.assert.deepEqual([...it.sources.keys()].toSorted(), ['src/cli.rs', 'src/config.rs', 'src/lib.rs', 'tests/common/mod.rs', 'tests/smoke.rs'])
+  t.assert.equal(it.imports.get('rust').get('tests/smoke.rs').get('mod common'), 'tests/common/mod.rs')
+})
+
+test('buildRustBundle follows Cargo path dependencies across a workspace, one bucket per member', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'workspace'), entries: ['crates/app/src/main.rs'] })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+    'crates/app/src/local.rs', 'crates/app/src/main.rs', 'crates/tools/src/lib.rs', 'crates/util/src/detail.rs', 'crates/util/src/util_lib.rs',
+  ])
+  const buckets = [...bundle.modules].map(([dir, m]) => [dir, m.name, m.version, m.ecosystem])
+  t.assert.deepEqual(buckets.toSorted(), [
+    ['crates/app', 'app', '0.3.0', undefined], // version.workspace = true -> [workspace.package]
+    ['crates/tools', 'dev-tools', '1.0.0', undefined], // reached as `tools` (package = "dev-tools")
+    ['crates/util', 'util', '0.2.0', undefined], // workspace = true dep with a [lib] path
+  ])
+  const main = bundle.imports.get('rust').get('crates/app/src/main.rs')
+  t.assert.equal(main.get('use util'), 'crates/util/src/util_lib.rs')
+  t.assert.equal(main.get('use tools'), 'crates/tools/src/lib.rs')
+  t.assert.equal(bundle.imports.get('rust').get('crates/util/src/util_lib.rs').get('mod detail'), 'crates/util/src/detail.rs')
+})
+
+test('buildRustBundle honours #[path] (crate root, non-root sibling, inside an inline module) and cfg_attr variants', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'path-attr'), entries: ['src/lib.rs'] })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+    'src/de.rs', 'src/de/seed.rs', 'src/discouraged.rs', 'src/lib.rs', 'src/parse.rs', 'src/private/mod.rs',
+    'src/raw/mod.rs', 'src/sys.rs', 'src/sys/unix.rs', 'src/sys/windows.rs',
+  ])
+  const lib = bundle.imports.get('rust').get('src/lib.rs')
+  t.assert.equal(lib.get('mod __private'), 'src/private/mod.rs')
+  t.assert.equal(lib.get('mod seed'), 'src/de/seed.rs')
+  t.assert.equal(lib.get('mod raw::inner'), 'src/raw/mod.rs')
+  t.assert.deepEqual(Object.fromEntries(lib.get('mod sys')), { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs', '*': 'src/sys.rs' })
+  t.assert.equal(bundle.imports.get('rust').get('src/parse.rs').get('mod discouraged'), 'src/discouraged.rs')
+})
+
+test('bundleCommand round-trips a cfg-keyed mod target through Bundle.parse', withTmp(async (t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  await bundleCommand({ cwd: join(rustFixtures, 'path-attr'), entries: ['src/lib.rs'], output: outPath })
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  const sys = parsed.imports.get('rust').get('src/lib.rs').get('mod sys')
+  t.assert.ok(sys instanceof Map)
+  t.assert.deepEqual(Object.fromEntries(sys), { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs', '*': 'src/sys.rs' })
+}))
+
+test('buildRustBundle refuses a #[path] escaping the crate root as an unresolved module', async (t) => {
+  await t.assert.rejects(
+    () => buildRustBundle({ cwd: join(rustFixtures, 'path-attr-escape'), entries: ['src/main.rs'] }),
+    /Rust bundle has unresolved modules[\s\S]*Unresolved module: mod evil from src\/main\.rs/u,
+  )
+})
+
+test('buildRustBundle resolves a mod declared inside inline modules under their directories', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'inline-nested'), entries: ['src/main.rs'] })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/main.rs', 'src/outer/deep/leaf.rs', 'src/outer/inner.rs'])
+  const main = bundle.imports.get('rust').get('src/main.rs')
+  t.assert.equal(main.get('mod outer::inner'), 'src/outer/inner.rs')
+  t.assert.equal(main.get('mod outer::deep::leaf'), 'src/outer/deep/leaf.rs')
+  t.assert.equal(main.get('outer::inner::go'), 'src/outer/inner.rs')
+})
+
+test('buildRustBundle records edges for grouped/multi-line use trees, super::/self:: paths and one-line attributes', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'use-groups'), entries: ['src/main.rs'] })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+    'src/a.rs', 'src/after_string.rs', 'src/b.rs', 'src/config.rs', 'src/errors.rs', 'src/macros.rs', 'src/main.rs',
+    'src/net/client.rs', 'src/net/mod.rs', 'src/net/server.rs', 'src/util.rs',
+  ])
+  const imports = bundle.imports.get('rust')
+  const main = imports.get('src/main.rs')
+  t.assert.equal(main.get('mod macros'), 'src/macros.rs') // `#[macro_use] mod macros;` on one line
+  t.assert.equal(main.get('mod after_string'), 'src/after_string.rs') // after a `//` inside a string
+  t.assert.equal(main.get('mod b'), 'src/b.rs') // after a nested block comment
+  t.assert.ok(!main.has('mod ghost'))
+  t.assert.equal(main.get('crate::config::Config'), 'src/config.rs') // `use crate::{a::B, c::D}`
+  t.assert.equal(main.get('crate::errors::AppError'), 'src/errors.rs')
+  t.assert.equal(main.get('crate::net::client::Client'), 'src/net/client.rs') // multi-line group
+  t.assert.equal(main.get('crate::util::helper'), 'src/util.rs') // `as` rename
+  t.assert.equal(main.get('crate::a'), 'src/a.rs') // glob
+  t.assert.equal(imports.get('src/util.rs').get('super::config::Config'), 'src/config.rs')
+  t.assert.equal(imports.get('src/net/mod.rs').get('self::client::Client'), 'src/net/client.rs')
+  t.assert.equal(imports.get('src/net/client.rs').get('super::server::Server'), 'src/net/server.rs')
+})
+
+test('buildRustBundle follows a vendored crate\'s vendored dependency and records the edge (extern crate … as)', async (t) => {
+  const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'vendored-transitive'), entries: ['src/main.rs'] }))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+    'src/main.rs', 'vendor/alpha/src/inner.rs', 'vendor/alpha/src/lib.rs', 'vendor/beta-lib/src/lib.rs',
+  ])
+  t.assert.deepEqual([...bundle.modules].map(([dir, m]) => [dir, m.name, m.version, m.ecosystem]).toSorted(), [
+    ['.', 'rust-bundle', '0.0.0', undefined],
+    ['vendor/alpha', 'alpha', '1.0.0', 'cargo'],
+    ['vendor/beta-lib', 'beta-lib', '2.0.0', 'cargo'],
+  ])
+  const imports = bundle.imports.get('rust')
+  t.assert.equal(imports.get('src/main.rs').get('use alpha'), 'vendor/alpha/src/lib.rs')
+  t.assert.equal(imports.get('vendor/alpha/src/lib.rs').get('use beta_lib'), 'vendor/beta-lib/src/lib.rs')
+  t.assert.equal(imports.get('vendor/alpha/src/lib.rs').get('crate::inner::x'), 'vendor/alpha/src/inner.rs')
+  // `use missing_crate::Nope` is unresolved, but with a vendor/ dir present there is no `cargo vendor` hint.
+  t.assert.ok(!warnings.some((w) => w.includes('cargo vendor')), warnings.join('\n'))
+})
+
+test('buildRustBundle bundles what is in-tree and hints at `cargo vendor` when deps are referenced with no vendor/ dir', async (t) => {
+  const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'no-vendor'), entries: ['src/main.rs'] }))
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/a.rs', 'src/main.rs'])
+  const hint = warnings.find((w) => w.includes('cargo vendor'))
+  t.assert.ok(hint, warnings.join('\n'))
+  t.assert.match(hint, /2 crates referenced but not found in the bundle root \(serde, syn\)/u)
+  t.assert.doesNotMatch(hint, /\bstd\b|\ba\b,/u)
+})
+
+test('CLI: bundle (rust) prints the `cargo vendor` hint to stderr and still exits 0', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '-o', outPath, 'src/main.rs'], { cwd: join(rustFixtures, 'no-vendor') })
+  t.assert.equal(r.status, 0, r.stderr)
+  t.assert.match(r.stderr, /run `cargo vendor` in .*no-vendor and re-bundle/u)
+  t.assert.match(r.stderr, /Bundled 2 files in 1 package/u)
+}))
+
 test('buildRustBundle rejects an empty entry list', async (t) => {
   await t.assert.rejects(() => buildRustBundle({ cwd: join(rustFixtures, 'basic'), entries: [] }), /at least one entry/)
 })

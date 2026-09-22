@@ -21,7 +21,7 @@ import {
   readRemappingsFile,
 } from '../loaders/solidity.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
-import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
+import { buildRustTree, collectRustFilesFromDisk, createCargoContext } from '../loaders/rust.js'
 import {
   bucketizePhpSources,
   buildPhpTree,
@@ -143,32 +143,21 @@ function makeSolidityClassifier(baseDir) {
   }
 }
 
-// Minimal Cargo.toml reader: name/version from the `[package]` table; null when no name.
-function parseCargoToml(file) {
-  const text = readFileSyncOrNull(file)
-  if (!text) return null
-  const at = text.search(/^\[package\]\s*$/mu)
-  let body = text
-  if (at !== -1) {
-    const rest = text.slice(at)
-    const next = rest.slice(1).search(/^\[/mu)
-    body = next === -1 ? rest : rest.slice(0, next + 1)
-  }
-  const name = /^\s*name\s*=\s*"([^"]+)"/mu.exec(body)?.[1]
-  const version = /^\s*version\s*=\s*"([^"]+)"/mu.exec(body)?.[1]
-  return name ? { name, version: version ?? '0.0.0' } : null
-}
+// `cargo vendor` copies registry crates in-tree under this dir.
+const CARGO_VENDOR_DIR = 'vendor'
 
-// Classify a Rust file: `cargo vendor` crates under `vendor/<dir>/` (tagged `cargo`), else
-// null to defer to the workspace logic.
-function makeRustClassifier(baseDir) {
+// Classify a Rust file by the nearest Cargo.toml `[package]`: a `cargo vendor`ed crate under
+// `vendor/<dir>/` is a dependency (tagged `cargo`); any other package (the crate itself, a
+// workspace member reached through a `path` dependency) is first-party, so no ecosystem. Null
+// (no manifest above the file) defers to the package.json/placeholder logic.
+function makeRustClassifier(cargo) {
   return (path) => {
-    if (!path.startsWith('vendor/')) return null
-    const dir = path.slice('vendor/'.length).split('/')[0]
-    if (!dir) return null
-    const bucketDir = `vendor/${dir}`
-    const pkg = parseCargoToml(join(baseDir, bucketDir, 'Cargo.toml'))
-    return pkg ? { bucketDir, name: pkg.name, version: pkg.version, ecosystem: 'cargo' } : null
+    const pkg = cargo.packageInfo(path)
+    if (!pkg) return null
+    const vendored = pkg.dir.startsWith(`${CARGO_VENDOR_DIR}/`)
+    return vendored
+      ? { bucketDir: pkg.dir, name: pkg.name, version: pkg.version, ecosystem: 'cargo' }
+      : { bucketDir: pkg.dir, name: pkg.name, version: pkg.version }
   }
 }
 
@@ -207,7 +196,7 @@ function assembleCodeBundle({
     const dep = classifyDep?.(path)
     if (dep) {
       ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem)
-        .files[path.slice(dep.bucketDir.length + 1)] = content
+        .files[dep.bucketDir === '.' ? path : path.slice(dep.bucketDir.length + 1)] = content
       continue
     }
     const meta = findPackageMetadata(baseDir, path)
@@ -330,9 +319,12 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   })
 }
 
-// Build an in-memory Bundle from entry .rs files by walking `mod` declarations. An
-// unresolvable `mod` is fatal; `use crate::` edges are recorded best-effort (never widen
-// the file set, not gated).
+// Build an in-memory Bundle from entry .rs files (crate roots) by walking `mod` declarations and
+// references to in-tree crates (the package's own lib, Cargo `path` deps, `cargo vendor`ed
+// crates). An unresolvable unconditional `mod` is fatal; path edges (`crate::`/`self::`/`super::`/
+// relative `use`s) are recorded best-effort and never widen the file set. Registry deps that
+// aren't vendored can't be bundled: they're reported, with a `cargo vendor` hint when there is no
+// `vendor/` dir at all.
 export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildRustBundle: at least one entry .rs file is required')
@@ -345,7 +337,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   const normalized = normalizeEntries(entries, cwd)
 
   const sources = await collectRustFilesFromDisk(baseDir, normalized)
-  const { resolutions, missing } = buildRustTree(sources)
+  const { resolutions, missing, unresolvedCrates } = buildRustTree(sources, { roots: normalized, baseDir })
 
   const issues = []
   for (const entry of normalized) {
@@ -358,6 +350,14 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
     throw new Error(`Rust bundle has unresolved modules:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
+  // Deps live outside the bundle root unless vendored; with no `vendor/` dir the fix is one command.
+  if (unresolvedCrates.size > 0 && !existsSync(join(baseDir, CARGO_VENDOR_DIR))) {
+    const names = [...unresolvedCrates].toSorted()
+    const shown = names.slice(0, 10).join(', ') + (names.length > 10 ? `, ... and ${names.length - 10} more` : '')
+    console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not found in the bundle root (${shown}). ` +
+      `Registry dependencies are bundled only when vendored in-tree: run \`cargo vendor\` in ${cwd} and re-bundle.`)
+  }
+
   return assembleCodeBundle({
     baseDir,
     entries: normalized,
@@ -367,7 +367,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
     workspaceVersion: RUST_WORKSPACE_VERSION,
     format: RUST_FORMAT,
     conditionKey: 'rust',
-    classifyDep: makeRustClassifier(baseDir),
+    classifyDep: makeRustClassifier(createCargoContext(baseDir)),
   })
 }
 
