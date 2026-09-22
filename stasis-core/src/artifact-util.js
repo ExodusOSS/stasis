@@ -278,8 +278,13 @@ export function mergeModuleMaps(a, b, label) {
       }
       assert(existing.name === info.name,
         `${label}: module '${dir}' name mismatch ('${existing.name}' vs '${info.name}')`)
+      // A one-sided absent version is usually a migration skew: older stasis fabricated '0.0.0'
+      // for a workspace package whose package.json has no version, newer stasis records none.
       assert(existing.version === info.version,
-        `${label}: module '${dir}' version mismatch ('${existing.version}' vs '${info.version}')`)
+        `${label}: module '${dir}' version mismatch ('${existing.version}' vs '${info.version}')` +
+        ((existing.version == null) === (info.version == null) ? '' :
+          ` -- an artifact from an older stasis may record a placeholder version for a workspace ` +
+          `package without one; regenerate it (bundle=replace / lock=replace)`))
       assert(existing.ecosystem === info.ecosystem,
         `${label}: module '${dir}' ecosystem mismatch ('${existing.ecosystem ?? '(none)'}' vs '${info.ecosystem ?? '(none)'}')`)
       for (const [rel, value] of Object.entries(info.files)) {
@@ -293,6 +298,25 @@ export function mergeModuleMaps(a, b, label) {
   }
   absorb(a)
   absorb(b)
+  // One project-relative path must live in exactly one bucket. Bucketing can change between
+  // releases (a versionless workspace package used to fall through to a parent bucket and now owns
+  // its own), and per-dir absorption cannot see that: without this check the merge would WRITE an
+  // artifact that then fails its own next parse on the duplicate-file-key guard.
+  const owners = new Map()
+  for (const [dir, { files }] of out) {
+    for (const rel of Object.keys(files)) {
+      const key = moduleFileKey(dir, rel)
+      const owner = owners.get(key)
+      if (owner !== undefined) {
+        // Message built only on failure: this loop visits every merged file.
+        assert(false,
+          `${label}: file '${key}' is bucketed under both '${owner}' and '${dir}' -- module bucketing ` +
+          `changed between the artifacts (a workspace package without a version now owns its own ` +
+          `bucket); regenerate the artifact (bundle=replace / lock=replace)`)
+      }
+      owners.set(key, dir)
+    }
+  }
   return out
 }
 

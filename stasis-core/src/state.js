@@ -443,7 +443,10 @@ export class State {
         assert.ok(this.modules.has(dir), `bundle module ${dir} missing in lockfile`)
         const lockModule = this.modules.get(dir)
         assert.equal(info.name, lockModule.name)
-        if (info.version) assert.equal(info.version, lockModule.version)
+        // Strict, absent included: every absorb site requires a v1 bundle, so a missing version is
+        // a real workspace identity (or a stripped field), never v0 partial metadata -- a
+        // version-less bundle bucket must not dodge the lockfile consistency check.
+        assert.equal(info.version, lockModule.version, `bundle module ${dir} version mismatch with lockfile`)
         for (const rel of Object.keys(info.files)) {
           assert.ok(Object.hasOwn(lockModule.files, rel), `bundle file ${dir}/${rel} missing in lockfile`)
         }
@@ -481,7 +484,9 @@ export class State {
       // Mutate in place: this.entries may be shared by reference with a sidecar's parent.
       for (const e of bundle.entries) this.entries.add(e)
       for (const [dir, info] of bundle.modules) {
-        if (!info.name || !info.version) continue // partial metadata
+        // Skip v0 partial metadata (nameless workspace buckets, version-less node_modules
+        // buckets); a v1 workspace bucket may omit version, so its identity is absorbed anyway.
+        if (!info.name || (!info.version && hasNodeModulesSegment(dir))) continue
         if (this.modules.has(dir)) {
           // A dir may be added twice (code + resource entries), and both must agree.
           const existing = this.modules.get(dir)
@@ -752,15 +757,20 @@ export class State {
       pkgAbsolute = closestPkgAbsolute
       let json = closestPkg
       while (true) {
-        if (json.name !== undefined && json.version !== undefined) {
-          ;({ name, version } = json)
+        // A workspace package outside node_modules may omit version (private/unpublished): the
+        // name alone claims the bucket. node_modules buckets (above) still require both.
+        if (json.name !== undefined) {
+          name = json.name
+          // A literal `"version": null` folds to undefined here too: the parsers normalize the same
+          // way, and recording null verbatim would split identity on the next run's re-read.
+          version = json.version ?? undefined
           break
         }
         assert.ok(Object.keys(json).every((k) => k === 'type'))
         const next = findPackageJSON('..', pathToFileURL(pkgAbsolute))
         assert.ok(
           next && !relative(this.root, next).startsWith('..'),
-          `No package.json with name+version found for ${file}`
+          `No package.json with a name found for ${file}`
         )
         pkgAbsolute = next
         json = readPackageJSON(pkgAbsolute)
@@ -778,8 +788,14 @@ export class State {
         : { name, version, files: Object.create(null) })
     }
     const module = this.modules.get(dir)
-    assert.equal(module.name, name)
-    assert.equal(module.version, version)
+    if (module.name !== name || module.version !== version) {
+      // Message built only on failure: addFile is hot, and the mismatch is a migration/drift event.
+      const hint = (module.version == null) === (version == null) ? '' :
+        ' -- an artifact from an older stasis may record a placeholder version for a workspace ' +
+        'package without one; regenerate it (lock=replace / bundle=replace)'
+      assert.fail(`module identity mismatch for '${dir}': artifact records ` +
+        `'${module.name}@${module.version ?? '(none)'}', package.json has '${name}@${version ?? '(none)'}'${hint}`)
+    }
 
     return { absolute, file, dir, module, closestType }
   }

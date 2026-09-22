@@ -161,6 +161,51 @@ test('collectComponents treats a legacy PHP bundle (php format, no ecosystem fie
   ])
 })
 
+// ── versionless workspace packages (a private package.json may omit version) ──
+
+// One versionless workspace bucket plus one tagged dependency.
+const NOVERSION = {
+  version: 0,
+  config: { scope: 'full' },
+  entries: ['index.js'],
+  sources: { pkg: { name: 'pkg-noversion', files: { 'index.js': 'sha512-a' } } },
+  modules: { 'node_modules/dep': { name: 'dep', version: '1.0.0', ecosystem: 'npm', files: { 'index.js': 'sha512-b' } } },
+}
+
+test('buildPurl omits the version qualifier when there is none', (t) => {
+  t.assert.equal(buildPurl('npm', 'pkg-noversion', undefined), 'pkg:npm/pkg-noversion')
+  t.assert.equal(buildPurl('npm', '@scope/app', undefined), 'pkg:npm/%40scope/app')
+})
+
+test('collectComponents keeps a versionless workspace package', (t) => {
+  const components = collectComponents([lockOf(NOVERSION)])
+  t.assert.deepEqual(components.map((c) => c.name), ['dep', 'pkg-noversion'])
+  const ws = components[1]
+  t.assert.equal(ws.version, undefined)
+  t.assert.equal(ws.scope, 'workspace')
+  t.assert.equal(ws.purl, 'pkg:npm/pkg-noversion')
+})
+
+test('toSpdx names the document after a versionless primary and omits versionInfo', (t) => {
+  const doc = toSpdx(collectComponents([lockOf(NOVERSION)]), fixed)
+  t.assert.equal(doc.name, 'pkg-noversion')
+  const root = doc.packages.find((p) => p.name === 'pkg-noversion')
+  t.assert.ok(!('versionInfo' in root), 'versionInfo must be omitted, not "undefined"')
+  t.assert.equal(root.primaryPackagePurpose, 'APPLICATION')
+  t.assert.equal(root.externalRefs[0].referenceLocator, 'pkg:npm/pkg-noversion')
+  const describes = doc.relationships.filter((r) => r.relationshipType === 'DESCRIBES')
+  t.assert.equal(describes.length, 1)
+  t.assert.equal(describes[0].relatedSpdxElement, root.SPDXID)
+})
+
+test('toCyclonedx keeps a versionless primary as metadata.component without a version field', (t) => {
+  const doc = toCyclonedx(collectComponents([lockOf(NOVERSION)]), fixed)
+  t.assert.equal(doc.metadata.component.name, 'pkg-noversion')
+  t.assert.ok(!('version' in doc.metadata.component), 'version must be omitted, not "undefined"')
+  t.assert.equal(doc.metadata.component.purl, 'pkg:npm/pkg-noversion')
+  t.assert.deepEqual(doc.dependencies, [{ ref: 'pkg:npm/pkg-noversion', dependsOn: ['pkg:npm/dep@1.0.0'] }])
+})
+
 // ── toSpdx ───────────────────────────────────────────────────────────────────
 
 test('toSpdx DESCRIBES the single workspace root and the root DEPENDS_ON each dependency', (t) => {

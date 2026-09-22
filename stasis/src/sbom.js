@@ -49,6 +49,8 @@ function splitName(ecosystem, name) {
 // Build a Package URL (purl) for a known ecosystem, or null when it has no purl type. Each path
 // segment is percent-encoded (npm scope's `@` -> `%40`) while the `/` namespace separator and the
 // `@` before the version stay literal; Composer and GitHub names are lowercased, per the purl spec.
+// The version qualifier is optional in the purl spec, so a versionless workspace package mints a
+// bare-name purl rather than a fabricated version.
 export function buildPurl(ecosystem, rawName, version) {
   if (!PURL_TYPES.has(ecosystem)) return null
   let { group, name } = splitName(ecosystem, rawName)
@@ -57,23 +59,29 @@ export function buildPurl(ecosystem, rawName, version) {
     name = name.toLowerCase()
   }
   const namespace = group ? `${encodeURIComponent(group)}/` : ''
-  return `pkg:${ecosystem}/${namespace}${encodeURIComponent(name)}@${encodeURIComponent(version)}`
+  const at = version == null ? '' : `@${encodeURIComponent(version)}`
+  return `pkg:${ecosystem}/${namespace}${encodeURIComponent(name)}${at}`
 }
 
 function compareComponents(a, b) {
   if (a.name !== b.name) return a.name < b.name ? -1 : 1
-  if (a.version !== b.version) {
-    if (semver.valid(a.version) && semver.valid(b.version)) return semver.compare(a.version, b.version)
-    return a.version < b.version ? -1 : 1
+  // A missing version sorts first, as '' (comparing raw undefined would be order-unstable).
+  const [av, bv] = [a.version ?? '', b.version ?? '']
+  if (av !== bv) {
+    if (semver.valid(av) && semver.valid(bv)) return semver.compare(av, bv)
+    return av < bv ? -1 : 1
   }
   return a.ecosystem < b.ecosystem ? -1 : a.ecosystem > b.ecosystem ? 1 : 0
 }
 
 // Collect the deduplicated, sorted set of packages across parsed artifacts. Unlike `stasis audit`
 // (installed deps only), an SBOM is the *full* bill of materials, so workspace/first-party packages
-// are included too, tagged scope 'workspace' vs 'dependency'. Buckets without a name+version are
-// skipped. Dedup is by ecosystem+name+version; a package seen as workspace in any artifact stays
-// workspace regardless of argument order, so output doesn't depend on how artifacts are listed.
+// are included too, tagged scope 'workspace' vs 'dependency'. Buckets without a name are skipped,
+// and so are DEPENDENCY buckets without a version (v0 partial metadata: unverifiable identity) --
+// but a workspace package may legitimately omit version (private/unpublished) and is kept, since
+// dropping it would silently lose the document's own first-party subject. Dedup is by
+// ecosystem+name+version; a package seen as workspace in any artifact stays workspace regardless
+// of argument order, so output doesn't depend on how artifacts are listed.
 export function collectComponents(artifacts) {
   const seen = new Map()
   for (const artifact of artifacts) {
@@ -83,7 +91,7 @@ export function collectComponents(artifacts) {
     const tagged = records.some(([, m]) => m.ecosystem !== undefined)
     const fileEcosystem = detectEcosystem(artifact)
     for (const [dir, { name, version, ecosystem }] of records) {
-      if (!name || !version) continue
+      if (!name) continue
       let scope, eco
       if (ecosystem !== undefined) {
         scope = 'dependency'
@@ -96,13 +104,14 @@ export function collectComponents(artifacts) {
         scope = classifyScope(fileEcosystem, dir)
         eco = fileEcosystem
       }
-      const key = `${eco} ${name} ${version}`
+      if (!version && scope !== 'workspace') continue
+      const key = `${eco} ${name} ${version ?? ''}`
       const existing = seen.get(key)
       if (existing) {
         if (scope === 'workspace') existing.scope = 'workspace'
         continue
       }
-      seen.set(key, { name, version, scope, ecosystem: eco, purl: buildPurl(eco, name, version) })
+      seen.set(key, { name, version: version ?? undefined, scope, ecosystem: eco, purl: buildPurl(eco, name, version) })
     }
   }
   return [...seen.values()].toSorted(compareComponents)
@@ -121,8 +130,8 @@ function selectPrimary(components) {
 const isoSeconds = (date) => date.toISOString().replace(/\.\d{3}Z$/u, 'Z')
 
 // A CycloneDX bom-ref must uniquely identify a component; use the purl when present, else
-// ecosystem+name+version (unique by construction -- it's the dedup key).
-const bomRef = (c) => c.purl ?? `${c.ecosystem}:${c.name}@${c.version}`
+// ecosystem+name(+version) (unique by construction -- it's the dedup key).
+const bomRef = (c) => c.purl ?? `${c.ecosystem}:${c.name}${c.version == null ? '' : `@${c.version}`}`
 
 // Render an SPDX 2.3 document. It DESCRIBES its primary component, which DEPENDS_ON each installed
 // dependency (flat graph). With no single primary, the document DESCRIBES the workspace packages,
@@ -135,7 +144,8 @@ export function toSpdx(components, { tool = DEFAULT_TOOL, now = new Date(), uuid
   const packages = ordered.map((c) => ({
     SPDXID: ids.get(c),
     name: c.name,
-    versionInfo: c.version,
+    // SPDX versionInfo is optional; omit it for a versionless workspace package.
+    ...(c.version == null ? {} : { versionInfo: c.version }),
     downloadLocation: 'NOASSERTION',
     filesAnalyzed: false,
     ...(c.purl && {
@@ -159,7 +169,9 @@ export function toSpdx(components, { tool = DEFAULT_TOOL, now = new Date(), uuid
     }
   }
 
-  const docName = primary ? `${primary.name}@${primary.version}` : 'stasis-sbom'
+  const docName = primary
+    ? (primary.version == null ? primary.name : `${primary.name}@${primary.version}`)
+    : 'stasis-sbom'
   return {
     spdxVersion: 'SPDX-2.3',
     dataLicense: 'CC0-1.0',
@@ -186,7 +198,8 @@ export function toCyclonedx(components, { tool = DEFAULT_TOOL, now = new Date(),
       'bom-ref': bomRef(c),
       ...(group && { group }),
       name,
-      version: c.version,
+      // CycloneDX 1.5 `version` is optional; omit it for a versionless workspace package.
+      ...(c.version == null ? {} : { version: c.version }),
       ...(c.purl && { purl: c.purl }),
     }
   }

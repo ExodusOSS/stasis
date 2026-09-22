@@ -24,7 +24,9 @@ const LEGACY_VERSION = 0
 
 const normalize = ({ name, version, ecosystem, files }) => {
   assert(ecosystem === undefined || typeof ecosystem === 'string')
-  return { name, version, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
+  // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
+  // identity comparisons and JSON round-trips can't split on it.
+  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
 }
 
 const inferModuleDir = (path) =>
@@ -139,7 +141,8 @@ export class Bundle {
         for (const [dir, info] of Object.entries(json.sources)) {
           assert(!hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
-          assert(info?.name && info.version && info.files)
+          // A workspace bucket may omit version (a private/unpublished package.json can lack one).
+          assert(info?.name && info.files)
           modules.set(dir, normalize(info))
         }
         // Empty entries are valid (`stasis add` attests files without making them entry points); state.assertEntry fails closed on an empty set.
@@ -169,7 +172,12 @@ export class Bundle {
     for (const [dir, { files }] of modules) {
       for (const rel of Object.keys(files)) {
         const key = moduleFileKey(dir, rel)
-        assert(!flatKeys.has(key), `duplicate file key '${key}' across bundle buckets`)
+        if (flatKeys.has(key)) {
+          // Message built only on failure: this loop visits every bundled file.
+          assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
+            `changed between writes (a workspace package without a version now owns its own ` +
+            `bucket); regenerate the artifact (bundle=replace)`)
+        }
         flatKeys.add(key)
       }
     }

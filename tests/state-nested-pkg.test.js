@@ -54,10 +54,31 @@ test('addFile walks past an empty workspace package.json to find the project pac
   t.assert.ok(module.files['empty/foo.cjs'])
 })
 
-test('addFile rejects a workspace package.json missing version but with non-type keys', (t) => {
+test('addFile accepts a workspace package.json with a name but no version', (t) => {
+  // A local workspace package outside node_modules may omit version (private/unpublished).
   const state = new State(root)
   const url = pathToFileURL(join(root, 'partial', 'file.js')).toString()
+  state.addFile(url, { format: 'module' })
+
+  const module = state.modules.get('partial')
+  t.assert.ok(module, 'version-less workspace bucket must be present')
+  t.assert.equal(module.name, 'partial')
+  t.assert.equal(module.version, undefined)
+  t.assert.equal(module.ecosystem, undefined)
+  t.assert.ok(module.files['file.js'])
+  t.assert.ok(!state.modules.has('.'), 'must not fall through to the project root bucket')
+})
+
+test('addFile rejects a workspace package.json with non-type keys but no name', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'unnamed', 'file.js')).toString()
   t.assert.throws(() => state.addFile(url, { format: 'module' }))
+})
+
+test('addFile still requires a version for a node_modules package', (t) => {
+  const state = new State(root)
+  const url = pathToFileURL(join(root, 'node_modules', 'noversion', 'index.js')).toString()
+  t.assert.throws(() => state.addFile(url, { format: 'commonjs' }), /Missing version/)
 })
 
 test('addFile infers .js format from the closest package.json type when format is omitted', (t) => {
