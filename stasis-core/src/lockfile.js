@@ -70,9 +70,12 @@ export class Lockfile {
       for (const name of Object.keys(files)) {
         assert(!posixPathEscapes(name))
         const key = moduleFileKey(dir, name)
-        assert(!flatKeys.has(key), `duplicate file key '${key}' across lockfile buckets -- module ` +
-          `bucketing changed between writes (a workspace package without a version now owns its ` +
-          `own bucket); regenerate the lockfile (lock=replace)`)
+        if (flatKeys.has(key)) {
+          // Message built only on failure: this loop visits every attested file.
+          assert(false, `duplicate file key '${key}' across lockfile buckets -- module bucketing ` +
+            `changed between writes (a workspace package without a version now owns its own ` +
+            `bucket); regenerate the lockfile (lock=replace)`)
+        }
         flatKeys.add(key)
       }
     }

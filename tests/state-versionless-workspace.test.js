@@ -162,6 +162,22 @@ test('Bundle.parse folds a null workspace version into undefined so merges canno
   t.assert.deepEqual(Object.keys(merged.files).toSorted(), ['a.js', 'b.js'])
 })
 
+test('a literal "version": null captures as absent and re-verifies across runs', withTmp('null-version', (t, dir) => {
+  // The fold must happen where the manifest is READ, not just in the artifact parsers: recording
+  // null verbatim would serialize "version": null, re-parse as undefined, and fail the second
+  // run's identity cross-check on an unchanged project.
+  writeFileSync(join(dir, 'pkg', 'package.json'), JSON.stringify({ name: 'pkg-noversion', version: null }))
+  const first = capture(dir)
+  t.assert.equal(first.modules.get('pkg').version, undefined)
+  t.assert.ok(!readFileSync(join(dir, 'stasis.lock.json'), 'utf-8').includes('"version": null'))
+
+  const again = capture(dir) // absorbs the artifacts from run 1, then re-observes the same files
+  t.assert.equal(again.modules.get('pkg').version, undefined)
+
+  t.assert.deepEqual(findPackageMetadata(dir, 'pkg/index.js'),
+    { pkgDir: 'pkg', name: 'pkg-noversion', version: undefined })
+}))
+
 test('a legacy placeholder-version mismatch names the migration remedy', (t) => {
   const base = { version: 1, config: { scope: 'full' }, entries: [], modules: {}, formats: {}, imports: {} }
   // Older stasis fabricated '0.0.0' for a versionless root; newer stasis records no version.

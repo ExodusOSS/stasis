@@ -760,7 +760,10 @@ export class State {
         // A workspace package outside node_modules may omit version (private/unpublished): the
         // name alone claims the bucket. node_modules buckets (above) still require both.
         if (json.name !== undefined) {
-          ;({ name, version } = json)
+          name = json.name
+          // A literal `"version": null` folds to undefined here too: the parsers normalize the same
+          // way, and recording null verbatim would split identity on the next run's re-read.
+          version = json.version ?? undefined
           break
         }
         assert.ok(Object.keys(json).every((k) => k === 'type'))

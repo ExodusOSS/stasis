@@ -172,9 +172,12 @@ export class Bundle {
     for (const [dir, { files }] of modules) {
       for (const rel of Object.keys(files)) {
         const key = moduleFileKey(dir, rel)
-        assert(!flatKeys.has(key), `duplicate file key '${key}' across bundle buckets -- module ` +
-          `bucketing changed between writes (a workspace package without a version now owns its ` +
-          `own bucket); regenerate the artifact (bundle=replace)`)
+        if (flatKeys.has(key)) {
+          // Message built only on failure: this loop visits every bundled file.
+          assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
+            `changed between writes (a workspace package without a version now owns its own ` +
+            `bucket); regenerate the artifact (bundle=replace)`)
+        }
         flatKeys.add(key)
       }
     }

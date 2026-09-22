@@ -307,10 +307,13 @@ export function mergeModuleMaps(a, b, label) {
     for (const rel of Object.keys(files)) {
       const key = moduleFileKey(dir, rel)
       const owner = owners.get(key)
-      assert(owner === undefined,
-        `${label}: file '${key}' is bucketed under both '${owner}' and '${dir}' -- module bucketing ` +
-        `changed between the artifacts (a workspace package without a version now owns its own ` +
-        `bucket); regenerate the artifact (bundle=replace / lock=replace)`)
+      if (owner !== undefined) {
+        // Message built only on failure: this loop visits every merged file.
+        assert(false,
+          `${label}: file '${key}' is bucketed under both '${owner}' and '${dir}' -- module bucketing ` +
+          `changed between the artifacts (a workspace package without a version now owns its own ` +
+          `bucket); regenerate the artifact (bundle=replace / lock=replace)`)
+      }
       owners.set(key, dir)
     }
   }

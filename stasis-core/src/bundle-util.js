@@ -29,7 +29,8 @@ export function findPackageMetadata(baseDir, fileRelPath) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
         if (pkg.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
-          return { pkgDir: dir, name: pkg.name, version: pkg.version }
+          // `?? undefined` folds a literal `"version": null` into the one absent-version spelling.
+          return { pkgDir: dir, name: pkg.name, version: pkg.version ?? undefined }
         }
       } catch { /* malformed -- keep walking */ }
     }
