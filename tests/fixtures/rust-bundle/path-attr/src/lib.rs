@@ -22,6 +22,11 @@ pub mod raw {
 #[cfg_attr(windows, path = "sys/windows.rs")]
 mod sys;
 
-// a cfg_attr variant with no fallback file and no matching variant on disk: tolerated
+// a platform-only module whose variant is not on disk: gated, so tolerated
+#[cfg(target_os = "fuchsia")]
 #[cfg_attr(target_os = "fuchsia", path = "sys/fuchsia.rs")]
 mod exotic;
+
+// a cfg_attr that applies a non-cfg attribute gates nothing: the module is unconditional
+#[cfg_attr(docsrs, doc(cfg(feature = "de")))]
+pub mod documented;

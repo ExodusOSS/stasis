@@ -5,7 +5,7 @@ mod outer {
         pub mod leaf;
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "testing")]
     mod tests {
         use super::inner::go;
         mod fixtures;

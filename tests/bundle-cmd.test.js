@@ -2889,7 +2889,7 @@ test('buildRustBundle follows Cargo path dependencies across a workspace, one bu
 test('buildRustBundle honours #[path] (crate root, non-root sibling, inside an inline module) and cfg_attr variants', async (t) => {
   const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'path-attr'), entries: ['src/lib.rs'] })
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
-    'src/de.rs', 'src/de/seed.rs', 'src/discouraged.rs', 'src/lib.rs', 'src/parse.rs', 'src/private/mod.rs',
+    'src/de.rs', 'src/de/seed.rs', 'src/discouraged.rs', 'src/documented.rs', 'src/lib.rs', 'src/parse.rs', 'src/private/mod.rs',
     'src/raw/mod.rs', 'src/sys.rs', 'src/sys/unix.rs', 'src/sys/windows.rs',
   ])
   const lib = bundle.imports.get('rust').get('src/lib.rs')
@@ -2923,6 +2923,19 @@ test('buildRustBundle resolves a mod declared inside inline modules under their 
   t.assert.equal(main.get('mod outer::inner'), 'src/outer/inner.rs')
   t.assert.equal(main.get('mod outer::deep::leaf'), 'src/outer/deep/leaf.rs')
   t.assert.equal(main.get('outer::inner::go'), 'src/outer/inner.rs')
+})
+
+test('buildRustBundle leaves test/doc-only modules and the dev-deps they reach out of the bundle', async (t) => {
+  const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'cfg-test'), entries: ['src/lib.rs'] }))
+  t.assert.deepEqual(warnings, [])
+  // Not bundled: src/tests/mod.rs, src/prop/strategies.rs, src/doc_only.rs, src/sys/mock.rs, vendor/proptest, vendor/quickcheck, serde's test helpers.
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+    'src/backend.rs', 'src/lib.rs', 'src/maybe.rs', 'src/real.rs', 'src/sys/unix.rs', 'src/sys/windows.rs', 'vendor/serde/src/lib.rs',
+  ])
+  t.assert.deepEqual([...bundle.modules.keys()].toSorted(), ['.', 'vendor/serde'])
+  const lib = bundle.imports.get('rust').get('src/lib.rs')
+  t.assert.deepEqual(Object.fromEntries(lib.get('mod sys')), { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs' })
+  t.assert.equal(lib.get('mod backend'), 'src/backend.rs')
 })
 
 test('buildRustBundle follows cfg_if!-style mods and tolerates macro-generated ones with no .rs file', async (t) => {

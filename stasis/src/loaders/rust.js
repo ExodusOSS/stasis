@@ -148,7 +148,7 @@ function charLiteralEnd(content, i) {
 // --- Item scanning ----------------------------------------------------------------------
 
 const WORD_RE = /[A-Za-z_]\w*/uy
-const EXTERN_CRATE_RE = /extern\s+crate\s+(?:r#)?(\w+)(?:\s+as\s+(?:r#)?\w+)?\s*;/uy
+const EXTERN_CRATE_RE = /extern\s+crate\s+(?:r#)?(\w+)(?:\s+as\s+(?:r#)?(\w+))?\s*;/uy
 // Expression-position paths anchored on a keyword, and any `lead::…` path whose lead is lowercase
 // (skipping `Type::assoc` associated-item paths). Both run over the masked view, so string
 // contents can't fake one.
@@ -192,30 +192,61 @@ function splitTopLevel(text) {
   return parts
 }
 
-// One outer attribute's text (inside `#[…]`) → whether it gates the item on a config that may be
-// off, and the module file paths it names: `#[path = "…"]` outright (cfg null), or each
-// `#[cfg_attr(<pred>, path = "…")]` under its predicate.
+const normalizeCfg = (pred) => pred.replaceAll(/\s+/gu, ' ').trim()
+
+// Predicates that are never true when a program (or a dependency of one) is built: `test` /
+// `doctest` only under `cargo test` of that very crate, `doc` only under rustdoc.
+const NEVER_BUILT_CFGS = new Set(['test', 'doctest', 'doc'])
+
+// Three-valued evaluation of a cfg predicate: `false` when it can never hold in a build (so the
+// item it gates is dead code for the bundle), `true` when it always does, `null` when it depends
+// on the target or the enabled features, which the loader can't know. `all`/`any`/`not` compose;
+// every other leaf (`unix`, `feature = "x"`, `target_os = …`) is unknown.
+export function evalCfg(pred) {
+  const p = pred.trim()
+  const m = /^(all|any|not)\s*\(([\s\S]*)\)$/u.exec(p)
+  if (!m) return NEVER_BUILT_CFGS.has(p) ? false : null
+  const args = splitTopLevel(m[2]).map((a) => a.trim()).filter(Boolean).map(evalCfg)
+  if (m[1] === 'not') return args.length === 1 && args[0] !== null ? !args[0] : null
+  if (m[1] === 'all') return args.includes(false) ? false : (args.every((a) => a === true) ? true : null)
+  return args.includes(true) ? true : (args.every((a) => a === false) ? false : null)
+}
+
+// Combine an item's cfg predicates (several `#[cfg]` attributes all apply) into one; null when ungated.
+const joinCfgs = (preds) => (preds.length === 0 ? null : (preds.length === 1 ? preds[0] : `all(${preds.join(', ')})`))
+
+// One outer attribute's text (inside `#[…]`) → `cfg`: the predicate gating the item (`#[cfg(<pred>)]`,
+// a `#[cfg_attr(<pred>, cfg(…))]`, or `test` for a `#[test]` fn; null when the item is
+// unconditional -- a `cfg_attr` applying any other attribute, `doc(cfg(…))` included, gates
+// nothing) and `paths`: the module file paths it names, `#[path = "…"]` outright (cfg null) or
+// each `#[cfg_attr(<pred>, path = "…")]` under its predicate.
 function parseAttr(text) {
   const path = ATTR_PATH_RE.exec(text)
-  if (path) return { conditional: false, paths: [{ path: path[1], cfg: null }] }
+  if (path) return { cfg: null, paths: [{ path: path[1], cfg: null }] }
+  if (/^\s*test\s*$/u.test(text)) return { cfg: 'test', paths: [] }
+  const cfg = /^\s*cfg\s*\(([\s\S]*)\)\s*$/u.exec(text)
+  if (cfg) return { cfg: normalizeCfg(cfg[1]), paths: [] }
   const cfgAttr = /^\s*cfg_attr\s*\(([\s\S]*)\)\s*$/u.exec(text)
   if (cfgAttr) {
     const parts = splitTopLevel(cfgAttr[1])
-    const pred = (parts.shift() ?? '').replaceAll(/\s+/gu, ' ').trim()
+    const pred = normalizeCfg(parts.shift() ?? '')
     const paths = []
+    let gates = false
     for (const part of parts) {
       const m = ATTR_PATH_RE.exec(part)
       if (m) paths.push({ path: m[1], cfg: pred })
+      else if (/^\s*cfg\s*\(/u.test(part)) gates = true
     }
-    return { conditional: true, paths }
+    return { cfg: gates ? pred : null, paths }
   }
-  return { conditional: /^\s*cfg\s*\(/u.test(text), paths: [] }
+  return { cfg: null, paths: [] }
 }
 
 // Flatten a `use` tree body (the text between `use` and `;`) into the paths it imports, as
-// `{ segments, absolute, spec }`: `a::{b::C, d::{E, F}}` → `a::b::C`, `a::d::E`, `a::d::F`; a
-// glob or `self` inside a group names the group's own module; `as` renames are dropped; a leading
-// `::` marks the path absolute (an external crate). `spec` is the flat path as it would be written.
+// `{ segments, absolute, spec, binding }`: `a::{b::C, d::{E, F}}` → `a::b::C`, `a::d::E`, `a::d::F`;
+// a glob or `self` inside a group names the group's own module; a leading `::` marks the path
+// absolute (an external crate). `spec` is the flat path as it would be written; `binding` the name
+// the import brings into scope (its last segment, or the `as` alias; null for a glob or `_`).
 export function parseUseTree(body) {
   const tokens = [...body.matchAll(/::|[{},*]|\bas\b|(?:r#)?\w+/gu)].map((m) => m[0])
   const out = []
@@ -223,8 +254,10 @@ export function parseUseTree(body) {
   const peek = () => tokens[pos]
   const next = () => tokens[pos++]
   const isIdent = (tok) => tok !== undefined && tok !== 'as' && /^(?:r#)?\w+$/u.test(tok)
-  const emit = (segments, absolute) => {
-    if (segments.length > 0) out.push({ segments, absolute, spec: `${absolute ? '::' : ''}${segments.join('::')}` })
+  const emit = (segments, absolute, binding) => {
+    if (segments.length > 0) {
+      out.push({ segments, absolute, spec: `${absolute ? '::' : ''}${segments.join('::')}`, binding: binding === '_' ? null : binding })
+    }
   }
   const parse = (prefix, absolute) => {
     let tok = peek()
@@ -246,7 +279,7 @@ export function parseUseTree(body) {
     }
     if (tok === '*') {
       next()
-      emit(prefix, absolute)
+      emit(prefix, absolute, null)
       return
     }
     if (!isIdent(tok)) return
@@ -262,34 +295,43 @@ export function parseUseTree(body) {
         return
       }
     }
+    let alias = null
     if (peek() === 'as') {
       next()
-      next()
+      alias = isIdent(peek()) ? next().replace(/^r#/u, '') : null
     }
     // `use a::{self, b}`: `self` names the group's own module.
     if (prefix.length > 0 && segments.length === prefix.length + 1 && segments.at(-1) === 'self') segments.pop()
-    emit(segments, absolute)
+    emit(segments, absolute, alias ?? segments.at(-1))
   }
   parse([], false)
   return out
 }
 
-// Statically scan one file's items. Returns
-//   mods:         external `mod` declarations `{ name, inlinePath, conditional, paths }` -- `inlinePath`
-//                 is the chain of inline `mod x { … }` blocks it sits in, `conditional` marks one
-//                 that may not exist as an item (`#[cfg(…)]`/`#[cfg_attr(…)]`-gated, an inline
-//                 ancestor so gated, or inside a macro invocation body), `paths` the explicit file
-//                 paths its attributes name (see parseAttr);
-//   refs:         path references `{ spec, segments, absolute, inlinePath }` -- flattened `use` trees
-//                 plus expression-position `crate::`/`self::`/`super::`/`lead::…` paths;
-//   externCrates: `extern crate x [as y];` names, with their inlinePath.
+// Statically scan one file's items. An item whose cfg can never hold in a build (`#[cfg(test)]`,
+// `#[test]`, `#[cfg(doc)]`, …) is skipped whole -- an inline `mod tests { … }` with everything in
+// it, a `fn`'s body, a `use` -- so test-only modules aren't bundled and the dev-dependencies test
+// code reaches for don't get pulled in. Returns
+//   mods:         external `mod` declarations `{ name, inlinePath, cfg, conditional, paths }` --
+//                 `inlinePath` is the chain of inline `mod x { … }` blocks it sits in, `cfg` the
+//                 `#[cfg(…)]` predicate gating it (several → `all(…)`; null when ungated),
+//                 `conditional` marks one that may not exist as an item (a cfg the loader can't
+//                 decide, an inline ancestor so gated, or inside a macro invocation body), `paths`
+//                 the explicit file paths its attributes name (see parseAttr);
+//   refs:         path references `{ spec, segments, absolute, inlinePath, fromUse }` -- flattened
+//                 `use` trees plus expression-position `crate::`/`self::`/`super::`/`lead::…` paths;
+//   externCrates: `extern crate x [as y];` names, with their inlinePath;
+//   bindings:     names the file's `use` items and `extern crate … as` aliases bring into scope --
+//                 a path lead among them names an import, not a crate.
 export function scanRustItems(content) {
   const { code, masked } = lexRust(content)
   const n = masked.length
   const mods = []
   const uses = []
   const useSpans = [] // [start, end) of each `use` item's body, parsed as a tree below
+  const deadSpans = [] // [start, end) of each skipped test/doc-only item
   const externCrates = []
+  const bindings = new Set()
   const spans = [] // closed inline module blocks: { start, end, path }
   const stack = [] // open inline modules: { name, depth, conditional, start }
   let depth = 0
@@ -354,6 +396,18 @@ export function scanRustItems(content) {
       i++
       continue
     }
+    // An item gated on a cfg that never holds in a build is dead code for the bundle: skip it
+    // whole -- through the `;` of a declaration, or the `{ … }` of a body/block -- without
+    // recording anything in it. (`pub` is visibility, not the item; keep its attributes pending.)
+    if (word !== 'pub' && pending.length > 0 && evalCfg(joinCfgs(pending.map((a) => parseAttr(a).cfg).filter((c) => c !== null)) ?? 'all()') === false) {
+      pending = []
+      let k = i + word.length
+      while (k < n && masked[k] !== ';' && masked[k] !== '{') k++
+      const end = masked[k] === '{' ? matchClose(masked, k) + 1 : k + 1
+      deadSpans.push([i, end])
+      i = end
+      continue
+    }
     // `name!` followed by a bracket opens a macro invocation body (`macro_rules! name` too).
     const bang = skipWs(i + word.length)
     if (masked[bang] === '!') {
@@ -384,9 +438,11 @@ export function scanRustItems(content) {
       const k = skipWs(j + name.length)
       const attrs = pending.map(parseAttr)
       pending = []
-      const conditional = attrs.some((a) => a.conditional) || stack.some((s) => s.conditional) || i < macroUntil
+      const cfg = joinCfgs(attrs.map((a) => a.cfg).filter((c) => c !== null))
+      // Dead cfgs were skipped above; a decidable-true one (`not(test)`) is as firm as no cfg at all.
+      const conditional = (cfg !== null && evalCfg(cfg) !== true) || stack.some((s) => s.conditional) || i < macroUntil
       if (masked[k] === ';') {
-        mods.push({ name, inlinePath: inlinePath(), conditional, paths: attrs.flatMap((a) => a.paths) })
+        mods.push({ name, inlinePath: inlinePath(), cfg, conditional, paths: attrs.flatMap((a) => a.paths) })
         i = k + 1
         continue
       }
@@ -403,7 +459,10 @@ export function scanRustItems(content) {
       const end = masked.indexOf(';', i + 3)
       const stop = end === -1 ? n : end
       const ip = inlinePath()
-      for (const p of parseUseTree(code.slice(i + 3, stop))) uses.push({ ...p, inlinePath: ip })
+      for (const p of parseUseTree(code.slice(i + 3, stop))) {
+        uses.push({ ...p, inlinePath: ip })
+        if (p.binding !== null) bindings.add(p.binding)
+      }
       useSpans.push([i, stop])
       pending = []
       i = stop + 1
@@ -415,6 +474,7 @@ export function scanRustItems(content) {
       pending = []
       if (m) {
         externCrates.push({ name: m[1], inlinePath: inlinePath() })
+        if (m[2] !== undefined) bindings.add(m[2])
         i = EXTERN_CRATE_RE.lastIndex
         continue
       }
@@ -443,18 +503,20 @@ export function scanRustItems(content) {
   }
   for (const u of uses) addRef(u.spec, u.segments, u.absolute, u.inlinePath, true)
   // Expression-position paths: scan everything outside `use` items (the tree parser owns those;
-  // a regex over `use syn::{parse::Parse}` would take `parse::Parse` for a local module path).
+  // a regex over `use syn::{parse::Parse}` would take `parse::Parse` for a local module path) and
+  // outside skipped test/doc-only items (a `quickcheck::quickcheck(…)` in a `#[test]` fn body
+  // must not pull the vendored dev-dependency in).
   let exprs = masked
-  if (useSpans.length > 0) {
+  if (useSpans.length > 0 || deadSpans.length > 0) {
     const chars = masked.split('')
-    for (const [start, end] of useSpans) chars.fill(' ', start, end)
+    for (const [start, end] of [...useSpans, ...deadSpans]) chars.fill(' ', start, end)
     exprs = chars.join('')
   }
   for (const m of exprs.matchAll(KEYWORD_PATH_RE)) addRef(m[0], m[0].split('::'), false, inlineAt(m.index), false)
   for (const m of exprs.matchAll(LEAD_PATH_RE)) {
     if (!NON_CRATE_LEADS.has(m[1])) addRef(m[0], m[0].split('::'), false, inlineAt(m.index), false)
   }
-  return { mods, refs: [...refs.values()], externCrates }
+  return { mods, refs: [...refs.values()], externCrates, bindings }
 }
 
 // --- Module files -----------------------------------------------------------------------
@@ -520,7 +582,8 @@ export function resolveExplicitModPath(explicitPath, fromFile, { knownSources, b
 
 // Every file a `mod` declaration can denote, as `{ cfg, file }`: an unconditional `#[path]` names
 // one outright; otherwise each `#[cfg_attr(<pred>, path = …)]` names one under its predicate
-// (`cfg`), and the default `<name>.rs`/`<name>/mod.rs` lookup is the fallback (`cfg` null).
+// (`cfg`; a predicate that never holds in a build, `test`, is dropped), and the default
+// `<name>.rs`/`<name>/mod.rs` lookup is the fallback (`cfg` null).
 export function resolveModDecl(decl, fromFile, opts = {}) {
   const o = { ...opts, inlinePath: decl.inlinePath }
   const unconditional = decl.paths.find((p) => p.cfg === null)
@@ -530,6 +593,7 @@ export function resolveModDecl(decl, fromFile, opts = {}) {
   }
   const out = []
   for (const { path, cfg } of decl.paths) {
+    if (evalCfg(cfg) === false) continue
     const file = resolveExplicitModPath(path, fromFile, o)
     if (file && !out.some((x) => x.file === file)) out.push({ cfg, file })
   }
@@ -756,15 +820,17 @@ export function resolveVendoredCrate(crateName, { knownSources, vendorDir = VEND
 
 // --- Module trees -----------------------------------------------------------------------
 
-// The files walked as crate roots: every explicit root (entry) that was loaded, every file named
-// main.rs/lib.rs (a vendored crate's root, the lib beside a bin, …) and, given a Cargo context,
-// every file a manifest names as its lib target (`[lib] path = "src/other.rs"`).
+// The files walked as crate roots: every file named main.rs/lib.rs (a vendored crate's root, the
+// lib beside a bin, …), every file a manifest names as its lib target (`[lib] path =
+// "src/other.rs"`, given a Cargo context), then every explicit root (entry) that was loaded. Roots
+// by name/manifest come first so their trees claim the files they reach (buildModuleTrees) before
+// a glob-listed module file, an entry only by role, claims itself.
 export function crateRoots(sources, explicit = [], cargo = null) {
   const roots = new Set()
-  for (const r of explicit) if (sources.has(r)) roots.add(r)
   for (const path of sources.keys()) {
     if (isNamedRoot(path) || cargo?.isLibRoot(path) === true) roots.add(path)
   }
+  for (const r of explicit) if (sources.has(r)) roots.add(r)
   return roots
 }
 
@@ -819,9 +885,10 @@ export function resolveUsePath(usePath, moduleTree) {
 // Resolve one path reference made in `file` to what it names in the bundle: a module file of the
 // same crate (`{ kind: 'module', target }`) for `crate::`/`self::`/`super::` paths and for
 // 2018-style relative paths whose lead is a child module of the current module; else an in-tree
-// crate root (`{ kind: 'crate', name, target }`) via `resolveCrate`; null for anything else (an
-// item in scope, std, a registry crate, a path above the crate root).
-function resolvePathRef(ref, file, { trees, files, resolveCrate }) {
+// crate root (`{ kind: 'crate', name, target }`) via `resolveCrate`, unless the lead is a name the
+// file imported (`bindings`: `use std::io; io::stdin()` names no crate `io`); null for anything
+// else (an item in scope, std, a registry crate, a path above the crate root).
+function resolvePathRef(ref, file, { trees, files, resolveCrate, bindings }) {
   const { segments, absolute, inlinePath } = ref
   if (segments.length === 0) return null
   const head = segments[0]
@@ -852,9 +919,26 @@ function resolvePathRef(ref, file, { trees, files, resolveCrate }) {
       return target ? { kind: 'module', target } : null
     }
   }
-  if (NON_CRATE_LEADS.has(head)) return null
+  if (NON_CRATE_LEADS.has(head) || (!absolute && bindings.has(head))) return null
   const target = resolveCrate(head, file)
   return target ? { kind: 'crate', name: head, target } : null
+}
+
+// Record `target` (file, or Map<cfg key, file>) under `spec` in `specMap`, merging with a same-name
+// declaration already there -- `#[cfg(unix)] #[path = "u.rs"] mod imp;` beside `#[cfg(windows)]
+// #[path = "w.rs"] mod imp;` -- by keying each declaration's files under its cfg predicate
+// (`declCfg`, '*' when ungated). A lone ungated single-file declaration stays a flat string.
+function setModTarget(specMap, declKeys, spec, targets, declCfg) {
+  const incoming = targets.map((t) => [cfgKey(t.cfg ?? declCfg), t.file])
+  const prior = specMap.get(spec)
+  if (prior === undefined) {
+    declKeys.set(spec, incoming[0][0])
+    specMap.set(spec, incoming.length === 1 ? incoming[0][1] : new Map(incoming))
+    return
+  }
+  const merged = prior instanceof Map ? prior : new Map([[declKeys.get(spec), prior]])
+  for (const [key, file] of incoming) if (!merged.has(key)) merged.set(key, file)
+  specMap.set(spec, merged)
 }
 
 // Bundle import keys can't contain '/'; a cfg predicate practically never does, but fail safe.
@@ -869,10 +953,11 @@ const SYSROOT_CRATES = new Set(['std', 'core', 'alloc', 'proc_macro', 'test'])
 // (crate roots by role; main.rs/lib.rs are roots by name regardless); `baseDir` enables crate
 // resolution through Cargo.toml (own lib, path deps), else only vendored crates already in
 // `sources` resolve. Spec shapes in `resolutions`: `mod <name>` (`mod a::<name>` inside inline
-// module `a`) → file, or a Map<cfg predicate | '*', file> when `#[cfg_attr(…, path)]` variants
-// differ; `<path as written>` → module file; `use <crate>` → crate root. `unresolvedCrates` names
-// the crates `use`/`extern crate` referenced that nothing in-tree satisfied (registry deps that
-// weren't vendored, typically) -- informational, never fatal.
+// module `a`) → file, or a Map<cfg predicate | '*', file> when `#[cfg_attr(…, path)]` variants or
+// same-name `#[cfg]`-gated declarations name different files; `<path as written>` → module file;
+// `use <crate>` → crate root. `unresolvedCrates` names the crates `use`/`extern crate` referenced
+// that nothing in-tree satisfied (registry deps that weren't vendored, typically) --
+// informational, never fatal.
 export function buildRustTree(sources, { roots = [], baseDir = null } = {}) {
   const cargo = baseDir ? createCargoContext(baseDir) : null
   const rootSet = crateRoots(sources, roots, cargo)
@@ -884,6 +969,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null } = {}) {
     const items = scanRustItems(content)
     scanned.set(path, items)
     const specMap = new Map()
+    const declKeys = new Map()
     for (const decl of items.mods) {
       const spec = `mod ${[...decl.inlinePath, decl.name].join('::')}`
       const targets = resolveModDecl(decl, path, { knownSources: sources, roots: rootSet })
@@ -895,7 +981,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null } = {}) {
         }
         continue
       }
-      specMap.set(spec, targets.length === 1 ? targets[0].file : new Map(targets.map((t) => [cfgKey(t.cfg), t.file])))
+      setModTarget(specMap, declKeys, spec, targets, decl.cfg)
     }
     resolutions.set(path, specMap)
   }
@@ -913,12 +999,14 @@ export function buildRustTree(sources, { roots = [], baseDir = null } = {}) {
       if (!NON_CRATE_LEADS.has(name) && !SYSROOT_CRATES.has(name) && /^[a-z_]/u.test(name)) unresolvedCrates.add(name)
     }
     for (const ref of items.refs) {
-      const r = resolvePathRef(ref, path, { trees, files, resolveCrate })
+      const r = resolvePathRef(ref, path, { trees, files, resolveCrate, bindings: items.bindings })
       if (r?.kind === 'module') add(ref.spec, r.target)
       else if (r?.kind === 'crate') add(`use ${r.name}`, r.target)
-      else if (r === null && ref.fromUse) noteUnresolved(ref.segments[0])
+      // A `use` whose lead is neither a module, an in-tree crate, nor something this file imported.
+      else if (r === null && ref.fromUse && !items.bindings.has(ref.segments[0])) noteUnresolved(ref.segments[0])
     }
     for (const { name } of items.externCrates) {
+      if (NON_CRATE_LEADS.has(name)) continue // `extern crate self as x;` / `extern crate alloc;`
       const target = resolveCrate(name, path)
       if (target) add(`use ${name}`, target)
       else noteUnresolved(name)
@@ -965,17 +1053,20 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
       if (!entry) continue
       const [relPath, content] = entry
       sources.set(relPath, content)
-      const { mods, refs, externCrates } = scanRustItems(content)
+      const { mods, refs, externCrates, bindings } = scanRustItems(content)
       for (const decl of mods) {
         for (const { file } of resolveModDecl(decl, relPath, { baseDir, roots })) {
           if (!sources.has(file)) next.push(file)
         }
       }
       // A reference to an in-tree crate pulls its root in (a crate root by role, whatever its
-      // name -- `[lib] path` may point anywhere); the root's own `mod` edges follow next wave.
-      const leads = new Set(externCrates.map((e) => e.name))
-      for (const r of refs) if (!NON_CRATE_LEADS.has(r.segments[0])) leads.add(r.segments[0])
+      // name -- `[lib] path` may point anywhere); the root's own `mod` edges follow next wave. A
+      // lead this file imported by `use` (or an `extern crate … as` alias) names that import.
+      const leads = new Set()
+      for (const e of externCrates) leads.add(e.name)
+      for (const r of refs) if (r.absolute || !bindings.has(r.segments[0])) leads.add(r.segments[0])
       for (const name of leads) {
+        if (NON_CRATE_LEADS.has(name)) continue
         const lib = cargo.resolveCrate(name, relPath)
         if (!lib) continue
         roots.add(lib)

@@ -304,15 +304,27 @@ What counts as a fatal unresolved reference differs by language:
 | Solidity | every `import` | — |
 | PHP | every literal `require`/`include` path | Composer-autoloaded class refs (unresolved ones usually built-in/extension classes); a dynamic include with a static dir prefix pulls in that dir's `.php` files as candidates |
 | Bash | every in-root `.sh`/`.bash` reference | PATH commands, `$VAR`/absolute/system paths, `../`-escaping sources (external); dynamic `source "${VAR}/x.sh"` followed via `# shellcheck source=` when present |
-| Rust | every unconditional `mod foo;` (incl. one whose `#[path]` names no file, or escapes the bundle root) | `#[cfg(...)]`/`#[cfg_attr(...)]`-gated `mod`; a `mod` inside a macro invocation body (`cfg_if! { … }` emits real ones, other macros may not — followed when the file exists); every path edge (`crate::`/`self::`/`super::`/relative `use`s, recorded best-effort and never widening the walk); crates not in-tree (unvendored registry deps: dropped); `include_str!`/`include_bytes!` assets |
+| Rust | every `mod foo;` whose cfg can hold in a build (none, or e.g. `not(test)`), incl. one whose `#[path]` names no file, or escapes the bundle root | a `mod` gated on a cfg the loader can't decide (`unix`, `feature = "x"`, …); a `mod` inside a macro invocation body (`cfg_if! { … }` emits real ones, other macros may not — followed when the file exists); every path edge (`crate::`/`self::`/`super::`/relative `use`s, recorded best-effort and never widening the walk); crates not in-tree (unvendored registry deps: dropped); `include_str!`/`include_bytes!` assets |
 
 A missing entry is always fatal.
+
+Rust items whose cfg can never hold when a program is built — `#[cfg(test)]`,
+`#[cfg(doctest)]`, `#[cfg(doc)]`, `#[test]` fns, and `all(…)`/`any(…)`/`not(…)`
+combinations that reduce to one — are dead code for the bundle and are skipped
+whole: a `#[cfg(test)] mod tests;` file, an inline `mod tests { … }` with every
+module and `use` in it, a `#[test]` fn body. That keeps vendored crates' test
+modules out, and with them the dev-dependencies only test code reaches for.
+Feature- and target-gated code can't be decided without Cargo's feature
+resolution and is included. A `cfg_attr` that applies a non-cfg attribute
+(`#[cfg_attr(docsrs, doc(cfg(…)))]`) gates nothing.
 
 Rust edge specs are the path as written (`crate::net::client::Client`,
 `super::config::Config`, a `use crate::{a::B, c::D}` group flattened to one edge
 per path); `mod <name>` for a module file (`mod outer::inner` when declared inside
-inline module `outer`); `use <crate>` for a crate root. A `mod` whose
-`#[cfg_attr(<pred>, path = …)]` variants name different files records a
+inline module `outer`); `use <crate>` for a crate root. A `mod` whose files vary
+by cfg — `#[cfg_attr(<pred>, path = …)]` variants, or same-name declarations
+under exclusive `#[cfg(<pred>)]`s (`#[cfg(unix)] #[path = "u.rs"] mod sys;`
+beside `#[cfg(windows)] #[path = "w.rs"] mod sys;`) — records a
 `{ <pred>: file, …, "*": <default file> }` map, the same shape as a JS edge that
 diverges per Metro platform.
 
