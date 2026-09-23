@@ -343,6 +343,11 @@ project's `.cargo/config.toml` (which can point `build.rustc` or a wrapper at an
 executable), may refresh the registry index, and writes `Cargo.lock` when there is
 none — so only on a project you trust.
 
+The root packages' features follow the same flags as `cargo build`, in either
+mode: `--cargo-features=a,b` (repeatable; `pkg/feat` targets one of the entries'
+packages), `--cargo-no-default-features`, `--cargo-all-features`. Without them,
+the roots get their `default` feature, as `cargo build` does.
+
 Rust edge specs are the path as written (`crate::net::client::Client`,
 `super::config::Config`, a `use crate::{a::B, c::D}` group flattened to one edge
 per path); `mod <name>` for a module file (`mod outer::inner` when declared inside

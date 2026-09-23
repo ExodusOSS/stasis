@@ -205,6 +205,22 @@ test('buildRustBundle leaves feature-gated code that is off out of the bundle, p
   t.assert.ok(!imports.get('src/main.rs').has('mod ser'))
 })
 
+test('buildRustBundle applies the cargo feature overrides to the entries\' packages', async (t) => {
+  const withSerde = await buildRustBundle({ cwd: featuresFixture, entries: ['src/main.rs'], cargoFeatures: ['with-serde'] })
+  const files = sorted(withSerde.sources.keys())
+  for (const f of ['src/ser.rs', 'crates/lib-a/src/ser.rs', 'vendor/serde/src/lib.rs', 'vendor/serde/src/std_impl.rs']) t.assert.ok(files.includes(f), f)
+  t.assert.equal(withSerde.imports.get('rust').get('src/ser.rs').get('use serde'), 'vendor/serde/src/lib.rs')
+  t.assert.deepEqual([...withSerde.modules.keys()].toSorted(), ['.', 'crates/lib-a', 'vendor/serde', 'vendor/winnowish', 'vendor/winnowish-0.5.0'])
+
+  const noDefault = await buildRustBundle({ cwd: featuresFixture, entries: ['src/main.rs'], cargoNoDefaultFeatures: true })
+  t.assert.ok(!noDefault.sources.has('src/fast.rs')) // `fast` is only a default feature
+  t.assert.ok(noDefault.sources.has('crates/lib-a/src/std_impl.rs')) // dependencies keep their own defaults
+
+  const all = await buildRustBundle({ cwd: featuresFixture, entries: ['src/main.rs'], cargoAllFeatures: true })
+  t.assert.ok(all.sources.has('src/fast.rs'))
+  t.assert.ok(all.sources.has('src/ser.rs'))
+})
+
 test('buildRustBundle treats a feature that is on as firm: a missing gated module is fatal', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'stasis-features-'))
   try {

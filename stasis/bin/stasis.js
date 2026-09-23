@@ -32,10 +32,11 @@ function usage(prefix = '') {
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
- stasis bundle [--cargo] [--add] [--output=(path|-)] path/to/file.rs ...
+ stasis bundle [--cargo] [--cargo-features=a,b,pkg/c] [--cargo-no-default-features] [--cargo-all-features] [--add] [--output=(path|-)] path/to/file.rs ...
  (Rust: each crate's Cargo features are resolved from Cargo.toml/Cargo.lock like "cargo build" of the
   entries' packages, so #[cfg(feature = ...)] code that is off stays out; --cargo takes the resolution
-  from "cargo metadata" instead -- it runs cargo, so only on a project you trust;
+  from "cargo metadata" instead -- it runs cargo, so only on a project you trust; the --cargo-*
+  flags are cargo's --features / --no-default-features / --all-features for those packages;
   writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
@@ -215,11 +216,14 @@ if (command === '-v' || command === '--version') {
     resources: { type: 'string' },
     'package-json': { type: 'boolean' },
     cargo: { type: 'boolean' },
+    'cargo-features': { type: 'string', multiple: true },
+    'cargo-no-default-features': { type: 'boolean' },
+    'cargo-all-features': { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
   const values = parseLeadingOptions(argv, options, {
-    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--brotli-quality', '-o'],
+    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--cargo-features', '--brotli-quality', '-o'],
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
@@ -235,6 +239,19 @@ if (command === '-v' || command === '--version') {
   // --cargo: take the Rust feature/dependency resolution from `cargo metadata` (runs cargo; opt-in).
   const cargo = Boolean(values.cargo)
   if (cargo && !allRust) usage('Error: --cargo is only valid for Rust bundles')
+  // --cargo-features / --cargo-no-default-features / --cargo-all-features: cargo's own feature flags
+  // for the entries' packages (`pkg/feat` targets one). --cargo-features is repeatable and/or comma-separated.
+  const cargoFeatures = [...new Set((values['cargo-features'] ?? []).flatMap((f) => f.split(/[\s,]+/u)).map((s) => s.trim()).filter(Boolean))]
+  if (values['cargo-features'] !== undefined && cargoFeatures.length === 0) {
+    usage('Error: --cargo-features must list at least one feature (e.g. --cargo-features=serde,app/tls)')
+  }
+  const cargoNoDefaultFeatures = Boolean(values['cargo-no-default-features'])
+  const cargoAllFeatures = Boolean(values['cargo-all-features'])
+  if (!allRust) {
+    if (cargoFeatures.length > 0) usage('Error: --cargo-features is only valid for Rust bundles')
+    if (cargoNoDefaultFeatures) usage('Error: --cargo-no-default-features is only valid for Rust bundles')
+    if (cargoAllFeatures) usage('Error: --cargo-all-features is only valid for Rust bundles')
+  }
   if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
   if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
     usage('Error: --scope must be node_modules or full')
@@ -349,6 +366,9 @@ if (command === '-v' || command === '--version') {
     resources,
     packageJSON,
     cargo,
+    cargoFeatures,
+    cargoNoDefaultFeatures,
+    cargoAllFeatures,
     brotliQuality,
     add,
   })

@@ -2952,6 +2952,33 @@ test('buildBundle rejects --cargo for a non-Rust bundle', async (t) => {
   )
 })
 
+test('CLI: bundle rejects the --cargo-* feature flags for a non-Rust bundle, and an empty --cargo-features', (t) => {
+  const cwd = join(bashFixtures, 'basic')
+  t.assert.match(runCli(['bundle', '--cargo-features=x', 'main.sh'], { cwd }).stderr, /--cargo-features is only valid for Rust bundles/u)
+  t.assert.match(runCli(['bundle', '--cargo-no-default-features', 'main.sh'], { cwd }).stderr, /--cargo-no-default-features is only valid for Rust bundles/u)
+  t.assert.match(runCli(['bundle', '--cargo-all-features', 'main.sh'], { cwd }).stderr, /--cargo-all-features is only valid for Rust bundles/u)
+  const empty = runCli(['bundle', '--cargo-features=,', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
+  t.assert.equal(empty.status, 1)
+  t.assert.match(empty.stderr, /--cargo-features must list at least one feature/u)
+})
+
+test('CLI: bundle --cargo-features enables a root feature (repeatable, comma-separated)', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const cwd = join(rustFixtures, 'features')
+  const plain = runCli(['bundle', '-o', outPath, 'src/main.rs'], { cwd })
+  t.assert.equal(plain.status, 0, plain.stderr)
+  t.assert.match(plain.stderr, /Bundled 10 files in 4 packages/u)
+  const withSerde = runCli(['bundle', '--cargo-features=with-serde', '--cargo-features', 'fast,', '-o', outPath, 'src/main.rs'], { cwd })
+  t.assert.equal(withSerde.status, 0, withSerde.stderr)
+  t.assert.match(withSerde.stderr, /Bundled 14 files in 5 packages/u)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.ok(parsed.sources.has('src/ser.rs'))
+  t.assert.equal(parsed.modules.get('vendor/serde').ecosystem, 'cargo')
+  const noDefault = runCli(['bundle', '--cargo-no-default-features', '-o', outPath, 'src/main.rs'], { cwd })
+  t.assert.equal(noDefault.status, 0, noDefault.stderr)
+  t.assert.match(noDefault.stderr, /Bundled 9 files in 4 packages/u)
+}))
+
 test('buildRustBundle follows cfg_if!-style mods and tolerates macro-generated ones with no .rs file', async (t) => {
   const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'macro-mods'), entries: ['src/main.rs'] }))
   t.assert.deepEqual(warnings, [])
