@@ -310,20 +310,23 @@ test('parseCargoManifest reads package, lib, dependencies in every shape, and wo
     '[workspace.package]', 'version = "0.9.0"',
     '[workspace.dependencies]', 'shared = { path = "crates/shared" }',
   ].join('\n'))
-  t.assert.deepEqual(m.package, { name: 'my-app', version: null, versionFromWorkspace: true })
+  t.assert.deepEqual(m.package, { name: 'my-app', version: null, versionFromWorkspace: true, edition: '2021' })
   t.assert.deepEqual(m.lib, { name: 'myapp_lib', path: 'src/the_lib.rs' })
-  t.assert.deepEqual([...m.deps].toSorted(), [
-    ['inline_sub', { path: '../sub' }],
-    ['nix', { path: '../nix' }],
-    ['serde', {}],
-    ['shared', { workspace: true }],
-    ['tempfile', {}],
-    ['tools', { package: 'dev-tools', path: '../tools' }],
-    ['util', { path: '../util' }],
-  ])
+  const dep = (k) => {
+    const d = m.deps.get(k)
+    return { path: d.path, package: d.package, workspace: d.workspace, kinds: [...d.kinds].toSorted() }
+  }
+  t.assert.deepEqual([...m.deps.keys()].toSorted(), ['inline_sub', 'nix', 'serde', 'shared', 'tempfile', 'tools', 'util'])
+  t.assert.deepEqual(dep('inline_sub'), { path: '../sub', package: null, workspace: false, kinds: ['normal'] })
+  t.assert.deepEqual(dep('nix'), { path: '../nix', package: null, workspace: false, kinds: ['normal'] })
+  t.assert.deepEqual(dep('serde'), { path: null, package: null, workspace: false, kinds: ['normal'] })
+  t.assert.deepEqual(dep('shared'), { path: null, package: null, workspace: true, kinds: ['normal'] })
+  t.assert.deepEqual(dep('tempfile'), { path: null, package: null, workspace: false, kinds: ['dev'] })
+  t.assert.deepEqual(dep('tools'), { path: '../tools', package: 'dev-tools', workspace: false, kinds: ['normal'] })
   t.assert.equal(m.isWorkspace, true)
   t.assert.equal(m.workspacePackage.version, '0.9.0')
-  t.assert.deepEqual([...m.workspaceDeps], [['shared', { path: 'crates/shared' }]])
+  t.assert.deepEqual([...m.workspaceDeps.keys()], ['shared'])
+  t.assert.equal(m.workspaceDeps.get('shared').path, 'crates/shared')
 })
 
 test('parseCargoManifest returns no package without a name', (t) => {
@@ -606,8 +609,9 @@ test('buildRustTree flags an unconditional mod under a non-gating cfg_attr as mi
 
 test('buildRustTree skips test/doc-only code: no files, no edges, no dev-dep pull-in', async (t) => {
   const sources = await collectRustFilesFromDisk(join(fixtures, 'cfg-test'), ['src/lib.rs'])
+  // maybe.rs sits behind `any(test, feature = "extra")`: `extra` is declared and off, so it is dead too.
   t.assert.deepEqual([...sources.keys()].toSorted(), [
-    'src/backend.rs', 'src/lib.rs', 'src/maybe.rs', 'src/real.rs', 'src/sys/unix.rs', 'src/sys/windows.rs', 'vendor/serde/src/lib.rs',
+    'src/backend.rs', 'src/lib.rs', 'src/real.rs', 'src/sys/unix.rs', 'src/sys/windows.rs', 'vendor/serde/src/lib.rs',
   ])
   const { result: tree, warnings } = captureWarnings(() => buildRustTree(sources, { roots: ['src/lib.rs'], baseDir: join(fixtures, 'cfg-test') }))
   t.assert.deepEqual(tree.missing, [])
@@ -617,7 +621,6 @@ test('buildRustTree skips test/doc-only code: no files, no edges, no dev-dep pul
   t.assert.deepEqual(lib, {
     'use serde': 'vendor/serde/src/lib.rs',
     'mod real': 'src/real.rs',
-    'mod maybe': 'src/maybe.rs',
     'mod sys': { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs' }, // same-name cfg-exclusive declarations, merged
     'mod backend': 'src/backend.rs', // the `test` path variant is dropped
     'real::go': 'src/real.rs',

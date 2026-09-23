@@ -28,7 +28,7 @@ mod doc_only;
 #[cfg(not(test))]
 mod real;
 
-// undecidable without the feature set: followed when present
+// decided by feature resolution: `extra` is declared but off by default, so this is dead too
 #[cfg(any(test, feature = "extra"))]
 mod maybe;
 

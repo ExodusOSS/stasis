@@ -1,0 +1,20 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"   # resolver 2: dev-dependencies don't unify into a normal build
+
+[dependencies]
+lib-a = { path = "crates/lib-a", features = ["extra"] }
+winnowish = "0.6"
+serde = { version = "1", optional = true }
+
+[dev-dependencies]
+proptest = { version = "1", features = ["std"] }
+
+[features]
+default = ["fast"]
+fast = []
+with-serde = [
+    "dep:serde",     # the optional dep, plus lib-a's serde support
+    "lib-a/serde",
+]

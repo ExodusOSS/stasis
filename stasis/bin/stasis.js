@@ -32,8 +32,11 @@ function usage(prefix = '') {
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
- stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
- (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
+ stasis bundle [--cargo] [--add] [--output=(path|-)] path/to/file.rs ...
+ (Rust: each crate's Cargo features are resolved from Cargo.toml/Cargo.lock like "cargo build" of the
+  entries' packages, so #[cfg(feature = ...)] code that is off stays out; --cargo takes the resolution
+  from "cargo metadata" instead -- it runs cargo, so only on a project you trust;
+  writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
   --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep);
@@ -211,6 +214,7 @@ if (command === '-v' || command === '--version') {
     tsconfig: { type: 'string' },
     resources: { type: 'string' },
     'package-json': { type: 'boolean' },
+    cargo: { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
@@ -228,6 +232,9 @@ if (command === '-v' || command === '--version') {
     usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
   }
   if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
+  // --cargo: take the Rust feature/dependency resolution from `cargo metadata` (runs cargo; opt-in).
+  const cargo = Boolean(values.cargo)
+  if (cargo && !allRust) usage('Error: --cargo is only valid for Rust bundles')
   if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
   if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
     usage('Error: --scope must be node_modules or full')
@@ -341,6 +348,7 @@ if (command === '-v' || command === '--version') {
     tsconfig: values.tsconfig,
     resources,
     packageJSON,
+    cargo,
     brotliQuality,
     add,
   })

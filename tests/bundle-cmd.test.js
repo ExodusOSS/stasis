@@ -2928,14 +2928,28 @@ test('buildRustBundle resolves a mod declared inside inline modules under their 
 test('buildRustBundle leaves test/doc-only modules and the dev-deps they reach out of the bundle', async (t) => {
   const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'cfg-test'), entries: ['src/lib.rs'] }))
   t.assert.deepEqual(warnings, [])
-  // Not bundled: src/tests/mod.rs, src/prop/strategies.rs, src/doc_only.rs, src/sys/mock.rs, vendor/proptest, vendor/quickcheck, serde's test helpers.
+  // Not bundled: src/tests/mod.rs, src/prop/strategies.rs, src/doc_only.rs, src/sys/mock.rs, src/maybe.rs (its feature
+  // is off), vendor/proptest, vendor/quickcheck, serde's test helpers.
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
-    'src/backend.rs', 'src/lib.rs', 'src/maybe.rs', 'src/real.rs', 'src/sys/unix.rs', 'src/sys/windows.rs', 'vendor/serde/src/lib.rs',
+    'src/backend.rs', 'src/lib.rs', 'src/real.rs', 'src/sys/unix.rs', 'src/sys/windows.rs', 'vendor/serde/src/lib.rs',
   ])
   t.assert.deepEqual([...bundle.modules.keys()].toSorted(), ['.', 'vendor/serde'])
   const lib = bundle.imports.get('rust').get('src/lib.rs')
   t.assert.deepEqual(Object.fromEntries(lib.get('mod sys')), { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs' })
   t.assert.equal(lib.get('mod backend'), 'src/backend.rs')
+})
+
+test('CLI: bundle rejects --cargo for a non-Rust bundle', (t) => {
+  const r = runCli(['bundle', '--cargo', 'main.sh'], { cwd: join(bashFixtures, 'basic') })
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--cargo is only valid for Rust bundles/u)
+})
+
+test('buildBundle rejects --cargo for a non-Rust bundle', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'], cargo: true }),
+    /--cargo is only valid for Rust bundles/u,
+  )
 })
 
 test('buildRustBundle follows cfg_if!-style mods and tolerates macro-generated ones with no .rs file', async (t) => {

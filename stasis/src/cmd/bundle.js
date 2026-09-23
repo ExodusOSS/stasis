@@ -21,7 +21,8 @@ import {
   readRemappingsFile,
 } from '../loaders/solidity.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
-import { buildRustTree, collectRustFilesFromDisk, createCargoContext } from '../loaders/rust.js'
+import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
+import { createCargoContext } from '../loaders/cargo.js'
 import {
   bucketizePhpSources,
   buildPhpTree,
@@ -324,8 +325,10 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
 // crates). An unresolvable unconditional `mod` is fatal; path edges (`crate::`/`self::`/`super::`/
 // relative `use`s) are recorded best-effort and never widen the file set. Registry deps that
 // aren't vendored can't be bundled: they're reported, with a `cargo vendor` hint when there is no
-// `vendor/` dir at all.
-export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
+// `vendor/` dir at all. Each crate's features are resolved from the manifests (Cargo.toml +
+// Cargo.lock) the way `cargo build` of the entries' packages would, so `#[cfg(feature = …)]` code
+// that is off stays out; `cargo` takes them from `cargo metadata` instead (opt-in: it runs cargo).
+export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildRustBundle: at least one entry .rs file is required')
   }
@@ -336,8 +339,11 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
 
-  const sources = await collectRustFilesFromDisk(baseDir, normalized)
-  const { resolutions, missing, unresolvedCrates } = buildRustTree(sources, { roots: normalized, baseDir })
+  // One Cargo context for the walk, the edge pass and the bucketing: manifests are read once, and
+  // the walk's crate resolution and the tree's feature decisions agree.
+  const cargoCtx = createCargoContext(baseDir, { entries: normalized, cargo })
+  const sources = await collectRustFilesFromDisk(baseDir, normalized, { cargo: cargoCtx })
+  const { resolutions, missing, unresolvedCrates } = buildRustTree(sources, { roots: normalized, baseDir, cargo: cargoCtx })
 
   const issues = []
   for (const entry of normalized) {
@@ -367,7 +373,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
     workspaceVersion: RUST_WORKSPACE_VERSION,
     format: RUST_FORMAT,
     conditionKey: 'rust',
-    classifyDep: makeRustClassifier(createCargoContext(baseDir)),
+    classifyDep: makeRustClassifier(cargoCtx),
   })
 }
 
@@ -909,7 +915,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -924,6 +930,10 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   }
   if (mappingFile && kind !== 'sol') {
     throw new Error(`${name}: --mapping is only valid for .sol bundles`)
+  }
+  // --cargo runs `cargo metadata` for the Rust feature/dependency resolution; nothing else reads Cargo.
+  if (cargo && kind !== 'rust') {
+    throw new Error(`${name}: --cargo is only valid for Rust bundles`)
   }
   if (scope !== undefined && kind !== 'js') {
     throw new Error(`${name}: --scope is only valid for JS bundles`)
@@ -1010,12 +1020,12 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
 // (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow|--typescript/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
-  if (kind === 'rust') return buildRustBundle({ cwd, entries })
+  if (kind === 'rust') return buildRustBundle({ cwd, entries, cargo })
   if (metro || mainFields !== undefined) {
     const { bundle } = await buildResolvedJsBundle({
       cwd,
@@ -1049,8 +1059,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, brotliQuality, add = false } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -1087,7 +1097,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
-    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON })
+    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo })
   }
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.

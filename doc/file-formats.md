@@ -308,15 +308,40 @@ What counts as a fatal unresolved reference differs by language:
 
 A missing entry is always fatal.
 
-Rust items whose cfg can never hold when a program is built — `#[cfg(test)]`,
-`#[cfg(doctest)]`, `#[cfg(doc)]`, `#[test]` fns, and `all(…)`/`any(…)`/`not(…)`
-combinations that reduce to one — are dead code for the bundle and are skipped
-whole: a `#[cfg(test)] mod tests;` file, an inline `mod tests { … }` with every
-module and `use` in it, a `#[test]` fn body. That keeps vendored crates' test
-modules out, and with them the dev-dependencies only test code reaches for.
-Feature- and target-gated code can't be decided without Cargo's feature
-resolution and is included. A `cfg_attr` that applies a non-cfg attribute
-(`#[cfg_attr(docsrs, doc(cfg(…)))]`) gates nothing.
+Rust items whose cfg can never hold in the build are dead code for the bundle
+and are skipped whole — a `#[cfg(test)] mod tests;` file, an inline
+`mod tests { … }` with every module and `use` in it, a `#[test]` fn body — so
+vendored crates' test modules stay out, and with them the dev-dependencies only
+test code reaches for. Two kinds of cfg are decided:
+
+- `test`, `doctest`, `doc` and `#[test]` are never on when a program is built.
+- `feature = "…"` is decided per crate from **Cargo feature resolution**: the
+  loader reads the `Cargo.toml` of every package in-tree (the root package or
+  workspace, `path` dependencies, `vendor/`) plus `Cargo.lock`, and replays what
+  `cargo build` of the entries' packages does — the roots start from their
+  `default` feature, features imply features (`std = ["alloc", "dep:serde",
+  "serde?/std"]`), enable optional dependencies and request dependency features,
+  and every active dependency gets `default` plus what its dependents ask for,
+  to a fixed point. Resolver 2 (edition 2021+, or `resolver = "2"`) leaves
+  dev-dependencies out of a normal build; resolver 1 counts them. Target-specific
+  dependency tables always count (an over-approximation: it only keeps files).
+  The crate a versioned dependency resolves to comes from `Cargo.lock`, so two
+  vendored versions of one crate each get their own features and edges. A
+  package the resolved build doesn't pull in has unknown features, and its gated
+  code is kept.
+
+`all(…)`/`any(…)`/`not(…)` compose; a predicate that reduces to true (`not(test)`,
+an enabled feature) is as firm as no cfg, so a missing module behind it is fatal.
+Target cfgs (`unix`, `target_os = …`) stay undecided and their code is kept. A
+`cfg_attr` that applies a non-cfg attribute (`#[cfg_attr(docsrs, doc(cfg(…)))]`)
+gates nothing.
+
+`stasis bundle --cargo` takes the dependency graph and features from
+`cargo metadata` instead of replaying the manifests. It is opt-in because it runs
+cargo: nothing is compiled and no build script runs, but cargo reads the
+project's `.cargo/config.toml` (which can point `build.rustc` or a wrapper at any
+executable), may refresh the registry index, and writes `Cargo.lock` when there is
+none — so only on a project you trust.
 
 Rust edge specs are the path as written (`crate::net::client::Client`,
 `super::config::Config`, a `use crate::{a::B, c::D}` group flattened to one edge

@@ -1,0 +1,6 @@
+[package]
+name = "devonly"
+version = "1.0.0"
+
+[features]
+x = []

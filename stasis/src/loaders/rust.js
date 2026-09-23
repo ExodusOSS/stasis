@@ -8,14 +8,16 @@
 // file to a crate, only `mod` can. Registry dependencies that aren't vendored live outside the
 // bundle root and are dropped.
 
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 
 import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
+import { VENDOR_DIR, createCargoContext, matchClose, normalizeRel, splitTopLevel } from './cargo.js'
 
-// `cargo vendor` copies external crates in-tree under this dir.
-const VENDOR_DIR = 'vendor'
+// The Cargo side (manifests, dependency and feature resolution) lives in cargo.js; re-exported
+// here for callers that reach it through the loader.
+export { createCargoContext, parseCargoManifest } from './cargo.js'
 
 // A path whose lead is one of these never names an external crate.
 const NON_CRATE_LEADS = new Set(['crate', 'self', 'super', 'std', 'core', 'alloc'])
@@ -156,57 +158,29 @@ const KEYWORD_PATH_RE = /\b(?:crate|self|super)(?:::\w+)+/gu
 const LEAD_PATH_RE = /\b([a-z_]\w*)(?:::\w+)+/gu
 const ATTR_PATH_RE = /^\s*path\s*=\s*"([^"]*)"\s*$/u
 
-// Index of the bracket closing the one opened at `open`, or the last index when unbalanced.
-function matchClose(text, open) {
-  const close = { '[': ']', '(': ')', '{': '}' }[text[open]]
-  let depth = 0
-  for (let i = open; i < text.length; i++) {
-    if (text[i] === text[open]) depth++
-    else if (text[i] === close && --depth === 0) return i
-  }
-  return text.length - 1
-}
-
-// Split on commas outside parentheses/brackets/strings.
-function splitTopLevel(text) {
-  const parts = []
-  let depth = 0
-  let start = 0
-  let inStr = false
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (inStr) {
-      if (ch === '\\') i++
-      else if (ch === '"') inStr = false
-      continue
-    }
-    if (ch === '"') inStr = true
-    else if (ch === '(' || ch === '[') depth++
-    else if (ch === ')' || ch === ']') depth--
-    else if (ch === ',' && depth === 0) {
-      parts.push(text.slice(start, i))
-      start = i + 1
-    }
-  }
-  parts.push(text.slice(start))
-  return parts
-}
-
 const normalizeCfg = (pred) => pred.replaceAll(/\s+/gu, ' ').trim()
 
 // Predicates that are never true when a program (or a dependency of one) is built: `test` /
 // `doctest` only under `cargo test` of that very crate, `doc` only under rustdoc.
 const NEVER_BUILT_CFGS = new Set(['test', 'doctest', 'doc'])
 
-// Three-valued evaluation of a cfg predicate: `false` when it can never hold in a build (so the
-// item it gates is dead code for the bundle), `true` when it always does, `null` when it depends
-// on the target or the enabled features, which the loader can't know. `all`/`any`/`not` compose;
-// every other leaf (`unix`, `feature = "x"`, `target_os = …`) is unknown.
-export function evalCfg(pred) {
+const FEATURE_CFG_RE = /^feature\s*=\s*"([^"]*)"$/u
+
+// Three-valued evaluation of a cfg predicate: `false` when it can never hold in the build (so the
+// item it gates is dead code for the bundle), `true` when it always does, `null` when the loader
+// can't tell. `all`/`any`/`not` compose. `feature = "x"` is decided against `env.features`, the
+// crate's resolved feature set (see cargo.js), and unknown without one; every other leaf
+// (`unix`, `target_os = …`) depends on the target and stays unknown.
+export function evalCfg(pred, env = {}) {
   const p = pred.trim()
   const m = /^(all|any|not)\s*\(([\s\S]*)\)$/u.exec(p)
-  if (!m) return NEVER_BUILT_CFGS.has(p) ? false : null
-  const args = splitTopLevel(m[2]).map((a) => a.trim()).filter(Boolean).map(evalCfg)
+  if (!m) {
+    if (NEVER_BUILT_CFGS.has(p)) return false
+    const feature = FEATURE_CFG_RE.exec(p)
+    if (feature && env.features) return env.features.has(feature[1])
+    return null
+  }
+  const args = splitTopLevel(m[2]).map((a) => a.trim()).filter(Boolean).map((a) => evalCfg(a, env))
   if (m[1] === 'not') return args.length === 1 && args[0] !== null ? !args[0] : null
   if (m[1] === 'all') return args.includes(false) ? false : (args.every((a) => a === true) ? true : null)
   return args.includes(true) ? true : (args.every((a) => a === false) ? false : null)
@@ -308,10 +282,11 @@ export function parseUseTree(body) {
   return out
 }
 
-// Statically scan one file's items. An item whose cfg can never hold in a build (`#[cfg(test)]`,
-// `#[test]`, `#[cfg(doc)]`, …) is skipped whole -- an inline `mod tests { … }` with everything in
-// it, a `fn`'s body, a `use` -- so test-only modules aren't bundled and the dev-dependencies test
-// code reaches for don't get pulled in. Returns
+// Statically scan one file's items. An item whose cfg can never hold in the build (`#[cfg(test)]`,
+// `#[test]`, `#[cfg(doc)]`, or a `#[cfg(feature = "x")]` with `x` off in the crate's resolved
+// `features`) is skipped whole -- an inline `mod tests { … }` with everything in it, a `fn`'s
+// body, a `use` -- so dead modules aren't bundled and the dependencies only dead code reaches for
+// don't get pulled in. Returns
 //   mods:         external `mod` declarations `{ name, inlinePath, cfg, conditional, paths }` --
 //                 `inlinePath` is the chain of inline `mod x { … }` blocks it sits in, `cfg` the
 //                 `#[cfg(…)]` predicate gating it (several → `all(…)`; null when ungated),
@@ -323,7 +298,8 @@ export function parseUseTree(body) {
 //   externCrates: `extern crate x [as y];` names, with their inlinePath;
 //   bindings:     names the file's `use` items and `extern crate … as` aliases bring into scope --
 //                 a path lead among them names an import, not a crate.
-export function scanRustItems(content) {
+export function scanRustItems(content, { features = null } = {}) {
+  const env = { features }
   const { code, masked } = lexRust(content)
   const n = masked.length
   const mods = []
@@ -399,7 +375,7 @@ export function scanRustItems(content) {
     // An item gated on a cfg that never holds in a build is dead code for the bundle: skip it
     // whole -- through the `;` of a declaration, or the `{ … }` of a body/block -- without
     // recording anything in it. (`pub` is visibility, not the item; keep its attributes pending.)
-    if (word !== 'pub' && pending.length > 0 && evalCfg(joinCfgs(pending.map((a) => parseAttr(a).cfg).filter((c) => c !== null)) ?? 'all()') === false) {
+    if (word !== 'pub' && pending.length > 0 && evalCfg(joinCfgs(pending.map((a) => parseAttr(a).cfg).filter((c) => c !== null)) ?? 'all()', env) === false) {
       pending = []
       let k = i + word.length
       while (k < n && masked[k] !== ';' && masked[k] !== '{') k++
@@ -440,7 +416,7 @@ export function scanRustItems(content) {
       pending = []
       const cfg = joinCfgs(attrs.map((a) => a.cfg).filter((c) => c !== null))
       // Dead cfgs were skipped above; a decidable-true one (`not(test)`) is as firm as no cfg at all.
-      const conditional = (cfg !== null && evalCfg(cfg) !== true) || stack.some((s) => s.conditional) || i < macroUntil
+      const conditional = (cfg !== null && evalCfg(cfg, env) !== true) || stack.some((s) => s.conditional) || i < macroUntil
       if (masked[k] === ';') {
         mods.push({ name, inlinePath: inlinePath(), cfg, conditional, paths: attrs.flatMap((a) => a.paths) })
         i = k + 1
@@ -561,14 +537,6 @@ export function resolveModPath(modName, fromFile, { knownSources, baseDir, roots
   return null
 }
 
-// Project-relative `sub` under `dir`, normalized; null when it escapes the bundle root.
-function normalizeRel(dir, sub) {
-  if (isAbsolute(sub) || posix.isAbsolute(sub)) return null
-  const rel = posix.normalize(posix.join(dir === '.' ? '' : dir, sub))
-  if (rel === '..' || rel.startsWith('../') || posix.isAbsolute(rel)) return null
-  return rel
-}
-
 // Resolve a `#[path = "…"]` target the way rustc does: relative to the declaring file's directory,
 // or -- inside inline modules -- to the file's module dir plus the inline module names. Absolute
 // or root-escaping paths resolve to nothing (a read would refuse them anyway).
@@ -582,8 +550,9 @@ export function resolveExplicitModPath(explicitPath, fromFile, { knownSources, b
 
 // Every file a `mod` declaration can denote, as `{ cfg, file }`: an unconditional `#[path]` names
 // one outright; otherwise each `#[cfg_attr(<pred>, path = …)]` names one under its predicate
-// (`cfg`; a predicate that never holds in a build, `test`, is dropped), and the default
-// `<name>.rs`/`<name>/mod.rs` lookup is the fallback (`cfg` null).
+// (`cfg`; a predicate that can't hold in the build -- `test`, a feature that is off -- is
+// dropped), and the default `<name>.rs`/`<name>/mod.rs` lookup is the fallback (`cfg` null).
+// `opts.features` is the declaring crate's resolved feature set, when known.
 export function resolveModDecl(decl, fromFile, opts = {}) {
   const o = { ...opts, inlinePath: decl.inlinePath }
   const unconditional = decl.paths.find((p) => p.cfg === null)
@@ -593,218 +562,13 @@ export function resolveModDecl(decl, fromFile, opts = {}) {
   }
   const out = []
   for (const { path, cfg } of decl.paths) {
-    if (evalCfg(cfg) === false) continue
+    if (evalCfg(cfg, { features: opts.features ?? null }) === false) continue
     const file = resolveExplicitModPath(path, fromFile, o)
     if (file && !out.some((x) => x.file === file)) out.push({ cfg, file })
   }
   const fallback = resolveModPath(decl.name, fromFile, o)
   if (fallback && !out.some((x) => x.file === fallback)) out.push({ cfg: null, file: fallback })
   return out
-}
-
-// --- Cargo manifests --------------------------------------------------------------------
-
-function readFileOrNull(file) {
-  try {
-    return readFileSync(file, 'utf8')
-  } catch {
-    return null
-  }
-}
-
-// One TOML value: quoted string, bool, or a single-line inline table (as a plain object); anything
-// else is returned raw. Trailing comments are dropped.
-function parseTomlValue(raw) {
-  const text = raw.trim()
-  if (text.startsWith('"')) {
-    const m = /^"((?:[^"\\]|\\.)*)"/u.exec(text)
-    return m ? m[1].replaceAll(/\\(.)/gu, '$1') : text
-  }
-  if (text.startsWith("'")) {
-    const m = /^'([^']*)'/u.exec(text)
-    return m ? m[1] : text
-  }
-  if (text.startsWith('{')) {
-    const end = matchClose(text, 0)
-    const table = {}
-    for (const part of splitTopLevel(text.slice(1, end))) {
-      const kv = /^\s*([\w."'-]+)\s*=\s*([\s\S]+)$/u.exec(part)
-      if (kv) table[kv[1].replaceAll(/["']/gu, '')] = parseTomlValue(kv[2])
-    }
-    return table
-  }
-  const bare = text.replace(/\s+#.*$/u, '')
-  if (bare === 'true') return true
-  if (bare === 'false') return false
-  return bare
-}
-
-const DEP_TABLE_RE = /^(?:target\..+\.)?(?:dependencies|dev-dependencies|build-dependencies)(?:\.(.+))?$/u
-
-// Minimal Cargo.toml reader (line-based TOML subset: table headers, `key = value`, single-line
-// inline tables, dotted keys) covering what crate resolution and bucketing need: the package
-// identity, the lib target's name/path, `path` dependencies (incl. workspace-inherited ones)
-// and the workspace tables they inherit from. Dependency keys are normalized to the `use` spelling
-// (`-` → `_`).
-export function parseCargoManifest(text) {
-  const manifest = {
-    package: null, // { name, version, versionFromWorkspace }
-    lib: { name: null, path: null },
-    deps: new Map(), // use-name -> { path, package, workspace }
-    workspaceDeps: new Map(),
-    workspacePackage: { version: null },
-    isWorkspace: false,
-  }
-  const depOf = (map, name) => {
-    const key = name.replaceAll('-', '_')
-    if (!map.has(key)) map.set(key, {})
-    return map.get(key)
-  }
-  const setDepFields = (dep, table) => {
-    if (typeof table !== 'object') return // `foo = "1.2"`: a registry dep, nothing in-tree
-    if (typeof table.path === 'string') dep.path = table.path
-    if (typeof table.package === 'string') dep.package = table.package
-    if (table.workspace === true) dep.workspace = true
-  }
-  let table = ''
-  for (const raw of text.split('\n')) {
-    const line = raw.trim()
-    if (line === '' || line.startsWith('#')) continue
-    const header = /^\[\[?\s*([^\]]+?)\s*\]\]?/u.exec(line)
-    if (header) {
-      table = header[1].trim()
-      if (table === 'workspace') manifest.isWorkspace = true
-      continue
-    }
-    const kv = /^([\w."'-]+)\s*=\s*(.+)$/u.exec(line)
-    if (!kv) continue
-    const key = kv[1].replaceAll(/["']/gu, '')
-    const value = parseTomlValue(kv[2])
-    if (table === 'package') {
-      manifest.package ??= { name: null, version: null, versionFromWorkspace: false }
-      if (key === 'name' && typeof value === 'string') manifest.package.name = value
-      else if (key === 'version' && typeof value === 'string') manifest.package.version = value
-      else if ((key === 'version' && value?.workspace === true) || (key === 'version.workspace' && value === true)) {
-        manifest.package.versionFromWorkspace = true
-      }
-    } else if (table === 'lib') {
-      if (key === 'name' && typeof value === 'string') manifest.lib.name = value
-      else if (key === 'path' && typeof value === 'string') manifest.lib.path = value
-    } else if (table === 'workspace.package') {
-      if (key === 'version' && typeof value === 'string') manifest.workspacePackage.version = value
-    } else {
-      const ws = table.startsWith('workspace.')
-      const m = DEP_TABLE_RE.exec(ws ? table.slice('workspace.'.length) : table)
-      if (!m) continue
-      const map = ws ? manifest.workspaceDeps : manifest.deps
-      // `[dependencies.foo]` sub-table: each line is one field of `foo`; else each line is one dep.
-      if (m[1]) setDepFields(depOf(map, m[1]), { [key]: value })
-      else setDepFields(depOf(map, key), value)
-    }
-  }
-  if (manifest.package && !manifest.package.name) manifest.package = null
-  return manifest
-}
-
-// Per-bundle Cargo manifest lookup (memoized per directory) and crate-name resolution against
-// in-tree sources. `baseDir` is the bundle root; every path in and out is project-relative POSIX.
-export function createCargoContext(baseDir) {
-  const manifests = new Map()
-  const readManifest = (dir) => {
-    if (!manifests.has(dir)) {
-      const text = readFileOrNull(join(baseDir, dir, 'Cargo.toml'))
-      manifests.set(dir, text === null ? null : { dir, ...parseCargoManifest(text) })
-    }
-    return manifests.get(dir)
-  }
-  const isFile = (rel) => {
-    try {
-      return statSync(join(baseDir, rel)).isFile()
-    } catch {
-      return false
-    }
-  }
-  // Manifests at or above `dir`, nearest first, up to the bundle root.
-  const manifestsAbove = function* (dir) {
-    for (;;) {
-      const m = readManifest(dir)
-      if (m) yield m
-      if (dir === '.' || dir === '') return
-      dir = posix.dirname(dir)
-    }
-  }
-  const packageFor = (fileRel) => {
-    for (const m of manifestsAbove(posix.dirname(fileRel))) if (m.package) return m
-    return null
-  }
-  const workspaceFor = (dir) => {
-    for (const m of manifestsAbove(dir)) if (m.isWorkspace) return m
-    return null
-  }
-  // The manifest's lib target root when it is on disk (`[lib] path`, default `src/lib.rs`).
-  const libPath = (m) => {
-    const rel = normalizeRel(m.dir, m.lib.path ?? 'src/lib.rs')
-    return rel !== null && isFile(rel) ? rel : null
-  }
-  const libName = (m) => (m.lib.name ?? m.package?.name ?? '').replaceAll('-', '_')
-  const version = (m) => {
-    if (m.package.versionFromWorkspace) return workspaceFor(m.dir)?.workspacePackage.version ?? '0.0.0'
-    return m.package.version ?? '0.0.0'
-  }
-
-  // `cargo vendor` layout: `vendor/<dir>/`, where the dir may hyphenate a snake_case crate name.
-  const resolveVendored = (norm) => {
-    for (const dir of norm.includes('_') ? [norm, norm.replaceAll('_', '-')] : [norm]) {
-      const vdir = `${VENDOR_DIR}/${dir}`
-      const m = readManifest(vdir)
-      const lib = m ? libPath(m) : (isFile(`${vdir}/src/lib.rs`) ? `${vdir}/src/lib.rs` : null)
-      if (lib) return lib
-    }
-    return null
-  }
-
-  return {
-    // Identity of the package owning `fileRel` -- `{ dir, name, version }` from the nearest
-    // Cargo.toml with a [package] -- or null when no manifest claims it.
-    packageInfo(fileRel) {
-      const m = packageFor(fileRel)
-      return m ? { dir: m.dir, name: m.package.name, version: version(m) } : null
-    },
-    // Whether `fileRel` is the lib target root of the package owning it (a crate root by role,
-    // whatever its name).
-    isLibRoot(fileRel) {
-      const m = packageFor(fileRel)
-      return m !== null && libPath(m) === fileRel
-    },
-    // Resolve a crate name as used in source (`use name::…`, `extern crate name`) from `fromFile`
-    // to a crate root in-tree: the owning package's own lib, one of its `path` dependencies
-    // (incl. `workspace = true` ones, whose path is relative to the workspace root), or a vendored
-    // crate. Null for anything else (a registry dep, std, a name that isn't a crate).
-    resolveCrate(name, fromFile) {
-      const norm = name.replaceAll('-', '_')
-      const m = packageFor(fromFile)
-      if (m) {
-        if (libName(m) === norm) {
-          const lib = libPath(m)
-          if (lib && lib !== fromFile) return lib
-        }
-        let dep = m.deps.get(norm)
-        let relTo = m.dir
-        if (dep?.workspace) {
-          const ws = workspaceFor(m.dir)
-          dep = ws?.workspaceDeps.get(norm) ?? null
-          relTo = ws?.dir
-        }
-        if (dep?.path) {
-          const depDir = normalizeRel(relTo, dep.path)
-          const dm = depDir === null ? null : readManifest(depDir)
-          const lib = dm ? libPath(dm) : null
-          if (lib) return lib
-        }
-      }
-      return resolveVendored(norm)
-    },
-  }
 }
 
 // Resolve a crate name to its vendored root (`vendor/<dir>/src/lib.rs`) among already-loaded
@@ -957,22 +721,25 @@ const SYSROOT_CRATES = new Set(['std', 'core', 'alloc', 'proc_macro', 'test'])
 // same-name `#[cfg]`-gated declarations name different files; `<path as written>` → module file;
 // `use <crate>` → crate root. `unresolvedCrates` names the crates `use`/`extern crate` referenced
 // that nothing in-tree satisfied (registry deps that weren't vendored, typically) --
-// informational, never fatal.
-export function buildRustTree(sources, { roots = [], baseDir = null } = {}) {
-  const cargo = baseDir ? createCargoContext(baseDir) : null
-  const rootSet = crateRoots(sources, roots, cargo)
+// informational, never fatal. A `cargo` context (cargo.js) may be passed in to share one
+// between the walk and this pass; it also carries each crate's resolved features, which decide
+// `#[cfg(feature = …)]`.
+export function buildRustTree(sources, { roots = [], baseDir = null, cargo = null } = {}) {
+  const ctx = cargo ?? (baseDir ? createCargoContext(baseDir, { entries: roots }) : null)
+  const rootSet = crateRoots(sources, roots, ctx)
   const resolutions = new Map()
   const missing = []
   const unresolvedCrates = new Set()
   const scanned = new Map()
   for (const [path, content] of sources) {
-    const items = scanRustItems(content)
+    const features = ctx?.featuresFor(path) ?? null
+    const items = scanRustItems(content, { features })
     scanned.set(path, items)
     const specMap = new Map()
     const declKeys = new Map()
     for (const decl of items.mods) {
       const spec = `mod ${[...decl.inlinePath, decl.name].join('::')}`
-      const targets = resolveModDecl(decl, path, { knownSources: sources, roots: rootSet })
+      const targets = resolveModDecl(decl, path, { knownSources: sources, roots: rootSet, features })
       if (targets.length === 0) {
         // conditional && unresolved: cfg-gated module, may be compiled out -- tolerated.
         if (!decl.conditional) {
@@ -993,7 +760,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null } = {}) {
     const add = (spec, target) => {
       if (target && target !== path && sources.has(target) && !specMap.has(spec)) specMap.set(spec, target)
     }
-    const resolveCrate = (name, from) => cargo?.resolveCrate(name, from) ?? resolveVendoredCrate(name, { knownSources: sources })
+    const resolveCrate = (name, from) => ctx?.resolveCrate(name, from) ?? resolveVendoredCrate(name, { knownSources: sources })
     // A crate name (lowercase lead; `Enum::Variant` imports aren't crates) nothing in-tree satisfied.
     const noteUnresolved = (name) => {
       if (!NON_CRATE_LEADS.has(name) && !SYSROOT_CRATES.has(name) && /^[a-z_]/u.test(name)) unresolvedCrates.add(name)
@@ -1019,12 +786,13 @@ export function buildRustTree(sources, { roots = [], baseDir = null } = {}) {
 
 // Walk from `entries` (the crate roots), following `mod` declarations and references to in-tree
 // crates, reading each reachable file once; a missing file warns and is skipped without aborting
-// the walk (buildRustTree decides what is fatal).
-export async function collectRustFilesFromDisk(baseDir, entries) {
+// the walk (buildRustTree decides what is fatal). `cargo` (cargo.js) resolves crate names and
+// carries each crate's features; one is created for `entries` when not passed in.
+export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null } = {}) {
   const sources = new Map()
   const realBase = realpathSync(baseDir)
   const roots = new Set(entries)
-  const cargo = createCargoContext(baseDir)
+  const ctx = cargo ?? createCargoContext(baseDir, { entries })
 
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))
@@ -1053,9 +821,10 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
       if (!entry) continue
       const [relPath, content] = entry
       sources.set(relPath, content)
-      const { mods, refs, externCrates, bindings } = scanRustItems(content)
+      const features = ctx.featuresFor(relPath)
+      const { mods, refs, externCrates, bindings } = scanRustItems(content, { features })
       for (const decl of mods) {
-        for (const { file } of resolveModDecl(decl, relPath, { baseDir, roots })) {
+        for (const { file } of resolveModDecl(decl, relPath, { baseDir, roots, features })) {
           if (!sources.has(file)) next.push(file)
         }
       }
@@ -1067,7 +836,7 @@ export async function collectRustFilesFromDisk(baseDir, entries) {
       for (const r of refs) if (r.absolute || !bindings.has(r.segments[0])) leads.add(r.segments[0])
       for (const name of leads) {
         if (NON_CRATE_LEADS.has(name)) continue
-        const lib = cargo.resolveCrate(name, relPath)
+        const lib = ctx.resolveCrate(name, relPath)
         if (!lib) continue
         roots.add(lib)
         if (!sources.has(lib)) next.push(lib)
@@ -1104,6 +873,7 @@ export async function loadRust(rsTxtFile) {
   }
   for (const line of lines) assertWithinBase(baseDir, line, 'Entry path')
 
-  const sources = await collectRustFilesFromDisk(baseDir, lines)
-  return buildRustTree(sources, { roots: lines, baseDir })
+  const cargo = createCargoContext(baseDir, { entries: lines })
+  const sources = await collectRustFilesFromDisk(baseDir, lines, { cargo })
+  return buildRustTree(sources, { roots: lines, baseDir, cargo })
 }
