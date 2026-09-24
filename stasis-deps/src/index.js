@@ -7,13 +7,15 @@ import { buildLayout, computeSkipped, currentPlatform, planTarballs } from './la
 import { defaultCacheDir, fetchTarballs } from './fetch.js'
 import { readPackageTarball } from './tar.js'
 
-export { MemoryTree, createOverlayHost } from './vfs.js'
+export { createOverlayHost } from './overlay.js'
+// The in-memory filesystem the layout is built into, for callers that build or inspect one.
+export { Vfs, VfsError } from '@preventive/vfs'
 
 // @exodus/stasis-deps: a project's node_modules reconstructed in memory from its pnpm-lock.yaml --
-// tarballs fetched into a verified cache, unpacked in memory, laid out exactly as `pnpm install`
-// would, with no package script ever run. `@exodus/stasis` reads it through the overlay host to
-// build a bundle without an install (`stasis bundle --pnpm`); this package itself knows nothing
-// about bundling or module resolution.
+// tarballs fetched into a verified cache, unpacked in memory (@preventive/archive), laid out into
+// a @preventive/vfs filesystem exactly as `pnpm install` would, with no package script ever run.
+// `@exodus/stasis` reads it through the overlay host to build a bundle without an install
+// (`stasis bundle --pnpm`); this package itself knows nothing about bundling or module resolution.
 
 export const LOCKFILE_NAME = 'pnpm-lock.yaml'
 
@@ -31,8 +33,8 @@ export function findLockfileRoot(cwd) {
 
 // Read the lockfile, download every needed tarball into the cache (verified, never unpacked on
 // disk), unpack them in memory and lay out pnpm's node_modules tree in memory. Returns the tree
-// (a MemoryTree rooted at the lockfile dir's real paths) plus what went into it; wrap it in
-// createOverlayHost({ root, tree, makeResolver }) to read through it.
+// (a Vfs holding the layout at the lockfile dir's real absolute paths) plus what went into it;
+// wrap it in createOverlayHost({ root, vfs, makeResolver }) to read through it.
 export async function loadPnpmNodeModules({ cwd = process.cwd(), cacheDir, offline = false, log = (msg) => console.warn(msg), fetchImpl, concurrency } = {}) {
   const root = findLockfileRoot(cwd)
   if (root === null) throw new Error(`stasis --pnpm: no ${LOCKFILE_NAME} found in ${resolve(cwd)} or any parent directory`)
@@ -80,7 +82,7 @@ export async function loadPnpmNodeModules({ cwd = process.cwd(), cacheDir, offli
   })
   return {
     root,
-    tree: layout.tree,
+    vfs: layout.vfs,
     lockfile,
     settings,
     skipped,

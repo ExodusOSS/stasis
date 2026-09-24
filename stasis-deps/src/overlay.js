@@ -1,14 +1,20 @@
 import * as fs from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-// The in-memory filesystem a pnpm lockfile is laid out into, and the overlay host that serves it
-// to a reader (the `host` surface `@exodus/stasis`' static bundler reads through; see its
-// src/host.js for the contract). The overlay is strict about its zone: under the project root,
-// every path with a `node_modules` segment is served from the memory tree ONLY -- whatever install
-// happens to sit on disk is invisible -- while the workspace's own sources come from disk.
+import { VfsError } from '@preventive/vfs'
+
+// The overlay host that serves a pnpm lockfile's in-memory node_modules to a reader (the `host`
+// surface `@exodus/stasis`' static bundler reads through; see its src/host.js for the contract).
+// The memory layer is a @preventive/vfs `Vfs` holding the layout at the project's real absolute
+// paths (a Vfs resolves every path from `/`, so the host's paths are its paths, no translation).
+// The overlay is strict about its zone: under the project root, every path with a `node_modules`
+// segment is served from the Vfs ONLY -- whatever install happens to sit on disk is invisible --
+// while the workspace's own sources come from disk. Symlinks cross both ways (an importer's link
+// into the store, a `link:` dependency out to a workspace directory), so the overlay walks
+// realpaths itself, one link at a time, asking each zone only what sits at a name.
 //
 // Host surface (all paths absolute):
-//   stat(p) -> { isFile(), isDirectory(), mode } | null      (follows symlinks)
+//   stat(p) -> { isFile(), isDirectory(), isSymbolicLink(), mode } | null   (follows symlinks)
 //   lstat(p) -> { isFile(), isDirectory(), isSymbolicLink(), mode } | null
 //   readFile(p) -> Buffer                                    (throws ENOENT / EISDIR)
 //   readdir(p) -> [{ name, isFile(), isDirectory(), isSymbolicLink() }] sorted by name
@@ -27,84 +33,39 @@ function fsError(code, message, path) {
   return err
 }
 
-const dirent = (name, kind) => ({
+const dirent = (name, type) => ({
   name,
-  isFile: () => kind === 'file',
-  isDirectory: () => kind === 'dir',
-  isSymbolicLink: () => kind === 'symlink',
+  isFile: () => type === 'file',
+  isDirectory: () => type === 'directory',
+  isSymbolicLink: () => type === 'symlink',
 })
 
 // A `Dirent` from node:fs reduced to the plain shape hosts return.
-const fromFsDirent = (d) => dirent(d.name, d.isSymbolicLink() ? 'symlink' : d.isDirectory() ? 'dir' : d.isFile() ? 'file' : 'other')
+const fromFsDirent = (d) => dirent(d.name, d.isSymbolicLink() ? 'symlink' : d.isDirectory() ? 'directory' : d.isFile() ? 'file' : 'other')
 
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
-// An in-memory tree of files, directories and symlinks keyed by absolute path. Parent directories
-// are implied; a path can hold one node (re-adding a different kind is a layout bug, so it throws).
-export class MemoryTree {
-  #nodes = new Map()
+// fs.Stats#mode carries the file type above the permission bits a Vfs stat holds.
+const TYPE_BITS = { file: 0o100000, directory: 0o40000, symlink: 0o120000 }
 
-  get size() {
-    return this.#nodes.size
-  }
+const statsFor = (st) => ({
+  isFile: () => st.type === 'file',
+  isDirectory: () => st.type === 'directory',
+  isSymbolicLink: () => st.type === 'symlink',
+  mode: TYPE_BITS[st.type] | st.mode,
+})
 
-  get(p) {
-    return this.#nodes.get(p)
-  }
+// The Vfs's own bytes, as the Buffer the host contract promises: a view, never a copy (and the
+// contract's readers never write into it).
+const asBuffer = (bytes) => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
-  has(p) {
-    return this.#nodes.has(p)
-  }
-
-  #ensureDir(p) {
-    const existing = this.#nodes.get(p)
-    if (existing) {
-      if (existing.kind !== 'dir') throw new Error(`virtual fs: ${p} is a ${existing.kind}, not a directory`)
-      return existing
-    }
-    const node = { kind: 'dir', children: new Set() }
-    this.#nodes.set(p, node)
-    if (p !== '/') this.#ensureDir(dirname(p)).children.add(basename(p))
-    return node
-  }
-
-  #place(p, node) {
-    if (!isAbsolute(p)) throw new Error(`virtual fs: path must be absolute: ${p}`)
-    const existing = this.#nodes.get(p)
-    if (existing) {
-      if (existing.kind === node.kind && node.kind === 'symlink' && existing.target === node.target) return
-      throw new Error(`virtual fs: ${p} already exists (${existing.kind})`)
-    }
-    this.#ensureDir(dirname(p)).children.add(basename(p))
-    this.#nodes.set(p, node)
-  }
-
-  addDir(p) {
-    this.#ensureDir(resolve(p))
-  }
-
-  addFile(p, content, mode = 0o644) {
-    if (!Buffer.isBuffer(content)) throw new TypeError(`virtual fs: file content must be a Buffer: ${p}`)
-    this.#place(resolve(p), { kind: 'file', content, mode: mode & 0o777 })
-  }
-
-  // `target` is stored verbatim (relative targets resolve against the link's directory, like readlink).
-  addSymlink(p, target) {
-    this.#place(resolve(p), { kind: 'symlink', target })
-  }
-
-  // Every path in the tree (files, dirs and links), for diagnostics/tests.
-  paths() {
-    return [...this.#nodes.keys()].toSorted()
-  }
-}
-
-// A host over `tree` for the node_modules zone under `root` and the real disk everywhere else.
+// A host over `vfs` for the node_modules zone under `root` and the real disk everywhere else.
 // `makeResolver(host)` builds the module resolver lazily (the resolution algorithm belongs to the
 // bundler, so it is injected rather than imported here).
-export function createOverlayHost({ root, tree, makeResolver }) {
+export function createOverlayHost({ root, vfs, makeResolver }) {
   root = resolve(root)
   if (sep !== '/') throw new Error('The virtual pnpm host is POSIX-only')
+  if (typeof vfs?.lstat !== 'function') throw new TypeError('createOverlayHost: vfs must be a @preventive/vfs Vfs')
   if (typeof makeResolver !== 'function') throw new TypeError('createOverlayHost: makeResolver(host) is required')
 
   // Under root AND containing a node_modules segment: memory only.
@@ -114,19 +75,31 @@ export function createOverlayHost({ root, tree, makeResolver }) {
     return rel.split('/').includes('node_modules')
   }
 
+  // What the Vfs holds at `p` itself (the last link not followed), or null when nothing is there.
+  // `p` is a real path but for its last name, so the Vfs walks plain directories to it; a path
+  // through something that is not one reads as absent, as a missing one does.
+  const nodeAt = (p) => {
+    try {
+      return vfs.lstat(p)
+    } catch (err) {
+      if (err instanceof VfsError && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return null
+      throw err
+    }
+  }
+
   // Symlink target of `p` (memory or disk, per zone); null when `p` exists and isn't a link.
   const readlink = (p) => {
     if (inVirtualZone(p)) {
-      const node = tree.get(p)
-      if (!node) throw fsError('ENOENT', 'no such file or directory', p)
-      return node.kind === 'symlink' ? node.target : null
+      const node = nodeAt(p)
+      if (node === null) throw fsError('ENOENT', 'no such file or directory', p)
+      return node.type === 'symlink' ? vfs.readlink(p) : null
     }
     const st = lstatSync(p, { throwIfNoEntry: false })
     if (st === undefined) throw fsError('ENOENT', 'no such file or directory', p)
     return st.isSymbolicLink() ? readlinkSync(p) : null
   }
 
-  // Memoized per path (the tree is immutable for the build and the disk is assumed still), so the
+  // Memoized per path (the Vfs is immutable for the build and the disk is assumed still), so the
   // scanner's many probes of one package cost one walk per directory prefix.
   const realCache = new Map()
   const realpath = (p, hops = 0) => {
@@ -155,23 +128,17 @@ export function createOverlayHost({ root, tree, makeResolver }) {
     return result
   }
 
-  const nodeAt = (real) => {
-    const node = tree.get(real)
-    if (!node) throw fsError('ENOENT', 'no such file or directory', real)
+  // The Vfs node at a real path, which has to be there.
+  const nodeOf = (real) => {
+    const node = nodeAt(real)
+    if (node === null) throw fsError('ENOENT', 'no such file or directory', real)
     return node
   }
-
-  const statsFor = (node, symlink = false) => ({
-    isFile: () => node.kind === 'file',
-    isDirectory: () => node.kind === 'dir',
-    isSymbolicLink: () => symlink,
-    mode: node.kind === 'file' ? (node.mode | 0o100000) : node.kind === 'dir' ? 0o40755 : 0o120777,
-  })
 
   const host = {
     virtual: true,
     root,
-    tree,
+    vfs,
     inVirtualZone,
     stat(p) {
       let real
@@ -181,8 +148,8 @@ export function createOverlayHost({ root, tree, makeResolver }) {
         return null
       }
       if (inVirtualZone(real)) {
-        const node = tree.get(real)
-        return node && node.kind !== 'symlink' ? statsFor(node) : null
+        const node = nodeAt(real)
+        return node !== null && node.type !== 'symlink' ? statsFor(node) : null
       }
       try {
         return statSync(real, { throwIfNoEntry: false }) ?? null
@@ -200,8 +167,8 @@ export function createOverlayHost({ root, tree, makeResolver }) {
       }
       const candidate = join(parentReal, basename(p))
       if (inVirtualZone(candidate)) {
-        const node = tree.get(candidate)
-        return node ? statsFor(node, node.kind === 'symlink') : null
+        const node = nodeAt(candidate)
+        return node === null ? null : statsFor(node)
       }
       try {
         return lstatSync(candidate, { throwIfNoEntry: false }) ?? null
@@ -212,28 +179,24 @@ export function createOverlayHost({ root, tree, makeResolver }) {
     readFile(p) {
       const real = realpath(resolve(p))
       if (inVirtualZone(real)) {
-        const node = nodeAt(real)
-        if (node.kind !== 'file') throw fsError('EISDIR', 'illegal operation on a directory', p)
-        return node.content
+        if (nodeOf(real).type !== 'file') throw fsError('EISDIR', 'illegal operation on a directory', p)
+        return asBuffer(vfs.readFile(real))
       }
       return readFileSync(real)
     },
     readdir(p) {
       const real = realpath(resolve(p))
       if (inVirtualZone(real)) {
-        const node = nodeAt(real)
-        if (node.kind !== 'dir') throw fsError('ENOTDIR', 'not a directory', p)
-        return [...node.children].map((name) => {
-          const child = tree.get(join(real, name))
-          return dirent(name, child.kind)
-        }).toSorted(byName)
+        if (nodeOf(real).type !== 'directory') throw fsError('ENOTDIR', 'not a directory', p)
+        return vfs.readdir(real).map((name) => dirent(name, vfs.lstat(join(real, name)).type)).toSorted(byName)
       }
       // A disk directory under root shows the VIRTUAL node_modules (if any), never the real one.
-      const out = readdirSync(real, { withFileTypes: true })
-        .filter((d) => d.name !== 'node_modules' || !inVirtualZone(join(real, 'node_modules')))
-        .map(fromFsDirent)
       const nm = join(real, 'node_modules')
-      if (inVirtualZone(nm) && tree.get(nm)?.kind === 'dir') out.push(dirent('node_modules', 'dir'))
+      const masked = inVirtualZone(nm)
+      const out = readdirSync(real, { withFileTypes: true })
+        .filter((d) => d.name !== 'node_modules' || !masked)
+        .map(fromFsDirent)
+      if (masked && nodeAt(nm)?.type === 'directory') out.push(dirent('node_modules', 'directory'))
       return out.toSorted(byName)
     },
     realpath(p) {

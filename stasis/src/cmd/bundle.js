@@ -1233,8 +1233,8 @@ async function importStasisDeps() {
 // tree comes from @exodus/stasis-deps; the resolution algorithm that reads it stays here.
 async function pnpmHostFor({ cwd, pnpmCache, pnpmOffline }) {
   const deps = await importStasisDeps()
-  const { root, tree } = await deps.loadPnpmNodeModules({ cwd, cacheDir: pnpmCache, offline: Boolean(pnpmOffline) })
-  return deps.createOverlayHost({ root, tree, makeResolver: createNodeResolver })
+  const { root, vfs } = await deps.loadPnpmNodeModules({ cwd, cacheDir: pnpmCache, offline: Boolean(pnpmOffline) })
+  return deps.createOverlayHost({ root, vfs, makeResolver: createNodeResolver })
 }
 
 // Build a JS bundle (+ companion lockfile) the way the flags select: the legacy-field resolver

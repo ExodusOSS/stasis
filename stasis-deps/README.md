@@ -12,14 +12,19 @@ or module resolution itself. See [doc/pnpm.md](https://github.com/ExodusOSS/stas
 ```js
 import { createOverlayHost, loadPnpmNodeModules } from '@exodus/stasis-deps'
 
-const { root, tree, summary } = await loadPnpmNodeModules({ cwd, cacheDir, offline })
-// `tree` is a MemoryTree of the lockfile's node_modules; read it through a host:
-const host = createOverlayHost({ root, tree, makeResolver })
+const { root, vfs, summary } = await loadPnpmNodeModules({ cwd, cacheDir, offline })
+// `vfs` is a @preventive/vfs Vfs holding the lockfile's node_modules at the project's real
+// paths; read it (and the workspace's own sources on disk) through the overlay host:
+const host = createOverlayHost({ root, vfs, makeResolver })
 ```
 
-Subpath exports (`/lockfile`, `/dep-path`, `/tar`, `/fetch`, `/settings`, `/layout`, `/vfs`)
-expose the pieces. Its only dependency is [`@preventive/yaml`](https://npmjs.com/package/@preventive/yaml),
-the strict parser for the YAML subset pnpm writes.
+Subpath exports (`/lockfile`, `/dep-path`, `/tar`, `/fetch`, `/settings`, `/layout`, `/overlay`)
+expose the pieces. It is built on three strict, dependency-light libraries:
+[`@preventive/yaml`](https://npmjs.com/package/@preventive/yaml) (the YAML subset pnpm writes),
+[`@preventive/archive`](https://npmjs.com/package/@preventive/archive) (the in-memory tar reader,
+which refuses what no honest packer writes: escaping or duplicate names, symlinks out of the
+archive, truncated archives) and [`@preventive/vfs`](https://npmjs.com/package/@preventive/vfs)
+(the in-memory filesystem with POSIX path resolution the layout is built into).
 
 ## License
 

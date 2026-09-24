@@ -14,7 +14,8 @@ import {
   stripPeerSuffix,
 } from '@exodus/stasis-deps/dep-path'
 import { readPackageTarball } from '@exodus/stasis-deps/tar'
-import { MemoryTree, createOverlayHost } from '@exodus/stasis-deps/vfs'
+import { createOverlayHost } from '@exodus/stasis-deps/overlay'
+import { Vfs } from '@exodus/stasis-deps'
 import { diskHost } from '../stasis/src/host.js'
 import { authHeadersFor, loadPnpmSettings, parseNpmrc, registryFor } from '@exodus/stasis-deps/settings'
 import { parsePnpmLockfile } from '@exodus/stasis-deps/lockfile'
@@ -78,7 +79,7 @@ test('registryTarballUrl follows the npm registry layout for plain and scoped na
 // --- tarballs ---
 
 // A minimal ustar writer (plus GNU long-name entries) for the reader's tests.
-function tarEntry(name, content, { mode = 0o644, type = '0' } = {}) {
+function tarEntry(name, content, { mode = 0o644, type = '0', linkname = '' } = {}) {
   const header = Buffer.alloc(512)
   header.write(name, 0, 100, 'utf8')
   header.write(mode.toString(8).padStart(7, '0'), 100, 8)
@@ -87,6 +88,7 @@ function tarEntry(name, content, { mode = 0o644, type = '0' } = {}) {
   header.write(content.length.toString(8).padStart(11, '0'), 124, 12)
   header.write('00000000000', 136, 12)
   header.write(type, 156, 1)
+  header.write(linkname, 157, 100, 'utf8')
   header.write('ustar\0', 257, 6)
   header.write('00', 263, 2)
   let sum = 0
@@ -101,28 +103,44 @@ function makeTgz(entries) {
   return gzipSync(Buffer.concat([...entries, Buffer.alloc(1024)]))
 }
 
+const text = (file) => Buffer.from(file.data).toString()
+
 test('readPackageTarball keeps regular files with their modes, strips the top-level dir, and drops links', (t) => {
   const long = `package/${'d'.repeat(120)}/deep.js`
   const files = readPackageTarball(makeTgz([
     tarEntry('package/', Buffer.alloc(0), { type: '5', mode: 0o755 }),
     tarEntry('package/index.js', Buffer.from('module.exports = 1\n')),
     tarEntry('package/bin/cli.js', Buffer.from('#!/usr/bin/env node\n'), { mode: 0o755 }),
-    tarEntry('package/link', Buffer.alloc(0), { type: '2' }),
+    tarEntry('package/link', Buffer.alloc(0), { type: '2', linkname: 'index.js' }),
+    tarEntry('package/hard', Buffer.alloc(0), { type: '1', linkname: 'package/index.js' }),
     tarEntry('././@LongLink', Buffer.from(`${long}\0`), { type: 'L' }),
     tarEntry('package/truncated-name-ignored', Buffer.from('deep')),
-    tarEntry('package/package.json', Buffer.from('{"name":"x"}')),
+    tarEntry('package/./package.json', Buffer.from('{"name":"x"}')),
+    tarEntry('stray.txt', Buffer.from('beside the package dir')),
   ]), { label: 'x' })
   t.assert.deepEqual([...files.keys()].toSorted(), ['bin/cli.js', `${'d'.repeat(120)}/deep.js`, 'index.js', 'package.json'])
-  t.assert.equal(files.get('index.js').content.toString(), 'module.exports = 1\n')
+  t.assert.equal(text(files.get('index.js')), 'module.exports = 1\n')
   t.assert.equal(files.get('index.js').mode, 0o644)
   t.assert.equal(files.get('bin/cli.js').mode, 0o755)
-  t.assert.equal(files.get(`${'d'.repeat(120)}/deep.js`).content.toString(), 'deep')
+  t.assert.equal(text(files.get(`${'d'.repeat(120)}/deep.js`)), 'deep')
+  t.assert.equal(text(files.get('package.json')), '{"name":"x"}')
 })
 
-test('readPackageTarball refuses entries that escape the package', (t) => {
-  t.assert.throws(() => readPackageTarball(makeTgz([tarEntry('package/../evil.js', Buffer.from('x'))]), { label: 'x' }), /escapes the package/u)
-  t.assert.throws(() => readPackageTarball(makeTgz([tarEntry('/abs/evil.js', Buffer.from('x'))]), { label: 'x' }), /absolute path|escapes/u)
-  t.assert.throws(() => readPackageTarball(gzipSync(tarEntry('package/a.js', Buffer.alloc(1000, 0x61)).subarray(0, 600)), { label: 'x' }), /truncated/u)
+test('readPackageTarball refuses what no honest packer writes, naming the tarball', (t) => {
+  const refuses = (entries, re) => t.assert.throws(() => readPackageTarball(makeTgz(entries), { label: 'x@1.0.0' }), (err) => err instanceof Error && err.message.startsWith('x@1.0.0: ') && re.test(err.message) && err.cause?.name === 'ArchiveError')
+  refuses([tarEntry('package/../evil.js', Buffer.from('x'))], /\.\. segment/u)
+  refuses([tarEntry('/abs/evil.js', Buffer.from('x'))], /is absolute/u)
+  // A symlink that would climb out is refused even though symlinks are never kept.
+  refuses([tarEntry('package/l', Buffer.alloc(0), { type: '2', linkname: '../../etc/passwd' })], /points outside the archive/u)
+  // Two different entries under one name have no right answer, so neither wins.
+  refuses([tarEntry('package/a.js', Buffer.from('1')), tarEntry('package/a.js', Buffer.from('2'))], /duplicate entry/u)
+  // ... but the same entry again (some packagers write `d/f` and `d/./f`) is fine.
+  t.assert.equal(readPackageTarball(makeTgz([tarEntry('package/a.js', Buffer.from('1')), tarEntry('package/./a.js', Buffer.from('1'))])).size, 1)
+  refuses([tarEntry('package/a.js', Buffer.from('x')), tarEntry('package/a.js/b.js', Buffer.from('y'))], /not a directory/u)
+  t.assert.throws(() => readPackageTarball(gzipSync(tarEntry('package/a.js', Buffer.alloc(1000, 0x61)).subarray(0, 600)), { label: 'x' }), /Error: x: the archive is truncated/u)
+  t.assert.throws(() => readPackageTarball(gzipSync(Buffer.alloc(0)), { label: 'x' }), /Error: x: the archive is empty/u)
+  // Not gzip after all: zlib's refusal is labelled the same way.
+  t.assert.throws(() => readPackageTarball(Buffer.from([0x1F, 0x8B, 1, 2, 3]), { label: 'x' }), (err) => err.message.startsWith('x: ') && err.cause?.code === 'Z_DATA_ERROR')
 })
 
 test('fetchTarballs serves a cached tarball only when it still matches its integrity, and never fetches without one', withTmp(async (t, tmp) => {
@@ -162,28 +180,40 @@ test('overlay host masks the on-disk node_modules, follows virtual symlinks (int
   writeFileSync(join(root, 'packages', 'ws', 'package.json'), '{"name":"ws","version":"1.0.0","main":"lib.js"}')
   writeFileSync(join(root, 'packages', 'ws', 'lib.js'), 'ws')
 
-  const tree = new MemoryTree()
+  // The memory layer is a @preventive/vfs Vfs holding the layout at the project's real paths.
+  const vfs = new Vfs()
   const store = join(root, 'node_modules', '.pnpm')
-  tree.addFile(join(store, 'dep@1.0.0/node_modules/dep/package.json'), Buffer.from('{"name":"dep","version":"1.0.0","exports":{"require":"./r.js","import":"./i.mjs"}}'))
-  tree.addFile(join(store, 'dep@1.0.0/node_modules/dep/r.js'), Buffer.from('r'), 0o755)
-  tree.addFile(join(store, 'dep@1.0.0/node_modules/dep/i.mjs'), Buffer.from('i'))
-  tree.addSymlink(join(store, 'dep@1.0.0/node_modules/ws'), '../../../../packages/ws')
-  tree.addSymlink(join(root, 'node_modules', 'dep'), '.pnpm/dep@1.0.0/node_modules/dep')
-  tree.addSymlink(join(root, 'node_modules', 'loop'), 'loop2')
-  tree.addSymlink(join(root, 'node_modules', 'loop2'), 'loop')
-  t.assert.throws(() => tree.addFile(join(root, 'node_modules', 'dep'), Buffer.from('x')), /already exists/u)
+  const dep = join(store, 'dep@1.0.0/node_modules/dep')
+  vfs.mkdir(dep, { recursive: true })
+  vfs.writeFile(join(dep, 'package.json'), '{"name":"dep","version":"1.0.0","exports":{"require":"./r.js","import":"./i.mjs"}}')
+  vfs.writeFile(join(dep, 'r.js'), 'r', { mode: 0o755 })
+  vfs.writeFile(join(dep, 'i.mjs'), Buffer.from('i'))
+  vfs.symlink('../../../../packages/ws', join(store, 'dep@1.0.0/node_modules/ws'))
+  vfs.symlink('.pnpm/dep@1.0.0/node_modules/dep', join(root, 'node_modules', 'dep'))
+  vfs.symlink('loop2', join(root, 'node_modules', 'loop'))
+  vfs.symlink('loop', join(root, 'node_modules', 'loop2'))
+  t.assert.throws(() => vfs.symlink('elsewhere', join(root, 'node_modules', 'dep')), { name: 'VfsError', code: 'EEXIST' })
+  t.assert.throws(() => createOverlayHost({ root, vfs: new Map(), makeResolver: createNodeResolver }), /must be a @preventive\/vfs Vfs/u)
 
-  const host = createOverlayHost({ root, tree, makeResolver: createNodeResolver })
+  const host = createOverlayHost({ root, vfs, makeResolver: createNodeResolver })
+  t.assert.equal(host.vfs, vfs)
   t.assert.equal(host.exists(join(root, 'node_modules', 'onDisk', 'index.js')), false, 'the real install is invisible')
   t.assert.equal(host.exists(join(root, 'src', 'entry.js')), true, 'workspace sources come from disk')
   t.assert.equal(host.realpath(join(root, 'node_modules', 'dep', 'r.js')), join(store, 'dep@1.0.0/node_modules/dep/r.js'))
   t.assert.equal(host.realpath(join(store, 'dep@1.0.0/node_modules/ws/lib.js')), join(root, 'packages', 'ws', 'lib.js'), 'a link: target lands on disk')
   t.assert.equal(host.readFile(join(store, 'dep@1.0.0/node_modules/ws/lib.js')).toString(), 'ws')
-  t.assert.equal(host.readFile(join(root, 'node_modules', 'dep', 'r.js')).toString(), 'r')
-  t.assert.equal(host.stat(join(root, 'node_modules', 'dep', 'r.js')).mode & 0o111, 0o111)
+  const r = host.readFile(join(root, 'node_modules', 'dep', 'r.js'))
+  t.assert.ok(Buffer.isBuffer(r), 'the host hands out Buffers over the Vfs bytes')
+  t.assert.equal(r.toString(), 'r')
+  t.assert.equal(host.stat(join(root, 'node_modules', 'dep', 'r.js')).mode, 0o100755, 'S_IFREG on top of the Vfs mode')
+  t.assert.equal(host.stat(join(root, 'node_modules', 'dep', 'r.js')).isFile(), true)
   t.assert.equal(host.stat(join(root, 'node_modules', 'dep')).isDirectory(), true)
+  t.assert.equal(host.stat(join(root, 'node_modules', 'dep')).mode, 0o40755)
   t.assert.equal(host.lstat(join(root, 'node_modules', 'dep')).isSymbolicLink(), true)
+  t.assert.equal(host.lstat(join(root, 'node_modules', 'dep')).mode, 0o120777)
   t.assert.equal(host.stat(join(root, 'node_modules', 'missing')), null)
+  t.assert.equal(host.stat(join(root, 'node_modules', 'dep', 'r.js', 'below-a-file')), null)
+  t.assert.equal(host.lstat(join(root, 'packages', 'other', 'node_modules', 'x')), null, 'a node_modules the layout never made is empty, not an error')
   t.assert.throws(() => host.realpath(join(root, 'node_modules', 'loop', 'x')), /ELOOP/u)
   t.assert.deepEqual(host.readdir(join(root, 'node_modules')).map((d) => `${d.name}${d.isSymbolicLink() ? '@' : '/'}`), ['.pnpm/', 'dep@', 'loop@', 'loop2@'])
   t.assert.deepEqual(host.readdir(root).map((d) => d.name), ['node_modules', 'package.json', 'packages', 'src'], 'a disk dir lists the virtual node_modules')
@@ -348,8 +378,8 @@ snapshots:
 `
 
 const syntheticFiles = (key) => new Map([
-  ['package.json', { content: Buffer.from(JSON.stringify({ name: parseDepPath(key).name, version: parseDepPath(key).version })), mode: 0o644 }],
-  ['index.js', { content: Buffer.from(`// ${key}\n`), mode: 0o644 }],
+  ['package.json', { data: Buffer.from(JSON.stringify({ name: parseDepPath(key).name, version: parseDepPath(key).version })), mode: 0o644 }],
+  ['index.js', { data: new TextEncoder().encode(`// ${key}\n`), mode: 0o644 }],
 ])
 
 test('computeSkipped drops optional packages this platform cannot install, and only those', (t) => {
@@ -387,17 +417,19 @@ test('buildLayout lays out pnpm\'s isolated tree: store dirs, dependency links, 
   const skipped = new Set(['native-dep@1.0.0', 'native-other-os@1.0.0'])
   const root = '/proj'
   const workspaceDirs = new Map([['app', '/proj/packages/app']])
-  const { tree, hoisted } = buildLayout({ root, lockfile: lock, settings, skipped, filesFor: syntheticFiles, workspaceDirs })
+  const { vfs, hoisted } = buildLayout({ root, lockfile: lock, settings, skipped, filesFor: syntheticFiles, workspaceDirs })
   const store = '/proj/node_modules/.pnpm'
+  const has = (fs, p) => fs.isFile(p) || fs.isDirectory(p) || fs.isSymlink(p)
   const link = (p) => {
-    const node = tree.get(p)
-    t.assert.ok(node, `missing ${p}`)
-    t.assert.equal(node.kind, 'symlink', `${p} is a ${node.kind}`)
-    return node.target
+    t.assert.ok(has(vfs, p), `missing ${p}`)
+    t.assert.equal(vfs.lstat(p).type, 'symlink', `${p} is a ${vfs.lstat(p).type}`)
+    return vfs.readlink(p)
   }
   // Store dirs named by depPathToFilename, holding the tarball's files.
-  t.assert.equal(tree.get(`${store}/@scope+tool@1.0.0_debug@4.3.6/node_modules/@scope/tool/index.js`).content.toString(), '// @scope/tool@1.0.0\n')
-  t.assert.equal(tree.get(`${store}/debug@4.3.6/node_modules/debug/index.js`).kind, 'file')
+  t.assert.equal(vfs.readText(`${store}/@scope+tool@1.0.0_debug@4.3.6/node_modules/@scope/tool/index.js`), '// @scope/tool@1.0.0\n')
+  t.assert.equal(vfs.lstat(`${store}/debug@4.3.6/node_modules/debug/index.js`).type, 'file')
+  t.assert.equal(vfs.lstat(`${store}/debug@4.3.6/node_modules/debug/index.js`).mode, 0o644)
+  t.assert.equal(vfs.lstat('/proj/node_modules').type, 'directory')
   // Dependency links beside each package, relative like pnpm's.
   t.assert.equal(link(`${store}/@scope+tool@1.0.0_debug@4.3.6/node_modules/debug`), '../../debug@4.3.6/node_modules/debug')
   t.assert.equal(link(`${store}/debug@4.3.6/node_modules/ms`), '../../ms@2.1.2/node_modules/ms')
@@ -409,22 +441,26 @@ test('buildLayout lays out pnpm\'s isolated tree: store dirs, dependency links, 
   t.assert.equal(link('/proj/packages/app/node_modules/express-like'), '../../../node_modules/.pnpm/express-like@1.0.0/node_modules/express-like')
   t.assert.equal(link('/proj/packages/app/node_modules/root-pkg'), '../../..')
   // A skipped optional dep is neither unpacked nor linked.
-  t.assert.equal(tree.has('/proj/packages/app/node_modules/native-other-os'), false)
-  t.assert.equal(tree.paths().some((p) => p.includes('native')), false)
+  t.assert.equal(has(vfs, '/proj/packages/app/node_modules/native-other-os'), false)
+  t.assert.equal([...vfs.walk('/proj')].some((entry) => entry.path.includes('native')), false)
   // Hoisting: the app's direct deps and the workspace package go to .pnpm/node_modules; root
   // direct-dep aliases never do; `ms` hoists to the version met first in breadth-first order.
   t.assert.equal(link(`${store}/node_modules/express-like`), '../express-like@1.0.0/node_modules/express-like')
   t.assert.equal(link(`${store}/node_modules/app`), '../../../packages/app')
   t.assert.equal(link(`${store}/node_modules/ms`), '../ms@2.1.2/node_modules/ms', 'debug (depth 0, first importer) brings ms@2.1.2 before express-like\'s ms@2.0.0')
-  t.assert.equal(tree.has(`${store}/node_modules/debug`), false, 'a root direct dependency is not privately hoisted')
-  t.assert.equal(tree.has(`${store}/node_modules/ms-alias`), false)
+  t.assert.equal(has(vfs, `${store}/node_modules/debug`), false, 'a root direct dependency is not privately hoisted')
+  t.assert.equal(has(vfs, `${store}/node_modules/ms-alias`), false)
   t.assert.deepEqual([...hoisted.keys()].toSorted(), ['app', 'express-like', 'ms'])
   // Public hoisting via pattern lands in the root node_modules instead.
   const pub = { ...settings, publicHoistPattern: ['ms'] }
-  const { tree: tree2 } = buildLayout({ root, lockfile: lock, settings: pub, skipped, filesFor: syntheticFiles, workspaceDirs })
-  t.assert.equal(tree2.get('/proj/node_modules/ms').target, '.pnpm/ms@2.1.2/node_modules/ms')
-  t.assert.equal(tree2.has(`${store}/node_modules/ms`), false)
+  const { vfs: vfs2 } = buildLayout({ root, lockfile: lock, settings: pub, skipped, filesFor: syntheticFiles, workspaceDirs })
+  t.assert.equal(vfs2.readlink('/proj/node_modules/ms'), '.pnpm/ms@2.1.2/node_modules/ms')
+  t.assert.equal(has(vfs2, `${store}/node_modules/ms`), false)
   t.assert.deepEqual([...computeHoisted(lock, { skipped, settings: { ...settings, hoistPattern: [] }, workspaceDirs }).keys()], [])
+  // A file list that names something twice (a directory and then a file of that name) is a bug in
+  // the caller, never an overwrite: the layout throws instead.
+  const clashing = (key) => new Map([...syntheticFiles(key), ...(key === 'debug@4.3.6' ? [['lib/x.js', { data: Buffer.from('x') }], ['lib', { data: Buffer.from('not a directory') }]] : [])])
+  t.assert.throws(() => buildLayout({ root, lockfile: lock, settings, skipped, filesFor: clashing, workspaceDirs }), /debug\/lib is laid out twice/u)
 })
 
 test('planTarballs asserts recorded tarball URLs (lockfileIncludeTarballUrl) and requires them when the setting is on', (t) => {

@@ -9,9 +9,9 @@
     "./fetch": "./src/fetch.js",
     "./layout": "./src/layout.js",
     "./lockfile": "./src/lockfile.js",
+    "./overlay": "./src/overlay.js",
     "./settings": "./src/settings.js",
-    "./tar": "./src/tar.js",
-    "./vfs": "./src/vfs.js"
+    "./tar": "./src/tar.js"
   },
   "files": [
     "src/dep-path.js",
@@ -19,10 +19,10 @@
     "src/index.js",
     "src/layout.js",
     "src/lockfile.js",
+    "src/overlay.js",
     "src/semver.cjs",
     "src/settings.js",
-    "src/tar.js",
-    "src/vfs.js"
+    "src/tar.js"
   ],
   "engines": {
     "node": ">=24.14.0"
@@ -39,6 +39,8 @@
   },
   "homepage": "https://github.com/ExodusOSS/stasis#readme",
   "dependencies": {
+    "@preventive/archive": "^1.0.0-beta.3",
+    "@preventive/vfs": "^1.0.0-beta.1",
     "@preventive/yaml": "^1.0.0-beta.0"
   }
 }

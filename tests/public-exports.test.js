@@ -50,10 +50,12 @@ test('@exodus/stasis-deps (the optional --pnpm dependency) exports the lockfile-
   const deps = await import('@exodus/stasis-deps')
   t.assert.equal(typeof deps.loadPnpmNodeModules, 'function')
   t.assert.equal(typeof deps.createOverlayHost, 'function')
-  t.assert.equal(typeof deps.MemoryTree, 'function')
+  // The in-memory filesystem the layout is built into is @preventive/vfs's, re-exported.
+  t.assert.equal(typeof deps.Vfs, 'function')
+  t.assert.equal(typeof deps.VfsError, 'function')
   t.assert.equal(typeof deps.findLockfileRoot, 'function')
   t.assert.equal(deps.LOCKFILE_NAME, 'pnpm-lock.yaml')
-  const subpaths = ['dep-path', 'fetch', 'layout', 'lockfile', 'settings', 'tar', 'vfs']
+  const subpaths = ['dep-path', 'fetch', 'layout', 'lockfile', 'overlay', 'settings', 'tar']
   const mods = await Promise.all(subpaths.map((sub) => import(`@exodus/stasis-deps/${sub}`)))
   for (const [i, mod] of mods.entries()) {
     t.assert.ok(Object.keys(mod).length > 0, `@exodus/stasis-deps/${subpaths[i]} exports something`)

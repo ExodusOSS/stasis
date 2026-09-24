@@ -12,8 +12,9 @@ stasis bundle --pnpm [--pnpm-cache=dir] [--pnpm-offline] [--scope=…] [--condit
 ```
 
 The lockfile → in-memory `node_modules` implementation lives in the separate
-[`@exodus/stasis-deps`](../stasis-deps) package (whose only dependency is the strict
-`@preventive/yaml` parser), an **optional** dependency of `@exodus/stasis`
+[`@exodus/stasis-deps`](../stasis-deps) package (built on the strict `@preventive/yaml`
+parser, `@preventive/archive` tar reader and `@preventive/vfs` in-memory filesystem), an
+**optional** dependency of `@exodus/stasis`
 (like `esbuild` for `stasis build`): install it alongside stasis to use `--pnpm`
 (`npm i -D @exodus/stasis-deps` / `pnpm add -D @exodus/stasis-deps`); without it, `--pnpm` fails
 with that hint. The bundling side — the scan, Node's resolution algorithm over the virtual tree,
@@ -57,7 +58,11 @@ deliberately masks).
    foreign host, or one pointing at a different package or version, fails the build
    before anything is fetched. With the setting enabled, a package that records no
    URL is a stale lockfile and fails too (`pnpm install` refreshes it).
-3. **Unpacks in memory** and lays out pnpm's isolated tree:
+3. **Unpacks in memory** — with a strict tar reader that keeps regular files only
+   (as npm and pnpm do) and refuses a tarball no honest packer writes: an entry
+   escaping the package, a name repeated as a different entry, a symlink out of
+   the archive, a truncated archive — and lays out pnpm's isolated tree in an
+   in-memory filesystem:
    `node_modules/.pnpm/<name>@<version>(<peers>)/node_modules/<name>/…` (directory
    names escaped and, when too long, hashed exactly as pnpm 10 does), dependency
    symlinks beside each package, each importer's `node_modules/<alias>` links

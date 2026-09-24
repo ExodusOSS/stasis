@@ -1,8 +1,9 @@
 import { dirname, join, relative, resolve } from 'node:path'
 
+import { Vfs, VfsError } from '@preventive/vfs'
+
 import { depPathToFilename, registryTarballUrl } from './dep-path.js'
 import { resolveDepRef } from './lockfile.js'
-import { MemoryTree } from './vfs.js'
 import { authHeadersFor, registryFor } from './settings.js'
 import semver from './semver.cjs'
 
@@ -295,15 +296,50 @@ export function planTarballs(lockfile, { skipped, settings, root }) {
 
 // --- the tree ---
 
-// `filesFor(packageKey)` -> Map<rel, { content, mode }> (the unpacked tarball). `workspaceDirs`:
-// Map<packageName, absolute dir> of the non-root importers with a package.json name.
+// A Vfs lookup of the name itself (the last link not followed): true when something is there.
+function taken(vfs, p) {
+  try {
+    vfs.lstat(p)
+    return true
+  } catch (err) {
+    if (err instanceof VfsError && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return false
+    throw err
+  }
+}
+
+// `filesFor(packageKey)` -> Map<rel, { data, mode }> (the unpacked tarball). `workspaceDirs`:
+// Map<packageName, absolute dir> of the non-root importers with a package.json name. The tree is
+// a @preventive/vfs `Vfs` holding the layout at the project's real absolute paths (a Vfs resolves
+// from `/`); a name laid out twice is a bug in this file, so it throws rather than overwrite.
 export function buildLayout({ root, lockfile, settings, skipped, filesFor, workspaceDirs = new Map() }) {
   root = resolve(root)
   const virtualStore = resolve(root, settings.virtualStoreDir)
-  const tree = new MemoryTree()
+  const vfs = new Vfs()
   const maxLength = settings.virtualStoreDirMaxLength
   const dirNames = new Map()
   const packageDirs = new Map()
+
+  const madeDirs = new Set()
+  const ensureDir = (dir) => {
+    if (madeDirs.has(dir)) return
+    vfs.mkdir(dir, { recursive: true })
+    madeDirs.add(dir)
+  }
+  const addFile = (p, data, mode) => {
+    ensureDir(dirname(p))
+    if (taken(vfs, p)) throw new Error(`stasis --pnpm: internal: ${p} is laid out twice`)
+    vfs.writeFile(p, data, { mode })
+  }
+  // `target` is stored verbatim; relative targets resolve against the link's directory, like readlink.
+  const addSymlink = (p, target) => {
+    ensureDir(dirname(p))
+    if (taken(vfs, p)) {
+      // The same link twice is fine; anything else at that name is a layout bug.
+      if (vfs.isSymlink(p) && vfs.readlink(p) === target) return
+      throw new Error(`stasis --pnpm: internal: ${p} is laid out twice`)
+    }
+    vfs.symlink(target, p)
+  }
 
   const storeDirFor = (depPath) => {
     let name = dirNames.get(depPath)
@@ -323,19 +359,19 @@ export function buildLayout({ root, lockfile, settings, skipped, filesFor, works
     }
     return dir
   }
-  const link = (from, to) => tree.addSymlink(from, relative(dirname(from), to))
+  const link = (from, to) => addSymlink(from, relative(dirname(from), to))
 
   // Root node_modules always exists on a real install (pnpm writes .modules.yaml there).
-  tree.addDir(join(root, 'node_modules'))
-  tree.addDir(virtualStore)
+  ensureDir(join(root, 'node_modules'))
+  ensureDir(virtualStore)
 
   // 1. Every non-skipped snapshot's files, then its dependency links beside it.
   for (const [depPath, snapshot] of lockfile.snapshots) {
     if (skipped.has(depPath)) continue
     const pkgDir = packageDirFor(depPath)
     const files = filesFor(snapshot.packageKey)
-    for (const [rel, { content, mode }] of files) tree.addFile(join(pkgDir, rel), content, mode)
-    tree.addDir(pkgDir) // an (odd) empty tarball still yields the directory
+    for (const [rel, { data, mode }] of files) addFile(join(pkgDir, rel), data, mode)
+    ensureDir(pkgDir) // an (odd) empty tarball still yields the directory
     // The store entry's node_modules (NOT dirname(pkgDir): a scoped package sits one level deeper).
     const modulesDir = join(storeDirFor(depPath), 'node_modules')
     for (const [alias, ref] of snapshotChildren(snapshot)) {
@@ -355,11 +391,11 @@ export function buildLayout({ root, lockfile, settings, skipped, filesFor, works
   for (const [id, importer] of lockfile.importers) {
     const importerDir = resolve(root, id)
     const modulesDir = join(importerDir, 'node_modules')
-    tree.addDir(modulesDir)
+    ensureDir(modulesDir)
     for (const group of [importer.dependencies, importer.devDependencies, importer.optionalDependencies]) {
       for (const [alias, { version }] of group) {
         const from = join(modulesDir, alias)
-        if (tree.has(from)) continue
+        if (taken(vfs, from)) continue
         if (version.startsWith('link:')) {
           link(from, resolve(importerDir, version.slice('link:'.length)))
           continue
@@ -377,9 +413,9 @@ export function buildLayout({ root, lockfile, settings, skipped, filesFor, works
   const publicDir = join(root, 'node_modules')
   for (const [alias, target] of hoisted) {
     const from = join(target.type === 'public' ? publicDir : privateDir, alias)
-    if (tree.has(from)) continue
+    if (taken(vfs, from)) continue
     link(from, target.workspaceDir ?? packageDirFor(target.depPath))
   }
 
-  return { tree, virtualStore, hoisted, dirNames }
+  return { vfs, virtualStore, hoisted, dirNames }
 }
