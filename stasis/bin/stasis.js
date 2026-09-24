@@ -36,8 +36,8 @@ function usage(prefix = '') {
  (Rust: each crate's Cargo features are resolved from Cargo.toml/Cargo.lock like "cargo build" of the
   entries' packages, so #[cfg(feature = ...)] code that is off stays out; --cargo takes the resolution
   from "cargo metadata" instead -- it runs cargo, so only on a project you trust; the --cargo-*
-  flags are cargo's --features / --no-default-features / --all-features for those packages;
-  writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
+  flags are cargo's --features / --no-default-features / --all-features for those packages)
+ (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
   --flow strips Flow types from .js/.cjs/.mjs sources oxc can't parse (needs the optional flow-remove-types dep);
@@ -46,7 +46,7 @@ function usage(prefix = '') {
    honouring tsconfig compilerOptions.paths aliases (from ./tsconfig.json, or --tsconfig=path);
    not with --metro-resolver;
   --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them;
-  --package-json auto-includes each bundled module's package.json, even ones the scan never reached))
+  --package-json auto-includes each bundled module's package.json, even ones the scan never reached)
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)

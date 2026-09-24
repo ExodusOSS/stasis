@@ -153,11 +153,12 @@ function makeRustClassifier(cargo) {
     const pkg = cargo.packageInfo(path)
     if (!pkg) return null
     const vendored = pkg.dir.startsWith(`${CARGO_VENDOR_DIR}/`)
-    return vendored
-      ? { bucketDir: pkg.dir, name: pkg.name, version: pkg.version, ecosystem: 'cargo' }
-      : { bucketDir: pkg.dir, name: pkg.name, version: pkg.version }
+    return { bucketDir: pkg.dir, name: pkg.name, version: pkg.version, ecosystem: vendored ? 'cargo' : undefined }
   }
 }
+
+// A file's key inside its bucket: the inverse of moduleFileKey.
+const fileInBucket = (bucketDir, path) => (bucketDir === '.' ? path : path.slice(bucketDir.length + 1))
 
 // Project-relative paths in `sources` whose on-disk file carries a POSIX execute bit -- the
 // `executable` list both artifacts record. The State-driven path derives this in addFile; the
@@ -193,8 +194,7 @@ function assembleCodeBundle({
   for (const [path, content] of sources) {
     const dep = classifyDep?.(path)
     if (dep) {
-      ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem)
-        .files[dep.bucketDir === '.' ? path : path.slice(dep.bucketDir.length + 1)] = content
+      ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem).files[fileInBucket(dep.bucketDir, path)] = content
       continue
     }
     const meta = findPackageMetadata(baseDir, path)
@@ -203,9 +203,8 @@ function assembleCodeBundle({
       if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
         throw new Error(`No package.json with name+version found for ${path}`)
       }
-      const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
       const bucketEcosystem = meta.pkgDir.includes('node_modules') ? 'npm' : undefined
-      ensureBucket(meta.pkgDir, meta.name, meta.version, bucketEcosystem).files[rel] = content
+      ensureBucket(meta.pkgDir, meta.name, meta.version, bucketEcosystem).files[fileInBucket(meta.pkgDir, path)] = content
     } else {
       if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
       ensureBucket('.', workspaceName, workspaceVersion).files[path] = content
@@ -368,7 +367,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     const mode = cargo ? 'cargo metadata' : 'Cargo.toml + Cargo.lock'
     console.warn(`[stasis] Rust features (${mode}), ${resolved.length} package${resolved.length === 1 ? '' : 's'}:`)
     for (const [dir, set] of resolved) {
-      const pkg = cargoCtx.packageInfo(dir === '.' ? 'Cargo.toml' : `${dir}/Cargo.toml`)
+      const pkg = cargoCtx.packageInfo(moduleFileKey(dir, 'Cargo.toml'))
       console.warn(`[stasis]   ${pkg?.name ?? '?'}@${pkg?.version ?? '?'} (${dir}): ${[...set].toSorted().join(', ') || '(none)'}`)
     }
   }
@@ -948,12 +947,10 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (mappingFile && kind !== 'sol') {
     throw new Error(`${name}: --mapping is only valid for .sol bundles`)
   }
-  // --cargo runs `cargo metadata` for the Rust feature/dependency resolution; nothing else reads Cargo.
-  if (cargo && kind !== 'rust') {
-    throw new Error(`${name}: --cargo is only valid for Rust bundles`)
-  }
-  // The --cargo-* feature overrides steer that resolution; meaningless for any other language.
+  // --cargo runs `cargo metadata` for the Rust feature/dependency resolution and the --cargo-*
+  // flags steer that resolution; nothing else reads Cargo.
   if (kind !== 'rust') {
+    if (cargo) throw new Error(`${name}: --cargo is only valid for Rust bundles`)
     if (Array.isArray(cargoFeatures) && cargoFeatures.length > 0) throw new Error(`${name}: --cargo-features is only valid for Rust bundles`)
     if (cargoNoDefaultFeatures) throw new Error(`${name}: --cargo-no-default-features is only valid for Rust bundles`)
     if (cargoAllFeatures) throw new Error(`${name}: --cargo-all-features is only valid for Rust bundles`)

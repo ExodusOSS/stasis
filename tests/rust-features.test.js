@@ -64,7 +64,7 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
   t.assert.deepEqual(Object.keys(dep('nix').kinds), ['normal'])
   // the key is the `use` spelling, the name the manifest's (an optional dep's implicit feature name)
   t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').kinds.get('normal').optional], ['pm_crate', 'pm-crate', true])
-  t.assert.deepEqual([...m.patches], [['plain', { path: 'patches/plain' }]])
+  t.assert.deepEqual([...m.patches], [['plain', 'patches/plain']])
 })
 
 test('parseCargoManifest splits dotted dependency keys and survives multi-line strings', (t) => {

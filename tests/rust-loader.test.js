@@ -2,17 +2,16 @@ import { test } from 'node:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { createCargoContext, parseCargoManifest } from '../stasis/src/loaders/cargo.js'
 import {
   buildModuleTrees,
   buildRustTree,
   collectRustFilesFromDisk,
   crateRoots,
-  createCargoContext,
   evalCfg,
   getModuleDir,
   lexRust,
   loadRust,
-  parseCargoManifest,
   parseUseTree,
   resolveExplicitModPath,
   resolveModDecl,
@@ -313,12 +312,16 @@ test('resolveExplicitModPath refuses absolute and root-escaping paths', (t) => {
 
 test('resolveModDecl lists cfg_attr variants under their predicate plus the default file as fallback', (t) => {
   const known = new Map([['src/sys/unix.rs', ''], ['src/sys/windows.rs', ''], ['src/sys/mock.rs', ''], ['src/sys.rs', '']])
-  const decl = { name: 'sys', inlinePath: [], conditional: false, paths: [{ path: 'sys/unix.rs', cfg: 'unix' }, { path: 'sys/windows.rs', cfg: 'windows' }, { path: 'sys/nope.rs', cfg: 'wasi' }, { path: 'sys/mock.rs', cfg: 'test' }] }
+  const decl = { name: 'sys', inlinePath: [], conditional: false, paths: [{ path: 'sys/unix.rs', cfg: 'unix' }, { path: 'sys/windows.rs', cfg: 'windows' }, { path: 'sys/nope.rs', cfg: 'wasi' }] }
   t.assert.deepEqual(resolveModDecl(decl, 'src/lib.rs', { knownSources: known }), [
     { cfg: 'unix', file: 'src/sys/unix.rs', explicit: true },
-    { cfg: 'windows', file: 'src/sys/windows.rs', explicit: true }, // the `test` variant is never built: dropped
+    { cfg: 'windows', file: 'src/sys/windows.rs', explicit: true },
     { cfg: null, file: 'src/sys.rs', explicit: false },
   ])
+  // A variant whose predicate can't hold in the build never reaches the resolver: the scanner drops it.
+  const src = '#[cfg_attr(unix, path = "sys/unix.rs")]\n#[cfg_attr(test, path = "sys/mock.rs")]\nmod sys;\n'
+  t.assert.deepEqual(scanRustItems(src).mods[0].paths, [{ path: 'sys/unix.rs', cfg: 'unix' }])
+  t.assert.deepEqual(scanRustItems(src, { test: true }).mods[0].paths, [{ path: 'sys/unix.rs', cfg: 'unix' }, { path: 'sys/mock.rs', cfg: 'test' }])
   // an unconditional #[path] is authoritative: no default lookup
   const explicit = { name: 'seed', inlinePath: [], conditional: false, paths: [{ path: 'sys/unix.rs', cfg: null }] }
   t.assert.deepEqual(resolveModDecl(explicit, 'src/lib.rs', { knownSources: known }), [{ cfg: null, file: 'src/sys/unix.rs', explicit: true }])
