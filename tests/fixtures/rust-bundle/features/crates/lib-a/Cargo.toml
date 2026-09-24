@@ -8,6 +8,9 @@ winnowish = "0.5"
 serde = { version = "1", optional = true }
 extra-dep = { version = "1", optional = true }
 
+[dev-dependencies]
+winnowish = { version = "0.5", features = ["debug"] }   # a dependency's dev-deps are never built
+
 [features]
 default = ["std"]
 std = ["extra-dep"]   # the optional dep's implicit feature, spelled as in the manifest

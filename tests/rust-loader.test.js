@@ -314,7 +314,7 @@ test('parseCargoManifest reads package, lib, dependencies in every shape, and wo
   t.assert.deepEqual(m.lib, { name: 'myapp_lib', path: 'src/the_lib.rs' })
   const dep = (k) => {
     const d = m.deps.get(k)
-    return { path: d.path, package: d.package, workspace: d.workspace, kinds: [...d.kinds].toSorted() }
+    return { path: d.path, package: d.package, workspace: d.workspace, kinds: [...d.kinds.keys()].toSorted() }
   }
   t.assert.deepEqual([...m.deps.keys()].toSorted(), ['inline_sub', 'nix', 'serde', 'shared', 'tempfile', 'tools', 'util'])
   t.assert.deepEqual(dep('inline_sub'), { path: '../sub', package: null, workspace: false, kinds: ['normal'] })

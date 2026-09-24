@@ -322,8 +322,11 @@ test code reaches for. Two kinds of cfg are decided:
   `default` feature, features imply features (`std = ["alloc", "dep:serde",
   "serde?/std"]`), enable optional dependencies and request dependency features,
   and every active dependency gets `default` plus what its dependents ask for,
-  to a fixed point. Resolver 2 (edition 2021+, or `resolver = "2"`) leaves
-  dev-dependencies out of a normal build; resolver 1 counts them. Target-specific
+  to a fixed point. A dependency's own dev-dependencies are nobody's build and
+  never count (sha2's `[dev-dependencies] digest = { features = ["dev"] }`
+  doesn't turn on digest's `dev`); the entries' packages' dev-dependencies
+  count under resolver 1 only, since resolver 2 (edition 2021+, or
+  `resolver = "2"`) keeps them out of a normal build. Target-specific
   dependency tables always count (an over-approximation: it only keeps files).
   The crate a versioned dependency resolves to comes from `Cargo.lock`, so two
   vendored versions of one crate each get their own features and edges. A

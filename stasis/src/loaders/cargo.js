@@ -170,20 +170,30 @@ export function parseCargoManifest(text) {
     resolver: null, // "1" | "2" | "3" from [workspace] or [package]
     lib: { name: null, path: null },
     features: new Map(), // name -> implied entries (`other`, `dep:key`, `key/feat`, `key?/feat`)
-    deps: new Map(), // key -> { key, name, version, path, package, workspace, optional, defaultFeatures, features, kinds }
-    workspaceDeps: new Map(),
+    // key -> { key, name, version, path, package, workspace, kinds: Map<kind, { optional, defaultFeatures, features }> }:
+    // what identifies the crate is shared, what is asked of it is per dependency table -- sha2's
+    // `[dependencies] digest = "0.10"` and `[dev-dependencies] digest = { features = ["dev"] }` are
+    // two requests, and only the first is part of a build of sha2's dependents.
+    deps: new Map(),
+    workspaceDeps: new Map(), // key -> { key, name, version, path, package, optional, defaultFeatures, features }
     workspacePackage: { version: null },
     patches: new Map(), // crate -> { path }
     isWorkspace: false,
   }
   // `key` is the `use` spelling (`-` → `_`); `name` the manifest's, which is also the implicit
   // feature an optional dependency defines (`#[cfg(feature = "proc-macro-crate")]`).
-  const depOf = (map, name) => {
+  const newRequest = () => ({ optional: false, defaultFeatures: true, features: [] })
+  const depOf = (map, name, { flat }) => {
     const key = normName(name)
-    if (!map.has(key)) map.set(key, { key, name, version: null, path: null, package: null, workspace: false, optional: false, defaultFeatures: true, features: [], kinds: new Set() })
+    if (!map.has(key)) {
+      map.set(key, { key, name, version: null, path: null, package: null, workspace: false, ...(flat ? newRequest() : { kinds: new Map() }) })
+    }
     return map.get(key)
   }
-  const setDepFields = (dep, table) => {
+  // Apply one table (or one `[dependencies.foo]` line) to a dependency: identity fields on the
+  // record, request fields on the entry for `kind` (or on the record itself for a flat one).
+  const setDepFields = (dep, table, kind) => {
+    const request = kind === null ? dep : (dep.kinds.get(kind) ?? dep.kinds.set(kind, newRequest()).get(kind))
     if (typeof table === 'string') {
       dep.version = table // `foo = "1.2"`: a registry dep
       return
@@ -193,9 +203,9 @@ export function parseCargoManifest(text) {
     if (typeof table.path === 'string') dep.path = table.path
     if (typeof table.package === 'string') dep.package = table.package
     if (table.workspace === true) dep.workspace = true
-    if (table.optional === true) dep.optional = true
-    if (table['default-features'] === false || table.default_features === false) dep.defaultFeatures = false
-    if (Array.isArray(table.features)) dep.features = [...new Set([...dep.features, ...table.features.filter((f) => typeof f === 'string')])]
+    if (table.optional === true) request.optional = true
+    if (table['default-features'] === false || table.default_features === false) request.defaultFeatures = false
+    if (Array.isArray(table.features)) request.features = [...new Set([...request.features, ...table.features.filter((f) => typeof f === 'string')])]
   }
   let table = ''
   for (const raw of logicalLines(text)) {
@@ -235,9 +245,8 @@ export function parseCargoManifest(text) {
       if (!m) continue
       const map = ws ? manifest.workspaceDeps : manifest.deps
       // `[dependencies.foo]` sub-table: each line is one field of `foo`; else each line is one dep.
-      const dep = depOf(map, m[2] ?? key)
-      setDepFields(dep, m[2] ? { [key]: value } : value)
-      dep.kinds.add(DEP_KINDS[m[1]])
+      const dep = depOf(map, m[2] ?? key, { flat: ws })
+      setDepFields(dep, m[2] ? { [key]: value } : value, ws ? null : DEP_KINDS[m[1]])
     }
   }
   if (manifest.package && !manifest.package.name) manifest.package = null
@@ -521,24 +530,29 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
         locate: (name, ver) => (typeof name === 'string' ? vendored().get(normName(name))?.find((c) => c.version === ver)?.dir ?? null : null),
       })
     : null
-  // A dependency as the package sees it: a `workspace = true` entry merged with the workspace's
-  // (features add up, the path is relative to the workspace root). Null when it can't be resolved.
-  const depSpec = (m, dep) => {
-    if (!dep.workspace) return { ...dep, relTo: m.dir }
+  // A dependency as the package sees it through one of its tables (`request`, an entry of
+  // `dep.kinds`; omit it for the identity alone): a `workspace = true` entry merged with the
+  // workspace's (features add up, the path is relative to the workspace root). Null when it can't
+  // be resolved.
+  const depSpec = (m, dep, request = null) => {
+    const own = request ?? newRequestSpec()
+    if (!dep.workspace) return { key: dep.key, name: dep.name, version: dep.version, path: dep.path, package: dep.package, ...own, relTo: m.dir }
     const ws = workspaceFor(m.dir)
     const base = ws?.workspaceDeps.get(dep.key)
     if (!base) return null
     return {
-      ...base,
       key: dep.key,
       name: dep.name,
-      optional: dep.optional,
-      kinds: dep.kinds,
-      features: [...new Set([...base.features, ...dep.features])],
-      defaultFeatures: base.defaultFeatures && dep.defaultFeatures,
+      version: base.version,
+      path: base.path,
+      package: base.package,
+      optional: own.optional,
+      defaultFeatures: base.defaultFeatures && own.defaultFeatures,
+      features: [...new Set([...base.features, ...own.features])],
       relTo: ws.dir,
     }
   }
+  const newRequestSpec = () => ({ optional: false, defaultFeatures: true, features: [] })
   // The in-tree package a dependency of `m` resolves to: a `path` dep (or a `[patch]` path
   // override in the root manifest), else the vendored crate of that name -- the version Cargo.lock
   // records for `m`, else the newest that satisfies the requirement. A package can depend on two
@@ -602,10 +616,13 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       const referenced = new Set()
       for (const imps of m.features.values()) for (const s of imps) if (s.startsWith('dep:')) referenced.add(normName(s.slice(4)))
       m.implicit = new Map()
-      for (const d of m.deps.values()) if (d.optional && !referenced.has(d.key)) m.implicit.set(d.name, [`dep:${d.key}`])
+      for (const d of m.deps.values()) {
+        if (isOptional(d) && !referenced.has(d.key)) m.implicit.set(d.name, [`dep:${d.key}`])
+      }
     }
     return m.implicit
   }
+  const isOptional = (d) => [...d.kinds.values()].some((r) => r.optional)
   const featureImplications = (m, f) => m.features.get(f) ?? implicitFeatures(m).get(f) ?? null
 
   let resolution = null
@@ -613,7 +630,9 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // the roots start from `default` (or the flags), then features imply features, activate
   // optional deps and request dependency features, and active deps get `default` plus what the
   // dependent asks for, to a fixed point -- cargo's unification, over-approximating where the
-  // loader can't tell (target-specific dependency tables always count).
+  // loader can't tell (target-specific dependency tables always count). Dev-dependencies: a
+  // dependency's own are never built by anyone, so they never count; the root packages' count
+  // under resolver 1 only (resolver 2 keeps them out of a normal build).
   const ensureResolved = () => {
     if (resolution !== null) return resolution
     if (metadata) {
@@ -646,8 +665,12 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       active.get(m.dir).add(key)
       changed = true
     }
-    const isActive = (m, d) => !d.optional || active.get(m.dir)?.has(d.key) === true
-    const kindApplies = (d) => d.kinds.has('normal') || d.kinds.has('build') || (resolver === 1 && d.kinds.has('dev'))
+    const rootDirs = new Set(roots.map((r) => r.dir))
+    const kindApplies = (m, kind) => kind !== 'dev' || (resolver === 1 && rootDirs.has(m.dir))
+    // The tables of `d` that take part in the build, with an optional one only once activated.
+    const activeRequests = (m, d) => [...d.kinds]
+      .filter(([kind, r]) => kindApplies(m, kind) && (!r.optional || active.get(m.dir)?.has(d.key) === true))
+      .map(([, r]) => r)
 
     // `--features a,b,pkg/c`: bare names go to every root package, `pkg/c` to that one.
     const requested = new Map()
@@ -686,11 +709,11 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
               const d = m.deps.get(normName(depFeature[1]))
               if (!d) continue
               // `dep/feat` enables an optional dep (and its implicit feature); `dep?/feat` only asks if it is already on.
-              if (depFeature[2] !== '?' && d.optional) {
+              if (depFeature[2] !== '?' && isOptional(d)) {
                 activate(m, d.key)
                 if (implicitFeatures(m).has(d.name)) enable(m, d.name)
               }
-              if (isActive(m, d) && kindApplies(d)) {
+              if (activeRequests(m, d).length > 0) {
                 const t = resolveDep(m, d)
                 if (t) enable(t, depFeature[3])
               }
@@ -700,13 +723,14 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
           }
         }
         for (const d of m.deps.values()) {
-          if (!kindApplies(d) || !isActive(m, d)) continue
-          const t = resolveDep(m, d)
-          if (!t) continue
-          inGraph(t)
-          const spec = depSpec(m, d)
-          if (spec.defaultFeatures) enable(t, 'default')
-          for (const f of spec.features) enable(t, f)
+          for (const request of activeRequests(m, d)) {
+            const spec = depSpec(m, d, request)
+            const t = spec === null ? null : resolveDep(m, d)
+            if (!t) continue
+            inGraph(t)
+            if (spec.defaultFeatures) enable(t, 'default')
+            for (const f of spec.features) enable(t, f)
+          }
         }
       }
     } while (changed)

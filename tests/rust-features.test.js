@@ -48,15 +48,19 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
   t.assert.deepEqual([...m.features], [['default', ['std']], ['std', []], ['full', ['std', 'dep:opt', 'sub/two', 'opt?/extra']]])
   const dep = (k) => {
     const d = m.deps.get(k)
-    return { version: d.version, optional: d.optional, defaultFeatures: d.defaultFeatures, features: d.features, kinds: sorted(d.kinds) }
+    return { version: d.version, kinds: Object.fromEntries([...d.kinds].toSorted()) }
   }
-  t.assert.deepEqual(dep('plain'), { version: '1', optional: false, defaultFeatures: true, features: ['dev-only'], kinds: ['dev', 'normal'] })
-  t.assert.deepEqual(dep('opt'), { version: '1', optional: true, defaultFeatures: false, features: ['a'], kinds: ['normal'] })
-  t.assert.deepEqual(dep('sub'), { version: '2', optional: false, defaultFeatures: true, features: ['one', 'two'], kinds: ['normal'] })
-  t.assert.deepEqual(dep('cc').kinds, ['build'])
-  t.assert.deepEqual(dep('nix').kinds, ['normal'])
+  // Each dependency table is its own request: a dev-dependency's features stay out of the normal one.
+  t.assert.deepEqual(dep('plain'), { version: '1', kinds: {
+    dev: { optional: false, defaultFeatures: true, features: ['dev-only'] },
+    normal: { optional: false, defaultFeatures: true, features: [] },
+  } })
+  t.assert.deepEqual(dep('opt'), { version: '1', kinds: { normal: { optional: true, defaultFeatures: false, features: ['a'] } } })
+  t.assert.deepEqual(dep('sub'), { version: '2', kinds: { normal: { optional: false, defaultFeatures: true, features: ['one', 'two'] } } })
+  t.assert.deepEqual(Object.keys(dep('cc').kinds), ['build'])
+  t.assert.deepEqual(Object.keys(dep('nix').kinds), ['normal'])
   // the key is the `use` spelling, the name the manifest's (an optional dep's implicit feature name)
-  t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').optional], ['pm_crate', 'pm-crate', true])
+  t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').kinds.get('normal').optional], ['pm_crate', 'pm-crate', true])
   t.assert.deepEqual([...m.patches], [['plain', { path: 'patches/plain' }]])
 })
 
@@ -167,9 +171,13 @@ test('createCargoContext honours the root feature flags: --features (incl. pkg/f
   t.assert.deepEqual(enabledOf(all)['vendor/serde'], ['default', 'std'])
 })
 
-test('createCargoContext unifies dev-dependency features under resolver 1 (edition 2018) but not resolver 2', (t) => {
+test('createCargoContext unifies the root\'s dev-dependency features under resolver 1 (edition 2018) but not resolver 2, and never a dependency\'s own', (t) => {
   const v1 = createCargoContext(join(fixtures, 'features-v1'), { entries: ['src/main.rs'] })
+  // devonly's own `[dev-dependencies] other = { features = ["y"] }` is nobody's build: `other` stays out.
   t.assert.deepEqual(enabledOf(v1), { '.': [], 'vendor/devonly': ['x'] })
+  // features (resolver 2): lib-a's `[dev-dependencies] winnowish = { features = ["debug"] }` doesn't reach winnowish 0.5.0
+  const v2 = createCargoContext(featuresFixture, { entries: ['src/main.rs'] })
+  t.assert.deepEqual(enabledOf(v2)['vendor/winnowish-0.5.0'], ['default', 'std'])
 })
 
 test('createCargoContext leaves features unknown when no package owns the entries', (t) => {
