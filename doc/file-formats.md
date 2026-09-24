@@ -341,7 +341,15 @@ gates nothing.
 cargo: nothing is compiled and no build script runs, but cargo reads the
 project's `.cargo/config.toml` (which can point `build.rustc` or a wrapper at any
 executable), may refresh the registry index, and writes `Cargo.lock` when there is
-none — so only on a project you trust.
+none — so only on a project you trust. Note what it reports: `cargo metadata`
+resolves the whole workspace with dev-dependencies and all targets, and gives one
+feature set per package — the union across normal, dev and build dependency kinds
+and across platforms (resolver-1-style unification). So `--cargo` describes
+everything cargo would ever compile for the workspace, tests included, and can
+enable features (and so bundle modules) that a plain `cargo build` of the entries'
+packages leaves off; the manifest replay describes that build. Set
+`EXODUS_STASIS_DEBUG=1` to have `stasis bundle` print the resolved features per
+package, in either mode.
 
 The root packages' features follow the same flags as `cargo build`, in either
 mode: `--cargo-features=a,b` (repeatable; `pkg/feat` targets one of the entries'

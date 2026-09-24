@@ -364,6 +364,18 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     throw new Error(`Rust bundle has unresolved modules:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
+  // EXODUS_STASIS_DEBUG=1: show the feature resolution the cfg decisions came from, per package, so
+  // the manifest replay and `cargo metadata` (which unifies dev/build deps like resolver 1) can be compared.
+  if (process.env.EXODUS_STASIS_DEBUG === '1' || process.env.EXODUS_STASIS_DEBUG === 'true') {
+    const resolved = [...cargoCtx.resolvedFeatures()].toSorted(([a], [b]) => (a < b ? -1 : 1))
+    const mode = cargo ? 'cargo metadata' : 'Cargo.toml + Cargo.lock'
+    console.warn(`[stasis] Rust features (${mode}), ${resolved.length} package${resolved.length === 1 ? '' : 's'}:`)
+    for (const [dir, set] of resolved) {
+      const pkg = cargoCtx.packageInfo(dir === '.' ? 'Cargo.toml' : `${dir}/Cargo.toml`)
+      console.warn(`[stasis]   ${pkg?.name ?? '?'}@${pkg?.version ?? '?'} (${dir}): ${[...set].toSorted().join(', ') || '(none)'}`)
+    }
+  }
+
   // Deps live outside the bundle root unless vendored; with no `vendor/` dir the fix is one command.
   if (unresolvedCrates.size > 0 && !existsSync(join(baseDir, CARGO_VENDOR_DIR))) {
     const names = [...unresolvedCrates].toSorted()

@@ -2962,6 +2962,18 @@ test('CLI: bundle rejects the --cargo-* feature flags for a non-Rust bundle, and
   t.assert.match(empty.stderr, /--cargo-features must list at least one feature/u)
 })
 
+test('CLI: EXODUS_STASIS_DEBUG=1 prints the resolved Rust features per package', (t) => {
+  const r = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features'), env: { ...cleanEnv, EXODUS_STASIS_DEBUG: '1' } })
+  t.assert.equal(r.status, 0, r.stderr)
+  t.assert.match(r.stderr, /^\[stasis\] Rust features \(Cargo\.toml \+ Cargo\.lock\), 4 packages:$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] {3}app@0\.1\.0 \(\.\): default, fast$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] {3}lib-a@0\.2\.0 \(crates\/lib-a\): default, extra, std$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] {3}winnowish@0\.6\.1 \(vendor\/winnowish\): default, std$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] {3}winnowish@0\.5\.0 \(vendor\/winnowish-0\.5\.0\): default, std$/mu)
+  const quiet = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
+  t.assert.doesNotMatch(quiet.stderr, /Rust features/u)
+})
+
 test('CLI: bundle --cargo-features enables a root feature (repeatable, comma-separated)', withTmp((t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   const cwd = join(rustFixtures, 'features')
