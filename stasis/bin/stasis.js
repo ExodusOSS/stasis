@@ -240,8 +240,10 @@ if (command === '-v' || command === '--version') {
   const cargo = Boolean(values.cargo)
   if (cargo && !allRust) usage('Error: --cargo is only valid for Rust bundles')
   // --cargo-features / --cargo-no-default-features / --cargo-all-features: cargo's own feature flags
-  // for the entries' packages (`pkg/feat` targets one). --cargo-features is repeatable and/or comma-separated.
-  const cargoFeatures = [...new Set((values['cargo-features'] ?? []).flatMap((f) => f.split(/[\s,]+/u)).map((s) => s.trim()).filter(Boolean))]
+  // for the entries' packages (`pkg/feat` targets one, or a dependency). --cargo-features is
+  // repeatable and/or comma-separated; parseFeatureList is the one splitter (the resolver reuses it).
+  const { parseFeatureList } = await import('../src/loaders/cargo.js')
+  const cargoFeatures = parseFeatureList(values['cargo-features'] ?? [])
   if (values['cargo-features'] !== undefined && cargoFeatures.length === 0) {
     usage('Error: --cargo-features must list at least one feature (e.g. --cargo-features=serde,app/tls)')
   }

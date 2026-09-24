@@ -110,12 +110,39 @@ test('scanRustItems marks #[cfg]-gated modules (and those inside a gated inline 
   t.assert.deepEqual(mods.map((m) => [m.name, m.cfg, m.conditional]), [
     ['featured', 'feature = "x"', true],
     ['not_gated', null, false],
-    ['gated_by_cfg_attr', 'feature = "x"', true],
+    // `cfg_attr(x, cfg(y))`: gated on y only when x holds -- compiled unless x && !y
+    ['gated_by_cfg_attr', 'any(not(feature = "x"), feature = "y")', true],
     ['always', 'not(test)', false],
     ['both', 'all(unix, feature = "z")', true],
     ['real', null, false],
     ['imp', null, true],
   ])
+  // With x off the cfg_attr never applies its cfg: the module is unconditional, not skipped.
+  const off = scanRustItems('#[cfg_attr(feature = "x", cfg(feature = "y"))]\nmod m;\n', { features: new Set() }).mods
+  t.assert.deepEqual(off.map((m) => [m.name, m.conditional]), [['m', false]])
+  // With x on and y off it is dead.
+  t.assert.deepEqual(scanRustItems('#[cfg_attr(feature = "x", cfg(feature = "y"))]\nmod m;\n', { features: new Set(['x']) }).mods, [])
+})
+
+test('scanRustItems skips a dead field, variant, tuple field or match arm without running past its enclosing block', (t) => {
+  const src = [
+    'pub struct Config {', '    #[cfg(feature = "tls")]', '    tls: bool,', '    pub name: String,', '}', 'pub mod client;',
+    'mod imp {', '    pub struct Inner {', '        #[cfg(feature = "tls")]', '        tls: bool', '    }', '    pub mod server;', '}',
+    'pub enum Kind { A, #[cfg(feature = "tls")] Secure(u8, u8), C }', 'mod after_enum;',
+    'pub struct Tuple(#[cfg(feature = "tls")] u8, pub u16);', 'mod after_tuple;',
+    'fn pick(n: u8) -> u8 { match n { #[cfg(feature = "tls")] 1 => { 10 } _ => 0 } }', 'mod after_fn;',
+    '#[cfg(feature = "tls")] fn tls_only() { client::connect() }', 'mod last;',
+  ].join('\n')
+  const { mods } = scanRustItems(src, { features: new Set() })
+  t.assert.deepEqual(mods.map((m) => [...m.inlinePath, m.name].join('::')), ['client', 'imp::server', 'after_enum', 'after_tuple', 'after_fn', 'last'])
+})
+
+test('scanRustItems compiles a test target with cfg(test): #[test] fns and #[cfg(test)] items are live', (t) => {
+  const src = '#[cfg(test)]\nmod helpers;\n#[test]\nfn t() { quickcheck::quickcheck(1); }\n'
+  t.assert.deepEqual(scanRustItems(src).mods, [])
+  const live = scanRustItems(src, { test: true })
+  t.assert.deepEqual(live.mods.map((m) => [m.name, m.conditional]), [['helpers', false]])
+  t.assert.deepEqual(live.refs.map((r) => r.spec), ['quickcheck::quickcheck'])
 })
 
 test('evalCfg decides test/doc-only predicates and leaves target/feature ones unknown', (t) => {
@@ -150,9 +177,10 @@ test('scanRustItems skips test/doc-only items whole: their mods, uses and paths 
   t.assert.deepEqual(externCrates, [])
 })
 
-test('scanRustItems reports the names a file\'s use items and extern-crate aliases bind', (t) => {
-  const { bindings } = scanRustItems('use std::io;\nuse crate::{config::Config, util::helper as help};\nuse foo::*;\nuse bar::_x as _;\nextern crate alpha as a;\n')
-  t.assert.deepEqual([...bindings].toSorted(), ['Config', 'a', 'help', 'io'])
+test('scanRustItems reports the names a file\'s use items and extern-crate aliases bind, not a crate imported under its own name', (t) => {
+  const { bindings } = scanRustItems('use std::io;\nuse crate::{config::Config, util::helper as help};\nuse foo::*;\nuse bar::_x as _;\nextern crate alpha as a;\nuse serde_json;\nuse rand::{self, Rng};\nuse tokio as tk;\n')
+  // `serde_json` and `rand` name the crates themselves; `tk` is an alias for one (so `tk::…` is not a crate lookup)
+  t.assert.deepEqual([...bindings].toSorted(), ['Config', 'Rng', 'a', 'help', 'io', 'tk'])
 })
 
 test('scanRustItems matches a mod with its attribute on the same line', (t) => {
@@ -287,13 +315,20 @@ test('resolveModDecl lists cfg_attr variants under their predicate plus the defa
   const known = new Map([['src/sys/unix.rs', ''], ['src/sys/windows.rs', ''], ['src/sys/mock.rs', ''], ['src/sys.rs', '']])
   const decl = { name: 'sys', inlinePath: [], conditional: false, paths: [{ path: 'sys/unix.rs', cfg: 'unix' }, { path: 'sys/windows.rs', cfg: 'windows' }, { path: 'sys/nope.rs', cfg: 'wasi' }, { path: 'sys/mock.rs', cfg: 'test' }] }
   t.assert.deepEqual(resolveModDecl(decl, 'src/lib.rs', { knownSources: known }), [
-    { cfg: 'unix', file: 'src/sys/unix.rs' },
-    { cfg: 'windows', file: 'src/sys/windows.rs' }, // the `test` variant is never built: dropped
-    { cfg: null, file: 'src/sys.rs' },
+    { cfg: 'unix', file: 'src/sys/unix.rs', explicit: true },
+    { cfg: 'windows', file: 'src/sys/windows.rs', explicit: true }, // the `test` variant is never built: dropped
+    { cfg: null, file: 'src/sys.rs', explicit: false },
   ])
   // an unconditional #[path] is authoritative: no default lookup
   const explicit = { name: 'seed', inlinePath: [], conditional: false, paths: [{ path: 'sys/unix.rs', cfg: null }] }
-  t.assert.deepEqual(resolveModDecl(explicit, 'src/lib.rs', { knownSources: known }), [{ cfg: null, file: 'src/sys/unix.rs' }])
+  t.assert.deepEqual(resolveModDecl(explicit, 'src/lib.rs', { knownSources: known }), [{ cfg: null, file: 'src/sys/unix.rs', explicit: true }])
+})
+
+test('resolveModPath treats a #[path]-loaded file like mod.rs: its submodules sit beside it', (t) => {
+  const known = new Map([['src/de/extra.rs', ''], ['src/de/seed/extra.rs', '']])
+  const pathLoaded = new Set(['src/de/seed.rs'])
+  t.assert.equal(resolveModPath('extra', 'src/de/seed.rs', { knownSources: known, pathLoaded }), 'src/de/extra.rs')
+  t.assert.equal(resolveModPath('extra', 'src/de/seed.rs', { knownSources: known }), 'src/de/seed/extra.rs') // a plain module file
 })
 
 // --- Cargo manifests ---
@@ -398,14 +433,16 @@ test('collectRustFilesFromDisk does not pull in external crates that are not in-
 test('collectRustFilesFromDisk treats every entry as a crate root (src/bin, tests) and pulls the own lib in', async (t) => {
   const bin = await collectRustFilesFromDisk(join(fixtures, 'lib-bin'), ['src/bin/tool.rs'])
   t.assert.deepEqual([...bin.keys()].toSorted(), ['src/bin/helper.rs', 'src/bin/tool.rs', 'src/cli.rs', 'src/config.rs', 'src/lib.rs'])
+  // tests/smoke.rs is a test target: its `#[cfg(test)] mod helpers;` is live
   const it = await collectRustFilesFromDisk(join(fixtures, 'lib-bin'), ['tests/smoke.rs'])
-  t.assert.deepEqual([...it.keys()].toSorted(), ['src/cli.rs', 'src/config.rs', 'src/lib.rs', 'tests/common/mod.rs', 'tests/smoke.rs'])
+  t.assert.deepEqual([...it.keys()].toSorted(), ['src/cli.rs', 'src/config.rs', 'src/lib.rs', 'tests/common/mod.rs', 'tests/helpers.rs', 'tests/smoke.rs'])
 })
 
 test('collectRustFilesFromDisk honours #[path] in every position and inline-nested mods', async (t) => {
+  // src/de/seed.rs is loaded via #[path]: its own `mod extra;` is src/de/extra.rs, beside it, like a mod.rs
   const paths = await collectRustFilesFromDisk(join(fixtures, 'path-attr'), ['src/lib.rs'])
   t.assert.deepEqual([...paths.keys()].toSorted(), [
-    'src/de.rs', 'src/de/seed.rs', 'src/discouraged.rs', 'src/documented.rs', 'src/lib.rs', 'src/parse.rs', 'src/private/mod.rs',
+    'src/de.rs', 'src/de/extra.rs', 'src/de/seed.rs', 'src/discouraged.rs', 'src/documented.rs', 'src/lib.rs', 'src/parse.rs', 'src/private/mod.rs',
     'src/raw/mod.rs', 'src/sys.rs', 'src/sys/unix.rs', 'src/sys/windows.rs',
   ])
   const inline = await collectRustFilesFromDisk(join(fixtures, 'inline-nested'), ['src/main.rs'])
@@ -413,14 +450,27 @@ test('collectRustFilesFromDisk honours #[path] in every position and inline-nest
 })
 
 test('collectRustFilesFromDisk follows path deps and vendored crates transitively (`extern crate … as` too)', async (t) => {
+  // util's `std` is a default feature; app's `default-features = false` on the inherited entry is ignored
+  // (the workspace entry keeps defaults), so std_impl.rs is in.
   const ws = await collectRustFilesFromDisk(join(fixtures, 'workspace'), ['crates/app/src/main.rs'])
   t.assert.deepEqual([...ws.keys()].toSorted(), [
-    'crates/app/src/local.rs', 'crates/app/src/main.rs', 'crates/tools/src/lib.rs', 'crates/util/src/detail.rs', 'crates/util/src/util_lib.rs',
+    'crates/app/src/local.rs', 'crates/app/src/main.rs', 'crates/tools/src/lib.rs', 'crates/util/src/detail.rs', 'crates/util/src/std_impl.rs', 'crates/util/src/util_lib.rs',
   ])
+  // `use gamma;` and `use delta::{self, D};` name the crates themselves: followed like any other import
   const vendored = await collectRustFilesFromDisk(join(fixtures, 'vendored-transitive'), ['src/main.rs'])
   t.assert.deepEqual([...vendored.keys()].toSorted(), [
-    'src/main.rs', 'vendor/alpha/src/inner.rs', 'vendor/alpha/src/lib.rs', 'vendor/beta-lib/src/lib.rs',
+    'src/main.rs', 'vendor/alpha/src/inner.rs', 'vendor/alpha/src/lib.rs', 'vendor/beta-lib/src/lib.rs', 'vendor/delta/src/lib.rs', 'vendor/gamma/src/lib.rs',
   ])
+})
+
+test('collectRustFilesFromDisk keeps the modules after a dead field, variant or arm, in and out of inline modules', async (t) => {
+  const sources = await collectRustFilesFromDisk(join(fixtures, 'dead-fields'), ['src/lib.rs'])
+  t.assert.deepEqual([...sources.keys()].toSorted(), [
+    'src/after_enum.rs', 'src/after_fn.rs', 'src/after_tuple.rs', 'src/client.rs', 'src/imp/server.rs', 'src/last.rs', 'src/lib.rs',
+  ])
+  const { missing, resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'], baseDir: join(fixtures, 'dead-fields') })
+  t.assert.deepEqual(missing, [])
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod imp::server'), 'src/imp/server.rs')
 })
 
 // --- module trees ---
@@ -563,6 +613,7 @@ test('buildRustTree records #[cfg_attr(…, path)] variants as a cfg-keyed map w
   t.assert.equal(lib['mod documented'], 'src/documented.rs')
   t.assert.equal(resolutions.get('src/parse.rs').get('mod discouraged'), 'src/discouraged.rs')
   t.assert.deepEqual(edges(resolutions.get('src/de.rs')), { 'crate::__private::helper': 'src/private/mod.rs', 'super::seed::Seed': 'src/de/seed.rs' })
+  t.assert.equal(resolutions.get('src/de/seed.rs').get('mod extra'), 'src/de/extra.rs') // the #[path]-loaded file owns its dir
 })
 
 test('buildRustTree follows a mod inside a macro body when its file exists and tolerates it when it does not', async (t) => {
@@ -654,6 +705,8 @@ test('buildRustTree resolves crate references to in-tree roots and reports the r
   const vendored = await collectRustFilesFromDisk(join(fixtures, 'vendored-transitive'), ['src/main.rs'])
   const tree = buildRustTree(vendored, { roots: ['src/main.rs'], baseDir: join(fixtures, 'vendored-transitive') })
   t.assert.equal(tree.resolutions.get('src/main.rs').get('use alpha'), 'vendor/alpha/src/lib.rs')
+  t.assert.equal(tree.resolutions.get('src/main.rs').get('use gamma'), 'vendor/gamma/src/lib.rs') // `use gamma;`
+  t.assert.equal(tree.resolutions.get('src/main.rs').get('use delta'), 'vendor/delta/src/lib.rs') // `use delta::{self, D};`
   const alpha = edges(tree.resolutions.get('vendor/alpha/src/lib.rs'))
   t.assert.equal(alpha['use beta_lib'], 'vendor/beta-lib/src/lib.rs') // vendored -> vendored
   t.assert.equal(alpha['crate::inner::x'], 'vendor/alpha/src/inner.rs') // a vendored crate's own tree

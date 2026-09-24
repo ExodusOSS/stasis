@@ -22,7 +22,7 @@ import {
 } from '../loaders/solidity.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
-import { createCargoContext } from '../loaders/cargo.js'
+import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
 import {
   bucketizePhpSources,
   buildPhpTree,
@@ -143,9 +143,6 @@ function makeSolidityClassifier(baseDir) {
     return null
   }
 }
-
-// `cargo vendor` copies registry crates in-tree under this dir.
-const CARGO_VENDOR_DIR = 'vendor'
 
 // Classify a Rust file by the nearest Cargo.toml `[package]`: a `cargo vendor`ed crate under
 // `vendor/<dir>/` is a dependency (tagged `cargo`); any other package (the crate itself, a

@@ -270,9 +270,12 @@ root). With no manifest above a file, the workspace bucket gets a placeholder
 identity (`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
 
 Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
-`tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does.
-Each root gets its own module tree, so a lib and its bin bundled together don't
-collide on `crate::`. A `use`/`extern crate` naming a crate found in-tree pulls
+`tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does,
+and so do those of a file a `#[path = …]` loaded. Each root gets its own module
+tree, so a lib and its bin bundled together don't collide on `crate::`. A
+`tests/*.rs` or `benches/*.rs` entry is compiled the way `cargo test` does:
+`cfg(test)` holds, its `#[test]` fns and `#[cfg(test)]` modules are live, and
+the package's dev-dependencies take part in the feature resolution. A `use`/`extern crate` naming a crate found in-tree pulls
 that crate's root in: the package's own lib target (`use my_app::…` from
 `main.rs`), a Cargo `path` dependency (incl. `workspace = true` ones and
 `package = …` renames, honouring `[lib] path`), or a `cargo vendor`ed crate under
@@ -358,9 +361,13 @@ packages leaves off; the manifest replay describes that build. Set
 package, in either mode.
 
 The root packages' features follow the same flags as `cargo build`, in either
-mode: `--cargo-features=a,b` (repeatable; `pkg/feat` targets one of the entries'
-packages), `--cargo-no-default-features`, `--cargo-all-features`. Without them,
-the roots get their `default` feature, as `cargo build` does.
+mode: `--cargo-features=a,b` (repeatable; `x/feat` is a feature of the entries'
+package named `x`, else of their dependency `x`, cargo's `dep/feat` form; a name
+that matches neither is reported), `--cargo-no-default-features`,
+`--cargo-all-features`. Without them, the roots get their `default` feature, as
+`cargo build` does. For a `workspace = true` dependency the workspace entry
+decides `default-features`: a member's `false` is ignored unless the workspace
+disabled them too, as cargo warns.
 
 Rust edge specs are the path as written (`crate::net::client::Client`,
 `super::config::Config`, a `use crate::{a::B, c::D}` group flattened to one edge

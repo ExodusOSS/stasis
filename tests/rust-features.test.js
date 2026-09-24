@@ -1,14 +1,16 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdtempSync, rmSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   createCargoContext,
+  findCargoLock,
   parseCargoLock,
   parseCargoManifest,
+  parseFeatureList,
   parseTomlValue,
   resolutionFromMetadata,
   satisfiesCargoReq,
@@ -51,17 +53,49 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
     return { version: d.version, kinds: Object.fromEntries([...d.kinds].toSorted()) }
   }
   // Each dependency table is its own request: a dev-dependency's features stay out of the normal one.
+  // `defaultFeatures` stays null until a table says (an inherited entry may only turn defaults on).
   t.assert.deepEqual(dep('plain'), { version: '1', kinds: {
-    dev: { optional: false, defaultFeatures: true, features: ['dev-only'] },
-    normal: { optional: false, defaultFeatures: true, features: [] },
+    dev: { optional: false, defaultFeatures: null, features: ['dev-only'] },
+    normal: { optional: false, defaultFeatures: null, features: [] },
   } })
   t.assert.deepEqual(dep('opt'), { version: '1', kinds: { normal: { optional: true, defaultFeatures: false, features: ['a'] } } })
-  t.assert.deepEqual(dep('sub'), { version: '2', kinds: { normal: { optional: false, defaultFeatures: true, features: ['one', 'two'] } } })
+  t.assert.deepEqual(dep('sub'), { version: '2', kinds: { normal: { optional: false, defaultFeatures: null, features: ['one', 'two'] } } })
   t.assert.deepEqual(Object.keys(dep('cc').kinds), ['build'])
   t.assert.deepEqual(Object.keys(dep('nix').kinds), ['normal'])
   // the key is the `use` spelling, the name the manifest's (an optional dep's implicit feature name)
   t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').kinds.get('normal').optional], ['pm_crate', 'pm-crate', true])
   t.assert.deepEqual([...m.patches], [['plain', { path: 'patches/plain' }]])
+})
+
+test('parseCargoManifest splits dotted dependency keys and survives multi-line strings', (t) => {
+  const m = parseCargoManifest([
+    '[package]', 'name = "app"', 'description = """', 'Not a table: [x]', 'nor a key = value', '"""', 'version = "0.4.0"',
+    '[dependencies]', 'util.workspace = true', 'util.features = ["extra"]', "serde.version = '1'", 'serde.features = [', '  "derive",', ']',
+  ].join('\n'))
+  t.assert.equal(m.package.version, '0.4.0')
+  t.assert.deepEqual([...m.deps.keys()], ['util', 'serde'])
+  t.assert.equal(m.deps.get('util').workspace, true)
+  t.assert.deepEqual(m.deps.get('util').kinds.get('normal').features, ['extra'])
+  t.assert.equal(m.deps.get('serde').version, '1')
+  t.assert.deepEqual(m.deps.get('serde').kinds.get('normal').features, ['derive'])
+})
+
+test('parseFeatureList splits cargo\'s repeatable, comma- or space-separated feature flags', (t) => {
+  t.assert.deepEqual(parseFeatureList(['a,b', ' c d ', 'a', ',']), ['a', 'b', 'c', 'd'])
+  t.assert.deepEqual(parseFeatureList([]), [])
+})
+
+test('findCargoLock finds the lock in the bundle root or an ancestor (a member dir\'s is its workspace\'s)', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-lock-'))
+  try {
+    mkdirSync(join(tmp, 'crates', 'app'), { recursive: true })
+    t.assert.equal(findCargoLock(join(tmp, 'crates', 'app')), null)
+    writeFileSync(join(tmp, 'Cargo.lock'), 'version = 3\n')
+    t.assert.equal(findCargoLock(join(tmp, 'crates', 'app')), join(tmp, 'Cargo.lock'))
+    t.assert.equal(findCargoLock(tmp), join(tmp, 'Cargo.lock'))
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('parseCargoLock indexes packages and their (possibly versioned) dependency edges', (t) => {
@@ -100,6 +134,13 @@ test('satisfiesCargoReq implements Cargo requirement semantics', (t) => {
   t.assert.equal(satisfiesCargoReq('1.2.4', '=1.2'), true)
   t.assert.equal(satisfiesCargoReq('1.9.0', '>=1.2, <2.0'), true)
   t.assert.equal(satisfiesCargoReq('2.0.0', '>=1.2, <2.0'), false)
+  // a partial bound covers its whole minor: `>1.2` is `>=1.3.0`, `<=1.2` is `<1.3.0`
+  t.assert.equal(satisfiesCargoReq('1.2.5', '>1.2'), false)
+  t.assert.equal(satisfiesCargoReq('1.3.0', '>1.2'), true)
+  t.assert.equal(satisfiesCargoReq('1.2.9', '<=1.2'), true)
+  t.assert.equal(satisfiesCargoReq('1.3.0', '<=1.2'), false)
+  t.assert.equal(satisfiesCargoReq('1.2.1', '>1.2.0'), true)
+  t.assert.equal(satisfiesCargoReq('1.2.0', '<=1.2.0'), true)
   t.assert.equal(satisfiesCargoReq('9.9.9', '*'), true)
   // a prerelease sorts below its release
   t.assert.equal(satisfiesCargoReq('1.0.0-beta.1', '>=1.0.0'), false)
@@ -116,10 +157,16 @@ test('createCargoContext resolves features like `cargo build` of the entry packa
     // implicit feature, spelled as in the manifest (hyphen), and activates the dep.
     'crates/lib-a': ['default', 'extra', 'extra-dep', 'std'],
     'vendor/extra-dep': [],
+    'vendor/md-5': [],
     'vendor/winnowish': ['default', 'std'], // 0.6.1, via app
     'vendor/winnowish-0.5.0': ['default', 'std'], // 0.5.0, via lib-a
     // serde: optional and never enabled; proptest: a dev-dependency, out of a resolver-2 build
   })
+  // An integration-test entry is `cargo test`'s build: the package's dev-dependencies join, with their features.
+  const testBuild = createCargoContext(featuresFixture, { entries: ['tests/it.rs'] })
+  t.assert.deepEqual(enabledOf(testBuild)['vendor/proptest'], ['default', 'std'])
+  t.assert.equal(testBuild.isTestTarget('tests/it.rs'), true)
+  t.assert.equal(testBuild.isTestTarget('src/main.rs'), false)
   t.assert.deepEqual(sorted(cargo.featuresFor('crates/lib-a/src/lib.rs')), ['default', 'extra', 'extra-dep', 'std'])
   t.assert.equal(cargo.featuresFor('vendor/serde/src/lib.rs'), null) // not in the build: unknown, so its gated code is kept
   t.assert.equal(cargo.featuresFor('vendor/proptest/src/lib.rs'), null)
@@ -133,6 +180,9 @@ test('createCargoContext picks the vendored version each package depends on from
   t.assert.equal(cargo.resolveCrate('winnowish0_5', 'src/main.rs'), 'vendor/winnowish-0.5.0/src/lib.rs')
   t.assert.equal(cargo.resolveCrate('winnowish', 'crates/lib-a/src/lib.rs'), 'vendor/winnowish-0.5.0/src/lib.rs')
   t.assert.equal(cargo.resolveCrate('lib_a', 'src/main.rs'), 'crates/lib-a/src/lib.rs')
+  // `md-5` is used as `md5`: its `[lib] name` differs from the package name
+  t.assert.equal(cargo.resolveCrate('md5', 'src/main.rs'), 'vendor/md-5/src/lib.rs')
+  t.assert.equal(cargo.resolveCrate('md5', 'crates/tools/src/lib.rs'), 'vendor/md-5/src/lib.rs') // no manifest declares it: by vendored lib name
 })
 
 test('createCargoContext falls back to the requirement when there is no Cargo.lock', (t) => {
@@ -155,12 +205,31 @@ test('createCargoContext honours the root feature flags: --features (incl. pkg/f
     '.': ['default', 'fast', 'with-serde'],
     'crates/lib-a': ['default', 'extra', 'extra-dep', 'serde', 'std'], // `lib-a/serde` from with-serde
     'vendor/extra-dep': [],
+    'vendor/md-5': [],
     'vendor/serde': ['default', 'std'], // `dep:serde` activated the optional dep
     'vendor/winnowish': ['default', 'std'],
     'vendor/winnowish-0.5.0': ['default', 'std'],
   })
-  const scoped = createCargoContext(featuresFixture, { entries: ['src/main.rs'], features: ['app/with-serde', 'nope/x'] })
+  const scoped = createCargoContext(featuresFixture, { entries: ['src/main.rs'], features: ['app/with-serde'] })
   t.assert.deepEqual(enabledOf(scoped)['.'], ['default', 'fast', 'with-serde'])
+  // cargo's `dep/feat` form: a feature of a dependency of the root, not of a root package named `dep`
+  const depFeat = createCargoContext(featuresFixture, { entries: ['src/main.rs'], features: ['lib-a/serde'] })
+  t.assert.deepEqual(enabledOf(depFeat)['crates/lib-a'], ['default', 'extra', 'extra-dep', 'serde', 'std'])
+  t.assert.deepEqual(enabledOf(depFeat)['vendor/serde'], ['default', 'std'])
+  t.assert.deepEqual(enabledOf(depFeat)['.'], ['default', 'fast'])
+  // an unknown name is reported, not silently dropped
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    createCargoContext(featuresFixture, { entries: ['src/main.rs'], features: ['nope/x', 'bogus'] }).resolvedFeatures()
+  } finally {
+    console.warn = original
+  }
+  t.assert.deepEqual(warnings, [
+    "[stasis] --cargo-features: 'nope/x' names no feature of the entries' packages, nor a dependency of theirs",
+    "[stasis] --cargo-features: 'bogus' names no feature of the entries' packages, nor a dependency of theirs",
+  ])
 
   const noDefault = createCargoContext(featuresFixture, { entries: ['src/main.rs'], noDefaultFeatures: true })
   t.assert.deepEqual(enabledOf(noDefault)['.'], [])
@@ -259,6 +328,7 @@ test('buildRustBundle leaves feature-gated code that is off out of the bundle, p
     'crates/lib-a/src/extra.rs', 'crates/lib-a/src/lib.rs', 'crates/lib-a/src/std_impl.rs', 'crates/lib-a/src/with_extra.rs',
     'src/fast.rs', 'src/main.rs', 'src/util.rs',
     'vendor/extra-dep/src/lib.rs',
+    'vendor/md-5/src/lib.rs',
     'vendor/winnowish-0.5.0/src/lib.rs', 'vendor/winnowish-0.5.0/src/std_impl.rs',
     'vendor/winnowish/src/lib.rs', 'vendor/winnowish/src/std_impl.rs',
   ])
@@ -268,11 +338,13 @@ test('buildRustBundle leaves feature-gated code that is off out of the bundle, p
     ['.', 'app', '0.1.0', undefined],
     ['crates/lib-a', 'lib-a', '0.2.0', undefined],
     ['vendor/extra-dep', 'extra-dep', '1.0.0', 'cargo'],
+    ['vendor/md-5', 'md-5', '0.10.6', 'cargo'],
     ['vendor/winnowish', 'winnowish', '0.6.1', 'cargo'],
     ['vendor/winnowish-0.5.0', 'winnowish', '0.5.0', 'cargo'],
   ])
   const imports = bundle.imports.get('rust')
   t.assert.equal(imports.get('crates/lib-a/src/with_extra.rs').get('use extra_dep'), 'vendor/extra-dep/src/lib.rs')
+  t.assert.equal(imports.get('src/main.rs').get('use md5'), 'vendor/md-5/src/lib.rs')
   t.assert.equal(imports.get('src/main.rs').get('use winnowish'), 'vendor/winnowish/src/lib.rs')
   t.assert.equal(imports.get('src/main.rs').get('use winnowish0_5'), 'vendor/winnowish-0.5.0/src/lib.rs')
   t.assert.equal(imports.get('crates/lib-a/src/lib.rs').get('use winnowish'), 'vendor/winnowish-0.5.0/src/lib.rs')
@@ -285,7 +357,7 @@ test('buildRustBundle applies the cargo feature overrides to the entries\' packa
   const files = sorted(withSerde.sources.keys())
   for (const f of ['src/ser.rs', 'crates/lib-a/src/ser.rs', 'vendor/serde/src/lib.rs', 'vendor/serde/src/std_impl.rs']) t.assert.ok(files.includes(f), f)
   t.assert.equal(withSerde.imports.get('rust').get('src/ser.rs').get('use serde'), 'vendor/serde/src/lib.rs')
-  t.assert.deepEqual([...withSerde.modules.keys()].toSorted(), ['.', 'crates/lib-a', 'vendor/extra-dep', 'vendor/serde', 'vendor/winnowish', 'vendor/winnowish-0.5.0'])
+  t.assert.deepEqual([...withSerde.modules.keys()].toSorted(), ['.', 'crates/lib-a', 'vendor/extra-dep', 'vendor/md-5', 'vendor/serde', 'vendor/winnowish', 'vendor/winnowish-0.5.0'])
 
   const noDefault = await buildRustBundle({ cwd: featuresFixture, entries: ['src/main.rs'], cargoNoDefaultFeatures: true })
   t.assert.ok(!noDefault.sources.has('src/fast.rs')) // `fast` is only a default feature
@@ -294,6 +366,12 @@ test('buildRustBundle applies the cargo feature overrides to the entries\' packa
   const all = await buildRustBundle({ cwd: featuresFixture, entries: ['src/main.rs'], cargoAllFeatures: true })
   t.assert.ok(all.sources.has('src/fast.rs'))
   t.assert.ok(all.sources.has('src/ser.rs'))
+})
+
+test('buildRustBundle compiles a tests/ entry with cfg(test): its #[test] fns and #[cfg(test)] modules are live, dev-deps join', async (t) => {
+  const bundle = await buildRustBundle({ cwd: featuresFixture, entries: ['tests/it.rs'] })
+  // `use proptest::prelude::*` is live in a test target; proptest is a dev-dependency with `std` requested.
+  t.assert.deepEqual(sorted(bundle.sources.keys()), ['tests/it.rs', 'vendor/proptest/src/lib.rs', 'vendor/proptest/src/std_impl.rs'])
 })
 
 test('buildRustBundle treats a feature that is on as firm: a missing gated module is fatal', async (t) => {

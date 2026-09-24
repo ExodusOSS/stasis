@@ -3,6 +3,6 @@ name = "app"
 version.workspace = true
 
 [dependencies]
-util = { workspace = true }
+util = { workspace = true, default-features = false }   # ignored: the workspace entry keeps defaults
 tools = { path = "../tools", package = "dev-tools" }
 serde = "1"

@@ -1,4 +1,6 @@
 mod common;
+#[cfg(test)]
+mod helpers;
 
 use my_app::run;
 

@@ -13,7 +13,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 
 import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
-import { VENDOR_DIR, createCargoContext, matchClose, normalizeRel, splitTopLevel } from './cargo.js'
+import { VENDOR_DIR, createCargoContext, isTestTargetPath, matchClose, normalizeRel, splitTopLevel } from './cargo.js'
 
 // The Cargo side (manifests, dependency and feature resolution) lives in cargo.js; re-exported
 // here for callers that reach it through the loader.
@@ -160,22 +160,20 @@ const ATTR_PATH_RE = /^\s*path\s*=\s*"([^"]*)"\s*$/u
 
 const normalizeCfg = (pred) => pred.replaceAll(/\s+/gu, ' ').trim()
 
-// Predicates that are never true when a program (or a dependency of one) is built: `test` /
-// `doctest` only under `cargo test` of that very crate, `doc` only under rustdoc.
-const NEVER_BUILT_CFGS = new Set(['test', 'doctest', 'doc'])
-
 const FEATURE_CFG_RE = /^feature\s*=\s*"([^"]*)"$/u
 
 // Three-valued evaluation of a cfg predicate: `false` when it can never hold in the build (so the
 // item it gates is dead code for the bundle), `true` when it always does, `null` when the loader
-// can't tell. `all`/`any`/`not` compose. `feature = "x"` is decided against `env.features`, the
-// crate's resolved feature set (see cargo.js), and unknown without one; every other leaf
-// (`unix`, `target_os = …`) depends on the target and stays unknown.
+// can't tell. `all`/`any`/`not` compose. `test` holds only in a test/bench target (`env.test`);
+// `doctest` and `doc` never do when a program is built; `feature = "x"` is decided against
+// `env.features`, the crate's resolved feature set (see cargo.js), and unknown without one; every
+// other leaf (`unix`, `target_os = …`) depends on the target and stays unknown.
 export function evalCfg(pred, env = {}) {
   const p = pred.trim()
   const m = /^(all|any|not)\s*\(([\s\S]*)\)$/u.exec(p)
   if (!m) {
-    if (NEVER_BUILT_CFGS.has(p)) return false
+    if (p === 'test') return env.test === true
+    if (p === 'doctest' || p === 'doc') return false
     const feature = FEATURE_CFG_RE.exec(p)
     if (feature && env.features) return env.features.has(feature[1])
     return null
@@ -189,29 +187,33 @@ export function evalCfg(pred, env = {}) {
 // Combine an item's cfg predicates (several `#[cfg]` attributes all apply) into one; null when ungated.
 const joinCfgs = (preds) => (preds.length === 0 ? null : (preds.length === 1 ? preds[0] : `all(${preds.join(', ')})`))
 
-// One outer attribute's text (inside `#[…]`) → `cfg`: the predicate gating the item (`#[cfg(<pred>)]`,
-// a `#[cfg_attr(<pred>, cfg(…))]`, or `test` for a `#[test]` fn; null when the item is
-// unconditional -- a `cfg_attr` applying any other attribute, `doc(cfg(…))` included, gates
-// nothing) and `paths`: the module file paths it names, `#[path = "…"]` outright (cfg null) or
-// each `#[cfg_attr(<pred>, path = "…")]` under its predicate.
+const CFG_ATTR_RE = /^\s*cfg\s*\(([\s\S]*)\)\s*$/u
+
+// One outer attribute's text (inside `#[…]`) → `cfg`: the predicate gating the item (`#[cfg(<pred>)]`;
+// `test` for a `#[test]` fn; for `#[cfg_attr(<pred>, cfg(<inner>))]` the item is compiled unless
+// pred holds and inner doesn't, i.e. `any(not(pred), inner)`; null when the item is unconditional
+// -- a `cfg_attr` applying any other attribute, `doc(cfg(…))` included, gates nothing) and
+// `paths`: the module file paths it names, `#[path = "…"]` outright (cfg null) or each
+// `#[cfg_attr(<pred>, path = "…")]` under its predicate.
 function parseAttr(text) {
   const path = ATTR_PATH_RE.exec(text)
   if (path) return { cfg: null, paths: [{ path: path[1], cfg: null }] }
   if (/^\s*test\s*$/u.test(text)) return { cfg: 'test', paths: [] }
-  const cfg = /^\s*cfg\s*\(([\s\S]*)\)\s*$/u.exec(text)
+  const cfg = CFG_ATTR_RE.exec(text)
   if (cfg) return { cfg: normalizeCfg(cfg[1]), paths: [] }
   const cfgAttr = /^\s*cfg_attr\s*\(([\s\S]*)\)\s*$/u.exec(text)
   if (cfgAttr) {
     const parts = splitTopLevel(cfgAttr[1])
     const pred = normalizeCfg(parts.shift() ?? '')
     const paths = []
-    let gates = false
+    const inner = []
     for (const part of parts) {
       const m = ATTR_PATH_RE.exec(part)
+      const c = CFG_ATTR_RE.exec(part)
       if (m) paths.push({ path: m[1], cfg: pred })
-      else if (/^\s*cfg\s*\(/u.test(part)) gates = true
+      else if (c) inner.push(normalizeCfg(c[1]))
     }
-    return { cfg: gates ? pred : null, paths }
+    return { cfg: inner.length === 0 ? null : `any(not(${pred}), ${joinCfgs(inner)})`, paths }
   }
   return { cfg: null, paths: [] }
 }
@@ -298,8 +300,8 @@ export function parseUseTree(body) {
 //   externCrates: `extern crate x [as y];` names, with their inlinePath;
 //   bindings:     names the file's `use` items and `extern crate … as` aliases bring into scope --
 //                 a path lead among them names an import, not a crate.
-export function scanRustItems(content, { features = null } = {}) {
-  const env = { features }
+export function scanRustItems(content, { features = null, test = false } = {}) {
+  const env = { features, test }
   const { code, masked } = lexRust(content)
   const n = masked.length
   const mods = []
@@ -334,6 +336,25 @@ export function scanRustItems(content, { features = null } = {}) {
   const skipWs = (at) => {
     while (at < n && /\s/u.test(masked[at])) at++
     return at
+  }
+  // The end of the item starting at `from`, without leaving its enclosing block: through a
+  // top-level `;` or `,` (a field, variant or match arm), or its `{ … }` body; a `}` or `)`
+  // closing the enclosing block is left for the main loop. Parentheses/brackets nest (a tuple
+  // field's `(u8, u8)` comma isn't the item's end).
+  const skipItem = (from) => {
+    let nest = 0
+    for (let k = from; k < n; k++) {
+      const ch = masked[k]
+      if (ch === '(' || ch === '[') nest++
+      else if (ch === ')' || ch === ']') {
+        if (--nest < 0) return k
+      } else if (nest === 0) {
+        if (ch === ';' || ch === ',') return k + 1
+        if (ch === '}') return k
+        if (ch === '{') return matchClose(masked, k) + 1
+      }
+    }
+    return n
   }
 
   let i = 0
@@ -372,14 +393,13 @@ export function scanRustItems(content, { features = null } = {}) {
       i++
       continue
     }
-    // An item gated on a cfg that never holds in a build is dead code for the bundle: skip it
-    // whole -- through the `;` of a declaration, or the `{ … }` of a body/block -- without
-    // recording anything in it. (`pub` is visibility, not the item; keep its attributes pending.)
+    // An item gated on a cfg that never holds in the build is dead code for the bundle: skip it
+    // whole -- a declaration through its `;`, a field or variant through its `,`, a body or block
+    // through its `}` -- without recording anything in it. (`pub` is visibility, not the item;
+    // keep its attributes pending.)
     if (word !== 'pub' && pending.length > 0 && evalCfg(joinCfgs(pending.map((a) => parseAttr(a).cfg).filter((c) => c !== null)) ?? 'all()', env) === false) {
       pending = []
-      let k = i + word.length
-      while (k < n && masked[k] !== ';' && masked[k] !== '{') k++
-      const end = masked[k] === '{' ? matchClose(masked, k) + 1 : k + 1
+      const end = skipItem(i + word.length)
       deadSpans.push([i, end])
       i = end
       continue
@@ -437,7 +457,9 @@ export function scanRustItems(content, { features = null } = {}) {
       const ip = inlinePath()
       for (const p of parseUseTree(code.slice(i + 3, stop))) {
         uses.push({ ...p, inlinePath: ip })
-        if (p.binding !== null) bindings.add(p.binding)
+        // A binding hides a crate name only when it is something else: `use std::io;` binds `io`,
+        // but `use serde_json;` / `use rand::{self, Rng};` bind the crate itself under its own name.
+        if (p.binding !== null && (p.segments.length > 1 || p.binding !== p.segments[0])) bindings.add(p.binding)
       }
       useSpans.push([i, stop])
       pending = []
@@ -497,9 +519,10 @@ export function scanRustItems(content, { features = null } = {}) {
 
 // --- Module files -----------------------------------------------------------------------
 
-// Directory holding this file's submodules, per Rust's path rules: siblings for crate roots
-// and mod.rs, else under a `<stem>/` subdir. `root` marks a crate root by role (an entry such as
-// `src/bin/tool.rs` or `tests/it.rs`) rather than by name.
+// Directory holding this file's submodules, per Rust's path rules: siblings for crate roots,
+// mod.rs and files loaded through `#[path = …]` (rustc treats those like mod.rs), else under a
+// `<stem>/` subdir. `root` marks a crate root by role (an entry such as `src/bin/tool.rs` or
+// `tests/it.rs`) rather than by name.
 export function getModuleDir(filePath, { root = false } = {}) {
   const lastSlash = filePath.lastIndexOf('/')
   const dir = lastSlash === -1 ? '' : filePath.slice(0, lastSlash)
@@ -508,6 +531,10 @@ export function getModuleDir(filePath, { root = false } = {}) {
   const stem = name.replace(/\.rs$/u, '')
   return dir ? `${dir}/${stem}` : stem
 }
+
+// Whether `file` owns its directory for submodule lookup: a crate root by role, or a file a
+// `#[path]` attribute loaded (`pathLoaded`).
+const ownsDir = (file, { roots, pathLoaded }) => roots?.has(file) === true || pathLoaded?.has(file) === true
 
 function firstFile(candidates, { knownSources, baseDir }) {
   if (knownSources) return candidates.find((c) => knownSources.has(c)) ?? null
@@ -523,11 +550,12 @@ function firstFile(candidates, { knownSources, baseDir }) {
 
 // Resolve `mod <name>;` declared in `fromFile` (inside the inline modules `inlinePath`) to its
 // file, trying `<dir>/<name>.rs` then `<dir>/<name>/mod.rs`. `roots` are the files walked as crate
-// roots (the entries): their submodules are siblings. An entry not named main.rs/lib.rs also
-// gets the non-root `<stem>/` rule as a fallback, so a glob-listed module file still resolves.
-export function resolveModPath(modName, fromFile, { knownSources, baseDir, roots, inlinePath = [] } = {}) {
+// roots (the entries) and `pathLoaded` the files a `#[path]` loaded: their submodules are
+// siblings. An entry not named main.rs/lib.rs also gets the non-root `<stem>/` rule as a
+// fallback, so a glob-listed module file still resolves.
+export function resolveModPath(modName, fromFile, { knownSources, baseDir, roots, pathLoaded, inlinePath = [] } = {}) {
   const isRoot = roots?.has(fromFile) === true
-  const dirs = [getModuleDir(fromFile, { root: isRoot })]
+  const dirs = [getModuleDir(fromFile, { root: ownsDir(fromFile, { roots, pathLoaded }) })]
   if (isRoot && !isNamedRoot(fromFile) && baseName(fromFile) !== 'mod.rs') dirs.push(getModuleDir(fromFile))
   for (const dir of new Set(dirs)) {
     const base = [dir, ...inlinePath, modName].filter(Boolean).join('/')
@@ -540,34 +568,36 @@ export function resolveModPath(modName, fromFile, { knownSources, baseDir, roots
 // Resolve a `#[path = "…"]` target the way rustc does: relative to the declaring file's directory,
 // or -- inside inline modules -- to the file's module dir plus the inline module names. Absolute
 // or root-escaping paths resolve to nothing (a read would refuse them anyway).
-export function resolveExplicitModPath(explicitPath, fromFile, { knownSources, baseDir, roots, inlinePath = [] } = {}) {
+export function resolveExplicitModPath(explicitPath, fromFile, { knownSources, baseDir, roots, pathLoaded, inlinePath = [] } = {}) {
   const dir = inlinePath.length === 0
     ? posix.dirname(fromFile)
-    : [getModuleDir(fromFile, { root: roots?.has(fromFile) === true }), ...inlinePath].filter(Boolean).join('/')
+    : [getModuleDir(fromFile, { root: ownsDir(fromFile, { roots, pathLoaded }) }), ...inlinePath].filter(Boolean).join('/')
   const rel = normalizeRel(dir, explicitPath)
   return rel === null ? null : firstFile([rel], { knownSources, baseDir })
 }
 
-// Every file a `mod` declaration can denote, as `{ cfg, file }`: an unconditional `#[path]` names
-// one outright; otherwise each `#[cfg_attr(<pred>, path = …)]` names one under its predicate
-// (`cfg`; a predicate that can't hold in the build -- `test`, a feature that is off -- is
-// dropped), and the default `<name>.rs`/`<name>/mod.rs` lookup is the fallback (`cfg` null).
-// `opts.features` is the declaring crate's resolved feature set, when known.
+// Every file a `mod` declaration can denote, as `{ cfg, file, explicit }`: an unconditional
+// `#[path]` names one outright; otherwise each `#[cfg_attr(<pred>, path = …)]` names one under
+// its predicate (`cfg`; a predicate that can't hold in the build -- `test`, a feature that is off
+// -- is dropped), and the default `<name>.rs`/`<name>/mod.rs` lookup is the fallback (`cfg`
+// null). `explicit` marks a file a `#[path]` named (its own submodules then sit beside it).
+// `opts.features` / `opts.test` describe the declaring crate's build, when known.
 export function resolveModDecl(decl, fromFile, opts = {}) {
   const o = { ...opts, inlinePath: decl.inlinePath }
+  const env = { features: opts.features ?? null, test: opts.test === true }
   const unconditional = decl.paths.find((p) => p.cfg === null)
   if (unconditional) {
     const file = resolveExplicitModPath(unconditional.path, fromFile, o)
-    return file ? [{ cfg: null, file }] : []
+    return file ? [{ cfg: null, file, explicit: true }] : []
   }
   const out = []
   for (const { path, cfg } of decl.paths) {
-    if (evalCfg(cfg, { features: opts.features ?? null }) === false) continue
+    if (evalCfg(cfg, env) === false) continue
     const file = resolveExplicitModPath(path, fromFile, o)
-    if (file && !out.some((x) => x.file === file)) out.push({ cfg, file })
+    if (file && !out.some((x) => x.file === file)) out.push({ cfg, file, explicit: true })
   }
   const fallback = resolveModPath(decl.name, fromFile, o)
-  if (fallback && !out.some((x) => x.file === fallback)) out.push({ cfg: null, file: fallback })
+  if (fallback && !out.some((x) => x.file === fallback)) out.push({ cfg: null, file: fallback, explicit: false })
   return out
 }
 
@@ -708,6 +738,23 @@ function setModTarget(specMap, declKeys, spec, targets, declCfg) {
 // Bundle import keys can't contain '/'; a cfg predicate practically never does, but fail safe.
 const cfgKey = (cfg) => (cfg ?? '*').replaceAll('/', '|')
 
+// Whether `rel` is compiled with `cfg(test)`: a file of a test/bench target (`tests/*.rs`,
+// `benches/*.rs` and their modules), judged against its package dir when a Cargo context knows it.
+const isTestTarget = (rel, ctx) => (ctx ? ctx.isTestTarget(rel) : isTestTargetPath('.', rel))
+
+// Scan results per `sources` map, so the tree pass reuses the walk's scan of each file when it
+// ran under the same build (the same feature set object and test flag).
+const scanCache = new WeakMap()
+function cachedScan(sources, path, content, build) {
+  if (!scanCache.has(sources)) scanCache.set(sources, new Map())
+  const cache = scanCache.get(sources)
+  const hit = cache.get(path)
+  if (hit && hit.features === build.features && hit.test === build.test) return hit.items
+  const items = scanRustItems(content, build)
+  cache.set(path, { ...build, items })
+  return items
+}
+
 // Crates rustc supplies from the sysroot; never in-tree, never worth reporting as unresolved.
 const SYSROOT_CRATES = new Set(['std', 'core', 'alloc', 'proc_macro', 'test'])
 
@@ -731,15 +778,36 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   const missing = []
   const unresolvedCrates = new Set()
   const scanned = new Map()
+  const builds = new Map() // path -> { features, test }: the crate build the file is compiled in
   for (const [path, content] of sources) {
-    const features = ctx?.featuresFor(path) ?? null
-    const items = scanRustItems(content, { features })
-    scanned.set(path, items)
+    const build = { features: ctx?.featuresFor(path) ?? null, test: isTestTarget(path, ctx) }
+    builds.set(path, build)
+    scanned.set(path, cachedScan(sources, path, content, build))
+  }
+  // Files a `#[path]` names own their directory (see getModuleDir), so find those before resolving
+  // any default `mod` lookup; a path-loaded file may itself hold inline modules with `#[path]`s,
+  // hence the loop to a fixed point.
+  const pathLoaded = new Set()
+  for (let grew = true; grew;) {
+    grew = false
+    for (const [path, items] of scanned) {
+      for (const decl of items.mods) {
+        if (decl.paths.length === 0) continue
+        for (const t of resolveModDecl(decl, path, { knownSources: sources, roots: rootSet, pathLoaded, ...builds.get(path) })) {
+          if (t.explicit && !pathLoaded.has(t.file)) {
+            pathLoaded.add(t.file)
+            grew = true
+          }
+        }
+      }
+    }
+  }
+  for (const [path, items] of scanned) {
     const specMap = new Map()
     const declKeys = new Map()
     for (const decl of items.mods) {
       const spec = `mod ${[...decl.inlinePath, decl.name].join('::')}`
-      const targets = resolveModDecl(decl, path, { knownSources: sources, roots: rootSet, features })
+      const targets = resolveModDecl(decl, path, { knownSources: sources, roots: rootSet, pathLoaded, ...builds.get(path) })
       if (targets.length === 0) {
         // conditional && unresolved: cfg-gated module, may be compiled out -- tolerated.
         if (!decl.conditional) {
@@ -792,6 +860,7 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null 
   const sources = new Map()
   const realBase = realpathSync(baseDir)
   const roots = new Set(entries)
+  const pathLoaded = new Set() // files a `#[path]` named: their submodules sit beside them
   const ctx = cargo ?? createCargoContext(baseDir, { entries })
 
   const processWave = async (wave) => {
@@ -821,10 +890,11 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null 
       if (!entry) continue
       const [relPath, content] = entry
       sources.set(relPath, content)
-      const features = ctx.featuresFor(relPath)
-      const { mods, refs, externCrates, bindings } = scanRustItems(content, { features })
+      const build = { features: ctx.featuresFor(relPath), test: isTestTarget(relPath, ctx) }
+      const { mods, refs, externCrates, bindings } = cachedScan(sources, relPath, content, build)
       for (const decl of mods) {
-        for (const { file } of resolveModDecl(decl, relPath, { baseDir, roots, features })) {
+        for (const { file, explicit } of resolveModDecl(decl, relPath, { baseDir, roots, pathLoaded, ...build })) {
+          if (explicit) pathLoaded.add(file)
           if (!sources.has(file)) next.push(file)
         }
       }

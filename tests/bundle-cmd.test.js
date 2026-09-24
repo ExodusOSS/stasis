@@ -2865,14 +2865,14 @@ test('buildRustBundle treats src/bin and tests entries as crate roots (sibling m
   t.assert.equal(bin.imports.get('rust').get('src/bin/tool.rs').get('use my_app'), 'src/lib.rs')
 
   const it = await buildRustBundle({ cwd: join(rustFixtures, 'lib-bin'), entries: ['tests/smoke.rs'] })
-  t.assert.deepEqual([...it.sources.keys()].toSorted(), ['src/cli.rs', 'src/config.rs', 'src/lib.rs', 'tests/common/mod.rs', 'tests/smoke.rs'])
+  t.assert.deepEqual([...it.sources.keys()].toSorted(), ['src/cli.rs', 'src/config.rs', 'src/lib.rs', 'tests/common/mod.rs', 'tests/helpers.rs', 'tests/smoke.rs'])
   t.assert.equal(it.imports.get('rust').get('tests/smoke.rs').get('mod common'), 'tests/common/mod.rs')
 })
 
 test('buildRustBundle follows Cargo path dependencies across a workspace, one bucket per member', async (t) => {
   const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'workspace'), entries: ['crates/app/src/main.rs'] })
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
-    'crates/app/src/local.rs', 'crates/app/src/main.rs', 'crates/tools/src/lib.rs', 'crates/util/src/detail.rs', 'crates/util/src/util_lib.rs',
+    'crates/app/src/local.rs', 'crates/app/src/main.rs', 'crates/tools/src/lib.rs', 'crates/util/src/detail.rs', 'crates/util/src/std_impl.rs', 'crates/util/src/util_lib.rs',
   ])
   const buckets = [...bundle.modules].map(([dir, m]) => [dir, m.name, m.version, m.ecosystem])
   t.assert.deepEqual(buckets.toSorted(), [
@@ -2889,7 +2889,7 @@ test('buildRustBundle follows Cargo path dependencies across a workspace, one bu
 test('buildRustBundle honours #[path] (crate root, non-root sibling, inside an inline module) and cfg_attr variants', async (t) => {
   const bundle = await buildRustBundle({ cwd: join(rustFixtures, 'path-attr'), entries: ['src/lib.rs'] })
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
-    'src/de.rs', 'src/de/seed.rs', 'src/discouraged.rs', 'src/documented.rs', 'src/lib.rs', 'src/parse.rs', 'src/private/mod.rs',
+    'src/de.rs', 'src/de/extra.rs', 'src/de/seed.rs', 'src/discouraged.rs', 'src/documented.rs', 'src/lib.rs', 'src/parse.rs', 'src/private/mod.rs',
     'src/raw/mod.rs', 'src/sys.rs', 'src/sys/unix.rs', 'src/sys/windows.rs',
   ])
   const lib = bundle.imports.get('rust').get('src/lib.rs')
@@ -2965,7 +2965,7 @@ test('CLI: bundle rejects the --cargo-* feature flags for a non-Rust bundle, and
 test('CLI: EXODUS_STASIS_DEBUG=1 prints the resolved Rust features per package', (t) => {
   const r = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features'), env: { ...cleanEnv, EXODUS_STASIS_DEBUG: '1' } })
   t.assert.equal(r.status, 0, r.stderr)
-  t.assert.match(r.stderr, /^\[stasis\] Rust features \(Cargo\.toml \+ Cargo\.lock\), 5 packages:$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] Rust features \(Cargo\.toml \+ Cargo\.lock\), 6 packages:$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}app@0\.1\.0 \(\.\): default, fast$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}lib-a@0\.2\.0 \(crates\/lib-a\): default, extra, extra-dep, std$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}extra-dep@1\.0\.0 \(vendor\/extra-dep\): \(none\)$/mu)
@@ -2980,16 +2980,16 @@ test('CLI: bundle --cargo-features enables a root feature (repeatable, comma-sep
   const cwd = join(rustFixtures, 'features')
   const plain = runCli(['bundle', '-o', outPath, 'src/main.rs'], { cwd })
   t.assert.equal(plain.status, 0, plain.stderr)
-  t.assert.match(plain.stderr, /Bundled 12 files in 5 packages/u)
+  t.assert.match(plain.stderr, /Bundled 13 files in 6 packages/u)
   const withSerde = runCli(['bundle', '--cargo-features=with-serde', '--cargo-features', 'fast,', '-o', outPath, 'src/main.rs'], { cwd })
   t.assert.equal(withSerde.status, 0, withSerde.stderr)
-  t.assert.match(withSerde.stderr, /Bundled 16 files in 6 packages/u)
+  t.assert.match(withSerde.stderr, /Bundled 17 files in 7 packages/u)
   const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
   t.assert.ok(parsed.sources.has('src/ser.rs'))
   t.assert.equal(parsed.modules.get('vendor/serde').ecosystem, 'cargo')
   const noDefault = runCli(['bundle', '--cargo-no-default-features', '-o', outPath, 'src/main.rs'], { cwd })
   t.assert.equal(noDefault.status, 0, noDefault.stderr)
-  t.assert.match(noDefault.stderr, /Bundled 11 files in 5 packages/u)
+  t.assert.match(noDefault.stderr, /Bundled 12 files in 6 packages/u)
 }))
 
 test('buildRustBundle follows cfg_if!-style mods and tolerates macro-generated ones with no .rs file', async (t) => {
@@ -3027,15 +3027,19 @@ test('buildRustBundle records edges for grouped/multi-line use trees, super::/se
 test('buildRustBundle follows a vendored crate\'s vendored dependency and records the edge (extern crate … as)', async (t) => {
   const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'vendored-transitive'), entries: ['src/main.rs'] }))
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
-    'src/main.rs', 'vendor/alpha/src/inner.rs', 'vendor/alpha/src/lib.rs', 'vendor/beta-lib/src/lib.rs',
+    'src/main.rs', 'vendor/alpha/src/inner.rs', 'vendor/alpha/src/lib.rs', 'vendor/beta-lib/src/lib.rs', 'vendor/delta/src/lib.rs', 'vendor/gamma/src/lib.rs',
   ])
   t.assert.deepEqual([...bundle.modules].map(([dir, m]) => [dir, m.name, m.version, m.ecosystem]).toSorted(), [
     ['.', 'rust-bundle', '0.0.0', undefined],
     ['vendor/alpha', 'alpha', '1.0.0', 'cargo'],
     ['vendor/beta-lib', 'beta-lib', '2.0.0', 'cargo'],
+    ['vendor/delta', 'delta', '1.0.0', 'cargo'],
+    ['vendor/gamma', 'gamma', '1.0.0', 'cargo'],
   ])
   const imports = bundle.imports.get('rust')
   t.assert.equal(imports.get('src/main.rs').get('use alpha'), 'vendor/alpha/src/lib.rs')
+  t.assert.equal(imports.get('src/main.rs').get('use gamma'), 'vendor/gamma/src/lib.rs') // `use gamma;`
+  t.assert.equal(imports.get('src/main.rs').get('use delta'), 'vendor/delta/src/lib.rs') // `use delta::{self, D};`
   t.assert.equal(imports.get('vendor/alpha/src/lib.rs').get('use beta_lib'), 'vendor/beta-lib/src/lib.rs')
   t.assert.equal(imports.get('vendor/alpha/src/lib.rs').get('crate::inner::x'), 'vendor/alpha/src/inner.rs')
   // `use missing_crate::Nope` is unresolved, but with a vendor/ dir present there is no `cargo vendor` hint.

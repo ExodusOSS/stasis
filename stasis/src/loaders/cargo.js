@@ -103,20 +103,32 @@ function bracketDepth(line) {
   return depth
 }
 
-// Physical lines → logical lines: a `key = [` / `key = {` whose brackets don't close on the line
-// takes the following lines up to the close (multi-line arrays are how long `features` lists and
-// `members` are written). Comments are dropped first.
+// Physical lines → logical lines: a `key = """` / `key = '''` multi-line string takes the lines
+// up to its closing delimiter verbatim (a `[x]` inside a description is text, not a table), and a
+// `key = [` / `key = {` whose brackets don't close on the line takes the following lines up to
+// the close (multi-line arrays are how long `features` lists and `members` are written).
+// Comments are dropped from the non-string lines.
 function logicalLines(text) {
-  const lines = text.split('\n').map(stripTomlComment)
+  const raw = text.split('\n')
   const out = []
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i]
+  for (let i = 0; i < raw.length; i++) {
+    let line = stripTomlComment(raw[i])
     const kv = /^\s*[\w."'-]+\s*=\s*(.*)$/u.exec(line)
     if (kv) {
-      let depth = bracketDepth(kv[1])
-      while (depth > 0 && i + 1 < lines.length) {
-        line += `\n${lines[++i]}`
-        depth += bracketDepth(lines[i])
+      const ml = /^("""|''')/u.exec(kv[1].trim())
+      if (ml && kv[1].trim().indexOf(ml[1], 3) === -1) {
+        line = raw[i]
+        while (i + 1 < raw.length) {
+          line += `\n${raw[++i]}`
+          if (raw[i].includes(ml[1])) break
+        }
+      } else {
+        let depth = bracketDepth(kv[1])
+        while (depth > 0 && i + 1 < raw.length) {
+          const next = stripTomlComment(raw[++i])
+          line += `\n${next}`
+          depth += bracketDepth(next)
+        }
       }
     }
     out.push(line)
@@ -128,6 +140,11 @@ function logicalLines(text) {
 // plain object); anything else is returned raw.
 export function parseTomlValue(raw) {
   const text = raw.trim()
+  if (text.startsWith('"""') || text.startsWith("'''")) {
+    const delim = text.slice(0, 3)
+    const end = text.indexOf(delim, 3)
+    return (end === -1 ? text.slice(3) : text.slice(3, end)).replace(/^\n/u, '')
+  }
   if (text.startsWith('"')) {
     const m = /^"((?:[^"\\]|\\.)*)"/u.exec(text)
     return m ? m[1].replaceAll(/\\(.)/gu, '$1') : text
@@ -159,6 +176,23 @@ export function parseTomlValue(raw) {
 const DEP_TABLE_RE = /^(?:target\..+\.)?(dependencies|dev-dependencies|build-dependencies)(?:\.(.+))?$/u
 const DEP_KINDS = { dependencies: 'normal', 'dev-dependencies': 'dev', 'build-dependencies': 'build' }
 
+// What one dependency table asks of a crate. `defaultFeatures` is tri-state: null until the table
+// says (an inherited `workspace = true` entry can only turn defaults on, not off).
+const newRequest = () => ({ optional: false, defaultFeatures: null, features: [] })
+
+// `--features a,b pkg/c` (cargo's syntax: repeatable, comma- or space-separated) → the list of names.
+export function parseFeatureList(values) {
+  return [...new Set(values.flatMap((s) => s.split(/[\s,]+/u)).map((s) => s.trim()).filter(Boolean))]
+}
+
+// Whether a source file belongs to a test or bench target of the package at `pkgDir` (`tests/*.rs`,
+// `benches/*.rs` and what they declare): rustc compiles those with `cfg(test)`.
+export function isTestTargetPath(pkgDir, fileRel) {
+  const inside = pkgDir === '.' || pkgDir === '' ? fileRel : (fileRel.startsWith(`${pkgDir}/`) ? fileRel.slice(pkgDir.length + 1) : fileRel)
+  const first = inside.split('/')[0]
+  return first === 'tests' || first === 'benches'
+}
+
 // Minimal Cargo.toml reader covering what crate and feature resolution and bucketing need: the
 // package identity (name, version, edition, resolver), the lib target, every dependency table
 // (kind, `path`/`version`/`package`/`workspace`, `optional`, `default-features`, `features`),
@@ -182,7 +216,6 @@ export function parseCargoManifest(text) {
   }
   // `key` is the `use` spelling (`-` → `_`); `name` the manifest's, which is also the implicit
   // feature an optional dependency defines (`#[cfg(feature = "proc-macro-crate")]`).
-  const newRequest = () => ({ optional: false, defaultFeatures: true, features: [] })
   const depOf = (map, name, { flat }) => {
     const key = normName(name)
     if (!map.has(key)) {
@@ -204,7 +237,8 @@ export function parseCargoManifest(text) {
     if (typeof table.package === 'string') dep.package = table.package
     if (table.workspace === true) dep.workspace = true
     if (table.optional === true) request.optional = true
-    if (table['default-features'] === false || table.default_features === false) request.defaultFeatures = false
+    const defaults = table['default-features'] ?? table.default_features
+    if (defaults === true || defaults === false) request.defaultFeatures = defaults
     if (Array.isArray(table.features)) request.features = [...new Set([...request.features, ...table.features.filter((f) => typeof f === 'string')])]
   }
   let table = ''
@@ -244,9 +278,13 @@ export function parseCargoManifest(text) {
       const m = DEP_TABLE_RE.exec(ws ? table.slice('workspace.'.length) : table)
       if (!m) continue
       const map = ws ? manifest.workspaceDeps : manifest.deps
-      // `[dependencies.foo]` sub-table: each line is one field of `foo`; else each line is one dep.
-      const dep = depOf(map, m[2] ?? key, { flat: ws })
-      setDepFields(dep, m[2] ? { [key]: value } : value, ws ? null : DEP_KINDS[m[1]])
+      // `[dependencies.foo]` sub-table: each line is one field of `foo`; a dotted `foo.features = […]`
+      // line is one field too; else each line is one dep.
+      const dot = m[2] ? -1 : key.indexOf('.')
+      const depName = m[2] ?? (dot === -1 ? key : key.slice(0, dot))
+      const field = m[2] ? key : (dot === -1 ? null : key.slice(dot + 1))
+      const dep = depOf(map, depName, { flat: ws })
+      setDepFields(dep, field === null ? value : { [field]: value }, ws ? null : DEP_KINDS[m[1]])
     }
   }
   if (manifest.package && !manifest.package.name) manifest.package = null
@@ -338,7 +376,8 @@ function compareVersionsDesc(a, b) {
 
 // One comparator of a Cargo requirement against a version: caret (the default -- `1.2` is
 // `>=1.2.0, <2.0.0`; `0.9` is `>=0.9.0, <0.10.0`; `0.0.3` is `<0.0.4`), tilde, wildcard (`1.*`),
-// `=` (partial `=1.2` covers the minor), and the comparison operators.
+// `=` (partial `=1.2` covers the minor), and the comparison operators (a partial `>1.2` means
+// `>=1.3.0`, `<=1.2` means `<1.3.0`: the whole minor is inside).
 function satisfiesComparator(v, comparator) {
   const c = comparator.trim()
   if (c === '*' || c === '') return true
@@ -356,14 +395,16 @@ function satisfiesComparator(v, comparator) {
   const lower = { parts: [ma, mi ?? 0, pa ?? 0], pre: r.pre }
   const upper = (a, b, p) => ({ parts: [a, b, p], pre: null })
   const within = (hi) => compareVersions(v, lower) >= 0 && compareVersions(v, hi) < 0
+  // The version just past a partial requirement's range (`1.2` → 1.3.0, `1` → 2.0.0); null when full.
+  const past = pa !== null ? null : (mi === null ? upper(ma + 1, 0, 0) : upper(ma, mi + 1, 0))
   switch (op) {
     case '=':
-      if (pa !== null) return compareVersions(v, lower) === 0
-      return within(mi === null ? upper(ma + 1, 0, 0) : upper(ma, mi + 1, 0))
-    case '>': return compareVersions(v, lower) > 0
+      if (past === null) return compareVersions(v, lower) === 0
+      return within(past)
+    case '>': return past === null ? compareVersions(v, lower) > 0 : compareVersions(v, past) >= 0
     case '>=': return compareVersions(v, lower) >= 0
     case '<': return compareVersions(v, lower) < 0
-    case '<=': return compareVersions(v, lower) <= 0
+    case '<=': return past === null ? compareVersions(v, lower) <= 0 : compareVersions(v, past) < 0
     case '~': return within(mi === null ? upper(ma + 1, 0, 0) : upper(ma, mi + 1, 0))
     default: // caret: the leftmost non-zero part may not change
       if (ma > 0) return within(upper(ma + 1, 0, 0))
@@ -389,9 +430,22 @@ export function satisfiesCargoReq(version, req) {
 // executable), may refresh the registry index, and writes Cargo.lock when there is none -- so it
 // is never run on a bundle root unasked. With a lockfile present, `--locked` keeps the
 // resolution the one the build uses. `features`/`noDefaultFeatures`/`allFeatures` pass through.
+// The Cargo.lock governing `baseDir`: in it or in an ancestor (a member dir's lock is its workspace root's).
+export function findCargoLock(baseDir) {
+  let dir = baseDir
+  for (;;) {
+    const candidate = join(dir, 'Cargo.lock')
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
 export function runCargoMetadata(baseDir, { features = [], noDefaultFeatures = false, allFeatures = false } = {}) {
   const args = ['metadata', '--format-version', '1']
-  if (existsSync(join(baseDir, 'Cargo.lock'))) args.push('--locked')
+  // A lock anywhere above governs too: never let metadata rewrite a workspace lock outside the bundle root.
+  if (findCargoLock(baseDir) !== null) args.push('--locked')
   if (allFeatures) args.push('--all-features')
   if (noDefaultFeatures) args.push('--no-default-features')
   for (const f of features) args.push('--features', f)
@@ -498,12 +552,15 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
 
   // --- dependency resolution
 
-  // `vendor/<dir>/` crates by normalized name: [{ version, dir }]. The dir may hyphenate a
-  // snake_case name, and an older duplicate version lives in `<name>-<version>/`.
+  // `vendor/<dir>/` crates by normalized package name: [{ version, dir }]. The dir may hyphenate a
+  // snake_case name, and an older duplicate version lives in `<name>-<version>/`. `vendoredByLib`
+  // indexes the same crates by lib name, for the ones whose `[lib] name` differs (`md-5` → `md5`).
   let vendorIndex = null
+  let vendorLibIndex = null
   const vendored = () => {
     if (vendorIndex === null) {
       vendorIndex = new Map()
+      vendorLibIndex = new Map()
       let dirs = []
       try {
         dirs = readdirSync(join(baseDir, VENDOR_DIR))
@@ -511,12 +568,18 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       for (const d of dirs) {
         const m = readManifest(`${VENDOR_DIR}/${d}`)
         if (!m?.package) continue
-        const key = normName(m.package.name)
-        if (!vendorIndex.has(key)) vendorIndex.set(key, [])
-        vendorIndex.get(key).push({ version: version(m), dir: m.dir })
+        const entry = { version: version(m), dir: m.dir }
+        for (const [index, key] of [[vendorIndex, normName(m.package.name)], [vendorLibIndex, libName(m)]]) {
+          if (!index.has(key)) index.set(key, [])
+          index.get(key).push(entry)
+        }
       }
     }
     return vendorIndex
+  }
+  const vendoredByLib = () => {
+    vendored()
+    return vendorLibIndex
   }
   let lock
   const lockfile = () => {
@@ -532,11 +595,15 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     : null
   // A dependency as the package sees it through one of its tables (`request`, an entry of
   // `dep.kinds`; omit it for the identity alone): a `workspace = true` entry merged with the
-  // workspace's (features add up, the path is relative to the workspace root). Null when it can't
-  // be resolved.
+  // workspace's -- features add up, the path is relative to the workspace root, and defaults are
+  // the workspace's call (a member's `default-features = false` is ignored, with a cargo warning,
+  // unless the workspace entry disables them too; a member's `true` turns them back on). Null when
+  // it can't be resolved. `defaultFeatures` comes out boolean.
   const depSpec = (m, dep, request = null) => {
-    const own = request ?? newRequestSpec()
-    if (!dep.workspace) return { key: dep.key, name: dep.name, version: dep.version, path: dep.path, package: dep.package, ...own, relTo: m.dir }
+    const own = request ?? newRequest()
+    if (!dep.workspace) {
+      return { key: dep.key, name: dep.name, version: dep.version, path: dep.path, package: dep.package, optional: own.optional, defaultFeatures: own.defaultFeatures !== false, features: own.features, relTo: m.dir }
+    }
     const ws = workspaceFor(m.dir)
     const base = ws?.workspaceDeps.get(dep.key)
     if (!base) return null
@@ -547,12 +614,13 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       path: base.path,
       package: base.package,
       optional: own.optional,
-      defaultFeatures: base.defaultFeatures && own.defaultFeatures,
+      defaultFeatures: base.defaultFeatures !== false || own.defaultFeatures === true,
       features: [...new Set([...base.features, ...own.features])],
       relTo: ws.dir,
     }
   }
-  const newRequestSpec = () => ({ optional: false, defaultFeatures: true, features: [] })
+  // Dependency → package, memoized per (package, dependency): the fixed-point loop asks many times.
+  const depTargets = new Map()
   // The in-tree package a dependency of `m` resolves to: a `path` dep (or a `[patch]` path
   // override in the root manifest), else the vendored crate of that name -- the version Cargo.lock
   // records for `m`, else the newest that satisfies the requirement. A package can depend on two
@@ -560,6 +628,11 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // the lock then lists both under it, and the requirement tells which is which. Null when it
   // isn't in-tree.
   const resolveDep = (m, dep) => {
+    const memo = `${m.dir}\0${dep.key}`
+    if (!depTargets.has(memo)) depTargets.set(memo, resolveDepUncached(m, dep))
+    return depTargets.get(memo)
+  }
+  const resolveDepUncached = (m, dep) => {
     const asPackage = (dir) => {
       const t = dir === null ? null : readManifest(dir)
       return t?.package ? t : null
@@ -666,20 +739,45 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       changed = true
     }
     const rootDirs = new Set(roots.map((r) => r.dir))
-    const kindApplies = (m, kind) => kind !== 'dev' || (resolver === 1 && rootDirs.has(m.dir))
+    // Dev-dependencies count for a root package under resolver 1, and for one whose entries include a
+    // test/bench target (that build is `cargo test`'s, which links them).
+    const testRootDirs = new Set(entries.filter((e) => isTestTargetPath(packageFor(e)?.dir ?? '.', e)).map((e) => packageFor(e)?.dir))
+    const kindApplies = (m, kind) => kind !== 'dev' || (rootDirs.has(m.dir) && (resolver === 1 || testRootDirs.has(m.dir)))
     // The tables of `d` that take part in the build, with an optional one only once activated.
     const activeRequests = (m, d) => [...d.kinds]
       .filter(([kind, r]) => kindApplies(m, kind) && (!r.optional || active.get(m.dir)?.has(d.key) === true))
       .map(([, r]) => r)
-
-    // `--features a,b,pkg/c`: bare names go to every root package, `pkg/c` to that one.
-    const requested = new Map()
-    for (const f of features.flatMap((s) => s.split(/[\s,]+/u)).filter(Boolean)) {
-      const slash = f.indexOf('/')
-      const [pkg, feat] = slash === -1 ? ['*', f] : [normName(f.slice(0, slash)), f.slice(slash + 1)]
-      if (!requested.has(pkg)) requested.set(pkg, new Set())
-      requested.get(pkg).add(feat)
+    // One entry of a feature's list: `other`, `dep:key`, `key/feat`, `key?/feat`. Returns whether it named anything.
+    const applyImplication = (m, imp) => {
+      const explicitDep = /^dep:(.+)$/u.exec(imp)
+      if (explicitDep) {
+        activate(m, normName(explicitDep[1]))
+        return true
+      }
+      const depFeature = /^([^/?]+)(\?)?\/(.+)$/u.exec(imp)
+      if (depFeature) {
+        const d = m.deps.get(normName(depFeature[1]))
+        if (!d) return false
+        // `dep/feat` enables an optional dep (and its implicit feature); `dep?/feat` only asks if it is already on.
+        if (depFeature[2] !== '?' && isOptional(d)) {
+          activate(m, d.key)
+          if (implicitFeatures(m).has(d.name)) enable(m, d.name)
+        }
+        if (activeRequests(m, d).length > 0) {
+          const t = resolveDep(m, d)
+          if (t) enable(t, depFeature[3])
+        }
+        return true
+      }
+      if (featureImplications(m, imp) === null) return false
+      enable(m, imp)
+      return true
     }
+
+    // `--features a,b,pkg/c`: a bare name is a feature of every root package; `x/c` is a feature of
+    // the root package named `x`, else of the dependency `x` of each root (cargo's `dep/feat` form).
+    const rootNames = new Set(roots.map((r) => normName(r.package.name)))
+    const pending = []
     for (const m of roots) {
       inGraph(m)
       if (allFeatures) {
@@ -688,39 +786,31 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       } else if (!noDefaultFeatures) {
         enable(m, 'default')
       }
-      for (const f of requested.get('*') ?? []) enable(m, f)
-      for (const f of requested.get(normName(m.package.name)) ?? []) enable(m, f)
+    }
+    for (const f of parseFeatureList(features)) {
+      const slash = f.indexOf('/')
+      const pkg = slash === -1 ? null : normName(f.slice(0, slash))
+      const targets = pkg !== null && rootNames.has(pkg) ? roots.filter((m) => normName(m.package.name) === pkg) : roots
+      const imp = pkg !== null && rootNames.has(pkg) ? f.slice(slash + 1) : f
+      pending.push({ targets, imp, flag: f })
+    }
+    // Requested features apply once the roots' own features are in place (a `dep/feat` needs the dep resolved).
+    const applyRequested = () => {
+      for (const { targets, imp, flag } of pending.splice(0)) {
+        if (!targets.some((m) => applyImplication(m, imp))) {
+          console.warn(`[stasis] --cargo-features: '${flag}' names no feature of the entries' packages, nor a dependency of theirs`)
+        }
+      }
     }
 
     do {
       changed = false
+      applyRequested()
       // Map/Set iteration is live: packages and features added mid-pass are visited in this pass.
       for (const dir of enabled.keys()) {
         const m = readManifest(dir)
         for (const f of enabled.get(dir)) {
-          for (const imp of featureImplications(m, f) ?? []) {
-            const explicitDep = /^dep:(.+)$/u.exec(imp)
-            if (explicitDep) {
-              activate(m, normName(explicitDep[1]))
-              continue
-            }
-            const depFeature = /^([^/?]+)(\?)?\/(.+)$/u.exec(imp)
-            if (depFeature) {
-              const d = m.deps.get(normName(depFeature[1]))
-              if (!d) continue
-              // `dep/feat` enables an optional dep (and its implicit feature); `dep?/feat` only asks if it is already on.
-              if (depFeature[2] !== '?' && isOptional(d)) {
-                activate(m, d.key)
-                if (implicitFeatures(m).has(d.name)) enable(m, d.name)
-              }
-              if (activeRequests(m, d).length > 0) {
-                const t = resolveDep(m, d)
-                if (t) enable(t, depFeature[3])
-              }
-              continue
-            }
-            enable(m, imp)
-          }
+          for (const imp of featureImplications(m, f) ?? []) applyImplication(m, imp)
         }
         for (const d of m.deps.values()) {
           for (const request of activeRequests(m, d)) {
@@ -751,10 +841,11 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       return m !== null && libPath(m) === fileRel
     },
     // Resolve a crate name as used in source (`use name::…`, `extern crate name`) from `fromFile`
-    // to a crate root in-tree: the owning package's own lib, the package its dependency of that
-    // name resolves to (path dep, `[patch]`, or the vendored version Cargo.lock says), or -- for a
-    // name no manifest declares -- a vendored crate of that name. Null for anything else (a
-    // registry dep that isn't vendored, std, a name that isn't a crate).
+    // to a crate root in-tree: the owning package's own lib; the package its dependency of that
+    // name resolves to (path dep, `[patch]`, or the vendored version Cargo.lock says); a dependency
+    // whose lib is named that (`md-5` is used as `md5`); or -- for a name no manifest declares -- a
+    // vendored crate of that lib or package name. Null for anything else (a registry dep that
+    // isn't vendored, std, a name that isn't a crate).
     resolveCrate(name, fromFile) {
       const norm = normName(name)
       const m = packageFor(fromFile)
@@ -769,12 +860,26 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
           const lib = t ? libPath(t) : null
           if (lib) return lib
         }
+        for (const other of m.deps.values()) {
+          if (other.key === norm || other.package !== null) continue // a rename is used by its key, not its lib name
+          const t = resolveDep(m, other)
+          if (t && libName(t) === norm) {
+            const lib = libPath(t)
+            if (lib) return lib
+          }
+        }
       }
-      for (const c of (vendored().get(norm) ?? []).toSorted((a, b) => compareVersionsDesc(a.version, b.version))) {
-        const lib = libPath(readManifest(c.dir))
-        if (lib) return lib
+      for (const index of [vendoredByLib(), vendored()]) {
+        for (const c of (index.get(norm) ?? []).toSorted((a, b) => compareVersionsDesc(a.version, b.version))) {
+          const lib = libPath(readManifest(c.dir))
+          if (lib) return lib
+        }
       }
       return null
+    },
+    // Whether `fileRel` belongs to a test or bench target of its package (compiled with `cfg(test)`).
+    isTestTarget(fileRel) {
+      return isTestTargetPath(packageFor(fileRel)?.dir ?? '.', fileRel)
     },
     // The features enabled for the package owning `fileRel` in the build of the root packages, or
     // null when that is unknown: no owning manifest, no root package to resolve from, or a package
