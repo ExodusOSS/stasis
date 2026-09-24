@@ -5,6 +5,7 @@
 | - | - |
 | `@exodus/stasis` | [stasis](stasis/) |
 | `@exodus/stasis-core` | [stasis-core](stasis-core/) |
+| `@exodus/stasis-deps` | [stasis-deps](stasis-deps/) |
 | `@exodus/stasis-plugins` | [stasis-plugins](stasis-plugins/) |
 
 See `@exodus/stasis` [Readme](stasis/README.md).

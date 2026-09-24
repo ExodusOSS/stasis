@@ -332,10 +332,11 @@ export const isExecutableMode = (stats) => stats.isFile() && (stats.mode & EXECU
 
 // Tri-state: `undefined` means the mode could NOT be observed (gone mid-run, EACCES, ELOOP, a synthetic
 // bundle entry). Callers must not read that as "not executable" -- failing to look is not evidence.
-export function observeExecutable(abs) {
+// `host` (optional; see bundle-util.js) observes through a virtual filesystem instead of the disk.
+export function observeExecutable(abs, host) {
   let stats
   try {
-    stats = statSync(abs, { throwIfNoEntry: false })
+    stats = host ? (host.stat(abs) ?? undefined) : statSync(abs, { throwIfNoEntry: false })
   } catch {
     return undefined
   }
@@ -344,7 +345,7 @@ export function observeExecutable(abs) {
 }
 
 // Boolean view for callers with nothing to refute (recording a fresh set from scratch).
-export const isExecutableFile = (abs) => observeExecutable(abs) === true
+export const isExecutableFile = (abs, host) => observeExecutable(abs, host) === true
 
 // Windows reports no POSIX execute bits, so a capture there records none and must NOT read "no bit" as
 // "the bit was removed" and strip what a POSIX capture attested.
@@ -352,8 +353,8 @@ export const canObserveExecuteBits = ({ win32 = process.platform === 'win32' } =
 
 // Throws on a symlink escaping the bundle root: a crafted `link.sh -> /etc/passwd` must not pull an
 // external file into an attestable bundle. realpathSync surfaces ENOENT, which loaders treat as "missing".
-export function assertRealPathWithinBase(realBase, baseDir, relPath) {
-  const real = realpathSync(join(baseDir, relPath))
+export function assertRealPathWithinBase(realBase, baseDir, relPath, host) {
+  const real = host ? host.realpath(join(baseDir, relPath)) : realpathSync(join(baseDir, relPath))
   const rel = toPosix(relative(realBase, real))
   if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`Refusing to follow symlink escaping bundle root: ${relPath} -> ${real}`)

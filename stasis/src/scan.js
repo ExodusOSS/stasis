@@ -1,4 +1,3 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { extname, resolve as resolvePath, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire, isBuiltin } from 'node:module'
@@ -6,6 +5,7 @@ import assert from 'node:assert/strict'
 import { packageType } from '@exodus/stasis-core/bundle-util'
 import { classifyExtension, classifyFormat } from '@exodus/stasis-core/util'
 import { resolveTypescriptFallback } from './resolve-typescript.js'
+import { diskHost } from './host.js'
 
 // Static require/import graph walker: parses source, never loads or executes user code.
 // Dynamic specifiers (`require(name)`, `import('./'+x)`) are recorded as unresolved.
@@ -55,10 +55,10 @@ function getFlowRemoveTypes() {
 // classifyFormat is the shared name->format authority (static and runtime bundles must agree); it
 // returns null for the .js/.ts family whose module system comes from package.json `type` (null =
 // detect from syntax, signaled up as null).
-function formatForFile(file) {
+function formatForFile(file, host) {
   const format = classifyFormat(file)
   if (format != null) return format
-  const type = packageType(file)
+  const type = packageType(file, host)
   if (type === null) return null
   return `${type}${extname(file) === '.ts' ? '-typescript' : ''}`
 }
@@ -134,7 +134,9 @@ export class Scan {
   // `resources` (a `parseResourcesOption` Set of extensions/filenames): reached files matching it
   // are carried as opaque resources (bytes only) rather than rejected as un-carryable -- for graphs
   // that aren't fully loadable in JS (e.g. Metro consuming .png/.svg assets).
-  constructor({ conditions = [], resolve = null, jsx = false, flow = false, typescript = false, typescriptPaths = null, resources = new Set() } = {}) {
+  // `host`: the filesystem the walk reads and resolves through (see host.js). The default is the
+  // real disk with Node's own `require.resolve`; `stasis bundle --pnpm` passes its in-memory tree.
+  constructor({ conditions = [], resolve = null, jsx = false, flow = false, typescript = false, typescriptPaths = null, resources = new Set(), host = diskHost } = {}) {
     this.extraConditions = [...conditions]
     this.customResolve = resolve
     this.jsx = jsx
@@ -142,6 +144,7 @@ export class Scan {
     this.typescript = typescript
     this.typescriptPaths = typescriptPaths
     this.resources = resources
+    this.host = host
     // --jsx widens the script/resolvable extension sets to include .jsx/.tsx, so those files are
     // parsed (not left as opaque leaves) and queued when reached. Off by default the base sets apply.
     this.scriptExts = jsx ? new Set([...SCRIPT_EXTS, ...JSX_FILE_EXTS]) : SCRIPT_EXTS
@@ -160,7 +163,7 @@ export class Scan {
     const queue = []
     for (const entry of entries) {
       const abs = resolvePath(entry)
-      assert.ok(existsSync(abs), `entry not found: ${abs}`)
+      assert.ok(this.host.exists(abs), `entry not found: ${abs}`)
       const url = pathToFileURL(abs).toString()
       this.entries.add(url)
       queue.push(url)
@@ -201,10 +204,11 @@ export class Scan {
       conditions,
       tsx: this.jsx,
       paths: this.typescriptPaths,
+      host: this.host,
     })
     if (hit == null) return null
     try {
-      return realpathSync(hit)
+      return this.host.realpath(hit)
     } catch {
       return null
     }
@@ -246,8 +250,8 @@ export class Scan {
     }
 
     // declared === null: typeless package; Node decides .js/.ts by syntax, resolved after parse.
-    const declared = formatForFile(file)
-    const src = readFileSync(file, 'utf8')
+    const declared = formatForFile(file, this.host)
+    const src = this.host.readFile(file).toString('utf8')
 
     // Resolve the parser outside the try: a missing oxc-parser is an env error, not this
     // file's — it must not be swallowed into a silent zero-edge leaf.
@@ -349,7 +353,6 @@ export class Scan {
     // IMPORT conditions -- the parent-format set baked the wrong `exports` branch into the bundle.
     // The custom (legacy-field) resolver keeps the format set: bundlers don't split per edge.
     const formatContext = ['module', 'module-typescript'].includes(format) ? 'import' : 'require'
-    const req = createRequire(file)
     const edges = []
     const specMaps = new Map() // condition key -> specifier -> child URL
     const record = (key, spec, childURL) => {
@@ -391,7 +394,7 @@ export class Scan {
       }
       let childPath
       try {
-        childPath = req.resolve(s.spec, { conditions })
+        childPath = this.host.resolve(file, s.spec, conditions)
       } catch (cause) {
         // --typescript: complete the miss with tsc's mapping (see #typescriptResolve); the edge
         // stays keyed by the ORIGINAL specifier -- only the target is the mapped file.

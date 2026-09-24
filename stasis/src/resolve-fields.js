@@ -1,4 +1,4 @@
-import { createRequire, isBuiltin } from 'node:module'
+import { isBuiltin } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -12,6 +12,7 @@ import {
   resolveTypescriptFallback,
   typescriptSiblings,
 } from './resolve-typescript.js'
+import { diskHost } from './host.js'
 
 // Static module resolver for legacy package fields (`react-native`/`browser`/`main` + browser-spec
 // redirect maps) and platform suffixes (`.ios`/`.android`/`.native`), reproducing Metro/React-Native
@@ -135,7 +136,7 @@ function resolveSourceFile(base, opts) {
   let scope
   const redirectCandidate = (p) => {
     if (scope === undefined) {
-      const pkg = nearestPackage(base)
+      const pkg = nearestPackage(base, opts.host)
       scope = pkg ? { pkgDir: pkg.pkgDir, map: mergeRedirectMap(pkg.pkg, opts.mainFields) } : null
     }
     if (!scope || scope.map.size === 0) return p
@@ -155,7 +156,7 @@ function resolveSourceFile(base, opts) {
     // A `.d.ts` is types-only, erased at runtime: never a resolution target, so a package whose
     // entry field points at one falls through to its real `.js` instead of bundling the declaration.
     if (isTypeDeclaration(p)) return null
-    return isFile(p) ? p : null
+    return isFile(p, opts.host) ? p : null
   }
   // `suffix` is everything appended to `base`.
   const probe = (suffix) => probePath(`${base}${suffix}`, suffix !== '')
@@ -199,8 +200,8 @@ function resolveFileOrDir(base, opts) {
   const asResolution = (hit) => (hit == null ? null : typeof hit === 'string' ? { url: pathToFileURL(hit).toString() } : hit)
   const file = asResolution(resolveSourceFile(base, opts))
   if (file) return file
-  if (isDir(base)) {
-    const dpkg = readJson(join(base, 'package.json'))
+  if (isDir(base, opts.host)) {
+    const dpkg = readJson(join(base, 'package.json'), opts.host)
     if (dpkg) {
       const r = resolveEntryThroughMap(mergeRedirectMap(dpkg, opts.mainFields), packageEntry(dpkg, opts.mainFields), opts)
       if (r.empty) return { empty: true }
@@ -225,6 +226,8 @@ function resolveFileOrDir(base, opts) {
 // `typescriptPaths` (a loadTsconfigPaths matcher) its tsconfig alias mapping.
 // `metroKeepEntryOnBrowserFalse` overrides the module-level toggle
 // (METRO_KEEP_ENTRY_ON_BROWSER_FALSE) per resolver -- primarily so tests can cover both branches.
+// `host` is the filesystem view (default: the real disk, with Node's own resolver for the
+// delegated `exports`/`#imports` cases; `stasis bundle --pnpm` passes its in-memory tree).
 export function createFieldResolver({
   conditions = [],
   mainFields = ['main'],
@@ -235,17 +238,17 @@ export function createFieldResolver({
   typescript = false,
   typescriptPaths = null,
   metroKeepEntryOnBrowserFalse = METRO_KEEP_ENTRY_ON_BROWSER_FALSE,
+  host = diskHost,
 } = {}) {
-  const opts = { platform, preferNative, sourceExts, mainFields, metro, typescript, metroKeepEntryOnBrowserFalse }
+  const opts = { platform, preferNative, sourceExts, mainFields, metro, typescript, metroKeepEntryOnBrowserFalse, host }
   // `callConditions` (from scan) is the parent's format-driven condition set, so `exports`
   // delegation matches Node resolving from THAT file; falls back to configured `conditions`.
   const resolve = function resolve(parentFile, specifier, callConditions) {
     const conds = new Set(callConditions ?? conditions)
-    // `#name` subpath imports use the `imports` field + conditions; Node handles them.
+    // `#name` subpath imports use the `imports` field + conditions; Node's algorithm handles them.
     if (specifier.startsWith('#')) {
       try {
-        const req = createRequire(parentFile)
-        return { url: pathToFileURL(req.resolve(specifier, { conditions: conds })).toString() }
+        return { url: pathToFileURL(host.resolve(parentFile, specifier, conds)).toString() }
       } catch {
         return null
       }
@@ -254,7 +257,7 @@ export function createFieldResolver({
     let spec = specifier
     // Redirect via the IMPORTER's browser/react-native map, BEFORE the builtin check on purpose:
     // a map entry can disable or shim a builtin (`{"crypto": false}` / `"crypto-browserify"`).
-    const imp = nearestPackage(parentFile)
+    const imp = nearestPackage(parentFile, host)
     if (imp) {
       const map = mergeRedirectMap(imp.pkg, mainFields)
       let r
@@ -283,14 +286,13 @@ export function createFieldResolver({
       return resolveFileOrDir(base, opts)
     }
 
-    const loc = locatePackage(dirname(parentFile), spec)
+    const loc = locatePackage(dirname(parentFile), spec, host)
     if (!loc) return null
-    const pkg = readJson(join(loc.pkgDir, 'package.json')) ?? {}
-    // `exports` wins over mainFields; Node resolves it (with conditions) correctly.
+    const pkg = readJson(join(loc.pkgDir, 'package.json'), host) ?? {}
+    // `exports` wins over mainFields; Node's algorithm resolves it (with conditions) correctly.
     if (pkg.exports != null) {
       try {
-        const req = createRequire(parentFile)
-        return { url: pathToFileURL(req.resolve(spec, { conditions: conds })).toString() }
+        return { url: pathToFileURL(host.resolve(parentFile, spec, conds)).toString() }
       } catch {
         return null
       }
@@ -317,6 +319,7 @@ export function createFieldResolver({
       conditions: new Set(callConditions ?? conditions),
       tsx: sourceExts.includes('tsx'),
       paths: typescriptPaths,
+      host,
     })
     return hit == null ? null : { url: pathToFileURL(hit).toString() }
   }

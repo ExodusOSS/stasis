@@ -26,6 +26,9 @@ importers:
       '@exodus/stasis-core':
         specifier: workspace:*
         version: link:stasis-core
+      '@exodus/stasis-deps':
+        specifier: workspace:*
+        version: link:stasis-deps
       '@exodus/stasis-plugins':
         specifier: workspace:*
         version: link:stasis-plugins
@@ -65,6 +68,9 @@ importers:
       '@exodus/stasis-core':
         specifier: 1.0.0-beta.4
         version: link:../stasis-core
+      '@exodus/stasis-deps':
+        specifier: 1.0.0-beta.4
+        version: link:../stasis-deps
       '@exodus/stasis-plugins':
         specifier: 1.0.0-beta.4
         version: link:../stasis-plugins
@@ -79,6 +85,18 @@ importers:
         version: 0.94.0(@emnapi/core@1.11.0)(@emnapi/runtime@1.11.0)
 
   stasis-core: {}
+
+  stasis-deps:
+    dependencies:
+      '@preventive/archive':
+        specifier: ^1.0.0-beta.3
+        version: 1.0.0-beta.3
+      '@preventive/vfs':
+        specifier: ^1.0.0-beta.1
+        version: 1.0.0-beta.1
+      '@preventive/yaml':
+        specifier: ^1.0.0-beta.0
+        version: 1.0.0-beta.0
 
   stasis-plugins:
     dependencies:
@@ -363,6 +381,15 @@ packages:
       '@noble/hashes':
         optional: true
 
+  '@exodus/bytes@1.16.0':
+    resolution: {integrity: sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA==, tarball: https://registry.npmjs.org/@exodus/bytes/-/bytes-1.16.0.tgz}
+    engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
+    peerDependencies:
+      '@noble/hashes': ^1.8.0 || ^2.0.0
+    peerDependenciesMeta:
+      '@noble/hashes':
+        optional: true
+
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==, tarball: https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz}
 
@@ -614,6 +641,18 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [win32]
+
+  '@preventive/archive@1.0.0-beta.3':
+    resolution: {integrity: sha512-2WLNnHNoUCJezrusJrA9QVIJTmo+34KF/6ODd+a8x6Ks5fk/GOWVaWTl8+A4DzOw5dO43Uf5fX1N6ga/gB7TIw==, tarball: https://registry.npmjs.org/@preventive/archive/-/archive-1.0.0-beta.3.tgz}
+    engines: {node: '>=24.14.0'}
+
+  '@preventive/vfs@1.0.0-beta.1':
+    resolution: {integrity: sha512-MDqqjjAw+Sy5ZRGx3qY4NsgcCU962IxhtpwclBxIxQ7LjR2WcdkIjR4j7YzV00NdKjv5z0iwCYS4RzZ9haqcDg==, tarball: https://registry.npmjs.org/@preventive/vfs/-/vfs-1.0.0-beta.1.tgz}
+    engines: {node: '>=24.14.0'}
+
+  '@preventive/yaml@1.0.0-beta.0':
+    resolution: {integrity: sha512-IfH8wWJGwDhFSnkc1ASuKYUGy6gHhA5+iJCPdV7gGJFfYp5IzElnWndNVP54ii2l2wxLEx9lx5zXXjaJ5pPNGA==, tarball: https://registry.npmjs.org/@preventive/yaml/-/yaml-1.0.0-beta.0.tgz}
+    engines: {node: '>=24.14.0'}
 
   '@rollup/rollup-android-arm-eabi@4.62.4':
     resolution: {integrity: sha512-RrPokAb7dmbxFoeO3TloqHyOjgye8RkBhSqmp4aJMIex4c9r46ZstPnleDQOq1t46VOVjwIuwNogIqbodV1Vvg==, tarball: https://registry.npmjs.org/@rollup/rollup-android-arm-eabi/-/rollup-android-arm-eabi-4.62.4.tgz}
@@ -2651,6 +2690,8 @@ snapshots:
 
   '@exodus/bytes@1.15.0': {}
 
+  '@exodus/bytes@1.16.0': {}
+
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
@@ -2793,6 +2834,16 @@ snapshots:
 
   '@oxlint/binding-win32-x64-msvc@1.52.0':
     optional: true
+
+  '@preventive/archive@1.0.0-beta.3':
+    dependencies:
+      '@exodus/bytes': 1.16.0
+    transitivePeerDependencies:
+      - '@noble/hashes'
+
+  '@preventive/vfs@1.0.0-beta.1': {}
+
+  '@preventive/yaml@1.0.0-beta.0': {}
 
   '@rollup/rollup-android-arm-eabi@4.62.4':
     optional: true

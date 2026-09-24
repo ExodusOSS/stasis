@@ -36,6 +36,7 @@
     "src/cmd/sbom.js",
     "src/diff.js",
     "src/esbuild.js",
+    "src/host.js",
     "src/loader.js",
     "src/loader-mock.js",
     "src/loaders/bash.js",
@@ -50,6 +51,7 @@
     "src/parse.js",
     "src/prune.js",
     "src/resolve-fields.js",
+    "src/resolve-node.js",
     "src/resolve-typescript.js",
     "src/rollup.js",
     "src/sbom.js",
@@ -79,10 +81,14 @@
     "oxc-parser": "^0.94.0"
   },
   "peerDependencies": {
+    "@exodus/stasis-deps": "1.0.0-beta.4",
     "esbuild": "*",
     "flow-remove-types": "*"
   },
   "peerDependenciesMeta": {
+    "@exodus/stasis-deps": {
+      "optional": true
+    },
     "esbuild": {
       "optional": true
     },
