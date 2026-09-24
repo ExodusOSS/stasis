@@ -13,9 +13,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "extra-dep"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "lib-a"
 version = "0.2.0"
 dependencies = [
+ "extra-dep",
  "serde",
  "winnowish 0.5.0",
 ]

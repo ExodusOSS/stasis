@@ -6,6 +6,8 @@ mod no_std_impl;
 pub mod extra;
 #[cfg(feature = "serde")]
 mod ser;
+#[cfg(feature = "extra-dep")]
+mod with_extra;
 
 use winnowish::Parser;
 

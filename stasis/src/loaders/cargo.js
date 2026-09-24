@@ -170,15 +170,17 @@ export function parseCargoManifest(text) {
     resolver: null, // "1" | "2" | "3" from [workspace] or [package]
     lib: { name: null, path: null },
     features: new Map(), // name -> implied entries (`other`, `dep:key`, `key/feat`, `key?/feat`)
-    deps: new Map(), // key -> { key, version, path, package, workspace, optional, defaultFeatures, features, kinds }
+    deps: new Map(), // key -> { key, name, version, path, package, workspace, optional, defaultFeatures, features, kinds }
     workspaceDeps: new Map(),
     workspacePackage: { version: null },
     patches: new Map(), // crate -> { path }
     isWorkspace: false,
   }
+  // `key` is the `use` spelling (`-` → `_`); `name` the manifest's, which is also the implicit
+  // feature an optional dependency defines (`#[cfg(feature = "proc-macro-crate")]`).
   const depOf = (map, name) => {
     const key = normName(name)
-    if (!map.has(key)) map.set(key, { key, version: null, path: null, package: null, workspace: false, optional: false, defaultFeatures: true, features: [], kinds: new Set() })
+    if (!map.has(key)) map.set(key, { key, name, version: null, path: null, package: null, workspace: false, optional: false, defaultFeatures: true, features: [], kinds: new Set() })
     return map.get(key)
   }
   const setDepFields = (dep, table) => {
@@ -529,6 +531,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     return {
       ...base,
       key: dep.key,
+      name: dep.name,
       optional: dep.optional,
       kinds: dep.kinds,
       features: [...new Set([...base.features, ...dep.features])],
@@ -591,13 +594,15 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     if (Number.isInteger(explicit) && explicit > 0) return explicit
     return Number(root?.package?.edition ?? 0) >= 2021 ? 2 : 1
   }
-  // An optional dependency no `dep:` entry names gets an implicit feature of its own name.
+  // An optional dependency no `dep:` entry names gets an implicit feature of its own name -- as
+  // the manifest spells it (`proc-macro-crate`), which is what `std = ["proc-macro-crate"]` and
+  // `#[cfg(feature = "proc-macro-crate")]` refer to.
   const implicitFeatures = (m) => {
     if (m.implicit === undefined) {
       const referenced = new Set()
       for (const imps of m.features.values()) for (const s of imps) if (s.startsWith('dep:')) referenced.add(normName(s.slice(4)))
       m.implicit = new Map()
-      for (const d of m.deps.values()) if (d.optional && !referenced.has(d.key)) m.implicit.set(d.key, [`dep:${d.key}`])
+      for (const d of m.deps.values()) if (d.optional && !referenced.has(d.key)) m.implicit.set(d.name, [`dep:${d.key}`])
     }
     return m.implicit
   }
@@ -683,7 +688,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
               // `dep/feat` enables an optional dep (and its implicit feature); `dep?/feat` only asks if it is already on.
               if (depFeature[2] !== '?' && d.optional) {
                 activate(m, d.key)
-                if (implicitFeatures(m).has(d.key)) enable(m, d.key)
+                if (implicitFeatures(m).has(d.name)) enable(m, d.name)
               }
               if (isActive(m, d) && kindApplies(d)) {
                 const t = resolveDep(m, d)
