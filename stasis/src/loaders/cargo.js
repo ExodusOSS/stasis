@@ -330,10 +330,13 @@ export function runCargoMetadata(baseDir, { features = [], noDefaultFeatures = f
 }
 
 // `cargo metadata` JSON → `{ enabled: Map<dir, Set<feature>>, deps: Map<dir, Map<useName, dir>> }`
-// over the packages whose manifest lies inside the bundle root (a registry crate that isn't
-// vendored, or a path dep outside the root, can't be bundled and is dropped). `deps` maps each
-// package's dependencies by the name code refers to them with (renames applied, `-` → `_`).
-export function resolutionFromMetadata(metadata, baseDir) {
+// over the packages the bundle can carry: those whose manifest lies inside the bundle root, plus
+// registry packages cargo read from `~/.cargo/registry` (no `.cargo/config.toml` redirecting
+// crates.io to `vendor/`) that `locate(name, version)` finds vendored in-tree -- `cargo vendor`
+// copies exactly the lockfile's versions, so name + version identify the dir. Anything else (an
+// unvendored registry crate, a path dep outside the root) can't be bundled and is dropped. `deps`
+// maps each package's dependencies by the name code refers to them with (renames applied, `-` → `_`).
+export function resolutionFromMetadata(metadata, baseDir, { locate = null } = {}) {
   let realBase = baseDir
   try {
     realBase = realpathSync(baseDir)
@@ -350,7 +353,7 @@ export function resolutionFromMetadata(metadata, baseDir) {
   }
   const dirOf = new Map()
   for (const p of metadata.packages ?? []) {
-    const dir = relDir(p.manifest_path)
+    const dir = relDir(p.manifest_path) ?? locate?.(p.name, p.version) ?? null
     if (dir !== null) dirOf.set(p.id, dir)
   }
   const enabled = new Map()
@@ -378,7 +381,6 @@ export function resolutionFromMetadata(metadata, baseDir) {
 // dependency graph and features from `cargo metadata` (see runCargoMetadata) instead of replaying
 // the manifests. `baseDir` is the bundle root; every path in and out is project-relative POSIX.
 export function createCargoContext(baseDir, { entries = [], features = [], noDefaultFeatures = false, allFeatures = false, cargo = false } = {}) {
-  const metadata = cargo ? resolutionFromMetadata(runCargoMetadata(baseDir, { features, noDefaultFeatures, allFeatures }), baseDir) : null
   const manifests = new Map()
   const readManifest = (dir) => {
     if (!manifests.has(dir)) {
@@ -449,6 +451,13 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     if (lock === undefined) lock = parseCargoLock(readFileOrNull(join(baseDir, 'Cargo.lock')))
     return lock
   }
+  // `--cargo`: the graph and features as cargo resolved them, with registry packages it read from
+  // the registry cache matched to their `vendor/` copy by name + version.
+  const metadata = cargo
+    ? resolutionFromMetadata(runCargoMetadata(baseDir, { features, noDefaultFeatures, allFeatures }), baseDir, {
+        locate: (name, ver) => (typeof name === 'string' ? vendored().get(normName(name))?.find((c) => c.version === ver)?.dir ?? null : null),
+      })
+    : null
   // A dependency as the package sees it: a `workspace = true` entry merged with the workspace's
   // (features add up, the path is relative to the workspace root). Null when it can't be resolved.
   const depSpec = (m, dep) => {

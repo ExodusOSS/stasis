@@ -341,7 +341,10 @@ gates nothing.
 cargo: nothing is compiled and no build script runs, but cargo reads the
 project's `.cargo/config.toml` (which can point `build.rustc` or a wrapper at any
 executable), may refresh the registry index, and writes `Cargo.lock` when there is
-none — so only on a project you trust. Note what it reports: `cargo metadata`
+none — so only on a project you trust. It works with or without a
+`.cargo/config.toml` that redirects crates.io to `vendor/`: a registry package
+cargo read from `~/.cargo/registry` is matched to its vendored copy by name and
+version. Note what it reports: `cargo metadata`
 resolves the whole workspace with dev-dependencies and all targets, and gives one
 feature set per package — the union across normal, dev and build dependency kinds
 and across platforms (resolver-1-style unification). So `--cargo` describes

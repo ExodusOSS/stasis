@@ -127,14 +127,18 @@ test('createCargoContext leaves features unknown when no package owns the entrie
 
 // --- cargo metadata ---
 
-test('resolutionFromMetadata maps `cargo metadata` packages inside the bundle root to features and dependency edges', (t) => {
+test('resolutionFromMetadata maps `cargo metadata` packages to features and dependency edges, locating registry crates in vendor/', (t) => {
   const base = '/work/proj'
   const metadata = {
     packages: [
-      { id: 'app 0.1.0 (path+file:///work/proj)', name: 'app', manifest_path: '/work/proj/Cargo.toml' },
-      { id: 'lib-a 0.2.0 (path+file:///work/proj/crates/lib-a)', name: 'lib-a', manifest_path: '/work/proj/crates/lib-a/Cargo.toml' },
-      { id: 'winnowish 0.6.1 (registry+…)', name: 'winnowish', manifest_path: '/work/proj/vendor/winnowish/Cargo.toml' },
-      { id: 'serde 1.0.0 (registry+…)', name: 'serde', manifest_path: '/home/u/.cargo/registry/src/x/serde-1.0.0/Cargo.toml' },
+      { id: 'app 0.1.0 (path+file:///work/proj)', name: 'app', version: '0.1.0', manifest_path: '/work/proj/Cargo.toml' },
+      { id: 'lib-a 0.2.0 (path+file:///work/proj/crates/lib-a)', name: 'lib-a', version: '0.2.0', manifest_path: '/work/proj/crates/lib-a/Cargo.toml' },
+      // read from vendor/ (a .cargo/config.toml redirects crates.io there)
+      { id: 'winnowish 0.6.1 (registry+…)', name: 'winnowish', version: '0.6.1', manifest_path: '/work/proj/vendor/winnowish/Cargo.toml' },
+      // read from the registry cache (no redirect), but vendored: located by name + version
+      { id: 'serde 1.0.0 (registry+…)', name: 'serde', version: '1.0.0', manifest_path: '/home/u/.cargo/registry/src/x/serde-1.0.0/Cargo.toml' },
+      // read from the registry cache and not vendored: dropped
+      { id: 'proc-macro2 1.0.9 (registry+…)', name: 'proc-macro2', version: '1.0.9', manifest_path: '/home/u/.cargo/registry/src/x/proc-macro2-1.0.9/Cargo.toml' },
     ],
     resolve: {
       nodes: [
@@ -145,18 +149,24 @@ test('resolutionFromMetadata maps `cargo metadata` packages inside the bundle ro
         ] },
         { id: 'lib-a 0.2.0 (path+file:///work/proj/crates/lib-a)', features: ['default', 'std', 'extra'], deps: [] },
         { id: 'winnowish 0.6.1 (registry+…)', features: ['std'], deps: [] },
-        { id: 'serde 1.0.0 (registry+…)', features: ['std'], deps: [] },
+        { id: 'serde 1.0.0 (registry+…)', features: ['std'], deps: [{ name: 'proc_macro2', pkg: 'proc-macro2 1.0.9 (registry+…)' }] },
+        { id: 'proc-macro2 1.0.9 (registry+…)', features: [], deps: [] },
       ],
     },
   }
-  const { enabled, deps } = resolutionFromMetadata(metadata, base)
+  const vendoredDirs = new Map([['serde 1.0.0', 'vendor/serde']])
+  const locate = (name, version) => vendoredDirs.get(`${name} ${version}`) ?? null
+  const { enabled, deps } = resolutionFromMetadata(metadata, base, { locate })
   t.assert.deepEqual([...enabled].map(([d, s]) => [d, sorted(s)]), [
     ['.', ['default', 'fast']],
     ['crates/lib-a', ['default', 'extra', 'std']],
     ['vendor/winnowish', ['std']],
+    ['vendor/serde', ['std']],
   ])
-  // serde lives in the registry cache, outside the root: not bundleable, dropped from both maps.
-  t.assert.deepEqual([...deps.get('.')], [['lib_a', 'crates/lib-a'], ['winnowish', 'vendor/winnowish']])
+  t.assert.deepEqual([...deps.get('.')], [['lib_a', 'crates/lib-a'], ['winnowish', 'vendor/winnowish'], ['serde', 'vendor/serde']])
+  t.assert.deepEqual([...deps.get('vendor/serde')], []) // proc-macro2 isn't in-tree
+  // Without a locator, a registry-cache package is simply outside the root.
+  t.assert.ok(!resolutionFromMetadata(metadata, base).enabled.has('vendor/serde'))
 })
 
 const hasCargo = spawnSync('cargo', ['--version'], { stdio: 'ignore' }).status === 0
