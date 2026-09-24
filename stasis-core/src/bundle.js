@@ -51,6 +51,13 @@ const mergeReason = (a, b) => {
   return fromEntries([...merged.keys()].toSorted().map((c) => [c, fileSetToObject(merged.get(c))]))
 }
 
+// The informational `repo` block ({ github: 'owner/name', directory }) in canonical key order, or
+// undefined when malformed/absent -- unvalidated beyond shape, a bad one is dropped, never fatal.
+const normalizeRepo = (repo) => {
+  if (!isPlainObject(repo) || typeof repo.github !== 'string' || typeof repo.directory !== 'string') return undefined
+  return { github: repo.github, directory: repo.directory }
+}
+
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
 export class Bundle {
   static VERSION = VERSION
@@ -65,8 +72,11 @@ export class Bundle {
   executable
   // Informational only, NOT attested -- never consulted for verification.
   reason
+  // Informational only, NOT attested (and never in a lockfile): where the bundle was built,
+  // `{ github: 'owner/name', directory }` with `directory` the bundle root within the repo.
+  repo
 
-  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, repo, version = VERSION } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
     assert(['node_modules', 'full'].includes(config.scope))
     this.version = version
@@ -77,6 +87,7 @@ export class Bundle {
     this.imports = imports ?? new Map()
     this.executable = executable ?? new Set()
     this.reason = reason
+    this.repo = normalizeRepo(repo)
   }
 
   // Flat project-relative view of the raw stored file contents (resources stay base64).
@@ -217,6 +228,7 @@ export class Bundle {
         ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
       reason: isPlainObject(json.reason) ? json.reason : undefined,
+      repo: json.repo,
     })
   }
 
@@ -242,6 +254,7 @@ export class Bundle {
     const formats = fileMapToObject(this.formats)
     const imports = fileMapToObject(this.imports)
     const data = { version: VERSION, config: this.config }
+    if (this.repo !== undefined) data.repo = this.repo
     if (this.config.scope === 'full') Object.assign(data, { entries, sources })
     Object.assign(data, { modules, formats, imports })
     const executable = serializeExecutable(this.executable, {
@@ -265,6 +278,23 @@ export class Bundle {
       imports: this.imports,
       executable: this.executable,
       reason: mergeReason(this.reason, { [consumer]: files }),
+      repo: this.repo,
+    })
+  }
+
+  // Return a copy carrying `repo`; an undefined `repo` keeps the current one.
+  withRepo(repo) {
+    if (repo === undefined) return this
+    return new Bundle({
+      version: this.version,
+      config: this.config,
+      entries: this.entries,
+      modules: this.modules,
+      formats: this.formats,
+      imports: this.imports,
+      executable: this.executable,
+      reason: this.reason,
+      repo,
     })
   }
 
@@ -281,6 +311,8 @@ export class Bundle {
       // `other` (the incoming, newer build) wins for the files it carries -- see mergeExecutableSets.
       executable: mergeExecutableSets(this.executable, other.executable, other.modules, this.config.scope),
       reason: mergeReason(this.reason, other.reason),
+      // Informational: the incoming build's origin wins, else the existing one is kept.
+      repo: other.repo ?? this.repo,
     })
   }
 }
