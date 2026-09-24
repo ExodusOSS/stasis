@@ -25,11 +25,15 @@ const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 // A `Dirent` from node:fs reduced to the plain shape hosts return.
 const fromFsDirent = (d) => {
   const kind = d.isSymbolicLink() ? 'symlink' : d.isDirectory() ? 'dir' : d.isFile() ? 'file' : 'other'
-  return {
-    name: d.name,
-    isFile: () => kind === 'file',
-    isDirectory: () => kind === 'dir',
-    isSymbolicLink: () => kind === 'symlink',
+  return { name: d.name, isFile: () => kind === 'file', isDirectory: () => kind === 'dir', isSymbolicLink: () => kind === 'symlink' }
+}
+
+// null for whatever cannot be stat'ed (missing, EACCES, ELOOP, ...).
+const statOrNull = (statFn) => (p) => {
+  try {
+    return statFn(p, { throwIfNoEntry: false }) ?? null
+  } catch {
+    return null
   }
 }
 
@@ -37,33 +41,11 @@ const fromFsDirent = (d) => {
 // runtime does, NODE_PATH and all) -- the host the plain `stasis bundle` path always used.
 export const diskHost = {
   virtual: false,
-  stat(p) {
-    try {
-      return statSync(p, { throwIfNoEntry: false }) ?? null
-    } catch {
-      return null
-    }
-  },
-  lstat(p) {
-    try {
-      return lstatSync(p, { throwIfNoEntry: false }) ?? null
-    } catch {
-      return null
-    }
-  },
-  readFile(p) {
-    return readFileSync(p)
-  },
-  readdir(p) {
-    return readdirSync(p, { withFileTypes: true }).map(fromFsDirent).toSorted(byName)
-  },
-  realpath(p) {
-    return realpathSync(p)
-  },
-  exists(p) {
-    return existsSync(p)
-  },
-  resolve(parentFile, specifier, conditions) {
-    return createRequire(parentFile).resolve(specifier, { conditions })
-  },
+  stat: statOrNull(statSync),
+  lstat: statOrNull(lstatSync),
+  readFile: (p) => readFileSync(p),
+  readdir: (p) => readdirSync(p, { withFileTypes: true }).map(fromFsDirent).toSorted(byName),
+  realpath: (p) => realpathSync(p),
+  exists: (p) => existsSync(p),
+  resolve: (parentFile, specifier, conditions) => createRequire(parentFile).resolve(specifier, { conditions }),
 }

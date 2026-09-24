@@ -15,19 +15,24 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const codedError = (code, message) => Object.assign(new Error(message), { code })
 
-// Same regex as esm/resolve.js's deprecatedInvalidSegmentRegEx: a `.`, `..` or `node_modules`
-// segment (percent-encoded spellings included) is invalid in a target/subpath. (Node's wider
-// invalidSegmentRegEx additionally matches an EMPTY segment, which it merely deprecates, so that
-// case is not an error here either.)
+// esm/resolve.js's deprecatedInvalidSegmentRegEx: a `.`, `..` or `node_modules` segment
+// (percent-encoded spellings included) is invalid in a target/subpath. (Node's wider
+// invalidSegmentRegEx also matches an EMPTY segment, which it merely deprecates, so that case is
+// not an error here either.)
 const deprecatedInvalidSegmentRegEx = /(^|\\|\/)((\.|%2e)(\.|%2e)?|(n|%6e|%4e)(o|%6f|%4f)(d|%64|%44)(e|%65|%45)(_|%5f)(m|%6d|%4d)(o|%6f|%4f)(d|%64|%44)(u|%75|%55)(l|%6c|%4c)(e|%65|%45)(s|%73|%53))(\\|\/|$)/iu
 const encodedSepRegEx = /%2F|%5C/iu
 // Module._findPath's bare-package matcher: `name` or `@scope/name`, optional `/subpath`.
 const EXPORTS_PATTERN = /^((?:@[^/\\%]+\/)?[^./\\%][^/\\%]*)(\/.*)?$/u
+// cjs/loader.js's character tests as regexes. `.`, `..`, `./x`, `../x` are relative requests; a
+// request ending in `/`, or being/ending in a `.` or `..` segment, asks for a directory (no file
+// probes); and only `.`, `./…` and `..…` (`..x` included, `.x` not) skip the node_modules lookup.
+const RELATIVE_REQUEST = /^\.\.?(?:\/|$)/u
+const TRAILING_SLASH = /\/$|(?:^|\/)\.\.?$/u
+const RELATIVE_LOOKUP = /^\.(?:$|[./])/u
 
-function isArrayIndex(key) {
+const isArrayIndex = (key) => {
   const n = Number(key)
-  if (`${n}` !== key) return false
-  return n >= 0 && n < 0xFF_FF_FF_FF
+  return `${n}` === key && n >= 0 && n < 0xFF_FF_FF_FF
 }
 
 function patternKeyCompare(a, b) {
@@ -47,83 +52,99 @@ function patternKeyCompare(a, b) {
 function isConditionalExportsMainSugar(exports, pkgPath) {
   if (typeof exports === 'string' || Array.isArray(exports)) return true
   if (typeof exports !== 'object' || exports === null) return false
-  let sugar = false
-  let i = 0
-  for (const key of Object.keys(exports)) {
-    const cur = key === '' || key[0] !== '.'
-    if (i++ === 0) sugar = cur
-    else if (sugar !== cur) {
-      throw codedError('ERR_INVALID_PACKAGE_CONFIG', `Invalid package config ${pkgPath}. "exports" cannot contain some keys starting with '.' and some not. The exports object must either be an object of package subpath keys or an object of main entry condition name keys only.`)
-    }
+  const keys = Object.keys(exports)
+  const isSugar = (key) => key === '' || key[0] !== '.'
+  const sugar = keys.length > 0 && isSugar(keys[0])
+  if (keys.some((key) => isSugar(key) !== sugar)) {
+    throw codedError('ERR_INVALID_PACKAGE_CONFIG', `Invalid package config ${pkgPath}. "exports" cannot contain some keys starting with '.' and some not. The exports object must either be an object of package subpath keys or an object of main entry condition name keys only.`)
   }
   return sugar
 }
 
-// The extensions Node probes for an extensionless request: exactly the running Node's registered
-// CJS loaders, so a `.ts` (type-stripping builds) or `.node` probe tracks the runtime.
-function cjsExtensions() {
-  return Object.keys(Module._extensions)
+// The best `*` pattern key of `map` (an exports/imports object) for `subpath` -- the loop
+// packageExportsResolve and packageImportsResolve share in esm/resolve.js: -> [key, wildcard] or null.
+function bestPatternMatch(map, subpath) {
+  let bestMatch = ''
+  let bestMatchSubpath
+  for (const key of Object.keys(map)) {
+    const patternIndex = key.indexOf('*')
+    if (patternIndex === -1 || !subpath.startsWith(key.slice(0, patternIndex))) continue
+    const patternTrailer = key.slice(patternIndex + 1)
+    if (subpath.length >= key.length && subpath.endsWith(patternTrailer) && patternKeyCompare(bestMatch, key) === 1 && key.lastIndexOf('*') === patternIndex) {
+      bestMatch = key
+      bestMatchSubpath = subpath.slice(patternIndex, subpath.length - patternTrailer.length)
+    }
+  }
+  return bestMatch ? [bestMatch, bestMatchSubpath] : null
+}
+
+// esm/resolve.js's parsePackageName: -> { packageName, packageSubpath, isScoped }.
+function parsePackageName(specifier, base) {
+  let separatorIndex = specifier.indexOf('/')
+  const isScoped = specifier[0] === '@'
+  let valid = true
+  if (isScoped) {
+    if (separatorIndex === -1) valid = false
+    else separatorIndex = specifier.indexOf('/', separatorIndex + 1)
+  }
+  const packageName = separatorIndex === -1 ? specifier : specifier.slice(0, separatorIndex)
+  if (!valid || /^\.|%|\\/u.test(packageName)) {
+    throw codedError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module "${specifier}" is not a valid package name imported from ${fileURLToPath(base)}`)
+  }
+  return { packageName, packageSubpath: `.${separatorIndex === -1 ? '' : specifier.slice(separatorIndex)}`, isScoped }
+}
+
+// Module._nodeModulePaths(from): every ancestor's node_modules, skipping node_modules dirs themselves.
+function nodeModulePaths(from) {
+  if (from === '/') return ['/node_modules']
+  const parts = from.split('/')
+  const paths = []
+  for (let i = parts.length; i > 0; i--) {
+    if (parts[i - 1] !== 'node_modules') paths.push(`${parts.slice(0, i).join('/')}/node_modules`)
+  }
+  return paths
 }
 
 export function createNodeResolver(host) {
-  // package.json reads, memoized per path: { exists, data, path } (a malformed manifest throws
-  // ERR_INVALID_PACKAGE_CONFIG like Node's reader, on every access).
+  // package.json reads, memoized per path: { exists, path, name, main, exports, imports }; a
+  // malformed manifest throws ERR_INVALID_PACKAGE_CONFIG like Node's reader, on every access.
+  const parsePackage = (pjsonPath) => {
+    if (!host.stat(pjsonPath)?.isFile()) return { exists: false }
+    let data
+    try {
+      data = JSON.parse(host.readFile(pjsonPath).toString('utf8'))
+    } catch (cause) {
+      return codedError('ERR_INVALID_PACKAGE_CONFIG', `Invalid package config ${pjsonPath}: ${cause.message}`)
+    }
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) data = {}
+    const string = (value) => (typeof value === 'string' ? value : undefined)
+    return { exists: true, path: pjsonPath, name: string(data.name), main: string(data.main), exports: data.exports, imports: data.imports }
+  }
   const pkgCache = new Map()
   const readPackage = (pjsonPath) => {
-    let cached = pkgCache.get(pjsonPath)
-    if (cached !== undefined) {
-      if (cached instanceof Error) throw cached
-      return cached
-    }
-    const st = host.stat(pjsonPath)
-    if (st === null || !st.isFile()) {
-      cached = { exists: false }
-    } else {
-      let data
-      try {
-        data = JSON.parse(host.readFile(pjsonPath).toString('utf8'))
-      } catch (cause) {
-        cached = codedError('ERR_INVALID_PACKAGE_CONFIG', `Invalid package config ${pjsonPath}: ${cause.message}`)
-        pkgCache.set(pjsonPath, cached)
-        throw cached
-      }
-      if (data === null || typeof data !== 'object' || Array.isArray(data)) data = {}
-      cached = {
-        exists: true,
-        path: pjsonPath,
-        name: typeof data.name === 'string' ? data.name : undefined,
-        main: typeof data.main === 'string' ? data.main : undefined,
-        type: data.type === 'module' || data.type === 'commonjs' ? data.type : 'none',
-        exports: data.exports,
-        imports: data.imports,
-      }
-    }
-    pkgCache.set(pjsonPath, cached)
-    return cached
+    let pkg = pkgCache.get(pjsonPath)
+    if (pkg === undefined) pkgCache.set(pjsonPath, pkg = parsePackage(pjsonPath))
+    if (pkg instanceof Error) throw pkg
+    return pkg
   }
 
-  // Nearest package.json for a FILE path, never crossing up out of a node_modules dir
-  // (Node's readPackageScope / getPackageScopeConfig): -> pkg record or null.
+  // Nearest package.json for a FILE path, never crossing up out of a node_modules dir (Node's
+  // readPackageScope): -> pkg record or null.
   const readPackageScope = (checkPath) => {
-    let dir = dirname(checkPath)
-    while (true) {
-      if (basename(dir) === 'node_modules') return null
+    for (let dir = dirname(checkPath); basename(dir) !== 'node_modules'; dir = dirname(dir)) {
       const pkg = readPackage(join(dir, 'package.json'))
       if (pkg.exists) return pkg
-      const parent = dirname(dir)
-      if (parent === dir) return null
-      dir = parent
+      if (dirname(dir) === dir) break
     }
+    return null
   }
 
   // internalModuleStat: 0 file, 1 dir, -1 missing.
   const stat = (p) => {
     const st = host.stat(p)
-    if (st === null) return -1
-    return st.isDirectory() ? 1 : 0
+    return st === null ? -1 : st.isDirectory() ? 1 : 0
   }
-  const toRealPath = (p) => host.realpath(p)
-  const tryFile = (p) => (stat(p) === 0 ? toRealPath(p) : false)
+  const tryFile = (p) => (stat(p) === 0 ? host.realpath(p) : false)
   const tryExtensions = (base, exts) => {
     for (const ext of exts) {
       const hit = tryFile(base + ext)
@@ -131,22 +152,17 @@ export function createNodeResolver(host) {
     }
     return false
   }
-
   const tryPackage = (requestPath, exts, originalPath) => {
     const pkg = readPackage(join(requestPath, 'package.json'))
-    if (!pkg.exists || pkg.main === undefined) return tryExtensions(resolve(requestPath, 'index'), exts)
+    const index = () => tryExtensions(resolve(requestPath, 'index'), exts)
+    if (!pkg.exists || pkg.main === undefined) return index()
     const filename = resolve(requestPath, pkg.main)
-    let actual = tryFile(filename) || tryExtensions(filename, exts) || tryExtensions(resolve(filename, 'index'), exts)
-    if (actual === false) {
-      actual = tryExtensions(resolve(requestPath, 'index'), exts)
-      if (!actual) {
-        throw Object.assign(
-          codedError('MODULE_NOT_FOUND', `Cannot find module '${filename}'. Please verify that the package.json has a valid "main" entry`),
-          { path: join(requestPath, 'package.json'), requestPath: originalPath },
-        )
-      }
-    }
-    return actual
+    const actual = tryFile(filename) || tryExtensions(filename, exts) || tryExtensions(resolve(filename, 'index'), exts) || index()
+    if (actual) return actual
+    throw Object.assign(
+      codedError('MODULE_NOT_FOUND', `Cannot find module '${filename}'. Please verify that the package.json has a valid "main" entry`),
+      { path: join(requestPath, 'package.json'), requestPath: originalPath },
+    )
   }
 
   // --- esm/resolve.js: exports / imports ---
@@ -162,27 +178,18 @@ export function createNodeResolver(host) {
         : `Invalid "exports" ${subpath === '.' ? 'main' : 'target'} ${t} defined for '${subpath}' in the package config ${rel}package.json`)
   }
 
-  const resolvePackageTargetString = (target, subpath, match, packageJSONUrl, pattern, internal, isPathMap, conditions) => {
-    if (subpath !== '' && !pattern && target[target.length - 1] !== '/') throwInvalidPackageTarget(match, target, packageJSONUrl, internal)
+  const resolvePackageTargetString = (target, subpath, match, packageJSONUrl, pattern, internal, conditions) => {
+    if (subpath !== '' && !pattern && !target.endsWith('/')) throwInvalidPackageTarget(match, target, packageJSONUrl, internal)
     if (!target.startsWith('./')) {
-      if (internal && !target.startsWith('../') && !target.startsWith('/')) {
-        let isURL = false
-        try {
-          new URL(target) // eslint-disable-line no-new
-          isURL = true
-        } catch { /* not a URL: a bare specifier */ }
-        if (!isURL) {
-          const exportTarget = pattern ? target.replaceAll('*', subpath) : target + subpath
-          return packageResolve(exportTarget, packageJSONUrl, conditions)
-        }
+      // A bare `imports` target (`"#x": "dep"`) is a package specifier, resolved the ESM way.
+      if (internal && !target.startsWith('../') && !target.startsWith('/') && !URL.canParse(target)) {
+        return packageResolve(pattern ? target.replaceAll('*', subpath) : target + subpath, packageJSONUrl, conditions)
       }
       throwInvalidPackageTarget(match, target, packageJSONUrl, internal)
     }
     if (deprecatedInvalidSegmentRegEx.test(target.slice(2))) throwInvalidPackageTarget(match, target, packageJSONUrl, internal)
     const resolved = new URL(target, packageJSONUrl)
-    const resolvedPath = resolved.pathname
-    const packagePath = new URL('.', packageJSONUrl).pathname
-    if (!resolvedPath.startsWith(packagePath)) throwInvalidPackageTarget(match, target, packageJSONUrl, internal)
+    if (!resolved.pathname.startsWith(new URL('.', packageJSONUrl).pathname)) throwInvalidPackageTarget(match, target, packageJSONUrl, internal)
     if (subpath === '') return resolved
     if (deprecatedInvalidSegmentRegEx.test(subpath)) {
       const request = pattern ? match.replace('*', subpath) : match + subpath
@@ -192,9 +199,9 @@ export function createNodeResolver(host) {
     return new URL(subpath, resolved)
   }
 
-  const resolvePackageTarget = (packageJSONUrl, target, subpath, packageSubpath, pattern, internal, isPathMap, conditions) => {
+  const resolvePackageTarget = (packageJSONUrl, target, subpath, packageSubpath, pattern, internal, conditions) => {
     if (typeof target === 'string') {
-      return resolvePackageTargetString(target, subpath, packageSubpath, packageJSONUrl, pattern, internal, isPathMap, conditions)
+      return resolvePackageTargetString(target, subpath, packageSubpath, packageJSONUrl, pattern, internal, conditions)
     }
     if (Array.isArray(target)) {
       if (target.length === 0) return null
@@ -202,7 +209,7 @@ export function createNodeResolver(host) {
       for (const item of target) {
         let resolved
         try {
-          resolved = resolvePackageTarget(packageJSONUrl, item, subpath, packageSubpath, pattern, internal, isPathMap, conditions)
+          resolved = resolvePackageTarget(packageJSONUrl, item, subpath, packageSubpath, pattern, internal, conditions)
         } catch (e) {
           lastException = e
           if (e.code === 'ERR_INVALID_PACKAGE_TARGET') continue
@@ -215,22 +222,18 @@ export function createNodeResolver(host) {
         }
         return resolved
       }
-      if (lastException === undefined || lastException === null) return lastException
+      if (lastException == null) return lastException
       throw lastException
     }
     if (typeof target === 'object' && target !== null) {
       const keys = Object.keys(target)
-      for (const key of keys) {
-        if (isArrayIndex(key)) {
-          throw codedError('ERR_INVALID_PACKAGE_CONFIG', `Invalid package config ${fileURLToPath(packageJSONUrl)}. "exports" cannot contain numeric property keys.`)
-        }
+      if (keys.some(isArrayIndex)) {
+        throw codedError('ERR_INVALID_PACKAGE_CONFIG', `Invalid package config ${fileURLToPath(packageJSONUrl)}. "exports" cannot contain numeric property keys.`)
       }
       for (const key of keys) {
-        if (key === 'default' || conditions.has(key)) {
-          const resolved = resolvePackageTarget(packageJSONUrl, target[key], subpath, packageSubpath, pattern, internal, isPathMap, conditions)
-          if (resolved === undefined) continue
-          return resolved
-        }
+        if (key !== 'default' && !conditions.has(key)) continue
+        const resolved = resolvePackageTarget(packageJSONUrl, target[key], subpath, packageSubpath, pattern, internal, conditions)
+        if (resolved !== undefined) return resolved
       }
       return undefined
     }
@@ -249,30 +252,15 @@ export function createNodeResolver(host) {
   const packageExportsResolve = (packageJSONUrl, packageSubpath, packageConfig, conditions) => {
     let exports = packageConfig.exports
     if (isConditionalExportsMainSugar(exports, fileURLToPath(packageJSONUrl))) exports = { '.': exports }
+    let resolved
     if (Object.hasOwn(exports, packageSubpath) && !packageSubpath.includes('*') && !packageSubpath.endsWith('/')) {
-      const resolved = resolvePackageTarget(packageJSONUrl, exports[packageSubpath], '', packageSubpath, false, false, false, conditions)
-      if (resolved == null) throwExportsNotFound(packageSubpath, packageJSONUrl)
-      return resolved
+      resolved = resolvePackageTarget(packageJSONUrl, exports[packageSubpath], '', packageSubpath, false, false, conditions)
+    } else {
+      const match = bestPatternMatch(exports, packageSubpath)
+      if (match) resolved = resolvePackageTarget(packageJSONUrl, exports[match[0]], match[1], match[0], true, false, conditions)
     }
-    let bestMatch = ''
-    let bestMatchSubpath
-    for (const key of Object.keys(exports)) {
-      const patternIndex = key.indexOf('*')
-      if (patternIndex !== -1 && packageSubpath.startsWith(key.slice(0, patternIndex))) {
-        const patternTrailer = key.slice(patternIndex + 1)
-        if (packageSubpath.length >= key.length && packageSubpath.endsWith(patternTrailer)
-          && patternKeyCompare(bestMatch, key) === 1 && key.lastIndexOf('*') === patternIndex) {
-          bestMatch = key
-          bestMatchSubpath = packageSubpath.slice(patternIndex, packageSubpath.length - patternTrailer.length)
-        }
-      }
-    }
-    if (bestMatch) {
-      const resolved = resolvePackageTarget(packageJSONUrl, exports[bestMatch], bestMatchSubpath, bestMatch, true, false, packageSubpath.endsWith('/'), conditions)
-      if (resolved == null) throwExportsNotFound(packageSubpath, packageJSONUrl)
-      return resolved
-    }
-    throwExportsNotFound(packageSubpath, packageJSONUrl)
+    if (resolved == null) throwExportsNotFound(packageSubpath, packageJSONUrl)
+    return resolved
   }
 
   const packageImportsResolve = (name, base, conditions) => {
@@ -281,34 +269,17 @@ export function createNodeResolver(host) {
       throw codedError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module "${name}" is not a valid internal imports specifier name imported from ${fileURLToPath(base)}`)
     }
     const packageConfig = readPackageScope(fileURLToPath(base))
-    let packageJSONUrl
-    if (packageConfig) {
-      packageJSONUrl = pathToFileURL(packageConfig.path)
-      const imports = packageConfig.imports
-      if (imports) {
-        if (Object.hasOwn(imports, name) && !name.includes('*')) {
-          const resolved = resolvePackageTarget(packageJSONUrl, imports[name], '', name, false, true, false, conditions)
-          if (resolved != null) return resolved
-        } else {
-          let bestMatch = ''
-          let bestMatchSubpath
-          for (const key of Object.keys(imports)) {
-            const patternIndex = key.indexOf('*')
-            if (patternIndex !== -1 && name.startsWith(key.slice(0, patternIndex))) {
-              const patternTrailer = key.slice(patternIndex + 1)
-              if (name.length >= key.length && name.endsWith(patternTrailer)
-                && patternKeyCompare(bestMatch, key) === 1 && key.lastIndexOf('*') === patternIndex) {
-                bestMatch = key
-                bestMatchSubpath = name.slice(patternIndex, name.length - patternTrailer.length)
-              }
-            }
-          }
-          if (bestMatch) {
-            const resolved = resolvePackageTarget(packageJSONUrl, imports[bestMatch], bestMatchSubpath, bestMatch, true, true, false, conditions)
-            if (resolved != null) return resolved
-          }
-        }
+    const packageJSONUrl = packageConfig ? pathToFileURL(packageConfig.path) : undefined
+    const imports = packageConfig?.imports
+    if (imports) {
+      let resolved
+      if (Object.hasOwn(imports, name) && !name.includes('*')) {
+        resolved = resolvePackageTarget(packageJSONUrl, imports[name], '', name, false, true, conditions)
+      } else {
+        const match = bestPatternMatch(imports, name)
+        if (match) resolved = resolvePackageTarget(packageJSONUrl, imports[match[0]], match[1], match[0], true, true, conditions)
       }
+      if (resolved != null) return resolved
     }
     throw codedError('ERR_PACKAGE_IMPORT_NOT_DEFINED',
       `Package import specifier "${name}" is not defined${packageJSONUrl ? ` in package ${fileURLToPath(packageJSONUrl)}` : ''} imported from ${fileURLToPath(base)}`)
@@ -325,24 +296,6 @@ export function createNodeResolver(host) {
       if (fileExists(guess = new URL(index, packageJSONUrl))) return guess
     }
     throw codedError('ERR_MODULE_NOT_FOUND', `Cannot find package '${fileURLToPath(new URL('.', packageJSONUrl))}' imported from ${fileURLToPath(base)}`)
-  }
-
-  const parsePackageName = (specifier, base) => {
-    let separatorIndex = specifier.indexOf('/')
-    let validPackageName = true
-    let isScoped = false
-    if (specifier[0] === '@') {
-      isScoped = true
-      if (separatorIndex === -1 || specifier.length === 0) validPackageName = false
-      else separatorIndex = specifier.indexOf('/', separatorIndex + 1)
-    }
-    const packageName = separatorIndex === -1 ? specifier : specifier.slice(0, separatorIndex)
-    if (/^\.|%|\\/u.test(packageName)) validPackageName = false
-    if (!validPackageName) {
-      throw codedError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module "${specifier}" is not a valid package name imported from ${fileURLToPath(base)}`)
-    }
-    const packageSubpath = `.${separatorIndex === -1 ? '' : specifier.slice(separatorIndex)}`
-    return { packageName, packageSubpath, isScoped }
   }
 
   // ESM-style bare resolution, reached only through a bare `imports` target (`"#x": "dep"`).
@@ -375,8 +328,17 @@ export function createNodeResolver(host) {
 
   const createEsmNotFoundErr = (request, path) => Object.assign(codedError('MODULE_NOT_FOUND', `Cannot find module '${request}'`), path ? { path } : {})
 
-  // A resolved URL to the real file it names (or a builtin marker), failing closed on a missing file.
-  const finalizeEsmResolution = (resolved, parentPath, pkgPath) => {
+  // An esm/resolve.js answer under CJS rules (Module._resolveFilename's finalizeEsmResolution and
+  // the catch around it): a builtin stays a marker, the file must exist (realpathed), and an ESM
+  // "not found" becomes CJS's MODULE_NOT_FOUND naming `request` (at `errPath`).
+  const viaEsm = (resolveUrl, request, errPath, parentPath, pkgDir) => {
+    let resolved
+    try {
+      resolved = resolveUrl()
+    } catch (e) {
+      if (e.code === 'ERR_MODULE_NOT_FOUND') throw createEsmNotFoundErr(request, errPath)
+      throw e
+    }
     if (resolved.protocol === 'node:') return { builtin: resolved.pathname }
     if (encodedSepRegEx.test(resolved.pathname)) {
       throw codedError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module "${resolved.pathname}" must not include encoded "/" or "\\" characters imported from ${parentPath}`)
@@ -384,9 +346,10 @@ export function createNodeResolver(host) {
     const filename = fileURLToPath(resolved)
     const actual = tryFile(filename)
     if (actual) return actual
-    throw createEsmNotFoundErr(filename, resolve(pkgPath, 'package.json'))
+    throw createEsmNotFoundErr(filename, resolve(pkgDir, 'package.json'))
   }
 
+  // Self-reference: a request naming the enclosing package, through its `exports`.
   const trySelf = (parentPath, request, conditions) => {
     const pkg = readPackageScope(parentPath)
     if (!pkg || pkg.exports == null || pkg.name === undefined) return false
@@ -394,67 +357,30 @@ export function createNodeResolver(host) {
     if (request === pkg.name) expansion = '.'
     else if (request.startsWith(`${pkg.name}/`)) expansion = `.${request.slice(pkg.name.length)}`
     else return false
-    try {
-      return finalizeEsmResolution(packageExportsResolve(pathToFileURL(pkg.path), expansion, pkg, conditions), parentPath, dirname(pkg.path))
-    } catch (e) {
-      if (e.code === 'ERR_MODULE_NOT_FOUND') throw createEsmNotFoundErr(request, pkg.path)
-      throw e
-    }
+    return viaEsm(() => packageExportsResolve(pathToFileURL(pkg.path), expansion, pkg, conditions), request, pkg.path, parentPath, dirname(pkg.path))
   }
 
+  // A bare request into `nmPath` whose package has `exports`.
   const resolveExports = (nmPath, request, conditions) => {
     const m = EXPORTS_PATTERN.exec(request)
     if (!m) return false
     const [, name, expansion = ''] = m
     const pkgPath = resolve(nmPath, name)
     const pkg = readPackage(`${pkgPath}/package.json`)
-    if (pkg.exists && pkg.exports != null) {
-      try {
-        return finalizeEsmResolution(packageExportsResolve(pathToFileURL(`${pkgPath}/package.json`), `.${expansion}`, pkg, conditions), null, pkgPath)
-      } catch (e) {
-        if (e.code === 'ERR_MODULE_NOT_FOUND') throw createEsmNotFoundErr(request, `${pkgPath}/package.json`)
-        throw e
-      }
-    }
-    return false
+    if (!pkg.exists || pkg.exports == null) return false
+    return viaEsm(() => packageExportsResolve(pathToFileURL(pkg.path), `.${expansion}`, pkg, conditions), request, pkg.path, null, pkgPath)
   }
 
-  // Module._nodeModulePaths(from): every ancestor's node_modules, skipping node_modules dirs themselves.
-  const nodeModulePaths = (from) => {
-    from = resolve(from)
-    if (from === '/') return ['/node_modules']
-    const paths = []
-    const parts = from.split('/')
-    for (let i = parts.length; i > 0; i--) {
-      if (parts[i - 1] === 'node_modules') continue
-      paths.push(`${parts.slice(0, i).join('/') || ''}/node_modules`)
-    }
-    return paths
-  }
-
-  const isRelativeRequest = (request) =>
-    request.charCodeAt(0) === 46 /* . */ && (request.length === 1 || request.charCodeAt(1) === 47 /* / */
-      || (request.charCodeAt(1) === 46 && (request.length === 2 || request.charCodeAt(2) === 47)))
-
-  const hasTrailingSlash = (request) => {
-    const len = request.length
-    if (len === 0) return false
-    const last = request.charCodeAt(len - 1)
-    if (last === 47) return true
-    if (last !== 46) return false
-    return len === 1 || request.charCodeAt(len - 2) === 47
-      || (request.charCodeAt(len - 2) === 46 && (len === 2 || request.charCodeAt(len - 3) === 47))
-  }
-
+  // Module._findPath over `paths`: `exports` first for a bare request, then the file itself, its
+  // extension completions (Module._extensions, so a `.ts`/`.node` probe tracks the running Node)
+  // and the directory's `main`/index.
   const findPath = (request, paths, conditions) => {
     const absoluteRequest = isAbsolute(request)
     if (absoluteRequest) paths = ['']
     else if (!paths || paths.length === 0) return false
-    const trailingSlash = hasTrailingSlash(request)
-    const isRelative = isRelativeRequest(request)
-    let insidePath = true
-    if (isRelative && normalize(request).startsWith('..')) insidePath = false
-    let exts
+    const trailingSlash = TRAILING_SLASH.test(request)
+    const insidePath = !(RELATIVE_REQUEST.test(request) && normalize(request).startsWith('..'))
+    const exts = Object.keys(Module._extensions)
     for (const curPath of paths) {
       if (insidePath && curPath && stat(curPath) < 1) continue
       if (!absoluteRequest) {
@@ -462,61 +388,30 @@ export function createNodeResolver(host) {
         if (exportsResolved) return exportsResolved
       }
       const basePath = resolve(curPath, request)
-      let filename
       const rc = stat(basePath)
-      if (!trailingSlash) {
-        if (rc === 0) filename = toRealPath(basePath)
-        if (!filename) {
-          exts ??= cjsExtensions()
-          filename = tryExtensions(basePath, exts)
-        }
-      }
-      if (!filename && rc === 1) {
-        exts ??= cjsExtensions()
-        filename = tryPackage(basePath, exts, request)
-      }
+      let filename = false
+      if (!trailingSlash) filename = (rc === 0 && host.realpath(basePath)) || tryExtensions(basePath, exts)
+      if (!filename && rc === 1) filename = tryPackage(basePath, exts, request)
       if (filename) return filename
     }
     return false
   }
 
-  const resolveLookupPaths = (request, parentFile) => {
-    // Bare (and absolute) requests walk node_modules; `./`, `../`, `.`, `..` resolve from the parent's dir.
-    if (request.charAt(0) !== '.' || (request.length > 1 && request.charAt(1) !== '.' && request.charAt(1) !== '/')) {
-      return nodeModulePaths(dirname(parentFile))
-    }
-    return [dirname(parentFile)]
-  }
+  const notFound = (request, parentFile) => Object.assign(codedError('MODULE_NOT_FOUND', `Cannot find module '${request}'\nRequire stack:\n- ${parentFile}`), { requireStack: [parentFile] })
 
-  // -> absolute path of the resolved file (realpathed), or a `{ builtin }` marker when a `#` import
-  // maps to a builtin. `conditions` is the Set Node would use (`require`/`import` + user extras).
-  const notFound = (request, parentFile) => {
-    const err = codedError('MODULE_NOT_FOUND', `Cannot find module '${request}'\nRequire stack:\n- ${parentFile}`)
-    err.requireStack = [parentFile]
-    return err
-  }
-
+  // Module._resolveFilename: -> the resolved file's real path, or a `{ builtin }` marker when a `#`
+  // import maps to a builtin.
   const resolveFilename = (parentFile, request, conditions) => {
-    if (typeof request !== 'string') {
-      throw codedError('ERR_INVALID_ARG_TYPE', `The "request" argument must be of type string. Received ${typeof request}`)
-    }
+    if (typeof request !== 'string') throw codedError('ERR_INVALID_ARG_TYPE', `The "request" argument must be of type string. Received ${typeof request}`)
     if (isBuiltin(request)) return request
     if (request === '') throw notFound(request, parentFile)
     if (request[0] === '#') {
       const pkg = readPackageScope(parentFile)
-      if (pkg?.imports != null) {
-        try {
-          return finalizeEsmResolution(packageImportsResolve(request, pathToFileURL(parentFile), conditions), parentFile, dirname(pkg.path))
-        } catch (e) {
-          if (e.code === 'ERR_MODULE_NOT_FOUND') throw createEsmNotFoundErr(request)
-          throw e
-        }
-      }
+      if (pkg?.imports != null) return viaEsm(() => packageImportsResolve(request, pathToFileURL(parentFile), conditions), request, undefined, parentFile, dirname(pkg.path))
     }
-    const selfResolved = trySelf(parentFile, request, conditions)
-    if (selfResolved) return selfResolved
-    const filename = findPath(request, resolveLookupPaths(request, parentFile), conditions)
-    if (filename) return filename
+    const paths = RELATIVE_LOOKUP.test(request) ? [dirname(parentFile)] : nodeModulePaths(dirname(parentFile))
+    const hit = trySelf(parentFile, request, conditions) || findPath(request, paths, conditions)
+    if (hit) return hit
     throw notFound(request, parentFile)
   }
 

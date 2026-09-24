@@ -534,6 +534,9 @@ function scanJsGraph({ baseDir, entries, conditions, jsx, flow, typescript, tsco
   return scanner
 }
 
+// map.get(key), first putting an empty Map there when the key is new.
+const nestedMap = (map, key) => map.get(key) ?? map.set(key, new Map()).get(key)
+
 // Edges of a plain scan, collapsed the way the artifacts record them. Edges where every context
 // agrees keep the wildcard '*' key (getImport's fallback when a condition lookup misses). Where the
 // require()- and import()-context resolutions of one (parent, specifier) DIVERGE, each target keeps
@@ -543,12 +546,8 @@ function collapseScanEdges(scanner) {
   const byParent = new Map()
   for (const [key, parents] of scanner.imports) {
     for (const [parentURL, specs] of parents) {
-      if (!byParent.has(parentURL)) byParent.set(parentURL, new Map())
-      const bySpec = byParent.get(parentURL)
-      for (const [spec, childURL] of specs) {
-        if (!bySpec.has(spec)) bySpec.set(spec, new Map())
-        bySpec.get(spec).set(key, childURL)
-      }
+      const bySpec = nestedMap(byParent, parentURL)
+      for (const [spec, childURL] of specs) nestedMap(bySpec, spec).set(key, childURL)
     }
   }
   const edges = []
@@ -607,27 +606,32 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   return state
 }
 
+// The companion lockfile mirrors a bundle, swapping each file's content for its integrity; the
+// same file set, so the same executable list attests it.
+function lockfileFor(bundle, integrities) {
+  const modules = new Map()
+  for (const [dir, m] of bundle.modules) {
+    const files = Object.create(null)
+    for (const rel of Object.keys(m.files)) files[rel] = integrities.get(moduleFileKey(dir, rel))
+    modules.set(dir, { ...m, files })
+  }
+  return new Lockfile({ config: bundle.config, entries: bundle.entries, modules, imports: bundle.imports, formats: bundle.formats, executable: bundle.executable })
+}
+
 // buildJsBundle's twin for a virtual filesystem (`--pnpm`): the same scan, read through `host`,
 // materialized straight into a Bundle + companion Lockfile -- a State reads the disk, which holds
-// no node_modules worth trusting here. Bucketing follows State#locateModule (a node_modules file
-// by its deepest `node_modules/<name>` dir, a workspace file by the nearest name+version
-// package.json); root and scope come from the same discovery (stasis.config.json / env / `scope`).
-// -> { bundle, lockfile }
+// no node_modules worth trusting here. Root and scope come from the same discovery
+// (stasis.config.json / env / `scope`). -> { bundle, lockfile }
 async function buildVirtualJsBundle({ cwd = process.cwd(), host, entries, scope, conditions = [], jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false }) {
   const baseDir = resolve(cwd)
   const scanner = scanJsGraph({ baseDir, entries, conditions, jsx, flow, typescript, tsconfig, resources, host, label: 'buildVirtualJsBundle' })
 
   // Root + effective scope exactly as the State path derives them; nothing is read from the tree.
-  const state = new State(baseDir, { bundle: 'replace', lock: 'ignore', ...(scope ? { scope } : {}) })
-  const root = state.root
-  const config = state.config.values
+  const { root, config: { values: config } } = new State(baseDir, { bundle: 'replace', lock: 'ignore', ...(scope ? { scope } : {}) })
   const realRoot = host.realpath(root)
-
   const toRel = (abs) => {
     const rel = toPosix(relative(root, abs))
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
-      throw new Error(`Bundle would reach a file outside the project root: ${abs}`)
-    }
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Bundle would reach a file outside the project root: ${abs}`)
     return rel
   }
   const readManifest = (abs) => {
@@ -636,54 +640,37 @@ async function buildVirtualJsBundle({ cwd = process.cwd(), host, entries, scope,
     return JSON.parse(buf.toString('utf8'))
   }
 
-  // rel -> { dir, module } (State#locateModule's bucketing).
+  // State#locateModule's bucketing: a node_modules file belongs to its deepest `node_modules/<name>`
+  // dir, whose manifest must carry name+version; a workspace file to the nearest in-root manifest
+  // with a name (version optional -- private packages omit it; a bare `{ "type" }` marker is skipped).
   const modules = new Map()
-  const bucketCache = new Map()
+  const buckets = new Map() // dir -> { dir, module }
   const bucketFor = (rel) => {
     const nmRoot = splitNodeModulesPath(rel)?.dir
-    let dir
-    let name
-    let version
-    if (nmRoot) {
-      dir = nmRoot
-      const cached = bucketCache.get(dir)
-      if (cached) return cached
-      ;({ name, version } = readManifest(join(root, dir, 'package.json')))
-      if (!name) throw new Error(`Missing name in ${moduleFileKey(dir, 'package.json')}`)
-      if (!version) throw new Error(`Missing version in ${moduleFileKey(dir, 'package.json')}`)
-    } else {
-      // Walk up (staying inside root) to the nearest manifest carrying a name -- a workspace
-      // package outside node_modules may omit version (private/unpublished), its name alone claims
-      // the bucket; a `{ "type" }` marker is skipped, anything else without a name is a malformed tree.
-      let cur = dirname(join(root, rel))
-      while (true) {
+    let dir = nmRoot
+    let manifest
+    if (!nmRoot) {
+      for (let cur = dirname(join(root, rel)); ; cur = dirname(cur)) {
         const candidate = join(cur, 'package.json')
-        if (host.stat(candidate)?.isFile()) {
-          const json = readManifest(candidate)
-          if (json.name !== undefined) {
-            name = json.name
-            // A literal `"version": null` folds to undefined, the parsers' one absent-version spelling.
-            version = json.version ?? undefined
-            dir = cur === root ? '.' : toRel(cur)
-            break
-          }
-          if (!Object.keys(json).every((k) => k === 'type')) {
-            throw new Error(`No package.json with a name found for ${rel} (${toRel(candidate)} has none)`)
-          }
+        const json = host.stat(candidate)?.isFile() ? readManifest(candidate) : null
+        if (json?.name !== undefined) {
+          dir = cur === root ? '.' : toRel(cur)
+          manifest = json
+          break
         }
+        if (json && !Object.keys(json).every((k) => k === 'type')) throw new Error(`No package.json with a name found for ${rel} (${toRel(candidate)} has none)`)
         if (cur === root) throw new Error(`No package.json with a name found for ${rel}`)
-        cur = dirname(cur)
       }
-      const cached = bucketCache.get(dir)
-      if (cached) return cached
     }
-    if (!modules.has(dir)) {
-      modules.set(dir, nmRoot
-        ? { name, version, ecosystem: 'npm', files: Object.create(null) }
-        : { name, version, files: Object.create(null) })
-    }
-    const bucket = { dir, module: modules.get(dir) }
-    bucketCache.set(dir, bucket)
+    let bucket = buckets.get(dir)
+    if (bucket) return bucket
+    const { name, version } = manifest ?? readManifest(join(root, dir, 'package.json'))
+    if (nmRoot && !name) throw new Error(`Missing name in ${moduleFileKey(dir, 'package.json')}`)
+    if (nmRoot && !version) throw new Error(`Missing version in ${moduleFileKey(dir, 'package.json')}`)
+    // A literal `"version": null` folds to undefined, the parsers' one absent-version spelling.
+    const module = { name, version: version ?? undefined, ...(nmRoot ? { ecosystem: 'npm' } : {}), files: Object.create(null) }
+    modules.set(dir, module)
+    buckets.set(dir, bucket = { dir, module })
     return bucket
   }
 
@@ -699,28 +686,19 @@ async function buildVirtualJsBundle({ cwd = process.cwd(), host, entries, scope,
     assertRealPathWithinBase(realRoot, root, rel, host)
     const buf = bytes ?? host.readFile(abs)
     const utf8 = isUtf8(buf)
-    let content
-    if (resource) {
-      format = utf8 ? 'resource' : 'resource:base64'
-      content = utf8 ? buf.toString('utf8') : buf.toString('base64')
-    } else {
-      if (!utf8) throw new Error(`File is not UTF-8: ${rel}`)
-      content = buf.toString('utf8')
-    }
+    if (resource) format = utf8 ? 'resource' : 'resource:base64'
+    else if (!utf8) throw new Error(`File is not UTF-8: ${rel}`)
+    const content = buf.toString(utf8 ? 'utf8' : 'base64')
     const { dir, module } = bucketFor(rel)
-    const inBucket = dir === '.' ? rel : rel.slice(dir.length + 1)
-    module.files[inBucket] = content
+    module.files[dir === '.' ? rel : rel.slice(dir.length + 1)] = content
     sources.set(rel, content)
     integrities.set(rel, sha512integrity(buf))
     if (format) formats.set(rel, format)
     if (isEntry) entrySet.add(rel)
     if (isExecutableFile(abs, host)) executable.add(rel)
   }
-
   for (const [url, info] of scanner.files) {
-    const abs = fileURLToPath(url)
-    if (info.resource) addFile(abs, { resource: true })
-    else addFile(abs, { format: info.format ?? undefined, isEntry: scanner.entries.has(url) })
+    addFile(fileURLToPath(url), info.resource ? { resource: true } : { format: info.format, isEntry: scanner.entries.has(url) })
   }
 
   // An absolute in-root specifier would be a machine-specific key: renormalize it against the
@@ -733,48 +711,30 @@ async function buildVirtualJsBundle({ cwd = process.cwd(), host, entries, scope,
     const rel = relative(dirname(parentAbs), path)
     return rel.startsWith('.') ? rel : `./${rel}`
   }
-  const imports = new Map()
+  const imports = new Map() // condition key -> parent rel -> specifier -> child rel
   for (const { parentURL, spec, childURL, conditions: cond } of collapseScanEdges(scanner)) {
-    const key = cond === '*' ? '*' : cond.join(', ')
     const parentAbs = fileURLToPath(parentURL)
-    const parent = toRel(parentAbs)
-    const child = toRel(fileURLToPath(childURL))
-    if (!imports.has(key)) imports.set(key, new Map())
-    const byParent = imports.get(key)
-    if (!byParent.has(parent)) byParent.set(parent, new Map())
-    byParent.get(parent).set(canonicalSpecifier(parentAbs, spec), child)
+    nestedMap(nestedMap(imports, cond === '*' ? '*' : cond.join(', ')), toRel(parentAbs)).set(canonicalSpecifier(parentAbs, spec), toRel(fileURLToPath(childURL)))
   }
 
   // --package-json: every bundled bucket's manifest, even when the scan never reached it; only a
-  // manifest whose identity matches the bucket rides along (State#includePackageJson's rule).
+  // manifest whose identity matches the bucket rides along (State#includePackageJson's rule). A
+  // bucket's own manifest lands in that same bucket, so iterating `modules` live is safe.
   if (packageJSON) {
-    // (Adding a bucket's own manifest lands in that same bucket, so iterating `modules` live is safe.)
     for (const [dir, module] of modules) {
       const rel = moduleFileKey(dir, 'package.json')
-      if (sources.has(rel)) continue
-      const buf = readModuleManifest({ baseDir: root, realBase: realRoot, rel, host })
+      const buf = sources.has(rel) ? null : readModuleManifest({ baseDir: root, realBase: realRoot, rel, host })
       if (!buf) continue
       let pkg
       try { pkg = JSON.parse(buf.toString('utf8')) } catch { continue }
-      if (pkg?.name !== module.name || pkg?.version !== module.version) continue
-      addFile(join(root, rel), { format: 'json', bytes: buf })
+      if (pkg?.name === module.name && pkg?.version === module.version) addFile(join(root, rel), { format: 'json', bytes: buf })
     }
   }
 
-  const bundleModules = new Map()
-  const lockModules = new Map()
-  for (const [dir, m] of modules) {
-    const identity = { name: m.name, version: m.version, ...(m.ecosystem === undefined ? {} : { ecosystem: m.ecosystem }) }
-    const hashes = Object.create(null)
-    for (const rel of Object.keys(m.files)) hashes[rel] = integrities.get(moduleFileKey(dir, rel))
-    bundleModules.set(dir, { ...identity, files: m.files })
-    lockModules.set(dir, { ...identity, files: hashes })
-  }
   // A non-full scope lists only node_modules files as executable (State#bundleExecutable's narrowing).
-  const narrowed = narrowExecutable(executable, { modules: bundleModules, formats, scope: config.scope })
-  const bundle = new Bundle({ config, entries: entrySet, modules: bundleModules, formats, imports, executable: narrowed }).withReason('bundle')
-  const lockfile = new Lockfile({ config, entries: entrySet, modules: lockModules, imports, formats, executable: narrowed })
-  return { bundle, lockfile }
+  const narrowed = narrowExecutable(executable, { modules, formats, scope: config.scope })
+  const bundle = new Bundle({ config, entries: entrySet, modules, formats, imports, executable: narrowed }).withReason('bundle')
+  return { bundle, lockfile: lockfileFor(bundle, integrities) }
 }
 
 // Extensions probed when a resolved target names none. Limited to what a source bundle can
@@ -1078,24 +1038,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     host,
   })
 
-  // The companion lockfile mirrors the bundle, swapping file content for its integrity.
-  const lockModules = new Map()
-  for (const [dir, m] of bundle.modules) {
-    const files = Object.create(null)
-    for (const rel of Object.keys(m.files)) files[rel] = integrities.get(moduleFileKey(dir, rel))
-    lockModules.set(dir, { name: m.name, version: m.version, ...(m.ecosystem === undefined ? {} : { ecosystem: m.ecosystem }), files })
-  }
-  const lockfile = new Lockfile({
-    config: bundle.config,
-    entries: bundle.entries,
-    modules: lockModules,
-    imports: bundle.imports,
-    formats: bundle.formats,
-    // Same file set as the bundle, so the same executable list attests it.
-    executable: bundle.executable,
-  })
-
-  return { bundle, lockfile }
+  return { bundle, lockfile: lockfileFor(bundle, integrities) }
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
@@ -1186,21 +1129,13 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   if (metroResolver && !metro) {
     throw new Error(`${name}: --metro-resolver is only valid with --metro`)
   }
-  // --pnpm resolves the dependency graph from pnpm-lock.yaml through an in-memory node_modules; JS-only
-  // (the other languages' dependency layouts aren't npm installs). Its knobs are meaningless without it.
-  if (pnpm && kind !== 'js') {
-    throw new Error(`${name}: --pnpm is only valid for JS bundles`)
-  }
-  if (pnpmCache !== undefined && !pnpm) {
-    throw new Error(`${name}: --pnpm-cache is only valid with --pnpm`)
-  }
-  if (pnpmOffline && !pnpm) {
-    throw new Error(`${name}: --pnpm-offline is only valid with --pnpm`)
-  }
-  // The project's own metro-resolver reads the real disk, which --pnpm deliberately masks.
-  if (pnpm && metroResolver) {
-    throw new Error(`${name}: --metro-resolver is not supported with --pnpm (the project's metro-resolver resolves against the on-disk node_modules, not the lockfile's tree)`)
-  }
+  // --pnpm resolves the dependency graph from pnpm-lock.yaml through an in-memory node_modules: JS-only
+  // (other languages' dependency layouts aren't npm installs), its knobs meaningless without it, and
+  // incompatible with the project's own metro-resolver, which reads the real disk --pnpm masks.
+  if (pnpm && kind !== 'js') throw new Error(`${name}: --pnpm is only valid for JS bundles`)
+  if (pnpmCache !== undefined && !pnpm) throw new Error(`${name}: --pnpm-cache is only valid with --pnpm`)
+  if (pnpmOffline && !pnpm) throw new Error(`${name}: --pnpm-offline is only valid with --pnpm`)
+  if (pnpm && metroResolver) throw new Error(`${name}: --metro-resolver is not supported with --pnpm (the project's metro-resolver resolves against the on-disk node_modules, not the lockfile's tree)`)
   // metro-resolver has no TS extension substitution, so --typescript would silently not apply -- reject it.
   if (typescript && metroResolver) {
     throw new Error(`${name}: --typescript is not supported with --metro-resolver (the project's metro-resolver doesn't substitute .js -> .ts)`)
@@ -1212,64 +1147,43 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   return kind
 }
 
-// @exodus/stasis-deps (the lockfile -> in-memory node_modules implementation) is an optional peer
-// dependency, loaded only under --pnpm: a missing install is an env error with an install hint,
-// like the other optional deps (esbuild, flow-remove-types).
-async function importStasisDeps() {
+// --pnpm: the filesystem view every JS read/resolution goes through -- pnpm's node_modules laid
+// out in memory from pnpm-lock.yaml by @exodus/stasis-deps (tarballs downloaded to `pnpmCache` and
+// integrity-verified, never unpacked to disk, no package script run); whatever install sits on disk
+// is ignored. stasis-deps is an optional peer dependency, so a missing install is an env error with
+// an install hint, like esbuild's or flow-remove-types'. The resolution algorithm stays here.
+async function pnpmHostFor({ cwd, pnpmCache, pnpmOffline }) {
+  let deps
   try {
-    return await import('@exodus/stasis-deps')
+    deps = await import('@exodus/stasis-deps')
   } catch (cause) {
     if (cause?.code !== 'ERR_MODULE_NOT_FOUND' && cause?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw cause
-    throw new Error(
-      "--pnpm needs the optional '@exodus/stasis-deps' dependency; install it alongside @exodus/stasis (e.g. `npm i -D @exodus/stasis-deps` / `pnpm add -D @exodus/stasis-deps`)",
-      { cause }
-    )
+    throw new Error("--pnpm needs the optional '@exodus/stasis-deps' dependency; install it alongside @exodus/stasis (e.g. `npm i -D @exodus/stasis-deps` / `pnpm add -D @exodus/stasis-deps`)", { cause })
   }
-}
-
-// --pnpm: the filesystem view every JS read/resolution goes through -- pnpm's node_modules laid
-// out in memory from pnpm-lock.yaml (tarballs downloaded to `pnpmCache` and integrity-verified,
-// never unpacked to disk, no package script run). Whatever install sits on disk is ignored. The
-// tree comes from @exodus/stasis-deps; the resolution algorithm that reads it stays here.
-async function pnpmHostFor({ cwd, pnpmCache, pnpmOffline }) {
-  const deps = await importStasisDeps()
   const { root, vfs } = await deps.loadPnpmNodeModules({ cwd, cacheDir: pnpmCache, offline: Boolean(pnpmOffline) })
   return deps.createOverlayHost({ root, vfs, makeResolver: createNodeResolver })
 }
 
-// Build a JS bundle (+ companion lockfile) the way the flags select: the legacy-field resolver
-// under --mainFields/--metro, else Node resolution -- through a State on the disk, or straight into
-// the artifacts through a virtual host (--pnpm). -> { bundle, lockfile } (lockfile serialized text).
-async function buildJsArtifacts({ cwd, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, host }) {
+// Build a JS bundle (+ companion lockfile, serialized) the way the flags select: the legacy-field
+// resolver under --mainFields/--metro, else Node resolution -- through a State on the disk, or
+// straight into the artifacts through the virtual host of --pnpm. -> { bundle, lockfile }
+async function buildJsArtifacts({ cwd, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, pnpm, pnpmCache, pnpmOffline }) {
+  const host = pnpm ? await pnpmHostFor({ cwd, pnpmCache, pnpmOffline }) : undefined
+  const common = { cwd, entries, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON }
+  let built
   if (metro || mainFields !== undefined) {
     // The legacy-field resolver builds Bundle + Lockfile directly (per-platform edges + a
     // synthetic empty module State's addFile can't represent).
-    const built = await buildResolvedJsBundle({
-      cwd,
-      entries,
-      mainFields: metro ? METRO_MAIN_FIELDS : mainFields,
-      platforms: metro ? platforms : [null],
-      conditions,
-      metro: Boolean(metro),
-      metroResolver: Boolean(metroResolver),
-      jsx,
-      flow,
-      typescript,
-      tsconfig,
-      resources,
-      packageJSON,
-      host: host ?? diskHost,
-    })
-    return { bundle: built.bundle, lockfile: built.lockfile.serialize() }
+    built = await buildResolvedJsBundle({ ...common, mainFields: metro ? METRO_MAIN_FIELDS : mainFields, platforms: metro ? platforms : [null], metro: Boolean(metro), metroResolver: Boolean(metroResolver), host: host ?? diskHost })
+  } else if (host) {
+    built = await buildVirtualJsBundle({ ...common, scope, host })
+  } else {
+    // Keep the State: only it carries the file hashes the companion lockfile needs (a Bundle holds
+    // sources, not digests); its bundle gets the `bundle` consumer stamp the static build lacks.
+    const state = await buildJsBundle({ ...common, scope })
+    return { bundle: state.sourceBundle.withReason('bundle'), lockfile: state.lockData }
   }
-  if (host) {
-    const built = await buildVirtualJsBundle({ cwd, host, entries, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON })
-    return { bundle: built.bundle, lockfile: built.lockfile.serialize() }
-  }
-  // Keep the State: only it carries the file hashes the companion lockfile needs (a Bundle holds sources, not digests).
-  const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON })
-  // Stamp the `bundle` consumer (the static build carries none).
-  return { bundle: state.sourceBundle.withReason('bundle'), lockfile: state.lockData }
+  return { bundle: built.bundle, lockfile: built.lockfile.serialize() }
 }
 
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
@@ -1281,8 +1195,7 @@ export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, s
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
   if (kind === 'rust') return buildRustBundle({ cwd, entries })
-  const host = pnpm ? await pnpmHostFor({ cwd, pnpmCache, pnpmOffline }) : undefined
-  const { bundle } = await buildJsArtifacts({ cwd, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, host })
+  const { bundle } = await buildJsArtifacts({ cwd, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, pnpm, pnpmCache, pnpmOffline })
   return bundle
 }
 
@@ -1308,8 +1221,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
   let bundle
   let lockData
   if (kind === 'js') {
-    const host = pnpm ? await pnpmHostFor({ cwd, pnpmCache, pnpmOffline }) : undefined
-    const built = await buildJsArtifacts({ cwd, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, host })
+    const built = await buildJsArtifacts({ cwd, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, pnpm, pnpmCache, pnpmOffline })
     bundle = built.bundle
     if (lockfile) lockData = built.lockfile
   } else {
