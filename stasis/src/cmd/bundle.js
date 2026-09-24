@@ -13,7 +13,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
+import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   buildSolidityTree,
@@ -1121,6 +1121,8 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     }
   }
 
+  // Informational origin (never in the lockfile); when undetectable, an --add merge keeps the existing one.
+  bundle = bundle.withRepo(detectRepo(resolve(cwd)))
   const serialized = bundle.serialize()
   const files = [...bundle.sources.keys()]
   const modules = bundle.modules

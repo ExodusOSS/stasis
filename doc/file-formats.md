@@ -232,6 +232,19 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   against `entries`.
 - `executable` mirrors the lockfile's (see "Executable files"), restricted to the
   files that bundle carries — in a split layout each half lists only its own.
+- `repo` (optional, right after `config`) records where the bundle was built:
+  `{ "github": "owner/name", "directory": "packages/app" }`, with `directory` being
+  the bundle root's path within the repository (`""` at the repository root). It
+  comes from the nearest `package.json` at or above the bundle root that declares
+  a `repository`: its GitHub URL or `github:`/`owner/name` shorthand, and its
+  `repository.directory` combined with the bundle root's path below that
+  `package.json`. When no `package.json` declares one, stasis falls back on a
+  best-effort basis to the `[remote "origin"]` url in `.git/config` at the work
+  tree root. If a `package.json` names a non-GitHub repository, no `repo` is
+  recorded. The field is **purely informational**. It is never attested, never
+  written to the lockfile, and ignored by every verification. A malformed value is
+  dropped on parse. `stasis bundle --add` and `stasis add` keep the existing value
+  when no `repo` can be detected.
 
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-relative
 path, with no `entries`/`modules`/`formats`/`imports` — is still accepted by
