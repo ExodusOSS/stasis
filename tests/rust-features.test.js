@@ -11,6 +11,7 @@ import {
   parseCargoManifest,
   parseTomlValue,
   resolutionFromMetadata,
+  satisfiesCargoReq,
 } from '../stasis/src/loaders/cargo.js'
 import { buildRustBundle } from '../stasis/src/cmd/bundle.js'
 
@@ -70,6 +71,35 @@ test('parseCargoLock indexes packages and their (possibly versioned) dependency 
   t.assert.equal(parseCargoLock(null), null)
 })
 
+test('satisfiesCargoReq implements Cargo requirement semantics', (t) => {
+  // caret is the default; the leftmost non-zero part may not change
+  t.assert.equal(satisfiesCargoReq('1.5.0', '1'), true)
+  t.assert.equal(satisfiesCargoReq('2.0.0', '1'), false)
+  t.assert.equal(satisfiesCargoReq('1.2.9', '1.2'), true)
+  t.assert.equal(satisfiesCargoReq('1.1.0', '1.2'), false)
+  t.assert.equal(satisfiesCargoReq('0.9.3', '0.9'), true)
+  t.assert.equal(satisfiesCargoReq('0.10.3', '0.9'), false)
+  t.assert.equal(satisfiesCargoReq('0.10.3', '0.10'), true)
+  t.assert.equal(satisfiesCargoReq('0.0.3', '0.0.3'), true)
+  t.assert.equal(satisfiesCargoReq('0.0.4', '0.0.3'), false)
+  t.assert.equal(satisfiesCargoReq('0.5.0', '^0'), true)
+  t.assert.equal(satisfiesCargoReq('1.0.0', '^0'), false)
+  // tilde, wildcard, exact, comparisons, several comparators
+  t.assert.equal(satisfiesCargoReq('1.2.9', '~1.2.3'), true)
+  t.assert.equal(satisfiesCargoReq('1.3.0', '~1.2.3'), false)
+  t.assert.equal(satisfiesCargoReq('1.7.0', '1.*'), true)
+  t.assert.equal(satisfiesCargoReq('1.7.0', '1.2.*'), false)
+  t.assert.equal(satisfiesCargoReq('1.2.3', '=1.2.3'), true)
+  t.assert.equal(satisfiesCargoReq('1.2.4', '=1.2.3'), false)
+  t.assert.equal(satisfiesCargoReq('1.2.4', '=1.2'), true)
+  t.assert.equal(satisfiesCargoReq('1.9.0', '>=1.2, <2.0'), true)
+  t.assert.equal(satisfiesCargoReq('2.0.0', '>=1.2, <2.0'), false)
+  t.assert.equal(satisfiesCargoReq('9.9.9', '*'), true)
+  // a prerelease sorts below its release
+  t.assert.equal(satisfiesCargoReq('1.0.0-beta.1', '>=1.0.0'), false)
+  t.assert.equal(satisfiesCargoReq('junk', '1'), false)
+})
+
 // --- feature resolution from the manifests ---
 
 test('createCargoContext resolves features like `cargo build` of the entry package: defaults, implications, dep requests', (t) => {
@@ -86,11 +116,28 @@ test('createCargoContext resolves features like `cargo build` of the entry packa
   t.assert.equal(cargo.featuresFor('vendor/proptest/src/lib.rs'), null)
 })
 
-test('createCargoContext picks the vendored version each package depends on from Cargo.lock', (t) => {
+test('createCargoContext picks the vendored version each package depends on from Cargo.lock, by requirement when a package depends on two', (t) => {
   const cargo = createCargoContext(featuresFixture, { entries: ['src/main.rs'] })
+  // app depends on `winnowish = "0.6"` AND `winnowish0-5 = { package = "winnowish", version = "0.5" }`: the lock
+  // lists both versions under app, and the requirement says which dependency is which.
   t.assert.equal(cargo.resolveCrate('winnowish', 'src/main.rs'), 'vendor/winnowish/src/lib.rs')
+  t.assert.equal(cargo.resolveCrate('winnowish0_5', 'src/main.rs'), 'vendor/winnowish-0.5.0/src/lib.rs')
   t.assert.equal(cargo.resolveCrate('winnowish', 'crates/lib-a/src/lib.rs'), 'vendor/winnowish-0.5.0/src/lib.rs')
   t.assert.equal(cargo.resolveCrate('lib_a', 'src/main.rs'), 'crates/lib-a/src/lib.rs')
+})
+
+test('createCargoContext falls back to the requirement when there is no Cargo.lock', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-nolock-'))
+  try {
+    cpSync(featuresFixture, tmp, { recursive: true })
+    rmSync(join(tmp, 'Cargo.lock'))
+    const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    t.assert.equal(cargo.resolveCrate('winnowish', 'src/main.rs'), 'vendor/winnowish/src/lib.rs') // "0.6" -> 0.6.1
+    t.assert.equal(cargo.resolveCrate('winnowish0_5', 'src/main.rs'), 'vendor/winnowish-0.5.0/src/lib.rs') // "0.5" -> 0.5.0
+    t.assert.equal(cargo.resolveCrate('winnowish', 'crates/lib-a/src/lib.rs'), 'vendor/winnowish-0.5.0/src/lib.rs') // "0.5"
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('createCargoContext honours the root feature flags: --features (incl. pkg/feat), --no-default-features, --all-features', (t) => {
@@ -210,6 +257,7 @@ test('buildRustBundle leaves feature-gated code that is off out of the bundle, p
   ])
   const imports = bundle.imports.get('rust')
   t.assert.equal(imports.get('src/main.rs').get('use winnowish'), 'vendor/winnowish/src/lib.rs')
+  t.assert.equal(imports.get('src/main.rs').get('use winnowish0_5'), 'vendor/winnowish-0.5.0/src/lib.rs')
   t.assert.equal(imports.get('crates/lib-a/src/lib.rs').get('use winnowish'), 'vendor/winnowish-0.5.0/src/lib.rs')
   t.assert.equal(imports.get('src/main.rs').get('mod fast'), 'src/fast.rs')
   t.assert.ok(!imports.get('src/main.rs').has('mod ser'))

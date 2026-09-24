@@ -293,20 +293,81 @@ export function parseCargoLock(text) {
   return { byId, byName }
 }
 
-// Descending semver-ish order (numeric segments, prerelease last).
-function compareVersionsDesc(a, b) {
-  const pa = a.split(/[.+-]/u)
-  const pb = b.split(/[.+-]/u)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] ?? ''
-    const y = pb[i] ?? ''
-    if (x === y) continue
-    const nx = Number(x)
-    const ny = Number(y)
-    if (!Number.isNaN(nx) && !Number.isNaN(ny)) return ny - nx
-    return y < x ? -1 : 1
+// --- Versions -------------------------------------------------------------------------
+
+// `1.2.3-beta.1+build` → { parts: [1, 2, 3], pre: 'beta.1' }; a partial `1.2` keeps null for the
+// missing parts (a requirement's precision matters). Null when it isn't a version.
+function parseVersion(text) {
+  const m = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u.exec(text.trim())
+  if (!m) return null
+  return { parts: [Number(m[1]), m[2] === undefined ? null : Number(m[2]), m[3] === undefined ? null : Number(m[3])], pre: m[4] ?? null }
+}
+
+// Semver order; a prerelease sorts below its release.
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) {
+    const d = (a.parts[i] ?? 0) - (b.parts[i] ?? 0)
+    if (d !== 0) return d
   }
-  return 0
+  if (a.pre === b.pre) return 0
+  if (a.pre === null) return 1
+  if (b.pre === null) return -1
+  return a.pre < b.pre ? -1 : 1
+}
+
+// Descending, for picking the newest of several versions; unparsable strings sort last.
+function compareVersionsDesc(a, b) {
+  const va = parseVersion(a)
+  const vb = parseVersion(b)
+  if (va && vb) return compareVersions(vb, va)
+  if (va) return -1
+  if (vb) return 1
+  return a < b ? 1 : (a > b ? -1 : 0)
+}
+
+// One comparator of a Cargo requirement against a version: caret (the default -- `1.2` is
+// `>=1.2.0, <2.0.0`; `0.9` is `>=0.9.0, <0.10.0`; `0.0.3` is `<0.0.4`), tilde, wildcard (`1.*`),
+// `=` (partial `=1.2` covers the minor), and the comparison operators.
+function satisfiesComparator(v, comparator) {
+  const c = comparator.trim()
+  if (c === '*' || c === '') return true
+  const m = /^(\^|~|=|>=|>|<=|<)?\s*(.+)$/u.exec(c)
+  let op = m[1] ?? '^'
+  let text = m[2]
+  const wild = /^(\d+)(?:\.(\d+))?\.[*xX]$/u.exec(text)
+  if (wild) {
+    op = '~'
+    text = wild[2] === undefined ? wild[1] : `${wild[1]}.${wild[2]}`
+  }
+  const r = parseVersion(text)
+  if (!r) return false
+  const [ma, mi, pa] = r.parts
+  const lower = { parts: [ma, mi ?? 0, pa ?? 0], pre: r.pre }
+  const upper = (a, b, p) => ({ parts: [a, b, p], pre: null })
+  const within = (hi) => compareVersions(v, lower) >= 0 && compareVersions(v, hi) < 0
+  switch (op) {
+    case '=':
+      if (pa !== null) return compareVersions(v, lower) === 0
+      return within(mi === null ? upper(ma + 1, 0, 0) : upper(ma, mi + 1, 0))
+    case '>': return compareVersions(v, lower) > 0
+    case '>=': return compareVersions(v, lower) >= 0
+    case '<': return compareVersions(v, lower) < 0
+    case '<=': return compareVersions(v, lower) <= 0
+    case '~': return within(mi === null ? upper(ma + 1, 0, 0) : upper(ma, mi + 1, 0))
+    default: // caret: the leftmost non-zero part may not change
+      if (ma > 0) return within(upper(ma + 1, 0, 0))
+      if (mi === null) return within(upper(1, 0, 0))
+      if (mi > 0 || pa === null) return within(upper(0, mi + 1, 0))
+      return within(upper(0, 0, pa + 1))
+  }
+}
+
+// Whether `version` satisfies a Cargo version requirement (`"0.9"`, `"^1.2"`, `"~1.2.3"`,
+// `"=1.0.0"`, `">=1, <2"`, `"1.*"`, `"*"`).
+export function satisfiesCargoReq(version, req) {
+  const v = parseVersion(version)
+  if (!v) return false
+  return req.split(',').every((c) => satisfiesComparator(v, c))
 }
 
 // --- cargo metadata -------------------------------------------------------------------
@@ -477,7 +538,10 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   }
   // The in-tree package a dependency of `m` resolves to: a `path` dep (or a `[patch]` path
   // override in the root manifest), else the vendored crate of that name -- the version Cargo.lock
-  // records for `m`, or the newest when there is no lock to say. Null when it isn't in-tree.
+  // records for `m`, else the newest that satisfies the requirement. A package can depend on two
+  // versions of one crate (`borsh = "1"` beside `borsh0-9 = { package = "borsh", version = "0.9" }`):
+  // the lock then lists both under it, and the requirement tells which is which. Null when it
+  // isn't in-tree.
   const resolveDep = (m, dep) => {
     const asPackage = (dir) => {
       const t = dir === null ? null : readManifest(dir)
@@ -495,16 +559,26 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     const candidates = vendored().get(crate) ?? []
     if (candidates.length === 0) return null
     if (candidates.length === 1) return readManifest(candidates[0].dir)
+    const req = typeof spec.version === 'string' ? spec.version : null
+    const fits = (ver) => req === null || satisfiesCargoReq(ver, req)
     const lk = lockfile()
     if (lk) {
       const entry = lk.byId.get(`${normName(m.package.name)} ${version(m)}`)
-      const d = entry?.deps.find((x) => x.name === crate)
-      const only = lk.byName.get(crate)
-      const want = d?.version ?? (only?.length === 1 ? only[0].version : null)
+      // The lock names a dependency with its version only when several versions of that crate are locked.
+      const listed = (entry?.deps ?? []).filter((x) => x.name === crate)
+      let want = null
+      if (listed.length === 1) {
+        const only = lk.byName.get(crate)
+        want = listed[0].version ?? (only?.length === 1 ? only[0].version : null)
+      } else if (listed.length > 1) {
+        want = listed.map((x) => x.version).find((ver) => ver !== null && fits(ver)) ?? null
+      }
       const hit = want === null ? undefined : candidates.find((c) => c.version === want)
       if (hit) return readManifest(hit.dir)
     }
-    return readManifest(candidates.toSorted((a, b) => compareVersionsDesc(a.version, b.version))[0].dir)
+    const fitting = candidates.filter((c) => fits(c.version))
+    const pool = fitting.length > 0 ? fitting : candidates
+    return readManifest(pool.toSorted((a, b) => compareVersionsDesc(a.version, b.version))[0].dir)
   }
 
   // --- feature resolution
