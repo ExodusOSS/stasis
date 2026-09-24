@@ -1090,6 +1090,11 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON })
   }
 
+  // Informational origin (never in the lockfile). A State-built bundle already carries its own,
+  // detected at the State root its paths are relative to (which may sit above cwd); the others are
+  // rooted at cwd. Stamped before an --add merge, which keeps the existing one when undetectable.
+  if (bundle.repo === undefined) bundle = bundle.withRepo(detectRepo(resolve(cwd)))
+
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.
   const outAbs = target === '-' ? undefined : resolve(cwd, target)
   // Files the pre-existing bundle carried; undefined when no merge happened (the summary's merged sentinel).
@@ -1121,8 +1126,6 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     }
   }
 
-  // Informational origin (never in the lockfile); when undetectable, an --add merge keeps the existing one.
-  bundle = bundle.withRepo(detectRepo(resolve(cwd)))
   const serialized = bundle.serialize()
   const files = [...bundle.sources.keys()]
   const modules = bundle.modules

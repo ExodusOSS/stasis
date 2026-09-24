@@ -143,3 +143,16 @@ test('stasis bundle records repo, combining a subdir cwd with repository.directo
   const bundle = JSON.parse(brotliDecompressSync(readFileSync(join(sub, 'out.br'))).toString('utf8'))
   t.assert.deepEqual(bundle.repo, { github: 'o/n', directory: 'app/sub' })
 }))
+
+test('stasis bundle of JS from a workspace subdir records the State root, which its paths are relative to', withTmp(async (t, tmp) => {
+  mkdirSync(join(tmp, '.git'))
+  writeJson(join(tmp, 'package.json'), { name: 'root', private: true, repository: 'https://github.com/o/n' })
+  const a = join(tmp, 'packages', 'a')
+  mkdirSync(a, { recursive: true })
+  writeJson(join(a, 'package.json'), { name: 'a', version: '1.0.0', type: 'module' })
+  writeFileSync(join(a, 'index.js'), 'export {}\n')
+  await bundleCommand({ cwd: a, entries: ['index.js'], output: 'out.br', lockfile: undefined })
+  const bundle = JSON.parse(brotliDecompressSync(readFileSync(join(a, 'out.br'))).toString('utf8'))
+  t.assert.deepEqual(bundle.entries, ['packages/a/index.js'])
+  t.assert.deepEqual(bundle.repo, { github: 'o/n', directory: '' })
+}))
