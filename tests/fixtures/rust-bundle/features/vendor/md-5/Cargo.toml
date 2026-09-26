@@ -1,0 +1,6 @@
+[package]
+name = "md-5"
+version = "0.10.6"
+
+[lib]
+name = "md5"

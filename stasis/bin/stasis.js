@@ -32,7 +32,11 @@ function usage(prefix = '') {
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
- stasis bundle [--add] [--output=(path|-)] path/to/file.rs ...
+ stasis bundle [--cargo] [--cargo-features=a,b,pkg/c] [--cargo-no-default-features] [--cargo-all-features] [--add] [--output=(path|-)] path/to/file.rs ...
+ (Rust: each crate's Cargo features are resolved from Cargo.toml/Cargo.lock like "cargo build" of the
+  entries' packages, so #[cfg(feature = ...)] code that is off stays out; --cargo takes the resolution
+  from "cargo metadata" instead -- it runs cargo, so only on a project you trust; the --cargo-*
+  flags are cargo's --features / --no-default-features / --all-features for those packages)
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
@@ -42,7 +46,7 @@ function usage(prefix = '') {
    honouring tsconfig compilerOptions.paths aliases (from ./tsconfig.json, or --tsconfig=path);
    not with --metro-resolver;
   --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them;
-  --package-json auto-includes each bundled module's package.json, even ones the scan never reached))
+  --package-json auto-includes each bundled module's package.json, even ones the scan never reached)
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -211,11 +215,15 @@ if (command === '-v' || command === '--version') {
     tsconfig: { type: 'string' },
     resources: { type: 'string' },
     'package-json': { type: 'boolean' },
+    cargo: { type: 'boolean' },
+    'cargo-features': { type: 'string', multiple: true },
+    'cargo-no-default-features': { type: 'boolean' },
+    'cargo-all-features': { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
   const values = parseLeadingOptions(argv, options, {
-    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--brotli-quality', '-o'],
+    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--cargo-features', '--brotli-quality', '-o'],
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
@@ -228,6 +236,24 @@ if (command === '-v' || command === '--version') {
     usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
   }
   if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
+  // --cargo: take the Rust feature/dependency resolution from `cargo metadata` (runs cargo; opt-in).
+  const cargo = Boolean(values.cargo)
+  if (cargo && !allRust) usage('Error: --cargo is only valid for Rust bundles')
+  // --cargo-features / --cargo-no-default-features / --cargo-all-features: cargo's own feature flags
+  // for the entries' packages (`pkg/feat` targets one, or a dependency). --cargo-features is
+  // repeatable and/or comma-separated; parseFeatureList is the one splitter (the resolver reuses it).
+  const { parseFeatureList } = await import('../src/loaders/cargo.js')
+  const cargoFeatures = parseFeatureList(values['cargo-features'] ?? [])
+  if (values['cargo-features'] !== undefined && cargoFeatures.length === 0) {
+    usage('Error: --cargo-features must list at least one feature (e.g. --cargo-features=serde,app/tls)')
+  }
+  const cargoNoDefaultFeatures = Boolean(values['cargo-no-default-features'])
+  const cargoAllFeatures = Boolean(values['cargo-all-features'])
+  if (!allRust) {
+    if (cargoFeatures.length > 0) usage('Error: --cargo-features is only valid for Rust bundles')
+    if (cargoNoDefaultFeatures) usage('Error: --cargo-no-default-features is only valid for Rust bundles')
+    if (cargoAllFeatures) usage('Error: --cargo-all-features is only valid for Rust bundles')
+  }
   if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
   if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
     usage('Error: --scope must be node_modules or full')
@@ -341,6 +367,10 @@ if (command === '-v' || command === '--version') {
     tsconfig: values.tsconfig,
     resources,
     packageJSON,
+    cargo,
+    cargoFeatures,
+    cargoNoDefaultFeatures,
+    cargoAllFeatures,
     brotliQuality,
     add,
   })

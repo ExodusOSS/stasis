@@ -39,6 +39,7 @@
     "src/loader.js",
     "src/loader-mock.js",
     "src/loaders/bash.js",
+    "src/loaders/cargo.js",
     "src/loaders/rust.js",
     "src/loaders/solidity.js",
     "src/loaders/php.js",

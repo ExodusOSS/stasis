@@ -22,6 +22,7 @@ import {
 } from '../loaders/solidity.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
+import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
 import {
   bucketizePhpSources,
   buildPhpTree,
@@ -143,34 +144,21 @@ function makeSolidityClassifier(baseDir) {
   }
 }
 
-// Minimal Cargo.toml reader: name/version from the `[package]` table; null when no name.
-function parseCargoToml(file) {
-  const text = readFileSyncOrNull(file)
-  if (!text) return null
-  const at = text.search(/^\[package\]\s*$/mu)
-  let body = text
-  if (at !== -1) {
-    const rest = text.slice(at)
-    const next = rest.slice(1).search(/^\[/mu)
-    body = next === -1 ? rest : rest.slice(0, next + 1)
+// Classify a Rust file by the nearest Cargo.toml `[package]`: a `cargo vendor`ed crate under
+// `vendor/<dir>/` is a dependency (tagged `cargo`); any other package (the crate itself, a
+// workspace member reached through a `path` dependency) is first-party, so no ecosystem. Null
+// (no manifest above the file) defers to the package.json/placeholder logic.
+function makeRustClassifier(cargo) {
+  return (path) => {
+    const pkg = cargo.packageInfo(path)
+    if (!pkg) return null
+    const vendored = pkg.dir.startsWith(`${CARGO_VENDOR_DIR}/`)
+    return { bucketDir: pkg.dir, name: pkg.name, version: pkg.version, ecosystem: vendored ? 'cargo' : undefined }
   }
-  const name = /^\s*name\s*=\s*"([^"]+)"/mu.exec(body)?.[1]
-  const version = /^\s*version\s*=\s*"([^"]+)"/mu.exec(body)?.[1]
-  return name ? { name, version: version ?? '0.0.0' } : null
 }
 
-// Classify a Rust file: `cargo vendor` crates under `vendor/<dir>/` (tagged `cargo`), else
-// null to defer to the workspace logic.
-function makeRustClassifier(baseDir) {
-  return (path) => {
-    if (!path.startsWith('vendor/')) return null
-    const dir = path.slice('vendor/'.length).split('/')[0]
-    if (!dir) return null
-    const bucketDir = `vendor/${dir}`
-    const pkg = parseCargoToml(join(baseDir, bucketDir, 'Cargo.toml'))
-    return pkg ? { bucketDir, name: pkg.name, version: pkg.version, ecosystem: 'cargo' } : null
-  }
-}
+// A file's key inside its bucket: the inverse of moduleFileKey.
+const fileInBucket = (bucketDir, path) => (bucketDir === '.' ? path : path.slice(bucketDir.length + 1))
 
 // Project-relative paths in `sources` whose on-disk file carries a POSIX execute bit -- the
 // `executable` list both artifacts record. The State-driven path derives this in addFile; the
@@ -206,8 +194,7 @@ function assembleCodeBundle({
   for (const [path, content] of sources) {
     const dep = classifyDep?.(path)
     if (dep) {
-      ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem)
-        .files[path.slice(dep.bucketDir.length + 1)] = content
+      ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem).files[fileInBucket(dep.bucketDir, path)] = content
       continue
     }
     const meta = findPackageMetadata(baseDir, path)
@@ -216,9 +203,8 @@ function assembleCodeBundle({
       if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
         throw new Error(`No package.json with name+version found for ${path}`)
       }
-      const rel = meta.pkgDir === '.' ? path : path.slice(meta.pkgDir.length + 1)
       const bucketEcosystem = meta.pkgDir.includes('node_modules') ? 'npm' : undefined
-      ensureBucket(meta.pkgDir, meta.name, meta.version, bucketEcosystem).files[rel] = content
+      ensureBucket(meta.pkgDir, meta.name, meta.version, bucketEcosystem).files[fileInBucket(meta.pkgDir, path)] = content
     } else {
       if (inNodeModules) throw new Error(`No package.json with name+version found for ${path}`)
       ensureBucket('.', workspaceName, workspaceVersion).files[path] = content
@@ -330,10 +316,17 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
   })
 }
 
-// Build an in-memory Bundle from entry .rs files by walking `mod` declarations. An
-// unresolvable `mod` is fatal; `use crate::` edges are recorded best-effort (never widen
-// the file set, not gated).
-export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
+// Build an in-memory Bundle from entry .rs files (crate roots) by walking `mod` declarations and
+// references to in-tree crates (the package's own lib, Cargo `path` deps, `cargo vendor`ed
+// crates). An unresolvable unconditional `mod` is fatal; path edges (`crate::`/`self::`/`super::`/
+// relative `use`s) are recorded best-effort and never widen the file set. Registry deps that
+// aren't vendored can't be bundled: they're reported, with a `cargo vendor` hint when there is no
+// `vendor/` dir at all. Each crate's features are resolved from the manifests (Cargo.toml +
+// Cargo.lock) the way `cargo build` of the entries' packages would, so `#[cfg(feature = …)]` code
+// that is off stays out; `cargo` takes them from `cargo metadata` instead (opt-in: it runs cargo).
+// `cargoFeatures` / `cargoNoDefaultFeatures` / `cargoAllFeatures` are cargo's `--features` /
+// `--no-default-features` / `--all-features` for the entries' packages, in either mode.
+export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildRustBundle: at least one entry .rs file is required')
   }
@@ -344,8 +337,17 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
 
-  const sources = await collectRustFilesFromDisk(baseDir, normalized)
-  const { resolutions, missing } = buildRustTree(sources)
+  // One Cargo context for the walk, the edge pass and the bucketing: manifests are read once, and
+  // the walk's crate resolution and the tree's feature decisions agree.
+  const cargoCtx = createCargoContext(baseDir, {
+    entries: normalized,
+    cargo,
+    features: cargoFeatures,
+    noDefaultFeatures: cargoNoDefaultFeatures,
+    allFeatures: cargoAllFeatures,
+  })
+  const sources = await collectRustFilesFromDisk(baseDir, normalized, { cargo: cargoCtx })
+  const { resolutions, missing, unresolvedCrates } = buildRustTree(sources, { roots: normalized, baseDir, cargo: cargoCtx })
 
   const issues = []
   for (const entry of normalized) {
@@ -358,6 +360,26 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
     throw new Error(`Rust bundle has unresolved modules:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
+  // EXODUS_STASIS_DEBUG=1: show the feature resolution the cfg decisions came from, per package, so
+  // the manifest replay and `cargo metadata` (which unifies dev/build deps like resolver 1) can be compared.
+  if (process.env.EXODUS_STASIS_DEBUG === '1' || process.env.EXODUS_STASIS_DEBUG === 'true') {
+    const resolved = [...cargoCtx.resolvedFeatures()].toSorted(([a], [b]) => (a < b ? -1 : 1))
+    const mode = cargo ? 'cargo metadata' : 'Cargo.toml + Cargo.lock'
+    console.warn(`[stasis] Rust features (${mode}), ${resolved.length} package${resolved.length === 1 ? '' : 's'}:`)
+    for (const [dir, set] of resolved) {
+      const pkg = cargoCtx.packageInfo(moduleFileKey(dir, 'Cargo.toml'))
+      console.warn(`[stasis]   ${pkg?.name ?? '?'}@${pkg?.version ?? '?'} (${dir}): ${[...set].toSorted().join(', ') || '(none)'}`)
+    }
+  }
+
+  // Deps live outside the bundle root unless vendored; with no `vendor/` dir the fix is one command.
+  if (unresolvedCrates.size > 0 && !existsSync(join(baseDir, CARGO_VENDOR_DIR))) {
+    const names = [...unresolvedCrates].toSorted()
+    const shown = names.slice(0, 10).join(', ') + (names.length > 10 ? `, ... and ${names.length - 10} more` : '')
+    console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not found in the bundle root: ${shown}`)
+    console.warn('[stasis] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first.')
+  }
+
   return assembleCodeBundle({
     baseDir,
     entries: normalized,
@@ -367,7 +389,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries } = {}) {
     workspaceVersion: RUST_WORKSPACE_VERSION,
     format: RUST_FORMAT,
     conditionKey: 'rust',
-    classifyDep: makeRustClassifier(baseDir),
+    classifyDep: makeRustClassifier(cargoCtx),
   })
 }
 
@@ -909,7 +931,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes errors.
-function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON }) {
+function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -924,6 +946,14 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
   }
   if (mappingFile && kind !== 'sol') {
     throw new Error(`${name}: --mapping is only valid for .sol bundles`)
+  }
+  // --cargo runs `cargo metadata` for the Rust feature/dependency resolution and the --cargo-*
+  // flags steer that resolution; nothing else reads Cargo.
+  if (kind !== 'rust') {
+    if (cargo) throw new Error(`${name}: --cargo is only valid for Rust bundles`)
+    if (Array.isArray(cargoFeatures) && cargoFeatures.length > 0) throw new Error(`${name}: --cargo-features is only valid for Rust bundles`)
+    if (cargoNoDefaultFeatures) throw new Error(`${name}: --cargo-no-default-features is only valid for Rust bundles`)
+    if (cargoAllFeatures) throw new Error(`${name}: --cargo-all-features is only valid for Rust bundles`)
   }
   if (scope !== undefined && kind !== 'js') {
     throw new Error(`${name}: --scope is only valid for JS bundles`)
@@ -1010,12 +1040,12 @@ function classifyEntries(name, { entries, mappingFile, scope, lockfile, conditio
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
 // (--mapping/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow|--typescript/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false } = {}) {
-  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })
+export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false } = {}) {
+  const kind = classifyEntries('buildBundle', { entries, mappingFile, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
-  if (kind === 'rust') return buildRustBundle({ cwd, entries })
+  if (kind === 'rust') return buildRustBundle({ cwd, entries, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   if (metro || mainFields !== undefined) {
     const { bundle } = await buildResolvedJsBundle({
       cwd,
@@ -1049,8 +1079,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })
+export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false, brotliQuality, add = false } = {}) {
+  const kind = classifyEntries('bundleCommand', { entries, mappingFile, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -1087,7 +1117,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
-    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON })
+    bundle = await buildBundle({ cwd, entries, mappingFile, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   }
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.

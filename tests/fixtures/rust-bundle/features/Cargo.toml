@@ -1,0 +1,22 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"   # resolver 2: dev-dependencies don't unify into a normal build
+
+[dependencies]
+lib-a = { path = "crates/lib-a", features = ["extra"] }
+winnowish = "0.6"
+winnowish0-5 = { package = "winnowish", version = "0.5" }   # a second version, renamed
+serde = { version = "1", optional = true }
+md-5 = "0.10"   # used as `md5`: its [lib] name differs from the package name
+
+[dev-dependencies]
+proptest = { version = "1", features = ["std"] }
+
+[features]
+default = ["fast"]
+fast = []
+with-serde = [
+    "dep:serde",     # the optional dep, plus lib-a's serde support
+    "lib-a/serde",
+]

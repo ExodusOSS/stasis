@@ -1,0 +1,9 @@
+[package]
+name = "devonly"
+version = "1.0.0"
+
+[dev-dependencies]
+other = { version = "1", features = ["y"] }
+
+[features]
+x = []

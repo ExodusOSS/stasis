@@ -1,0 +1,10 @@
+[package]
+name = "util"
+version = "0.2.0"
+
+[features]
+default = ["std"]
+std = []
+
+[lib]
+path = "src/util_lib.rs"

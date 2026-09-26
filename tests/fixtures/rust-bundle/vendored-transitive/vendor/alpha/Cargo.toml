@@ -1,0 +1,6 @@
+[package]
+name = "alpha"
+version = "1.0.0"
+
+[dependencies]
+beta-lib = "2"

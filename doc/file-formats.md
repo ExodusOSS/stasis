@@ -254,7 +254,7 @@ invocation):
 | `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
 | `.php` | PHP | literal `require`/`include` paths + Composer-autoloaded class references (PSR-4/PSR-0/classmap/files) | `php` |
 | `.sh` `.bash` | Shell | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:`, `# shellcheck source=` | `shell` |
-| `.rs` | Rust | `mod` declarations (+ `use crate::` edges) | `rust` |
+| `.rs` | Rust | `mod` declarations (incl. `#[path = …]` / `#[cfg_attr(…, path = …)]`, inside inline modules too) + `use`/`extern crate` of a crate whose source is in-tree | `rust` |
 
 These four are **`scope = full`, produce-only artifacts** in the same
 `stasis.code.br` shape as a JS bundle, tagged with a language `format` and keyed
@@ -263,9 +263,26 @@ under a language `imports` condition. They are for external static analysis —
 `format`. Every reachable file is read from disk (symlinks whose real target
 escapes the bundle root are refused) and bucketized by the nearest `package.json`,
 except PHP, which buckets by the nearest `composer.json`
-(`vendor/<vendor>/<pkg>`, versions from `vendor/composer/installed.json`). With no
-manifest above a file, the workspace bucket gets a placeholder identity
-(`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
+(`vendor/<vendor>/<pkg>`, versions from `vendor/composer/installed.json`), and
+Rust, which buckets by the nearest `Cargo.toml` `[package]` (a workspace member
+is its own bucket; `version.workspace = true` resolves through the workspace
+root). With no manifest above a file, the workspace bucket gets a placeholder
+identity (`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
+
+Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
+`tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does,
+and so do those of a file a `#[path = …]` loaded. Each root gets its own module
+tree, so a lib and its bin bundled together don't collide on `crate::`. A
+`tests/*.rs` or `benches/*.rs` entry is compiled the way `cargo test` does:
+`cfg(test)` holds, its `#[test]` fns and `#[cfg(test)]` modules are live, and
+the package's dev-dependencies take part in the feature resolution. A `use`/`extern crate` naming a crate found in-tree pulls
+that crate's root in: the package's own lib target (`use my_app::…` from
+`main.rs`), a Cargo `path` dependency (incl. `workspace = true` ones and
+`package = …` renames, honouring `[lib] path`), or a `cargo vendor`ed crate under
+`vendor/`. Registry dependencies live in `~/.cargo/registry`, outside the bundle
+root, so they're never read: vendor them first (`cargo vendor`). When a bundle
+references crates it can't find and there is no `vendor/` dir, `stasis bundle`
+says so and suggests it.
 
 Dependency buckets carry an `ecosystem`, attributed by the install layout each
 file resolves out of:
@@ -279,7 +296,9 @@ file resolves out of:
 
 A dep under `node_modules` is `npm` whatever the language. A git submodule with no
 `package.json`/`branch`, or a Soldeer dir with no version suffix, falls back to
-`0.0.0`; the workspace bucket carries no `ecosystem`.
+`0.0.0`; the workspace bucket carries no `ecosystem`. A Rust crate reached
+through a Cargo `path` dependency is first-party (its own `Cargo.toml` bucket, no
+`ecosystem`), not a registry dep.
 
 What counts as a fatal unresolved reference differs by language:
 
@@ -288,9 +307,77 @@ What counts as a fatal unresolved reference differs by language:
 | Solidity | every `import` | — |
 | PHP | every literal `require`/`include` path | Composer-autoloaded class refs (unresolved ones usually built-in/extension classes); a dynamic include with a static dir prefix pulls in that dir's `.php` files as candidates |
 | Bash | every in-root `.sh`/`.bash` reference | PATH commands, `$VAR`/absolute/system paths, `../`-escaping sources (external); dynamic `source "${VAR}/x.sh"` followed via `# shellcheck source=` when present |
-| Rust | every unconditional `mod foo;` | `#[cfg(...)]`-gated `mod`, all `use crate::` edges |
+| Rust | every `mod foo;` not gated on an undecidable cfg (see the cfg rules below), incl. one whose `#[path]` names no file, or escapes the bundle root | a `mod` gated on a cfg the loader can't decide (`unix`, a feature of a package outside the resolved build, …); a `mod` inside a macro invocation body (`cfg_if! { … }` emits real ones, other macros may not — followed when the file exists); every path edge (`crate::`/`self::`/`super::`/relative `use`s, recorded best-effort and never widening the walk); crates not in-tree (see above); `include_str!`/`include_bytes!` assets |
 
 A missing entry is always fatal.
+
+Rust items whose cfg can never hold in the build are dead code for the bundle
+and are skipped whole — a `#[cfg(test)] mod tests;` file, an inline
+`mod tests { … }` with every module and `use` in it, a `#[test]` fn body — so
+vendored crates' test modules stay out, and with them the dev-dependencies only
+test code reaches for. Two kinds of cfg are decided:
+
+- `test`, `doctest`, `doc` and `#[test]` are never on when a program is built.
+- `feature = "…"` is decided per crate from **Cargo feature resolution**: the
+  loader reads the `Cargo.toml` of every package in-tree (the root package or
+  workspace, `path` dependencies, `vendor/`) plus `Cargo.lock`, and replays what
+  `cargo build` of the entries' packages does — the roots start from their
+  `default` feature, features imply features (`std = ["alloc", "dep:serde",
+  "serde?/std"]`), enable optional dependencies and request dependency features,
+  and every active dependency gets `default` plus what its dependents ask for,
+  to a fixed point. A dependency's own dev-dependencies are nobody's build and
+  never count (sha2's `[dev-dependencies] digest = { features = ["dev"] }`
+  doesn't turn on digest's `dev`); the entries' packages' dev-dependencies
+  count under resolver 1 only, since resolver 2 (edition 2021+, or
+  `resolver = "2"`) keeps them out of a normal build. Target-specific
+  dependency tables always count (an over-approximation: it only keeps files).
+  The crate a versioned dependency resolves to comes from `Cargo.lock`, so two
+  vendored versions of one crate each get their own features and edges. A
+  package the resolved build doesn't pull in has unknown features, and its gated
+  code is kept.
+
+`all(…)`/`any(…)`/`not(…)` compose; a predicate that reduces to true (`not(test)`,
+an enabled feature) is as firm as no cfg, so a missing module behind it is fatal.
+Target cfgs (`unix`, `target_os = …`) stay undecided and their code is kept. A
+`cfg_attr` that applies a non-cfg attribute (`#[cfg_attr(docsrs, doc(cfg(…)))]`)
+gates nothing.
+
+`stasis bundle --cargo` takes the dependency graph and features from
+`cargo metadata` instead of replaying the manifests. It is opt-in because it runs
+cargo: nothing is compiled and no build script runs, but cargo reads the
+project's `.cargo/config.toml` (which can point `build.rustc` or a wrapper at any
+executable), may refresh the registry index, and writes `Cargo.lock` when there is
+none — so only on a project you trust. It works with or without a
+`.cargo/config.toml` that redirects crates.io to `vendor/`: a registry package
+cargo read from `~/.cargo/registry` is matched to its vendored copy by name and
+version. Note what it reports: `cargo metadata`
+resolves the whole workspace with dev-dependencies and all targets, and gives one
+feature set per package — the union across normal, dev and build dependency kinds
+and across platforms (resolver-1-style unification). So `--cargo` describes
+everything cargo would ever compile for the workspace, tests included, and can
+enable features (and so bundle modules) that a plain `cargo build` of the entries'
+packages leaves off; the manifest replay describes that build. Set
+`EXODUS_STASIS_DEBUG=1` to have `stasis bundle` print the resolved features per
+package, in either mode.
+
+The root packages' features follow the same flags as `cargo build`, in either
+mode: `--cargo-features=a,b` (repeatable; `x/feat` is a feature of the entries'
+package named `x`, else of their dependency `x`, cargo's `dep/feat` form; a name
+that matches neither is reported), `--cargo-no-default-features`,
+`--cargo-all-features`. Without them, the roots get their `default` feature, as
+`cargo build` does. For a `workspace = true` dependency the workspace entry
+decides `default-features`: a member's `false` is ignored unless the workspace
+disabled them too, as cargo warns.
+
+Rust edge specs are the path as written (`crate::net::client::Client`,
+`super::config::Config`, a `use crate::{a::B, c::D}` group flattened to one edge
+per path); `mod <name>` for a module file (`mod outer::inner` when declared inside
+inline module `outer`); `use <crate>` for a crate root. A `mod` whose files vary
+by cfg — `#[cfg_attr(<pred>, path = …)]` variants, or same-name declarations
+under exclusive `#[cfg(<pred>)]`s (`#[cfg(unix)] #[path = "u.rs"] mod sys;`
+beside `#[cfg(windows)] #[path = "w.rs"] mod sys;`) — records a
+`{ <pred>: file, …, "*": <default file> }` map, the same shape as a JS edge that
+diverges per Metro platform.
 
 ## Resources in the bundle
 

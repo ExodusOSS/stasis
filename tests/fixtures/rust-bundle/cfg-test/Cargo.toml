@@ -1,0 +1,13 @@
+[package]
+name = "cfgtest"
+version = "0.1.0"
+
+[dependencies]
+serde = "1"
+
+[features]
+extra = []
+
+[dev-dependencies]
+proptest = "1"
+quickcheck = "1"

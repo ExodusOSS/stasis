@@ -1,0 +1,10 @@
+[package]
+name = "winnowish"
+version = "0.5.0"
+edition = "2021"
+
+[features]
+default = ["std"]
+std = []
+unstable-doc = []
+debug = []
