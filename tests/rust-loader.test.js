@@ -68,6 +68,18 @@ test('lexRust handles raw strings, byte strings, char literals and lifetimes', (
   t.assert.match(masked, /mod z;$/u)
 })
 
+test('lexRust keeps UTF-16 offsets aligned across astral chars in strings and comments', (t) => {
+  // An emoji is two UTF-16 units: blanking it as one space would shift every later offset.
+  const src = 'const S: &str = "😀 smile"; // 🎉\nuse serde::Serialize;\n#[path = "x.rs"]\nmod m;\n'
+  const { code, masked } = lexRust(src)
+  t.assert.equal(code.length, src.length)
+  t.assert.equal(masked.length, src.length)
+  t.assert.match(masked, /"        "; {6}\nuse serde::Serialize;/u)
+  const items = scanRustItems(src)
+  t.assert.deepEqual(items.refs.map((r) => r.spec), ['serde::Serialize'])
+  t.assert.deepEqual(items.mods[0].paths, [{ path: 'x.rs', cfg: null }])
+})
+
 // --- use trees ---
 
 test('parseUseTree flattens brace groups (incl. nested and multi-line) into one path each', (t) => {

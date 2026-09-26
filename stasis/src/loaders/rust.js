@@ -46,13 +46,14 @@ const isWordChar = (ch) => ch !== undefined && /\w/u.test(ch)
 // wrong in both directions (a commented-out `mod` taken for a real one, or real ones swallowed).
 export function lexRust(content) {
   const n = content.length
-  // Each view is assembled from chunks: the source up to a blanked range, then the range with its
-  // non-newline chars replaced by spaces (indexes stay those of `content`).
+  // Each view is assembled from chunks: the source up to a blanked range, then the range with
+  // every line replaced by as many spaces as it has UTF-16 units (a char may be two), so indexes
+  // stay those of `content`.
   const code = []
   const masked = []
   let codeAt = 0
   let maskedAt = 0
-  const blanks = (start, end) => content.slice(start, end).replaceAll(/[^\n]/gu, ' ')
+  const blanks = (start, end) => content.slice(start, end).split('\n').map((line) => ' '.repeat(line.length)).join('\n')
   const blankMasked = (start, end) => {
     masked.push(content.slice(maskedAt, start), blanks(start, end))
     maskedAt = end
