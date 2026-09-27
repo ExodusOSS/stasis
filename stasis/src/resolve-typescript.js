@@ -50,9 +50,10 @@ export function typescriptSiblings(name, { tsx = false } = {}) {
 // completed like an extensionless name, matching tsc's candidate list.
 const NO_COMPLETION_EXTS = new Set([...JS_OUTPUT_EXTS, '.ts', '.tsx', '.mts', '.cts', '.json'])
 
+// A missing path is the common miss: `throwIfNoEntry: false` skips building an error for it.
 export function isFile(p) {
   try {
-    return statSync(p).isFile()
+    return statSync(p, { throwIfNoEntry: false })?.isFile() ?? false
   } catch {
     return false
   }
@@ -60,7 +61,7 @@ export function isFile(p) {
 
 export function isDir(p) {
   try {
-    return statSync(p).isDirectory()
+    return statSync(p, { throwIfNoEntry: false })?.isDirectory() ?? false
   } catch {
     return false
   }

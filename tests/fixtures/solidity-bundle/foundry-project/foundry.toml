@@ -1,0 +1,7 @@
+# A profile listed before the default one must not supply the remappings.
+[profile.ci]
+remappings = ["@openzeppelin/contracts/=lib/wrong/"]
+
+[profile.default]
+src = "src"
+libs = ["lib"]

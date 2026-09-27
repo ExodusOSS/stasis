@@ -23,7 +23,7 @@ export function isFile(path) {
   }
 }
 
-function readFileOrNull(file) {
+export function readFileOrNull(file) {
   try {
     return readFileSync(file, 'utf8')
   } catch {
@@ -131,6 +131,25 @@ function logicalLines(text) {
     out.push(line)
   }
   return out
+}
+
+// Every `[header]` and `key = value` of a TOML text, in order: a header as `{ table, key: null }`,
+// a pair as `{ table, key, value }` -- `table` the enclosing header's name ('' before the first),
+// `key` with its quotes dropped (a dotted key stays dotted), `value` parsed. For readers of other
+// TOML configs (foundry.toml).
+export function* tomlEntries(text) {
+  let table = ''
+  for (const raw of logicalLines(text)) {
+    const line = raw.trim()
+    const header = TABLE_HEADER_RE.exec(line)
+    if (header) {
+      table = header[1].replaceAll(/["']/gu, '').trim()
+      yield { table, key: null, value: undefined }
+      continue
+    }
+    const kv = KEY_VALUE_RE.exec(line)
+    if (kv) yield { table, key: kv[1].replaceAll(/["']/gu, ''), value: parseTomlValue(kv[2]) }
+  }
 }
 
 // One TOML value: quoted string, bool, array (as an array), or a single-line inline table (as a

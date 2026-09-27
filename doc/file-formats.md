@@ -246,12 +246,12 @@ source). Bundles are always written as `version: 1`.
 ### Source-language bundles (Solidity / PHP / Bash / Rust)
 
 `stasis bundle` dispatches on the entry file extension (no mixing within one
-invocation):
+invocation; a directory entry is Solidity's, see below):
 
 | Extension(s) | Language | How the graph is found | `format` / `imports` key |
 | --- | --- | --- | --- |
 | `.js` `.cjs` `.mjs` `.ts` `.cts` `.mts` | JavaScript / TypeScript | static require/import scan | Node format / `"*"` + conditions |
-| `.sol` | Solidity | `import` statements (+ remappings via `--mapping`) | `solidity` |
+| `.sol` (or a directory) | Solidity | `import` statements, resolved as the project's build tool does (see below) | `solidity` |
 | `.php` | PHP | literal `require`/`include` paths + Composer-autoloaded class references (PSR-4/PSR-0/classmap/files) | `php` |
 | `.sh` `.bash` | Shell | `source`/`.`, `bash`/`sh` exec, direct `./x.sh`, `# Depends on:`, `# shellcheck source=` | `shell` |
 | `.rs` | Rust | `mod` declarations (incl. `#[path = …]` / `#[cfg_attr(…, path = …)]`, inside inline modules too) + `use`/`extern crate` of a crate whose source is in-tree | `rust` |
@@ -268,6 +268,47 @@ Rust, which buckets by the nearest `Cargo.toml` `[package]` (a workspace member
 is its own bucket; `version.workspace = true` resolves through the workspace
 root). With no manifest above a file, the workspace bucket gets a placeholder
 identity (`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
+
+Solidity entries are `.sol` files or directories: a directory stands for every
+`.sol` file under it (symlinks followed), imported or not — `stasis bundle src
+test script` is what `forge build` compiles, `stasis bundle contracts` what
+Hardhat compiles (Yul sources are not collected). Imports are found by a scan
+that skips comments and string literals, and resolve the way solc does under the
+project's build tool:
+
+- A relative import (`./`, `../`) is resolved against the importing file; one
+  that climbs above the bundle root is unresolved.
+- Remappings then apply as solc applies them: the longest matching context
+  wins, then the longest prefix, then the one listed last. With a `foundry.toml`
+  at the root they are the ones `forge build` uses (a port of foundry v1.8.3's
+  discovery, checked against it): `FOUNDRY_REMAPPINGS`/`DAPP_REMAPPINGS`, the
+  root `remappings.txt`, the `remappings` of `[profile.default]` overlaid by the
+  `FOUNDRY_PROFILE` profile (with its `extends` base), the remappings of every
+  dependency that is itself a Foundry project (its `foundry.toml` and
+  `remappings.txt`, relativised onto it, transitively), and the ones forge
+  auto-detects under the `libs` dirs (`lib/` and/or `node_modules/` when unset),
+  including the contextual ones that scope a dependency's imports to its own
+  copy of a package; aliases of the project's own `src`/`test`/`script` dirs
+  are dropped, and `auto_detect_remappings = false` turns detection off. Not
+  read: `~/.foundry/foundry.toml`, `FOUNDRY_CONFIG` and the other `FOUNDRY_*`
+  overrides. Without a `foundry.toml`, a root `remappings.txt` is used as
+  listed. `--mapping=<file>` replaces all of this with exactly the remappings
+  that one file lists (a `foundry.toml`'s selected profile, or a
+  `remappings.txt`). A remapping read from a file gets forge's trailing `/` on
+  prefix and target (`forge-std=lib/forge-std/src` is `forge-std/=lib/forge-std/src/`).
+- An unremapped non-relative import is looked up as a project file (solc's base
+  path: `import "src/A.sol"`), then inside the importing Foundry library (the
+  include path forge adds for `lib/dep/src/A.sol` importing `src/B.sol`), then
+  as a package file in `node_modules`, from the importer's directory up
+  (Hardhat and Node: `hardhat/console.sol`, `@scope/pkg/contracts/X.sol`; a
+  package's `exports` map doesn't apply to Solidity files).
+
+The config files are read, not bundled. `--manifests` bundles the build
+description too: the config files the resolution read, the root's
+`foundry.lock`, `soldeer.lock`, `.gitmodules`, `package.json` and
+`hardhat.config.*`, and the `package.json`, `foundry.toml` and `remappings.txt`
+of every package the bundle holds files of — `json` for a `package.json`,
+`resource` otherwise, so `stasis extract` restores them.
 
 Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
 `tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does,
