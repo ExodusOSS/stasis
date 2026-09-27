@@ -347,6 +347,126 @@ test('outermostDir handles paths that escape cwd (e.g. via a remapping with ../)
   t.assert.equal(outermostDir(['../deps/B.sol'], '/cwd'), '../deps')
 })
 
+// A Foundry project bundled the way `forge build` resolves it (the fixture's remappings are what
+// forge v1.8.3 prints for it, and solc loads exactly the files bundled here).
+const foundryProjectFiles = [
+  'lib/forge-std/lib/ds-test/src/test.sol',
+  'lib/forge-std/src/Script.sol',
+  'lib/forge-std/src/Test.sol',
+  'lib/forge-std/src/Vm.sol',
+  'lib/openzeppelin-contracts/contracts/token/ERC20.sol',
+  'lib/openzeppelin-contracts/contracts/utils/Context.sol',
+  'lib/openzeppelin-contracts/lib/forge-std/src/Vm.sol',
+  'lib/solmate/src/tokens/ERC20.sol',
+  'script/Deploy.s.sol',
+  'src/Counter.sol',
+  'src/Standalone.sol',
+  'test/Counter.t.sol',
+]
+
+test('buildSolidityBundle bundles a Foundry project the way forge build resolves it', async (t) => {
+  const cwd = join(fixtures, 'foundry-project')
+  const bundle = await buildSolidityBundle({ cwd, entries: ['src', 'test', 'script'], env: {} })
+  // Directory entries: every .sol under src/test/script, imported or not (Standalone.sol).
+  t.assert.deepEqual([...bundle.entries].toSorted(), ['script/Deploy.s.sol', 'src/Counter.sol', 'src/Standalone.sol', 'test/Counter.t.sol'])
+  // Commented-out imports and strings are not followed; no config file is bundled by default.
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), foundryProjectFiles)
+  const edges = bundle.imports.get('solidity')
+  // [profile.default]'s (auto-detected) remappings, not [profile.ci]'s listed above them.
+  t.assert.equal(edges.get('src/Counter.sol').get('@openzeppelin/contracts/token/ERC20.sol'), 'lib/openzeppelin-contracts/contracts/token/ERC20.sol')
+  t.assert.equal(edges.get('src/Counter.sol').get('solmate/tokens/ERC20.sol'), 'lib/solmate/src/tokens/ERC20.sol')
+  // forge-std's own foundry.toml maps ds-test into its nested lib.
+  t.assert.equal(edges.get('lib/forge-std/src/Test.sol').get('ds-test/test.sol'), 'lib/forge-std/lib/ds-test/src/test.sol')
+  // OpenZeppelin's forge-std import is scoped to its own copy (a contextual remapping).
+  t.assert.equal(edges.get('lib/openzeppelin-contracts/contracts/token/ERC20.sol').get('forge-std/Vm.sol'), 'lib/openzeppelin-contracts/lib/forge-std/src/Vm.sol')
+  t.assert.equal(edges.get('script/Deploy.s.sol').get('forge-std/Script.sol'), 'lib/forge-std/src/Script.sol')
+  t.assert.equal(edges.get('script/Deploy.s.sol').get('src/Counter.sol'), 'src/Counter.sol')
+  t.assert.equal(bundle.modules.get('lib/forge-std').ecosystem, 'github')
+})
+
+test('buildSolidityBundle with manifests carries the build description files', async (t) => {
+  const cwd = join(fixtures, 'foundry-project')
+  const bundle = await buildSolidityBundle({ cwd, entries: ['src', 'test', 'script'], manifests: true, env: {} })
+  const manifests = ['.gitmodules', 'foundry.toml', 'lib/forge-std/foundry.toml', 'lib/openzeppelin-contracts/foundry.toml', 'lib/openzeppelin-contracts/remappings.txt']
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [...foundryProjectFiles, ...manifests].toSorted())
+  for (const m of manifests) {
+    t.assert.equal(bundle.formats.get(m), 'resource', m)
+    t.assert.equal(bundle.sources.get(m), readFileSync(join(cwd, m), 'utf8'))
+  }
+  // They are not entries, and a nested one stays in its dependency's bucket.
+  t.assert.ok(!bundle.entries.has('foundry.toml'))
+  t.assert.ok(Object.hasOwn(bundle.modules.get('lib/forge-std').files, 'foundry.toml'))
+  // Round-trips through the on-disk format.
+  const parsed = Bundle.parse(bundle.serialize())
+  t.assert.equal(parsed.formats.get('lib/openzeppelin-contracts/remappings.txt'), 'resource')
+})
+
+test('buildSolidityBundle with manifests carries package.json identities as json', withTmp(async (t, tmp) => {
+  mkdirSync(join(tmp, 'contracts'), { recursive: true })
+  mkdirSync(join(tmp, 'node_modules/hardhat'), { recursive: true })
+  writeFileSync(join(tmp, 'package.json'), '{"name":"hh-app","version":"1.0.0"}')
+  writeFileSync(join(tmp, 'hardhat.config.js'), 'module.exports = {}\n')
+  writeFileSync(join(tmp, 'contracts/A.sol'), 'import "hardhat/console.sol";\ncontract A {}\n')
+  writeFileSync(join(tmp, 'node_modules/hardhat/package.json'), '{"name":"hardhat","version":"2.22.0"}')
+  writeFileSync(join(tmp, 'node_modules/hardhat/console.sol'), 'library console {}\n')
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['contracts'], manifests: true, env: {} })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+    'contracts/A.sol', 'hardhat.config.js', 'node_modules/hardhat/console.sol', 'node_modules/hardhat/package.json', 'package.json',
+  ])
+  t.assert.equal(bundle.formats.get('package.json'), 'json')
+  t.assert.equal(bundle.formats.get('node_modules/hardhat/package.json'), 'json')
+  t.assert.equal(bundle.formats.get('hardhat.config.js'), 'resource')
+  t.assert.equal(bundle.modules.get('node_modules/hardhat').ecosystem, 'npm')
+}))
+
+test('buildSolidityBundle resolves unscoped node_modules packages (hardhat/console.sol) with no mapping', withTmp(async (t, tmp) => {
+  mkdirSync(join(tmp, 'contracts'), { recursive: true })
+  mkdirSync(join(tmp, 'node_modules/hardhat'), { recursive: true })
+  mkdirSync(join(tmp, 'node_modules/@scope/pkg/contracts'), { recursive: true })
+  writeFileSync(join(tmp, 'contracts/A.sol'), 'import "hardhat/console.sol";\nimport "@scope/pkg/contracts/X.sol";\ncontract A {}\n')
+  writeFileSync(join(tmp, 'node_modules/hardhat/package.json'), '{"name":"hardhat","version":"2.22.0"}')
+  writeFileSync(join(tmp, 'node_modules/hardhat/console.sol'), 'library console {}\n')
+  // An `exports` map without the Solidity paths doesn't hide them.
+  writeFileSync(join(tmp, 'node_modules/@scope/pkg/package.json'), '{"name":"@scope/pkg","version":"1.0.0","exports":{".":"./index.js"}}')
+  writeFileSync(join(tmp, 'node_modules/@scope/pkg/contracts/X.sol'), 'contract X {}\n')
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['contracts/A.sol'], env: {} })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['contracts/A.sol', 'node_modules/@scope/pkg/contracts/X.sol', 'node_modules/hardhat/console.sol'])
+}))
+
+test('buildSolidityBundle rejects a directory entry holding no .sol file', async (t) => {
+  await t.assert.rejects(
+    () => buildSolidityBundle({ cwd: join(fixtures, 'foundry-project'), entries: ['docs'], env: {} }),
+    /No \.sol files under docs\//u,
+  )
+})
+
+test('buildBundle rejects a directory entry or --manifests outside a Solidity bundle', async (t) => {
+  const cwd = join(fixtures, 'foundry-project')
+  await t.assert.rejects(() => buildBundle({ cwd, entries: ['src', 'a.js'] }), /directory entry is only supported for Solidity bundles/u)
+  await t.assert.rejects(() => buildBundle({ cwd, entries: ['a.js'], manifests: true }), /--manifests is only valid for \.sol bundles/u)
+})
+
+test('CLI: bundle takes Solidity directory entries and --manifests, and extract restores the manifests', withTmp((t, tmp) => {
+  const out = join(tmp, 'sol.stasis.code.br')
+  const r = runCli(['bundle', '--manifests', '-o', out, 'src', 'test', 'script'], { cwd: join(fixtures, 'foundry-project') })
+  t.assert.equal(r.status, 0, r.stderr)
+  t.assert.match(r.stderr, /Bundled 17 files/u)
+  const dir = join(tmp, 'extracted')
+  t.assert.equal(runCli(['extract', `--output=${dir}`, out]).status, 0)
+  t.assert.equal(readFileSync(join(dir, 'lib/openzeppelin-contracts/remappings.txt'), 'utf8'), '@openzeppelin/contracts/=contracts/\n')
+  t.assert.ok(existsSync(join(dir, 'src/Standalone.sol')))
+}))
+
+test('CLI: bundle rejects a directory entry mixed with non-Solidity entries, and --manifests for JS', (t) => {
+  const cwd = join(fixtures, 'foundry-project')
+  let r = runCli(['bundle', 'src', 'a.js'], { cwd })
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /directory entry is only supported for Solidity bundles/u)
+  r = runCli(['bundle', '--manifests', 'a.js'], { cwd })
+  t.assert.equal(r.status, 1)
+  t.assert.match(r.stderr, /--manifests is only valid for \.sol bundles/u)
+})
+
 test('bundleCommand writes a brotli-compressed stasis Bundle that round-trips through Bundle.parse', withTmp(async (t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
   await bundleCommand({ cwd: join(fixtures, 'basic'), entries: ['src/A.sol'], output: outPath })

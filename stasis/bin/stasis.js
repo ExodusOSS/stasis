@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { basename, dirname, resolve } from 'node:path'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync, statSync } from 'node:fs'
 import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
 import { parseBrotliQuality, parseLeadingOptions, parseResourcesOption } from '@exodus/stasis-core/util'
@@ -27,7 +27,14 @@ function usage(prefix = '') {
   lockfile/bundle -- except modules the app graph also reaches, which are attested like any
   other app code; with --mock, preloads run under the mock's side-effect denials, so a preload
   that spawns helper processes cannot work there)
- stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--add] [--output=(path|-)] path/to/file.sol ...
+ stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--manifests] [--add] [--output=(path|-)] path/to/(file.sol|dir) ...
+ (Solidity: a directory stands for every .sol file under it -- "stasis bundle src test script" is what
+  "forge build" compiles, "stasis bundle contracts" what Hardhat does; imports resolve through the
+  remappings "forge build" uses (remappings.txt, foundry.toml's profile, FOUNDRY_PROFILE, lib/
+  auto-detection incl. dependencies' own configs), else a root remappings.txt, then node_modules
+  by file path; --mapping instead takes exactly the remappings that one file lists; --manifests
+  also carries foundry.toml, remappings.txt, foundry.lock, soldeer.lock, .gitmodules, package.json
+  and hardhat.config.* of the project and its bundled dependencies)
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -201,6 +208,7 @@ if (command === '-v' || command === '--version') {
 } else if (command === 'bundle') {
   const options = {
     mapping: { type: 'string' },
+    manifests: { type: 'boolean' },
     output: { type: 'string', short: 'o' },
     scope: { type: 'string' },
     lockfile: { type: 'string' },
@@ -227,7 +235,17 @@ if (command === '-v' || command === '--version') {
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
-  const allSol = argv.every((f) => f.endsWith('.sol'))
+  // A directory entry stands for the .sol files under it (Solidity only).
+  const isDir = (f) => {
+    try {
+      return statSync(resolve(f)).isDirectory()
+    } catch {
+      return false
+    }
+  }
+  const dirEntries = argv.filter(isDir)
+  const allSol = argv.every((f) => f.endsWith('.sol') || dirEntries.includes(f))
+  if (dirEntries.length > 0 && !allSol) usage(`Error: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirEntries[0]}`)
   const allPhp = argv.every((f) => f.endsWith('.php'))
   const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
   const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))
@@ -236,6 +254,9 @@ if (command === '-v' || command === '--version') {
     usage('Error: bundle entries must all be .sol, all be .php, all be .js/.cjs/.mjs/.ts/.cts/.mts, all be .sh/.bash, or all be .rs')
   }
   if (values.mapping && !allSol) usage('Error: --mapping is only valid for .sol bundles')
+  // --manifests: carry the Solidity build's description files (foundry.toml, remappings.txt, ...).
+  const manifests = Boolean(values.manifests)
+  if (manifests && !allSol) usage('Error: --manifests is only valid for .sol bundles')
   // --cargo: take the Rust feature/dependency resolution from `cargo metadata` (runs cargo; opt-in).
   const cargo = Boolean(values.cargo)
   if (cargo && !allRust) usage('Error: --cargo is only valid for Rust bundles')
@@ -353,6 +374,7 @@ if (command === '-v' || command === '--version') {
     cwd: process.cwd(),
     entries: argv,
     mappingFile: values.mapping,
+    manifests,
     output: values.output,
     scope: values.scope,
     lockfile: values.lockfile,
