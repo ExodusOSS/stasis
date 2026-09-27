@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { basename, dirname, resolve } from 'node:path'
+import { basename, dirname, extname, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
@@ -28,13 +28,15 @@ function usage(prefix = '') {
   other app code; with --mock, preloads run under the mock's side-effect denials, so a preload
   that spawns helper processes cannot work there)
  stasis bundle [--mapping=path/to/remappings(.txt|.toml)] [--manifests] [--add] [--output=(path|-)] path/to/(file.sol|dir) ...
- (Solidity: a directory stands for every .sol file under it -- "stasis bundle src test script" is what
-  "forge build" compiles, "stasis bundle contracts" what Hardhat does; imports resolve through the
-  remappings "forge build" uses (remappings.txt, foundry.toml's profile, FOUNDRY_PROFILE, lib/
-  auto-detection incl. dependencies' own configs), else a root remappings.txt, then node_modules
-  by file path; --mapping instead takes exactly the remappings that one file lists; --manifests
-  also carries foundry.toml, remappings.txt, foundry.lock, soldeer.lock, .gitmodules, package.json
-  and hardhat.config.* of the project and its bundled dependencies)
+ (Solidity: a directory stands for every .sol file under it (a missing or empty one is skipped) --
+  "stasis bundle src test script" is what "forge build" compiles, "stasis bundle contracts" what
+  Hardhat does; imports resolve through the remappings "forge build" uses (remappings.txt,
+  foundry.toml's profile, FOUNDRY_PROFILE, lib/ auto-detection incl. dependencies' own configs),
+  else a root remappings.txt, then node_modules by file path; --mapping instead takes exactly the
+  remappings that one file lists; an import must reach a .sol file inside the project, and a
+  dependency's only other dependencies' files; --manifests also carries foundry.toml,
+  remappings.txt, foundry.lock, soldeer.lock, .gitmodules and package.json of the project and its
+  bundled dependencies, without their RPC/Etherscan keys, secret-named keys and URL credentials)
  stasis bundle [--add] [--output=(path|-)] path/to/file.php ...
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
@@ -235,11 +237,17 @@ if (command === '-v' || command === '--version') {
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
-  // A directory entry stands for the .sol files under it (Solidity only).
+  // A directory entry stands for the .sol files under it (Solidity only); an extensionless path
+  // that doesn't exist is a missing one (skipped with a warning).
   const { isDir } = await import('../src/resolve-typescript.js')
-  const dirEntries = argv.filter((f) => isDir(resolve(f)))
+  const dirEntries = argv.filter((f) => isDir(resolve(f)) || (extname(f) === '' && !existsSync(resolve(f))))
   const allSol = argv.every((f) => f.endsWith('.sol') || dirEntries.includes(f))
-  if (dirEntries.length > 0 && !allSol) usage(`Error: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirEntries[0]}`)
+  if (dirEntries.length > 0 && !allSol) {
+    const missing = dirEntries.find((f) => !existsSync(resolve(f)))
+    usage(missing === undefined
+      ? `Error: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirEntries[0]}`
+      : `Error: no such file or directory: ${missing}`)
+  }
   const allPhp = argv.every((f) => f.endsWith('.php'))
   const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
   const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))

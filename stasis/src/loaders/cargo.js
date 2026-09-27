@@ -105,11 +105,12 @@ function scanTomlLine(line) {
 // up to its closing delimiter verbatim (a `[x]` inside a description is text, not a table), and a
 // `key = [` / `key = {` whose brackets don't close on the line takes the following lines up to
 // the close (multi-line arrays are how long `features` lists and `members` are written).
-// Comments are dropped from the non-string lines.
-function logicalLines(text) {
+// Comments are dropped from the non-string lines. Each comes with the span of physical lines
+// (`first`..`last`, 0-based) it took.
+function* logicalLineSpans(text) {
   const raw = text.split('\n')
-  const out = []
   for (let i = 0; i < raw.length; i++) {
+    const first = i
     let { code: line, depth } = scanTomlLine(raw[i])
     const kv = KEY_VALUE_RE.exec(line.trim())
     if (kv) {
@@ -128,29 +129,55 @@ function logicalLines(text) {
         }
       }
     }
-    out.push(line)
+    yield { line, first, last: i }
   }
+}
+
+const logicalLines = (text) => [...logicalLineSpans(text)].map((l) => l.line)
+
+// A dotted TOML key or table name -> its segments, quotes dropped (a quoted segment keeps its dots:
+// `profile."ci.fast"` is ['profile', 'ci.fast']).
+function splitTomlKey(key) {
+  const out = []
+  let cur = ''
+  let quote = null
+  for (const ch of key) {
+    if (quote) {
+      if (ch === quote) quote = null
+      else cur += ch
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (ch === '.') {
+      out.push(cur.trim())
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  out.push(cur.trim())
   return out
 }
 
-// Every `[header]` and `key = value` of a TOML text, in order: a header as `{ table, key: null }`,
-// a pair as `{ table, key, value }` -- `table` the enclosing header's name ('' before the first),
-// `key` with its quotes dropped (a dotted key stays dotted), `value` parsed. For readers of other
-// TOML configs (foundry.toml).
+// Every `[header]` and `key = value` of a TOML text, in order, for readers of other TOML configs
+// (foundry.toml): a header as `{ path, header: true }` (the table's segments), a pair as
+// `{ path, header: false, value }` (the enclosing table's segments then the key's), each with the
+// physical lines (`first`..`last`) it spans.
 export function* tomlEntries(text) {
-  let table = ''
-  for (const raw of logicalLines(text)) {
+  let table = []
+  for (const { line: raw, first, last } of logicalLineSpans(text)) {
     const line = raw.trim()
     const header = TABLE_HEADER_RE.exec(line)
     if (header) {
-      table = header[1].replaceAll(/["']/gu, '').trim()
-      yield { table, key: null, value: undefined }
+      table = splitTomlKey(header[1])
+      yield { path: table, header: true, first, last }
       continue
     }
     const kv = KEY_VALUE_RE.exec(line)
-    if (kv) yield { table, key: kv[1].replaceAll(/["']/gu, ''), value: parseTomlValue(kv[2]) }
+    if (kv) yield { path: [...table, ...splitTomlKey(kv[1])], header: false, value: parseTomlValue(kv[2]), first, last }
   }
 }
+
+const TOML_ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' }
 
 // One TOML value: quoted string, bool, array (as an array), or a single-line inline table (as a
 // plain object); anything else is returned raw.
@@ -163,7 +190,8 @@ export function parseTomlValue(raw) {
   }
   if (text.startsWith('"')) {
     const m = /^"((?:[^"\\]|\\.)*)"/u.exec(text)
-    return m ? m[1].replaceAll(/\\(.)/gu, '$1') : text
+    if (!m) return text
+    return m[1].replaceAll(/\\(u[\dA-Fa-f]{4}|U[\dA-Fa-f]{8}|.)/gu, (_, e) => (e.length > 1 ? String.fromCodePoint(Number.parseInt(e.slice(1), 16)) : TOML_ESCAPES[e] ?? e))
   }
   if (text.startsWith("'")) {
     const m = /^'([^']*)'/u.exec(text)

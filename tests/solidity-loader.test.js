@@ -17,7 +17,7 @@ import {
   readRemappingsFile,
   resolveSolImport,
 } from '../stasis/src/loaders/solidity.js'
-import { findRemappingsWithContext, foundryProject } from '../stasis/src/loaders/foundry.js'
+import { findRemappingsWithContext, foundryProject, foundryTomlRemappings, redactFoundryToml, scrubUrlCredentials } from '../stasis/src/loaders/foundry.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'solidity-bundle')
 
@@ -584,4 +584,90 @@ test('expandSolidityEntries replaces a directory with the .sol files under it', 
     'src/A.sol', 'src/nested/B.sol', 'test/A.t.sol', 'test/linked/A.sol', 'test/linked/nested/B.sol',
   ])
   t.assert.throws(() => expandSolidityEntries(dir, ['docs']), /No \.sol files under docs\//u)
+}))
+
+// --- Post-merge review ------------------------------------------------------------------------
+
+test('extractSolImports ends a // comment at \r and reads escapes as UTF-8 bytes, as solc does', (t) => {
+  // solc-js 0.8.30: the import after a CR-only line break is live; `\xc3\xa9` is `é`.
+  t.assert.deepEqual(extractSolImports('// comment\rimport "./A.sol";'), ['./A.sol'])
+  t.assert.deepEqual(extractSolImports('import "./\\xc3\\xa9.sol";\nimport "./\\u00e9x.sol";'), ['./é.sol', './éx.sol'])
+  // An unterminated literal (solc rejects the file) ends the import instead of taking a later string.
+  t.assert.deepEqual(extractSolImports('import "./a\rb.sol"; string s = "x";'), [])
+})
+
+test('foundry.toml profiles: legacy [<name>] tables, case-insensitive names, quoted dotted names, escapes', (t) => {
+  // `[default]` is still read (forge warns), and `[profile.<name>]` wins key by key.
+  t.assert.deepEqual(foundryTomlRemappings('[default]\nremappings = ["@legacy/=lib/legacy/"]\n').map((r) => r.name), ['@legacy/'])
+  t.assert.deepEqual(foundryTomlRemappings('[default]\nremappings = ["@old/=a/"]\n[profile.default]\nremappings = ["@new/=b/"]\n').map((r) => r.name), ['@new/'])
+  t.assert.deepEqual(parseRemappingsFromToml('[profile.CI]\nremappings = ["@ci/=lib/ci/"]\n', { env: { FOUNDRY_PROFILE: 'ci' } }).map((r) => r.prefix), ['@ci/'])
+  t.assert.deepEqual(parseRemappingsFromToml('[profile."ci.fast"]\nremappings = ["@f/=lib/\\u0066/"]\n', { env: { FOUNDRY_PROFILE: 'ci.fast' } }), [{ context: null, prefix: '@f/', target: 'lib/f/' }])
+  // Standalone sections are not profiles; a top-level `remappings` is a mapping file's fallback.
+  t.assert.deepEqual(foundryTomlRemappings('[fmt]\nremappings = ["@x/=x/"]\n'), [])
+  t.assert.deepEqual(foundryTomlRemappings('remappings = ["@top/=lib/top/"]\n').map((r) => r.name), ['@top/'])
+})
+
+test('redactFoundryToml drops RPC/Etherscan tables and secret-named keys, keeping the rest verbatim', (t) => {
+  const toml = [
+    '# build',
+    '[profile.default]',
+    'src = "src"',
+    'eth_rpc_url = "https://eth.example/v2/K1"',
+    'remappings = [',
+    '  "a/=b/", # comment',
+    ']',
+    'rpc_endpoints = { mainnet = "https://x/K2" }',
+    '[profile.default.rpc_endpoints]',
+    'sepolia = "https://x/K3"',
+    '[rpc_endpoints]',
+    '"weird name" = "https://x/K4"',
+    '[etherscan]',
+    'mainnet = { key = "K5" }',
+    '[fmt]',
+    'repo = "https://user:K6@host/r"',
+    '',
+  ].join('\n')
+  t.assert.equal(redactFoundryToml(toml), '# build\n[profile.default]\nsrc = "src"\nremappings = [\n  "a/=b/", # comment\n]\n[fmt]\nrepo = "https://host/r"\n')
+  t.assert.equal(scrubUrlCredentials('https://t@github.com/o/r git@github.com:o/r https://h/p@v1'), 'https://github.com/o/r git@github.com:o/r https://h/p@v1')
+})
+
+test('resolveSolImport refuses a non-.sol target, one outside the root, and a dependency reaching the project', withProject({
+  '.env': 'K=1\n',
+  'secret.sol': 'contract S {}\n',
+  'lib/dep/src/A.sol': '',
+  'lib/other/src/B.sol': '',
+  'node_modules/pkg/C.sol': '',
+}, (t, dir) => {
+  t.assert.equal(resolveSolImport('../../.env', 'lib/dep/src/A.sol', { baseDir: dir }), null)
+  t.assert.equal(resolveSolImport('x/Y.sol', 'src/A.sol', { baseDir: dir, remappings: [{ context: null, prefix: 'x/', target: '/abs/' }] }), null)
+  const opts = { baseDir: dir, libs: ['lib'], dependencyDirs: ['lib'] }
+  t.assert.equal(resolveSolImport('secret.sol', 'lib/dep/src/A.sol', opts), null)
+  t.assert.equal(resolveSolImport('secret.sol', 'src/Main.sol', opts), 'secret.sol')
+  t.assert.equal(resolveSolImport('../../other/src/B.sol', 'lib/dep/src/A.sol', opts), 'lib/other/src/B.sol')
+  t.assert.equal(resolveSolImport('../../../node_modules/pkg/C.sol', 'lib/dep/src/A.sol', opts), 'node_modules/pkg/C.sol')
+}))
+
+test('resolveSolImport starts a library lookup at the importer directory\'s parent, as foundry-compilers does', withProject({
+  'lib/dep/src/utils/C.sol': '',
+  'lib/dep/src/utils/src/B.sol': '',
+  'lib/dep/src/B.sol': '',
+}, (t, dir) => {
+  // `resolve_absolute_library` never tries the importer's own dir (lib/dep/src/utils/src/B.sol).
+  t.assert.equal(resolveSolImport('src/B.sol', 'lib/dep/src/utils/C.sol', { baseDir: dir, libs: ['lib'] }), 'lib/dep/src/B.sol')
+}))
+
+test('expandSolidityEntries follows symlinks the way walkdir does', withProject({
+  'src/A.sol': '',
+  'src/sub/B.sol': '',
+  'shared/S.sol': '',
+  'lib/x/X.sol': '',
+}, (t, dir) => {
+  symlinkSync(join(dir, 'src'), join(dir, 'src/sub/back')) // to the walk root: a loop, skipped
+  symlinkSync(join(dir, 'shared'), join(dir, 'src/l1'))
+  symlinkSync(join(dir, 'shared'), join(dir, 'src/l2')) // two links to one dir: both walked
+  symlinkSync(dir, join(dir, 'src/up')) // above the walk: walked, up to its link back into src
+  t.assert.deepEqual(expandSolidityEntries(dir, ['src']), [
+    'src/A.sol', 'src/l1/S.sol', 'src/l2/S.sol', 'src/sub/B.sol',
+    'src/up/lib/x/X.sol', 'src/up/shared/S.sol', 'src/up/src/A.sol', 'src/up/src/l1/S.sol', 'src/up/src/l2/S.sol', 'src/up/src/sub/B.sol',
+  ])
 }))

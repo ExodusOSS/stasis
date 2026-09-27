@@ -270,14 +270,21 @@ root). With no manifest above a file, the workspace bucket gets a placeholder
 identity (`solidity-bundle`/`php-bundle`/`bash-bundle`/`rust-bundle` at `0.0.0`).
 
 Solidity entries are `.sol` files or directories: a directory stands for every
-`.sol` file under it (symlinks followed), imported or not — `stasis bundle src
-test script` is what `forge build` compiles, `stasis bundle contracts` what
-Hardhat compiles (Yul sources are not collected). Imports are found by a scan
-that skips comments and string literals, and resolve the way solc does under the
-project's build tool:
+`.sol` file under it, imported or not — `stasis bundle src test script` is what
+`forge build` compiles, `stasis bundle contracts` what Hardhat compiles (Yul
+sources are not collected). Symlinks are followed as forge's walker (walkdir)
+follows them: a symlinked directory that is one already on the walk is a loop
+and skipped, anything else is walked, so two links to one directory give two
+copies. A directory entry that is missing or holds no `.sol` file is skipped
+with a warning (a project without `script/` bundles with `src test script`);
+only when no entry yields a file is it an error. Imports are found by a scan
+that skips comments (a `//` comment ends at `\n` or `\r`) and string literals
+(read as bytes: `\xNN` is one byte, and the path is those bytes as UTF-8), and
+resolve the way solc does under the project's build tool:
 
 - A relative import (`./`, `../`) is resolved against the importing file; one
-  that climbs above the bundle root is unresolved.
+  that climbs above the bundle root is refused (solc would clamp it to the
+  root: `../../B.sol` from `src/A.sol` is `B.sol`).
 - Remappings then apply as solc applies them: the longest matching context
   wins, then the longest prefix, then the one listed last. With a `foundry.toml`
   at the root they are the ones `forge build` uses (a port of foundry v1.8.3's
@@ -289,26 +296,50 @@ project's build tool:
   auto-detects under the `libs` dirs (`lib/` and/or `node_modules/` when unset),
   including the contextual ones that scope a dependency's imports to its own
   copy of a package; aliases of the project's own `src`/`test`/`script` dirs
-  are dropped, and `auto_detect_remappings = false` turns detection off. Not
+  are dropped, and `auto_detect_remappings = false` turns detection off.
+  Profiles are `[profile.<name>]` tables and the legacy top-level `[<name>]`
+  ones (the former wins key by key); names match case-insensitively. Not
   read: `~/.foundry/foundry.toml`, `FOUNDRY_CONFIG` and the other `FOUNDRY_*`
-  overrides. Without a `foundry.toml`, a root `remappings.txt` is used as
-  listed. `--mapping=<file>` replaces all of this with exactly the remappings
-  that one file lists (a `foundry.toml`'s selected profile, or a
-  `remappings.txt`). A remapping read from a file gets forge's trailing `/` on
-  prefix and target (`forge-std=lib/forge-std/src` is `forge-std/=lib/forge-std/src/`).
-- An unremapped non-relative import is looked up as a project file (solc's base
-  path: `import "src/A.sol"`), then inside the importing Foundry library (the
-  include path forge adds for `lib/dep/src/A.sol` importing `src/B.sol`), then
-  as a package file in `node_modules`, from the importer's directory up
-  (Hardhat and Node: `hardhat/console.sol`, `@scope/pkg/contracts/X.sol`; a
-  package's `exports` map doesn't apply to Solidity files).
+  overrides. When `FOUNDRY_PROFILE` or a remapping variable shapes the
+  result, `stasis bundle` says so on stderr; the bundle doesn't record it.
+  Without a `foundry.toml`, a root `remappings.txt` applies as written, as solc
+  and Hardhat apply it (`@oz/=lib/oz` makes `@oz/X.sol` `lib/ozX.sol`).
+  `--mapping=<file>` replaces the remappings with exactly the ones that file
+  lists: a `foundry.toml`'s selected profile (with its `extends` base; a
+  `remappings` key outside any table is taken too), or a `remappings.txt`. A
+  remapping forge reads (from a `foundry.toml`, or a `remappings.txt` next to
+  one) gets forge's trailing `/` on prefix and target
+  (`forge-std=lib/forge-std/src` is `forge-std/=lib/forge-std/src/`).
+- An unremapped non-relative import is looked up inside the importing Foundry
+  library first (the include path forge adds for `lib/dep/src/A.sol` importing
+  `src/B.sol`: each directory from the importer directory's parent up to the
+  lib dir, as foundry-compilers tries them), then as a project file (solc's
+  base path: `import "src/A.sol"`), then as a package file in `node_modules`,
+  from the importer's directory up (Hardhat and Node: `hardhat/console.sol`,
+  `@scope/pkg/contracts/X.sol`; a package's `exports` map doesn't apply to
+  Solidity files). `--mapping` changes none of these lookups.
+
+Dependencies are input the project didn't write, so whatever resolves an
+import, the result must be a `.sol` file inside the bundle root (an `import
+".env";` or a remapping to `/opt/x/` is refused, stating why), and an import
+from a dependency — a file under forge's `libs`, Soldeer's `dependencies/`, a
+git submodule or any `node_modules` — must land, by real path, on a dependency's
+file too: a dependency may import another (forge-std's `ds-test`), never the
+project's own files, whether through a relative path, a base-path lookup, its
+own remappings or a symlink. A dependency's `foundry.toml` whose `extends`
+lies outside it is skipped with a warning.
 
 The config files are read, not bundled. `--manifests` bundles the build
-description too: the config files the resolution read, the root's
-`foundry.lock`, `soldeer.lock`, `.gitmodules`, `package.json` and
-`hardhat.config.*`, and the `package.json`, `foundry.toml` and `remappings.txt`
-of every package the bundle holds files of — `json` for a `package.json`,
-`resource` otherwise, so `stasis extract` restores them.
+description too: the `*.toml`/`*.txt` config files the resolution read, the
+root's `foundry.lock`, `soldeer.lock`, `.gitmodules` and `package.json`, and the
+`package.json`, `foundry.toml` and `remappings.txt` of every package the bundle
+holds files of — `json` for a `package.json`, `resource` otherwise, so `stasis
+extract` restores them. Credentials stay behind: a `.toml` config loses its
+`[rpc_endpoints]` and `[etherscan]` tables (at the top level or in a profile)
+and keys such as `eth_rpc_url` or `etherscan_api_key` (any key named like a
+key, token, secret or password), every carried file loses the user info of its
+URLs (`https://user:token@host` is `https://host`), and `hardhat.config.*`,
+being code that may hold keys, is never carried.
 
 Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
 `tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does,
