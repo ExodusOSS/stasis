@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
@@ -8,7 +8,7 @@ import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { scan } from '../scan.js'
 import { createFieldResolver, resolveConditions } from '../resolve-fields.js'
-import { discoverTsconfig, loadTsconfigPaths } from '../resolve-typescript.js'
+import { discoverTsconfig, isDir, loadTsconfigPaths } from '../resolve-typescript.js'
 import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
@@ -16,6 +16,8 @@ import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
+  SOLIDITY_PACKAGE_MANIFESTS,
+  SOLIDITY_ROOT_MANIFESTS,
   buildSolidityTree,
   collectSolidityFilesFromDisk,
   discoverSolidityConfig,
@@ -177,7 +179,7 @@ function executableSources(baseDir, sources) {
 // "." with the placeholder identity); a node_modules file whose nearest package.json is the
 // workspace root is rejected, not mislabeled. `classifyDep(path)` optionally places a file
 // directly (non-node_modules ecosystems like Soldeer/github); null defers. `format` tags
-// every file, or pass `formats` (Map<path,format>) to tag per file. `resolutions` values are
+// every file; `formats` (Map<path,format>) overrides it per file. `resolutions` values are
 // a flat target string or a Map<platform,target>; both round-trip untouched.
 function assembleCodeBundle({
   baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep,
@@ -234,23 +236,6 @@ function assembleCodeBundle({
   }).withReason('bundle')
 }
 
-const isDirectory = (abs) => {
-  try {
-    return statSync(abs).isDirectory()
-  } catch {
-    return false
-  }
-}
-
-// What --manifests carries for a Solidity bundle besides the config files the resolution read:
-// the root's dependency pins and build-tool config, and the manifests of every package the bundle
-// holds files of (a dependency's own foundry.toml/remappings.txt, its package.json identity).
-const SOLIDITY_ROOT_MANIFESTS = [
-  'foundry.toml', 'remappings.txt', 'foundry.lock', 'soldeer.lock', '.gitmodules', 'package.json',
-  'hardhat.config.js', 'hardhat.config.cjs', 'hardhat.config.mjs', 'hardhat.config.ts', 'hardhat.config.cts', 'hardhat.config.mts',
-]
-const SOLIDITY_PACKAGE_MANIFESTS = ['package.json', 'foundry.toml', 'remappings.txt']
-
 // The build-description files of a Solidity bundle (--manifests), as Map<path, text>: `configFiles`
 // (what discoverSolidityConfig read) plus the SOLIDITY_*_MANIFESTS that exist, for the root and for
 // each package dir `classifyDep`/package.json places a bundled source in. Files inside the root only.
@@ -264,7 +249,7 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep) {
     if (meta) dirs.add(meta.pkgDir)
   }
   for (const dir of dirs) {
-    for (const name of SOLIDITY_PACKAGE_MANIFESTS) wanted.add(dir === '.' ? name : `${dir}/${name}`)
+    for (const name of SOLIDITY_PACKAGE_MANIFESTS) wanted.add(moduleFileKey(dir, name))
   }
   const realBase = realpathSync(baseDir)
   const out = new Map()
@@ -298,7 +283,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
   for (const e of normalized) {
-    if (!e.endsWith('.sol') && !isDirectory(join(baseDir, e))) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
+    if (!e.endsWith('.sol') && !isDir(join(baseDir, e))) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
   }
   const expanded = expandSolidityEntries(baseDir, normalized)
 
@@ -320,7 +305,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
 
   const classifyDep = makeSolidityClassifier(baseDir)
   const bundled = new Map(sources)
-  const formats = new Map([...sources.keys()].map((path) => [path, SOLIDITY_FORMAT]))
+  const formats = new Map()
   if (manifests) {
     for (const [path, text] of solidityManifests(baseDir, sources, configFiles, classifyDep)) {
       bundled.set(path, text)
@@ -335,6 +320,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     resolutions,
     workspaceName: SOLIDITY_WORKSPACE_NAME,
     workspaceVersion: SOLIDITY_WORKSPACE_VERSION,
+    format: SOLIDITY_FORMAT,
     formats,
     conditionKey: 'solidity',
     classifyDep,
@@ -1002,7 +988,7 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
-  const dirs = entries.filter((e) => isDirectory(resolve(cwd, e)))
+  const dirs = entries.filter((e) => isDir(resolve(cwd, e)))
   const files = entries.filter((e) => !dirs.includes(e))
   let kind
   if (files.every((e) => e.endsWith('.sol'))) kind = 'sol'

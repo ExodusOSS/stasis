@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { basename, dirname, resolve } from 'node:path'
-import { existsSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
 import { parseBrotliQuality, parseLeadingOptions, parseResourcesOption } from '@exodus/stasis-core/util'
@@ -236,14 +236,8 @@ if (command === '-v' || command === '--version') {
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
   // A directory entry stands for the .sol files under it (Solidity only).
-  const isDir = (f) => {
-    try {
-      return statSync(resolve(f)).isDirectory()
-    } catch {
-      return false
-    }
-  }
-  const dirEntries = argv.filter(isDir)
+  const { isDir } = await import('../src/resolve-typescript.js')
+  const dirEntries = argv.filter((f) => isDir(resolve(f)))
   const allSol = argv.every((f) => f.endsWith('.sol') || dirEntries.includes(f))
   if (dirEntries.length > 0 && !allSol) usage(`Error: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirEntries[0]}`)
   const allPhp = argv.every((f) => f.endsWith('.php'))

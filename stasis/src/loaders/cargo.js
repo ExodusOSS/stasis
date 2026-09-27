@@ -23,7 +23,7 @@ export function isFile(path) {
   }
 }
 
-function readFileOrNull(file) {
+export function readFileOrNull(file) {
   try {
     return readFileSync(file, 'utf8')
   } catch {

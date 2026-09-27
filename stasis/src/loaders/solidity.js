@@ -10,12 +10,17 @@ import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 
 import { assertRealPathWithinBase, toPosix } from '@exodus/stasis-core/util'
-import { FOUNDRY_TOML, REMAPPINGS_TXT, foundryProject, foundryTomlRemappings, parseRemapping, parseRemappingLines } from './foundry.js'
+import { isDir, isFile } from '../resolve-typescript.js'
+import { FOUNDRY_TOML, REMAPPINGS_TXT, foundryProfile, foundryProject, foundryTomlRemappings, parseRemappingLines, toSolcRemapping } from './foundry.js'
 
 // --- Import scan ------------------------------------------------------------------------------
 
-const IDENT_START = /[A-Za-z_$]/u
-const IDENT_PART = /[\w$]/u
+// The scan's ASCII classes, by char code: identifier start [A-Za-z_$], identifier part [\w$], digit,
+// and a number literal's [\w.].
+const isIdentStart = (c) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c === 36
+const isDigit = (c) => c >= 48 && c <= 57
+const isIdentPart = (c) => isIdentStart(c) || isDigit(c)
+const isNumberPart = (c) => (isIdentPart(c) && c !== 36) || c === 46
 const STRING_ESCAPES = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', 0: '\0' }
 
 // A string literal starting at `text[i]` (a quote): `{ value, end }`, `value` null when it's
@@ -59,35 +64,37 @@ function readStringLiteral(text, i) {
 // `import {A, B as C} from "p";` -- over any number of lines.
 export function extractSolImports(content) {
   const specs = []
+  const n = content.length
   let inImport = false
   let i = 0
-  while (i < content.length) {
-    const ch = content[i]
-    if (ch === '/' && content[i + 1] === '/') {
+  while (i < n) {
+    const c = content.charCodeAt(i)
+    const next = content.charCodeAt(i + 1)
+    if (c === 47 && next === 47) { // `//`
       const eol = content.indexOf('\n', i + 2)
-      i = eol === -1 ? content.length : eol + 1
-    } else if (ch === '/' && content[i + 1] === '*') {
+      i = eol === -1 ? n : eol + 1
+    } else if (c === 47 && next === 42) { // `/*`
       const close = content.indexOf('*/', i + 2)
-      i = close === -1 ? content.length : close + 2
-    } else if (ch === '"' || ch === "'") {
+      i = close === -1 ? n : close + 2
+    } else if (c === 34 || c === 39) { // `"` or `'`
       const { value, end } = readStringLiteral(content, i)
       if (inImport && value !== null) {
         specs.push(value)
         inImport = false
       }
       i = end
-    } else if (IDENT_START.test(ch)) {
+    } else if (isIdentStart(c)) {
       let j = i + 1
-      while (j < content.length && IDENT_PART.test(content[j])) j++
-      if (content.slice(i, j) === 'import') inImport = true
+      while (j < n && isIdentPart(content.charCodeAt(j))) j++
+      if (j - i === 6 && content.startsWith('import', i)) inImport = true
       i = j
-    } else if (/\d/u.test(ch)) {
+    } else if (isDigit(c)) {
       // A number literal (`0x1f`, `1e18`, `1_000`): its letters aren't identifiers.
       let j = i + 1
-      while (j < content.length && /[\w.]/u.test(content[j])) j++
+      while (j < n && isNumberPart(content.charCodeAt(j))) j++
       i = j
     } else {
-      if (ch === ';') inImport = false
+      if (c === 59) inImport = false // `;`
       i++
     }
   }
@@ -99,42 +106,24 @@ export function extractSolImports(content) {
 // Loader-side shape: `{ context, prefix, target }` (context null = global).
 const toLoaderRemapping = ({ context, name, path }) => ({ context, prefix: name, target: path })
 
-// remappings.txt text -> remappings, one `[context:]prefix=target` per line (lines trimmed; blank
-// and invalid lines skipped).
+// remappings.txt text -> remappings as written, one `[context:]prefix=target` per line (lines
+// trimmed; blank and invalid lines skipped).
 export function parseRemappings(content) {
-  const out = []
-  for (const line of content.split('\n').map((l) => l.trim()).filter(Boolean)) {
-    const r = parseRemapping(line)
-    if (r) out.push(toLoaderRemapping(r))
-  }
-  return out
+  return parseRemappingLines(content).map(toLoaderRemapping)
 }
 
 // foundry.toml text -> the `remappings` of `[profile.default]`, overlaid by the selected profile's
 // (FOUNDRY_PROFILE in `env`) when it sets them.
 export function parseRemappingsFromToml(tomlContent, { env = process.env } = {}) {
-  return foundryTomlRemappings(tomlContent, env.FOUNDRY_PROFILE || 'default').map(toLoaderRemapping)
+  return foundryTomlRemappings(tomlContent, foundryProfile(env)).map(toLoaderRemapping)
 }
-
-// Forge reads a remapping from a file with a trailing `/` on prefix and target (unless it ends in
-// `.sol`): `forge-std=lib/forge-std/src` means `forge-std/=lib/forge-std/src/`.
-const withSlash = (s) => (s.endsWith('/') || s.endsWith('.sol') ? s : `${s}/`)
-const slashTerminated = (r) => ({ ...r, prefix: withSlash(r.prefix), target: withSlash(r.target) })
 
 // Read a foundry.toml/remappings.txt mapping file -> its remappings, as listed (no discovery
-// around it; slash-terminated as forge reads them). The file itself is not added to sources.
+// around it) and slash-terminated as forge reads them. The file itself is not added to sources.
 export async function readRemappingsFile(mappingFile, { env = process.env } = {}) {
   const content = await readFile(mappingFile, 'utf8')
-  const listed = mappingFile.endsWith('.toml') ? parseRemappingsFromToml(content, { env }) : parseRemappingLines(content, mappingFile).map(toLoaderRemapping)
-  return listed.map(slashTerminated)
-}
-
-const isFileAt = (abs) => {
-  try {
-    return statSync(abs).isFile()
-  } catch {
-    return false
-  }
+  const listed = mappingFile.endsWith('.toml') ? foundryTomlRemappings(content, foundryProfile(env)) : parseRemappingLines(content, mappingFile)
+  return listed.map(toSolcRemapping)
 }
 
 // What resolves the imports of the project at `baseDir`: `{ remappings, libs, files }`.
@@ -150,11 +139,8 @@ export async function discoverSolidityConfig(baseDir, { mappingFile, env = proce
     const rel = toPosix(relative(baseDir, abs))
     return { remappings: await readRemappingsFile(abs, { env }), libs: [], files: rel.startsWith('..') || isAbsolute(rel) ? [] : [rel] }
   }
-  if (isFileAt(join(baseDir, FOUNDRY_TOML))) {
-    const { remappings, libs, files } = foundryProject(baseDir, { env })
-    return { remappings, libs, files }
-  }
-  if (isFileAt(join(baseDir, REMAPPINGS_TXT))) {
+  if (isFile(join(baseDir, FOUNDRY_TOML))) return foundryProject(baseDir, { env })
+  if (isFile(join(baseDir, REMAPPINGS_TXT))) {
     return { remappings: await readRemappingsFile(join(baseDir, REMAPPINGS_TXT), { env }), libs: [], files: [REMAPPINGS_TXT] }
   }
   return { remappings: [], libs: [], files: [] }
@@ -199,10 +185,10 @@ const isRelativeImport = (specifier) => {
 
 // `<baseDir>/<spec>` when a real file sits there, as a clean project-relative path.
 function projectFile(baseDir, spec) {
-  if (isAbsolute(spec) || posix.isAbsolute(spec)) return null
+  if (isAbsolute(spec)) return null
   const rel = toPosix(relative(baseDir, resolve(baseDir, spec)))
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null
-  return isFileAt(join(baseDir, rel)) ? rel : null
+  return isFile(join(baseDir, rel)) ? rel : null
 }
 
 // No `.`/`..`/empty segment: a bare spec can't wander out of the directory it's looked up in.
@@ -253,6 +239,14 @@ export function resolveSolImport(specifier, fromFile, { remappings = [], baseDir
   return projectFile(baseDir, name)
     ?? (isPlainSpec(name) ? libraryFile(baseDir, name, fromFile, libs) ?? nodeModulesFile(baseDir, name, fromFile) : null)
 }
+
+// The files that describe a Solidity build (bundled by `--manifests`) besides the config files
+// discovery read: the root's dependency pins and build-tool config, and each package's manifests.
+export const SOLIDITY_ROOT_MANIFESTS = [
+  FOUNDRY_TOML, REMAPPINGS_TXT, 'foundry.lock', 'soldeer.lock', '.gitmodules', 'package.json',
+  ...['js', 'cjs', 'mjs', 'ts', 'cts', 'mts'].map((ext) => `hardhat.config.${ext}`),
+]
+export const SOLIDITY_PACKAGE_MANIFESTS = ['package.json', FOUNDRY_TOML, REMAPPINGS_TXT]
 
 // --- The walk -----------------------------------------------------------------------------------
 
@@ -328,19 +322,22 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings,
   return sources
 }
 
+const realpathOrNull = (p) => {
+  try {
+    return realpathSync(p)
+  } catch {
+    return null
+  }
+}
+
 // Every `.sol` file under the project-relative directory `dir`, sorted, symlinks followed (as forge
-// and Hardhat collect a source dir) but each real directory walked once.
-export function solidityFilesUnder(baseDir, dir) {
+// and Hardhat collect a source dir) but each real directory walked once. A dir's real path is its
+// parent's plus its name unless it's a symlink.
+function solidityFilesUnder(baseDir, dir) {
   const out = []
   const seen = new Set()
-  const walk = (rel) => {
-    let real
-    try {
-      real = realpathSync(join(baseDir, rel))
-    } catch {
-      return
-    }
-    if (seen.has(real)) return
+  const walk = (rel, real) => {
+    if (real === null || seen.has(real)) return
     seen.add(real)
     for (const e of readdirSync(join(baseDir, rel), { withFileTypes: true })) {
       const child = rel === '.' ? e.name : `${rel}/${e.name}`
@@ -352,11 +349,11 @@ export function solidityFilesUnder(baseDir, dir) {
           continue
         }
       }
-      if (kind.isDirectory()) walk(child)
+      if (kind.isDirectory()) walk(child, e.isSymbolicLink() ? realpathOrNull(join(baseDir, child)) : join(real, e.name))
       else if (kind.isFile() && e.name.endsWith('.sol')) out.push(child)
     }
   }
-  walk(dir)
+  walk(dir, realpathOrNull(join(baseDir, dir)))
   return out.toSorted()
 }
 
@@ -366,11 +363,8 @@ export function expandSolidityEntries(baseDir, entries) {
   const out = new Set()
   for (const e of entries) {
     const entry = e === '' ? '.' : e
-    let isDir = false
-    try {
-      isDir = statSync(join(baseDir, entry)).isDirectory()
-    } catch { /* a missing entry is reported by the walk */ }
-    if (!isDir) {
+    // A missing entry is reported by the walk.
+    if (!isDir(join(baseDir, entry))) {
       out.add(entry)
       continue
     }

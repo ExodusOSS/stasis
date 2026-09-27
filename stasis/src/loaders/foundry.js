@@ -12,11 +12,12 @@
 // the global ~/.foundry/foundry.toml, `FOUNDRY_CONFIG`, and the FOUNDRY_*/DAPP_* overrides of
 // other keys (`FOUNDRY_PROFILE` and the remapping env vars are).
 
-import { lstatSync, opendirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, opendirSync, realpathSync, statSync } from 'node:fs'
 import { posix, resolve } from 'node:path'
 
 import { toPosix } from '@exodus/stasis-core/util'
-import { tomlEntries } from './cargo.js'
+import { isDir } from '../resolve-typescript.js'
+import { readFileOrNull, tomlEntries } from './cargo.js'
 
 export const FOUNDRY_TOML = 'foundry.toml'
 export const REMAPPINGS_TXT = 'remappings.txt'
@@ -72,36 +73,11 @@ function canonicalize(p) {
   }
 }
 
-const isDirPath = (p) => {
-  try {
-    return statSync(p).isDirectory()
-  } catch {
-    return false
-  }
-}
-
-const pathExists = (p) => {
-  try {
-    statSync(p)
-    return true
-  } catch {
-    return false
-  }
-}
-
 const isSymlinkPath = (p) => {
   try {
     return lstatSync(p).isSymbolicLink()
   } catch {
     return false
-  }
-}
-
-function readFileOrNull(file) {
-  try {
-    return readFileSync(file, 'utf8')
-  } catch {
-    return null
   }
 }
 
@@ -122,19 +98,15 @@ function listDir(dir) {
   const out = []
   for (const e of entries) {
     const path = rustJoin(dir, e.name)
-    let isFile = e.isFile()
-    let isDir = e.isDirectory()
-    const isSymlink = e.isSymbolicLink()
-    if (isSymlink) {
+    let kind = e
+    if (e.isSymbolicLink()) {
       try {
-        const st = statSync(path)
-        isFile = st.isFile()
-        isDir = st.isDirectory()
+        kind = statSync(path)
       } catch {
         continue
       }
     }
-    out.push({ path, name: e.name, isFile, isDir, isSymlink })
+    out.push({ path, name: e.name, isFile: kind.isFile(), isDir: kind.isDirectory(), isSymlink: e.isSymbolicLink() })
   }
   return out
 }
@@ -163,19 +135,26 @@ export function parseRemapping(entry) {
 }
 
 // A remappings.txt / env var body: one remapping per non-blank (trimmed) line; invalid lines
-// (forge rejects the whole file on one) are reported and skipped.
+// (forge rejects the whole file on one) are skipped, and reported when a `label` names the source.
 export function parseRemappingLines(text, label) {
   const out = []
   for (const line of text.split('\n').map((l) => l.trim()).filter(Boolean)) {
     const r = parseRemapping(line)
     if (r) out.push(r)
-    else console.warn(`[loader.solidity] Invalid remapping in ${label}: ${line}`)
+    else if (label !== undefined) console.warn(`[loader.solidity] Invalid remapping in ${label}: ${line}`)
   }
   return out
 }
 
-const needsTrailingSlash = (s) => !s.endsWith('/') && !s.endsWith('.sol')
-const withSlash = (s) => (needsTrailingSlash(s) ? `${s}/` : s)
+// Forge's trailing `/` on a remapping's name and path, unless they end in `/` or `.sol`.
+const withSlash = (s) => (s.endsWith('/') || s.endsWith('.sol') ? s : `${s}/`)
+
+// A remapping as forge hands it to solc, in the loader's `{ context, prefix, target }` shape:
+// `forge-std=lib/forge-std/src` is `forge-std/=lib/forge-std/src/`.
+export const toSolcRemapping = (r) => ({ context: r.context, prefix: withSlash(r.name), target: withSlash(r.path) })
+
+// The profile forge selects: FOUNDRY_PROFILE, else `default`.
+export const foundryProfile = (env) => env.FOUNDRY_PROFILE || 'default'
 
 // `RelativeRemappingPathBuf::with_root`.
 function withRoot(parent, path) {
@@ -205,9 +184,8 @@ function fromRelative(rr) {
 // `relative_remapping_preserving_context_boundary`: relative to `root`, keeping a context's
 // trailing `/` (it bounds the directory the context names).
 function relativePreservingBoundary(r, root) {
-  const boundary = r.context?.endsWith('/') ?? false
   const rr = toRelative(r, root)
-  if (boundary && rr.context !== null && !rr.context.endsWith('/')) rr.context += '/'
+  if (r.context?.endsWith('/') && rr.context !== null) rr.context = withTrailing(rr.context)
   return rr
 }
 
@@ -229,19 +207,14 @@ class Remappings {
   }
 
   push(r) {
-    if (r.name.endsWith('.sol') && !r.path.endsWith('.sol')) return false
+    if (r.name.endsWith('.sol') && !r.path.endsWith('.sol')) return
     const conflicting = this.remappings.some((e) => {
       if (r.name.endsWith('.sol')) return e.name === r.name && e.context === r.context && e.path === r.path
       return r.name.startsWith(withTrailing(e.name)) && e.context === r.context
     })
-    if (conflicting) return false
-    if (this.projectPaths.some((p) => p.toLowerCase() === r.name.toLowerCase())) return false
+    if (conflicting) return
+    if (this.projectPaths.some((p) => p.toLowerCase() === r.name.toLowerCase())) return
     this.remappings.push(r)
-    return true
-  }
-
-  extend(list) {
-    for (const r of list) this.push(r)
   }
 
   // First of each (context, name).
@@ -271,27 +244,22 @@ function nameIsPrefix(prefix, name) {
 const SRC_DIR = 'src'
 const JS_SRC_DIR = 'contracts'
 const isSourceDir = (p) => [SRC_DIR, JS_SRC_DIR].includes(fileName(p))
-const isLibDir = (p) => ['lib', 'node_modules'].includes(fileName(p))
-const noRecurse = (p) => ['tests', 'test', 'demo'].includes(fileName(p))
+const isLibName = (name) => name === 'lib' || name === 'node_modules'
+const isLibDir = (p) => isLibName(fileName(p))
+const noRecurse = (name) => name === 'tests' || name === 'test' || name === 'demo'
 
 function dirDistance(root, current) {
-  if (pathEq(root, current)) return 0
   const rest = stripPrefix(current, root)
   return rest === null ? 0 : normalComps(rest).length
 }
 
+// The window a dir under the lib dir `root` belongs to: `root`'s child on the way to `current`.
+// (Upstream loops `while !is_lib_dir(next) || !next.ends_with("contracts")`, which always holds on
+// the first component.)
 function nextNestedWindow(root, current) {
-  if (!isLibDir(root) || pathEq(root, current)) return root
-  const rest = stripPrefix(current, root)
-  if (rest !== null) {
-    let p = root
-    for (const c of normalComps(rest)) {
-      const next = rustJoin(p, c)
-      if (!isLibDir(next) || fileName(next) !== JS_SRC_DIR) return next
-      p = next
-    }
-  }
-  return root
+  if (!isLibDir(root)) return root
+  const first = normalComps(stripPrefix(current, root) ?? '')[0]
+  return first === undefined ? root : rustJoin(root, first)
 }
 
 function lastNestedSourceDir(root, dir) {
@@ -309,16 +277,9 @@ const endsWithJsSource = (c) => fileName(c.sourceDir) === JS_SRC_DIR || pathEnds
 
 function mergeOnSameLevel(candidates, currentDir, level, windowStart, insideNodeModules) {
   // A single `src` candidate wins outright.
-  let srcCount = 0
-  let pos = null
-  candidates.forEach((c, idx) => {
-    if (fileName(c.sourceDir) === SRC_DIR) {
-      srcCount++
-      pos = srcCount === 1 ? idx : null
-    }
-  })
-  if (pos !== null) {
-    candidates.splice(0, candidates.length, candidates[pos])
+  const srcs = candidates.filter((c) => fileName(c.sourceDir) === SRC_DIR)
+  if (srcs.length === 1) {
+    candidates.splice(0, candidates.length, srcs[0])
     return
   }
   // Else the current dir absorbs the candidates of its level (`current/{auth,tokens}/*.sol`).
@@ -336,6 +297,7 @@ function mergeOnSameLevel(candidates, currentDir, level, windowStart, insideNode
 // except back into the current traversal path.
 function findRemappingCandidates(currentDir, open, level, insideNodeModules, visited) {
   let isCandidate = false
+  let current
   const search = []
   for (const e of readDir(currentDir)) {
     if (!isCandidate && e.isFile && e.name.endsWith('.sol')) {
@@ -345,20 +307,20 @@ function findRemappingCandidates(currentDir, open, level, insideNodeModules, vis
       if (e.isSymlink) {
         const target = canonicalize(e.path)
         if (target !== null) {
-          const current = canonicalize(currentDir)
+          current ??= canonicalize(currentDir)
           if (visited.has(target) || (current !== null && pathStartsWith(current, target))) continue
           seen = new Set(visited).add(target)
         }
       }
-      if (!noRecurse(e.path)) search.push([e.path, seen])
+      if (!noRecurse(e.name)) search.push([e, seen])
     }
   }
 
   const candidates = []
-  for (const [sub, seen] of search) {
-    candidates.push(...(isLibDir(sub)
-      ? findRemappingCandidates(sub, sub, level + 1, insideNodeModules, seen)
-      : findRemappingCandidates(sub, open, level, insideNodeModules, seen)))
+  for (const [{ path, name }, seen] of search) {
+    candidates.push(...(isLibName(name)
+      ? findRemappingCandidates(path, path, level + 1, insideNodeModules, seen)
+      : findRemappingCandidates(path, open, level, insideNodeModules, seen)))
   }
 
   const windowStart = nextNestedWindow(open, currentDir)
@@ -438,7 +400,7 @@ const snakeCase = (k) => k.replaceAll(/([a-z0-9])([A-Z])/gu, '$1_$2').replaceAll
 // foundry.toml -> Map<profile, Map<key, value>> from its `[profile.<name>]` tables (keys
 // snake_cased as forge does); standalone sections (`[fmt]`, `[rpc_endpoints]`, ...) and sub-tables
 // other than `extends` are skipped.
-export function parseFoundryToml(text) {
+function parseFoundryToml(text) {
   const profiles = new Map()
   for (const { table, key, value } of tomlEntries(text)) {
     const path = [...(table ? table.split('.') : []), ...(key === null ? [] : key.split('.'))].map((s) => s.trim())
@@ -516,12 +478,12 @@ export function foundryTomlRemappings(text, profile = 'default') {
 }
 
 // `ProjectPathsConfig::find_source_dir`: `src` unless only `contracts` exists.
-const findSourceDir = (root) => (isDirPath(rustJoin(root, 'src')) || !isDirPath(rustJoin(root, JS_SRC_DIR)) ? 'src' : JS_SRC_DIR)
+const findSourceDir = (root) => (isDir(rustJoin(root, 'src')) || !isDir(rustJoin(root, JS_SRC_DIR)) ? 'src' : JS_SRC_DIR)
 
 // `DappHardhatDirProvider`: `lib` and/or `node_modules`, whichever exist (`lib` when neither).
 function detectLibs(root) {
-  const nm = isDirPath(rustJoin(root, 'node_modules'))
-  const lib = isDirPath(rustJoin(root, 'lib'))
+  const nm = isDir(rustJoin(root, 'node_modules'))
+  const lib = isDir(rustJoin(root, 'lib'))
   if (!nm) return ['lib']
   return lib ? ['lib', 'node_modules'] : ['node_modules']
 }
@@ -535,15 +497,7 @@ function loadFoundryConfig(root, profile) {
   const { profiles, files } = readFoundryProfiles(rustJoin(root, FOUNDRY_TOML), profile)
   const dict = selectProfile(profiles, profile)
   const str = (k) => (typeof dict.get(k) === 'string' ? dict.get(k) : null)
-  let remappings = []
-  for (const s of stringList(dict.get('remappings')) ?? []) {
-    const r = parseRemapping(s)
-    if (r === null) {
-      remappings = null
-      break
-    }
-    remappings.push(r)
-  }
+  const remappings = (stringList(dict.get('remappings')) ?? []).map(parseRemapping)
   return {
     profiles,
     files,
@@ -551,7 +505,7 @@ function loadFoundryConfig(root, profile) {
     test: str('test') ?? 'test',
     script: str('script') ?? 'script',
     libs: stringList(dict.get('libs')) ?? detectLibs(root),
-    remappings,
+    remappings: remappings.includes(null) ? null : remappings,
     autoDetect: dict.get('auto_detect_remappings') !== false,
   }
 }
@@ -559,16 +513,16 @@ function loadFoundryConfig(root, profile) {
 // --- The remappings provider ----------------------------------------------------------------
 
 // `foundry_toml_dir_entries`: `dir` and its direct subdirs (symlinks resolved) that hold a
-// foundry.toml, as `{ canonical, path }`.
+// foundry.toml, as `{ canonical, path, isSymlink }`.
 function foundryTomlDirEntries(dir) {
   const out = []
-  const consider = (path) => {
+  const consider = (path, isSymlink) => {
+    if (!existsSync(rustJoin(path, FOUNDRY_TOML))) return
     const canonical = canonicalize(path)
-    if (canonical !== null && isDirPath(canonical) && pathExists(rustJoin(canonical, FOUNDRY_TOML))) out.push({ canonical, path })
+    if (canonical !== null) out.push({ canonical, path, isSymlink })
   }
-  if (!isDirPath(dir)) return out
-  consider(dir)
-  for (const e of listDir(dir)) if (e.isDir) consider(e.path)
+  consider(dir, isSymlinkPath(dir))
+  for (const e of listDir(dir)) if (e.isDir) consider(e.path, e.isSymlink)
   return out
 }
 
@@ -593,7 +547,7 @@ function rebaseNested(r, canonical, lexical) {
       }
       context = `/${parts.join('/')}`
     }
-    out.context = boundary && !context.endsWith('/') ? `${context}/` : context
+    out.context = boundary ? withTrailing(context) : context
   }
   return out
 }
@@ -618,6 +572,7 @@ function loadNestedConfig(canonical, profile) {
 // dependency (transitively, through each one's own libs) that is a Foundry project.
 function findNestedFoundryRemappings(root, libPaths, profile, files) {
   const canonicalRoot = canonicalize(root) ?? root
+  // A BTreeSet popped in (canonical, path) order.
   const pending = new Map()
   const addPending = (e) => pending.set(`${e.canonical}\0${e.path}`, e)
   for (const lib of libPaths) for (const e of foundryTomlDirEntries(rustJoin(root, lib))) addPending(e)
@@ -625,7 +580,11 @@ function findNestedFoundryRemappings(root, libPaths, profile, files) {
   const configs = new Map()
   const out = []
   while (pending.size > 0) {
-    const [key, entry] = [...pending].toSorted(([, a], [, b]) => cmpEntry(a, b))[0]
+    let key
+    let entry
+    for (const [k, e] of pending) {
+      if (entry === undefined || cmpEntry(e, entry) < 0) [key, entry] = [k, e]
+    }
     pending.delete(key)
     if (entry.canonical === canonicalRoot) continue
     if (!configs.has(entry.canonical)) {
@@ -638,16 +597,16 @@ function findNestedFoundryRemappings(root, libPaths, profile, files) {
     if (!config) continue
     for (const r of config.remappings) out.push([entry.path, rebaseNested(r, entry.canonical, entry.path), false])
     for (const r of config.fileRemappings) out.push([entry.path, fromRelative(toRelative(r, entry.path)), false])
-    if (!isSymlinkPath(entry.path) && !seen.has(entry.canonical)) {
+    if (!entry.isSymlink && !seen.has(entry.canonical)) {
       seen.add(entry.canonical)
       for (const lib of config.libs) {
-        for (const e of foundryTomlDirEntries(rustJoin(entry.path, lib))) if (!isSymlinkPath(e.path)) addPending(e)
+        for (const e of foundryTomlDirEntries(rustJoin(entry.path, lib))) if (!e.isSymlink) addPending(e)
       }
     }
     // A custom (or missing) source dir isn't auto-detected: forge synthesizes `<dep>/=<dep>/<src>/`.
     const standard = ['src', 'contracts', 'lib'].some((s) => pathEq(s, config.src))
     const name = fileName(entry.path)
-    if ((!standard || !isDirPath(rustJoin(entry.canonical, config.src))) && name !== null) {
+    if ((!standard || !isDir(rustJoin(entry.canonical, config.src))) && name !== null) {
       out.push([entry.path, { context: null, name: `${name}/`, path: withTrailing(rustJoin(entry.path, config.src)) }, true])
     }
   }
@@ -686,7 +645,7 @@ function contextualOverlays(authoritative, refinement) {
 // `expand_scoped_contextual_remapping`: a contextual `@scope/=<..>/node_modules/@scope/` becomes
 // one remapping per package in the scope.
 function expandScopedContextual(r) {
-  const scope = r.name.replace(/\/+$/u, '')
+  const scope = trimSlashes(r.name)
   if (!scope.startsWith('@') || fileName(r.path) !== scope || fileName(parentOf(r.path) ?? '') !== 'node_modules') return [r]
   const packages = listDir(r.path)
     .filter((e) => e.isDir)
@@ -695,19 +654,19 @@ function expandScopedContextual(r) {
   return packages.length === 0 ? [r] : packages
 }
 
-// Forge's closest-path choice per (context, alias): fewer components, then `src`, then path order.
-function insertClosest(mappings, context, key, path) {
-  if (!mappings.has(context)) mappings.set(context, new Map())
-  const m = mappings.get(context)
+// Forge's closest-path choice per alias: fewer components, then `src`, then path order.
+function insertClosest(m, key, path) {
   const existing = m.get(key)
-  const rank = (p) => [compCount(p), fileName(p) === SRC_DIR ? 0 : 1]
-  if (existing === undefined) {
+  const srcRank = (p) => (fileName(p) === SRC_DIR ? 0 : 1)
+  if (existing === undefined || (compCount(path) - compCount(existing) || srcRank(path) - srcRank(existing) || cmpPath(path, existing)) < 0) {
     m.set(key, path)
-    return
   }
-  const [a0, a1] = rank(path)
-  const [b0, b1] = rank(existing)
-  if (a0 - b0 < 0 || (a0 === b0 && (a1 - b1 < 0 || (a1 === b1 && cmpPath(path, existing) < 0)))) m.set(key, path)
+}
+
+// A refinement with the authoritative aliases it overlays, or nothing when one already covers it.
+const withOverlays = (authoritative, r) => {
+  const overlays = contextualOverlays(authoritative, r)
+  return overlays ? [...overlays, r] : []
 }
 
 // `RemappingsProvider::get_remappings`: the remappings in the order forge settles them.
@@ -724,69 +683,53 @@ function providerRemappings(root, { userRemappings, libs, autoDetect, profile, f
     auto.contextual.push(...found.contextual)
   }
 
-  const packageEntries = nested.filter(([, , pkg]) => pkg).map(([lib, r]) => [lib, r])
+  const packageEntries = nested.filter(([, , pkg]) => pkg)
   const safeAlias = (r) => !['lib/', 'src/', 'contracts/'].includes(r.name)
   const global = auto.global.map((r) => configuredAutoRemapping(r, packageEntries)).filter(safeAlias)
   const contextual = auto.contextual.map((r) => configuredAutoRemapping(r, packageEntries)).filter(safeAlias)
+  const detected = [...global, ...contextual]
 
   const targetsByAlias = new Map()
-  for (const r of [...global, ...contextual]) {
+  for (const r of detected) {
     if (!targetsByAlias.has(r.name)) targetsByAlias.set(r.name, new Set())
     targetsByAlias.get(r.name).add(pathKey(r.path))
   }
   const ambiguous = new Set([...targetsByAlias].filter(([, t]) => t.size > 1).map(([name]) => name))
 
-  const libRemappings = new Map()
-  const explicitContextual = []
-  for (const [, r] of nested) {
-    if (r.context === null) continue
-    const overlays = contextualOverlays(authoritativeUser, r)
-    if (overlays) explicitContextual.push(...overlays, r)
-  }
+  const explicitContextual = nested.filter(([, r]) => r.context !== null).flatMap(([, r]) => withOverlays(authoritativeUser, r))
   const authoritative = [...authoritativeUser, ...explicitContextual]
+  // Forge's per-(context, alias) closest paths; only global remappings ever reach it.
+  const closest = new Map()
   const contextualRemappings = []
   for (const [lib, r, isPackageEntry] of nested) {
     if (r.context !== null) continue
     // A dependency refining an auto-detected package root to its source dir: scope the refinement
     // to that dependency so root imports keep the broader mapping.
-    const refines = !isPackageEntry && [...global, ...contextual].some((a) => a.name === r.name && !pathEq(r.path, a.path)
-      && ((a.context !== null && pathEq(a.context, lib)) || (a.context === r.context && pathStartsWith(r.path, a.path))))
-    if (refines) {
-      const scoped = { ...r, context: `${lib}/` }
-      const overlays = contextualOverlays(authoritative, scoped)
-      if (overlays) contextualRemappings.push(...overlays, scoped)
-    }
-    insertClosest(libRemappings, r.context, r.name, r.path)
+    const refines = !isPackageEntry && detected.some((a) => a.name === r.name && !pathEq(r.path, a.path)
+      && ((a.context !== null && pathEq(a.context, lib)) || (a.context === null && pathStartsWith(r.path, a.path))))
+    if (refines) contextualRemappings.push(...withOverlays(authoritative, { ...r, context: `${lib}/` }))
+    insertClosest(closest, r.name, r.path)
   }
   for (const r of contextual.filter((c) => ambiguous.has(c.name)).flatMap(expandScopedContextual)) {
-    const overlays = contextualOverlays(authoritative, r)
-    if (overlays) contextualRemappings.push(...overlays, r)
+    contextualRemappings.push(...withOverlays(authoritative, r))
   }
-  contextualRemappings.sort(byContextDepth)
-  for (const r of global) insertClosest(libRemappings, r.context, r.name, r.path)
+  for (const r of global) insertClosest(closest, r.name, r.path)
 
   const explicit = new Set(all.remappings.map((r) => relKey(relativePreservingBoundary(r, root))))
-  explicitContextual.sort(byContextDepth)
-  for (const c of explicitContextual) {
+  for (const c of [...explicitContextual.toSorted(byContextDepth), ...contextualRemappings.toSorted(byContextDepth)]) {
     if (!explicit.has(relKey(relativePreservingBoundary(c, root)))) all.push(c)
   }
-  for (const c of contextualRemappings) {
-    if (!explicit.has(relKey(relativePreservingBoundary(c, root)))) all.push(c)
-  }
-  const cmpContext = (a, b) => (a === b ? 0 : a === null ? -1 : b === null ? 1 : cmpStr(a, b))
-  for (const [context, m] of [...libRemappings].toSorted(([a], [b]) => cmpContext(a, b))) {
-    for (const [name, path] of [...m].toSorted(([a], [b]) => cmpStr(a, b))) all.push({ context, name, path })
-  }
+  for (const [name, path] of [...closest].toSorted(([a], [b]) => cmpStr(a, b))) all.push({ context: null, name, path })
   return all.intoInner()
 }
 
 // The Foundry project at `baseDir`: what `forge build` would use. `remappings` are
 // `{ context, prefix, target }` relative to the root, in forge's order; `libs` the lib dirs;
-// `files` the config files read (project-relative, when inside the project); `src`/`test`/`script`
-// the input dirs. `env` supplies FOUNDRY_PROFILE and FOUNDRY_REMAPPINGS / DAPP_REMAPPINGS.
+// `files` the config files read (project-relative, when inside the project). `env` supplies
+// FOUNDRY_PROFILE and FOUNDRY_REMAPPINGS / DAPP_REMAPPINGS.
 export function foundryProject(baseDir, { env = process.env } = {}) {
   const root = toPosix(resolve(baseDir))
-  const profile = env.FOUNDRY_PROFILE || 'default'
+  const profile = foundryProfile(env)
   const config = loadFoundryConfig(root, profile)
   if (profile !== 'default' && !config.profiles.has(profile)) {
     console.warn(`[loader.solidity] FOUNDRY_PROFILE=${profile} is not a profile in foundry.toml; using [profile.default]`)
@@ -813,8 +756,8 @@ export function foundryProject(baseDir, { env = process.env } = {}) {
   const remappings = build.intoInner()
     .map((r) => parseRemapping(displayRelative(relativePreservingBoundary(r, root))))
     .filter(Boolean)
-    .map((r) => ({ context: r.context, prefix: withSlash(r.name), target: withSlash(r.path) }))
+    .map(toSolcRemapping)
 
   const relFiles = [...files].map((f) => stripPrefix(f, root)).filter((f) => f !== null && f !== '')
-  return { remappings, libs: config.libs, files: relFiles, src: config.src, test: config.test, script: config.script }
+  return { remappings, libs: config.libs, files: relFiles }
 }
