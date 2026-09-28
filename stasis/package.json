@@ -23,8 +23,8 @@
   "files": [
     "bin/stasis.js",
     "logo.svg",
-    "src/apis/npm/index.js",
     "src/apis/npm/semver.cjs",
+    "src/audit-corrections.js",
     "src/audit.js",
     "src/babel.js",
     "src/babel-worker.cjs",
@@ -56,7 +56,8 @@
     "src/rollup.js",
     "src/sbom.js",
     "src/scan.js",
-    "src/webpack.js"
+    "src/webpack.js",
+    "src/why.js"
   ],
   "engines": {
     "node": ">=24.14.0"
@@ -78,6 +79,7 @@
   "dependencies": {
     "@exodus/stasis-core": "1.0.0-beta.4",
     "@exodus/stasis-plugins": "1.0.0-beta.4",
+    "@preventive/upstream": "1.0.0-alpha.0",
     "oxc-parser": "^0.94.0"
   },
   "peerDependencies": {

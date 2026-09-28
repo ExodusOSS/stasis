@@ -1,7 +1,7 @@
 import { moduleFileKey } from '@exodus/stasis-core/util'
-import { advisories } from './apis/npm/index.js'
+import { advisories } from '@preventive/upstream/advisories.js'
+import { compareVersions } from '@preventive/upstream/semver.js'
 import { isEvidenceFile } from './audit-corrections.js'
-import semver from './apis/npm/semver.cjs'
 import { parseFile } from './parse.js'
 import { collectWhy } from './why.js'
 
@@ -40,7 +40,7 @@ export function collectPackages(files) {
       out.push({ name, version })
     }
   }
-  return out.toSorted((a, b) => a.name.localeCompare(b.name) || semver.compare(a.version, b.version))
+  return out.toSorted((a, b) => a.name.localeCompare(b.name) || compareVersions(a.version, b.version))
 }
 
 // Map each audited node_modules package (`name@version`) to the bundle consumers ("reasons") that
@@ -116,38 +116,25 @@ function reasonCell(pkg, affected, reasonsByPkg, whyByPkg, reasonFilter) {
   return consumers.toSorted(byConsumerOrder).join(', ')
 }
 
-export function flattenAdvisories(result, packages = [], reasonsByPkg = new Map(), whyByPkg = null, reasonFilter = null) {
-  const installed = new Map()
-  for (const { name, version } of packages) {
-    if (!installed.has(name)) installed.set(name, [])
-    installed.get(name).push(version)
-  }
+// `found` is what @preventive/upstream's advisories() answers: one row per advisory range, whose
+// `versions` are the audited versions it covers (never empty -- a range covering none is dropped
+// there, so the table and exit code reflect only real hits).
+export function flattenAdvisories(found, reasonsByPkg = new Map(), whyByPkg = null, reasonFilter = null) {
   const rows = []
-  for (const [pkg, list] of Object.entries(result)) {
-    if (!Array.isArray(list)) continue
-    const installedVersions = installed.get(pkg) ?? []
-    for (const adv of list) {
-      const range = adv.vulnerable_versions ?? ''
-      const affected = range
-        ? installedVersions.filter((v) => semver.satisfies(v, range))
-        : installedVersions
-      // npm sometimes returns advisories whose range matches none of the versions we submitted; drop
-      // them so the table and exit code reflect only real hits.
-      if (installedVersions.length > 0 && affected.length === 0) continue
-      const reason = reasonCell(pkg, affected, reasonsByPkg, whyByPkg, reasonFilter)
-      // --reason keeps only advisories tied to that consumer: once the cell is
-      // narrowed to it, an empty cell means this package isn't related to it.
-      if (reasonFilter && reason === '') continue
-      rows.push({
-        package: pkg,
-        installed: affected.join(', '),
-        vulnerable: range,
-        severity: adv.severity ?? '',
-        title: adv.title ?? '',
-        url: adv.url ?? '',
-        reason,
-      })
-    }
+  for (const adv of found) {
+    const reason = reasonCell(adv.name, adv.versions, reasonsByPkg, whyByPkg, reasonFilter)
+    // --reason keeps only advisories tied to that consumer: once the cell is
+    // narrowed to it, an empty cell means this package isn't related to it.
+    if (reasonFilter && reason === '') continue
+    rows.push({
+      package: adv.name,
+      installed: adv.versions.join(', '),
+      vulnerable: adv.range ?? '',
+      severity: adv.severity ?? '',
+      title: adv.title ?? '',
+      id: adv.id,
+      reason,
+    })
   }
   rows.sort((a, b) => {
     const sa = SEVERITY_ORDER[a.severity] ?? 99
@@ -199,16 +186,25 @@ export function formatTable(rows, columns, { multiline = [] } = {}) {
   ].join('\n')
 }
 
-export async function audit(files, { why = false, whyDeep = false, whyFull = false, reason = null } = {}) {
+// `repoAdvisories` and `github` (a @preventive/upstream/github.js client) go to advisories() as they are.
+export async function audit(files, { why = false, whyDeep = false, whyFull = false, reason = null, repoAdvisories = false, github } = {}) {
   // --why-deep and --why-full imply --why. Deep keeps every chain instead of the
   // default pruning of chains whose full suffix is already a chain (see
   // collectWhy/dropSuffixed); full spells chains out with no `...` collapse.
   why = why || whyDeep || whyFull
   const packages = collectPackages(files)
   if (packages.length === 0) {
-    return { packages, advisories: {}, rows: [], why }
+    return { packages, advisories: [], rows: [], why }
   }
-  const result = await advisories(packages)
+  let result
+  try {
+    result = await advisories(packages.map(({ name, version }) => ({ ecosystem: 'npm', name, versions: [version] })), { repoAdvisories, github })
+  } catch (cause) {
+    // Refused input or a malformed answer is an assertion that says so itself; a transport or
+    // HTTP failure gets the context of which request it was.
+    if (cause?.code === 'ERR_ASSERTION') throw cause
+    throw new Error(`${repoAdvisories ? 'npm/GitHub' : 'npm'} advisories request failed: ${cause.message}`, { cause })
+  }
   // `--why` REPLACES the consumer list with per-consumer import paths, so only
   // one of the two is computed. Restrict the (potentially expensive) path search
   // to the packages that actually carry an advisory. `reason` (--reason) narrows
@@ -216,15 +212,10 @@ export async function audit(files, { why = false, whyDeep = false, whyFull = fal
   // to a single consumer, dropping advisories unrelated to it.
   let rows
   if (why) {
-    const vulnerable = new Set(
-      Object.entries(result).filter(([, v]) => Array.isArray(v) && v.length > 0).map(([name]) => name)
-    )
-    const targetKeys = new Set(
-      packages.filter((p) => vulnerable.has(p.name)).map((p) => `${p.name}@${p.version}`)
-    )
-    rows = flattenAdvisories(result, packages, undefined, collectWhy(files, targetKeys, reason, { deep: whyDeep, full: whyFull }), reason)
+    const targetKeys = new Set(result.flatMap((adv) => adv.versions.map((v) => `${adv.name}@${v}`)))
+    rows = flattenAdvisories(result, undefined, collectWhy(files, targetKeys, reason, { deep: whyDeep, full: whyFull }), reason)
   } else {
-    rows = flattenAdvisories(result, packages, collectReasons(files), null, reason)
+    rows = flattenAdvisories(result, collectReasons(files), null, reason)
   }
   return { packages, advisories: result, rows, why, whyDeep, whyFull, reason }
 }
@@ -239,7 +230,7 @@ export function printAuditReport({ packages, rows, why = false, reason = null },
     err.write('No advisories found\n')
     return
   }
-  const columns = ['severity', 'package', 'installed', 'vulnerable', 'title', 'url']
+  const columns = ['severity', 'package', 'installed', 'vulnerable', 'title', 'id']
   // Surface the reason column only when some advisory has provenance -- bundle
   // consumers, or (with --why) import paths. Under --reason WITHOUT --why every
   // cell is just the filter value repeated, so drop the column then; --why still

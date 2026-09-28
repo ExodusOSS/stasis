@@ -81,6 +81,7 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis audit --why-deep app.stasis.code.br` | like `--why`, but keep those longer chains too (every path, shared tails collapsed to `a -> b -> ... -> d`) |
 | `stasis audit --why-full app.stasis.code.br` | like `--why`, but spell every chain out with no `...` collapse (combine with `--why-deep` for the complete raw listing) |
 | `stasis audit --reason=run app.stasis.code.br` | show only advisories related to one consumer (`run`); with `--why`, keep only that consumer's chains |
+| `GITHUB_TOKEN=... stasis audit --repo-advisories stasis.lock.json` | also ask each dependency's GitHub repository for the advisories its maintainers published there, which npm's database has only once GitHub reviews them; needs a GitHub token in `GITHUB_TOKEN` |
 | `stasis sbom --format=spdx stasis.lock.json` | export an SPDX SBOM for a lockfile or bundle |
 | `stasis sbom --format=cyclonedx app.stasis.code.br` | export a CycloneDX SBOM for a lockfile or bundle |
 
