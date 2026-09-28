@@ -505,7 +505,7 @@ describe('stasis run --import passthrough (spawned, concurrent)', { concurrency:
     child.stderr.on('data', (d) => stderrChunks.push(d))
     const [status] = await once(child, 'close')
     t.assert.equal(status, 0, `stderr: ${Buffer.concat(stderrChunks)}`)
-    t.assert.match(Buffer.concat(stderrChunks).toString(), /import: \[ '\.\/preload\.mjs' \]/)
+    t.assert.match(stripVTControlCharacters(Buffer.concat(stderrChunks).toString()), /import: \[ '\.\/preload\.mjs' \]/)
     const lock = await readLock(tmp)
     t.assert.deepEqual(Object.keys(lock.sources['.'].files).toSorted(), ['src/entry.mjs', 'src/shared.mjs'])
   }))
