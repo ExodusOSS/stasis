@@ -499,6 +499,24 @@ test('printAuditReport keeps the reason column under --reason WITH --why', (t) =
   t.assert.match(text, /run: a -> foo/u)
 })
 
+test('printAuditReport summarizes the alerts by severity, most severe first', (t) => {
+  const err = []
+  const row = (severity) => ({ severity, package: 'foo', installed: '1.0.0', vulnerable: '*', title: 't', id: 'GHSA-aaaa-bbbb-cccc', reason: '' })
+  printAuditReport(
+    { packages: [{ name: 'foo', version: '1.0.0' }, { name: 'bar', version: '1.0.0' }, { name: 'baz', version: '1.0.0' }], rows: [row('critical'), row('high'), row('high'), row('low'), row('')] },
+    { out: { write: () => {} }, err: { write: (s) => err.push(s) } }
+  )
+  t.assert.equal(err.join(''), 'Scanned 3 packages: 5 alerts, 1 critical, 2 high, 1 low, 1 unrated\n')
+})
+
+test('printAuditReport reports 0 alerts and prints no table', (t) => {
+  const out = []
+  const err = []
+  printAuditReport({ packages: [{ name: 'foo', version: '1.0.0' }], rows: [] }, { out: { write: (s) => out.push(s) }, err: { write: (s) => err.push(s) } })
+  t.assert.equal(err.join(''), 'Scanned 1 package: 0 alerts\n')
+  t.assert.deepEqual(out, [])
+})
+
 test('printAuditReport hints when nothing was scanned', (t) => {
   const lines = []
   const err = { write: (s) => lines.push(s) }

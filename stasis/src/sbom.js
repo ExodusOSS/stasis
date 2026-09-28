@@ -1,4 +1,4 @@
-import semver from './apis/npm/semver.cjs'
+import { compareVersions, valid } from '@preventive/upstream/semver.js'
 import pkg from '../package.json' with { type: 'json' }
 
 // Derive an SPDX 2.3 or CycloneDX 1.5 SBOM from already-parsed stasis artifacts (`Bundle`/`Lockfile`).
@@ -68,7 +68,7 @@ function compareComponents(a, b) {
   // A missing version sorts first, as '' (comparing raw undefined would be order-unstable).
   const [av, bv] = [a.version ?? '', b.version ?? '']
   if (av !== bv) {
-    if (semver.valid(av) && semver.valid(bv)) return semver.compare(av, bv)
+    if (valid(av) && valid(bv)) return compareVersions(av, bv)
     return av < bv ? -1 : 1
   }
   return a.ecosystem < b.ecosystem ? -1 : a.ecosystem > b.ecosystem ? 1 : 0

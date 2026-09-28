@@ -220,16 +220,21 @@ export async function audit(files, { why = false, whyDeep = false, whyFull = fal
   return { packages, advisories: result, rows, why, whyDeep, whyFull, reason }
 }
 
+// `10 alerts, 1 critical, 5 high, 3 moderate, 1 low`: the rows, then each severity present, in the
+// rows' own order (most severe first); a row without one is `unrated`, so the parts add up.
+function alertStats(rows) {
+  const bySeverity = Map.groupBy(rows, (r) => r.severity || 'unrated')
+  return [`${rows.length} alert${rows.length === 1 ? '' : 's'}`, ...[...bySeverity].map(([severity, list]) => `${list.length} ${severity}`)].join(', ')
+}
+
 export function printAuditReport({ packages, rows, why = false, reason = null }, { out = process.stdout, err = process.stderr } = {}) {
-  err.write(`Scanned ${packages.length} package${packages.length === 1 ? '' : 's'}\n`)
+  const scanned = `Scanned ${packages.length} package${packages.length === 1 ? '' : 's'}`
   if (packages.length === 0) {
-    err.write('No node_modules entries found in the input files\n')
+    err.write(`${scanned}\nNo node_modules entries found in the input files\n`)
     return
   }
-  if (rows.length === 0) {
-    err.write('No advisories found\n')
-    return
-  }
+  err.write(`${scanned}: ${alertStats(rows)}\n`)
+  if (rows.length === 0) return
   const columns = ['severity', 'package', 'installed', 'vulnerable', 'title', 'id']
   // Surface the reason column only when some advisory has provenance -- bundle
   // consumers, or (with --why) import paths. Under --reason WITHOUT --why every

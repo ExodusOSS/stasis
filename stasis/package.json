@@ -23,7 +23,6 @@
   "files": [
     "bin/stasis.js",
     "logo.svg",
-    "src/apis/npm/semver.cjs",
     "src/audit-corrections.js",
     "src/audit.js",
     "src/babel.js",
