@@ -10,7 +10,7 @@
   "scripts": {
     "lint": "oxlint",
     "test": "node --run test:coherence",
-    "test:coherence": "node --test"
+    "test:coherence": "exodus-test"
   },
   "repository": {
     "type": "git",
@@ -26,6 +26,7 @@
     "@exodus/stasis": "workspace:*",
     "@exodus/stasis-core": "workspace:*",
     "@exodus/stasis-plugins": "workspace:*",
+    "@exodus/test": "1.0.0-rc.116",
     "babel-plugin-module-resolver": "^3.2.0",
     "esbuild": "^0.27.3",
     "file-loader": "^6.2.0",

@@ -9,6 +9,11 @@ allowBuilds:
 
 enableGlobalVirtualStore: false
 
+# Keep bin shims (e.g. exodus-test) from exporting NODE_PATH: it leaks into every stasis child the
+# tests spawn, where CJS bare specifiers then fall back to hoisted .pnpm/node_modules packages outside
+# the project root.
+extendNodePath: false
+
 ignoreWorkspaceRootCheck: true
 
 linkWorkspacePackages: true
