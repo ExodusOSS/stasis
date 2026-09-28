@@ -23,6 +23,7 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
+import { redactFoundryToml, scrubUrlCredentials } from '../loaders/foundry.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -237,10 +238,12 @@ function assembleCodeBundle({
 }
 
 // The build-description files of a Solidity bundle (--manifests), as Map<path, text>: `configFiles`
-// (what discoverSolidityConfig read) plus the SOLIDITY_*_MANIFESTS that exist, for the root and for
-// each package dir `classifyDep`/package.json places a bundled source in. Files inside the root only.
+// (what discoverSolidityConfig read, when named `*.toml`/`*.txt`) plus the SOLIDITY_*_MANIFESTS
+// that exist, for the root and for each package dir `classifyDep`/package.json places a bundled
+// source in. Files inside the root only. Credentials stay behind: a `.toml` config loses its RPC
+// endpoint and Etherscan tables and secret-named keys, and every file its URLs' user info.
 function solidityManifests(baseDir, sources, configFiles, classifyDep) {
-  const wanted = new Set([...configFiles, ...SOLIDITY_ROOT_MANIFESTS])
+  const wanted = new Set([...configFiles.filter((f) => f.endsWith('.toml') || f.endsWith('.txt')), ...SOLIDITY_ROOT_MANIFESTS])
   const dirs = new Set()
   for (const path of sources.keys()) {
     const dep = classifyDep(path)
@@ -264,17 +267,24 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep) {
       throw err
     }
     if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
-    out.set(rel, buf.toString('utf8'))
+    const text = buf.toString('utf8')
+    out.set(rel, rel.endsWith('.toml') ? redactFoundryToml(text) : scrubUrlCredentials(text))
   }
   return out
 }
 
+// An entry `stasis bundle` takes for a directory: one that is, or an extensionless path that
+// doesn't exist (a project without `script/` still bundles with `src test script`).
+const isDirEntry = (abs) => isDir(abs) || (extname(abs) === '' && !existsSync(abs))
+
 // Build an in-memory Bundle from entry .sol files and directories (a directory stands for the .sol
-// files under it, as forge's src/test/script dirs and Hardhat's contracts dir do). Imports resolve
-// through the remappings the project's build uses (discoverSolidityConfig: forge's discovery for a
-// Foundry project); `mappingFile` (foundry.toml/remappings.txt) pins them to exactly what it lists.
-// Config files are read, and bundled only with `manifests` (see solidityManifests). `env` supplies
-// FOUNDRY_PROFILE / FOUNDRY_REMAPPINGS.
+// files under it, as forge's src/test/script dirs and Hardhat's contracts dir do; a missing or
+// empty one is skipped). Imports resolve through the remappings the project's build uses
+// (discoverSolidityConfig: forge's discovery for a Foundry project); `mappingFile`
+// (foundry.toml/remappings.txt) pins them to exactly what it lists. An import is refused when it
+// reaches a non-.sol file or leaves the root, or when a dependency's reaches the project's own
+// files. Config files are read, and bundled only with `manifests` (see solidityManifests). `env`
+// supplies FOUNDRY_PROFILE / FOUNDRY_REMAPPINGS, reported when they apply.
 export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappingFile, manifests = false, env = process.env } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildSolidityBundle: at least one entry .sol file or directory is required')
@@ -283,21 +293,23 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
   for (const e of normalized) {
-    if (!e.endsWith('.sol') && !isDir(join(baseDir, e))) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
+    if (!e.endsWith('.sol') && !isDirEntry(join(baseDir, e))) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
   }
   const expanded = expandSolidityEntries(baseDir, normalized)
 
-  const { remappings, libs, files: configFiles } = await discoverSolidityConfig(baseDir, { mappingFile, env })
-  const sources = await collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs })
-  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs })
+  const { remappings, libs, dependencyDirs, files: configFiles, envUsed } = await discoverSolidityConfig(baseDir, { mappingFile, env })
+  // The bundle doesn't record the environment, so say when it shaped the resolution.
+  if (envUsed.length > 0) console.warn(`[stasis] Solidity imports resolved with ${envUsed.join(', ')} from the environment`)
+  const sources = await collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs, dependencyDirs })
+  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs, dependencyDirs })
 
   // Bundles must be self-contained: fail on a missing entry or unresolved import.
   const issues = []
   for (const entry of expanded) {
     if (!sources.has(entry)) issues.push(`Missing entry: ${entry}`)
   }
-  for (const { spec, from } of missing) {
-    issues.push(`Unresolved import: ${spec} from ${from}`)
+  for (const { spec, from, reason } of missing) {
+    issues.push(`Unresolved import: ${spec} from ${from}${reason ? ` (refused: ${reason})` : ''}`)
   }
   if (issues.length > 0) {
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
@@ -988,11 +1000,13 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
-  const dirs = entries.filter((e) => isDir(resolve(cwd, e)))
+  const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e)))
   const files = entries.filter((e) => !dirs.includes(e))
   let kind
   if (files.every((e) => e.endsWith('.sol'))) kind = 'sol'
   else if (dirs.length > 0) {
+    const missing = dirs.find((e) => !existsSync(resolve(cwd, e)))
+    if (missing !== undefined) throw new Error(`${name}: no such file or directory: ${missing}`)
     throw new Error(`${name}: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirs[0]}`)
   } else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
   else if (entries.every((e) => JS_EXTS.has(extname(e)))) kind = 'js'
@@ -1101,9 +1115,9 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
 // (--mapping|--manifests/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow|--typescript/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), entries, mappingFile, manifests = false, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false } = {}) {
+export async function buildBundle({ cwd = process.cwd(), env = process.env, entries, mappingFile, manifests = false, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false } = {}) {
   const kind = classifyEntries('buildBundle', { cwd, entries, mappingFile, manifests, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
-  if (kind === 'sol') return buildSolidityBundle({ cwd, entries, mappingFile, manifests })
+  if (kind === 'sol') return buildSolidityBundle({ cwd, env, entries, mappingFile, manifests })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
   if (kind === 'rust') return buildRustBundle({ cwd, entries, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
@@ -1140,7 +1154,7 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile, manifests = false, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false, brotliQuality, add = false } = {}) {
+export async function bundleCommand({ cwd = process.cwd(), env = process.env, entries, mappingFile, manifests = false, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false, brotliQuality, add = false } = {}) {
   const kind = classifyEntries('bundleCommand', { cwd, entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
@@ -1178,7 +1192,7 @@ export async function bundleCommand({ cwd = process.cwd(), entries, mappingFile,
     bundle = state.sourceBundle.withReason('bundle')
     lockData = state.lockData
   } else {
-    bundle = await buildBundle({ cwd, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
+    bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   }
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.

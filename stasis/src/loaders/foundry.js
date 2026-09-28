@@ -153,8 +153,9 @@ const withSlash = (s) => (s.endsWith('/') || s.endsWith('.sol') ? s : `${s}/`)
 // `forge-std=lib/forge-std/src` is `forge-std/=lib/forge-std/src/`.
 export const toSolcRemapping = (r) => ({ context: r.context, prefix: withSlash(r.name), target: withSlash(r.path) })
 
-// The profile forge selects: FOUNDRY_PROFILE, else `default`.
-export const foundryProfile = (env) => env.FOUNDRY_PROFILE || 'default'
+// The profile forge selects: FOUNDRY_PROFILE, else `default`. Profile names are case-insensitive
+// (figment's `Profile`), so they are compared lowercased.
+export const foundryProfile = (env) => (env.FOUNDRY_PROFILE || 'default').toLowerCase()
 
 // `RelativeRemappingPathBuf::with_root`.
 function withRoot(parent, path) {
@@ -397,26 +398,48 @@ export function findRemappingsWithContext(dir) {
 
 const snakeCase = (k) => k.replaceAll(/([a-z0-9])([A-Z])/gu, '$1_$2').replaceAll('-', '_').toLowerCase()
 
-// foundry.toml -> Map<profile, Map<key, value>> from its `[profile.<name>]` tables (keys
-// snake_cased as forge does); standalone sections (`[fmt]`, `[rpc_endpoints]`, ...) and sub-tables
-// other than `extends` are skipped.
+// Top-level tables that are sections of their own, not (legacy) profiles (`Config::STANDALONE_SECTIONS`).
+const STANDALONE_SECTIONS = new Set([
+  'profile', 'external', 'rpc_endpoints', 'etherscan', 'fmt', 'lint', 'doc', 'fuzz', 'invariant', 'symbolic',
+  'coverage', 'mutation', 'tracing', 'labels', 'dependencies', 'soldeer', 'vyper', 'bind_json',
+])
+
+// foundry.toml -> `{ profiles, topLevel }`. `profiles` is Map<profile, Map<key, value>> (profile
+// names lowercased, keys snake_cased as forge does) from the `[profile.<name>]` tables and the
+// legacy top-level `[<name>]` ones forge still reads, the former winning key by key; sub-tables
+// other than `extends` are skipped. `topLevel` holds keys set outside any table (forge rejects
+// those; a `--mapping` file may list its `remappings` there).
 function parseFoundryToml(text) {
-  const profiles = new Map()
-  for (const { table, key, value } of tomlEntries(text)) {
-    const path = [...(table ? table.split('.') : []), ...(key === null ? [] : key.split('.'))].map((s) => s.trim())
-    if (path[0] !== 'profile' || path.length < 2) continue
-    if (!profiles.has(path[1])) profiles.set(path[1], new Map())
-    if (path.length < 3 || key === null) continue
-    const dict = profiles.get(path[1])
-    const k = snakeCase(path[2])
-    if (path.length === 3) {
+  const current = new Map()
+  const legacy = new Map()
+  const topLevel = new Map()
+  const dictOf = (map, name) => map.get(name) ?? map.set(name, new Map()).get(name)
+  for (const { path, header, value } of tomlEntries(text)) {
+    let map
+    let rest
+    if (path[0] === 'profile' && path.length >= 2) {
+      map = current
+      rest = path.slice(2)
+    } else if (path.length >= (header ? 1 : 2) && !STANDALONE_SECTIONS.has(path[0])) {
+      map = legacy
+      rest = path.slice(1)
+    } else {
+      if (!header && path.length === 1) topLevel.set(snakeCase(path[0]), value)
+      continue
+    }
+    const dict = dictOf(map, (map === current ? path[1] : path[0]).toLowerCase())
+    if (header || rest.length === 0) continue
+    const k = snakeCase(rest[0])
+    if (rest.length === 1) {
       dict.set(k, value)
-    } else if (k === 'extends' && path.length === 4) {
+    } else if (k === 'extends' && rest.length === 2) {
       const ext = dict.get('extends')
-      dict.set('extends', { ...(ext && typeof ext === 'object' ? ext : {}), [path[3]]: value })
+      dict.set('extends', { ...(ext && typeof ext === 'object' ? ext : {}), [rest[1]]: value })
     }
   }
-  return profiles
+  const profiles = new Map([...legacy].map(([name, dict]) => [name, new Map(dict)]))
+  for (const [name, dict] of current) profiles.set(name, new Map([...(profiles.get(name) ?? []), ...dict]))
+  return { profiles, topLevel }
 }
 
 // Figment's merge of an `extends` base under the local file: local keys win, and with the
@@ -435,20 +458,25 @@ function mergeExtended(base, local, strategy) {
 }
 
 // A foundry.toml's profiles, with the selected profile's `extends` base merged in (forge's
-// `TomlFileProvider`). `files` lists what was read. Throws where forge refuses the config.
-function readFoundryProfiles(file, profile) {
+// `TomlFileProvider`). `files` lists what was read; `topLevel` is the file's own (see
+// parseFoundryToml). Throws where forge refuses the config, and where `confineTo` (a dependency's
+// real root) doesn't hold the base: a dependency's config may not read the project's files.
+function readFoundryProfiles(file, profile, { confineTo } = {}) {
   const text = readFileOrNull(file)
-  if (text === null) return { profiles: new Map(), files: [] }
-  let profiles = parseFoundryToml(text)
+  if (text === null) return { profiles: new Map(), topLevel: new Map(), files: [] }
+  let { profiles, topLevel } = parseFoundryToml(text)
   const files = [file]
   const ext = profiles.get(profile)?.get('extends')
   const extPath = typeof ext === 'string' ? ext : ext?.path
   if (typeof extPath === 'string') {
     const strategy = (typeof ext === 'object' && typeof ext.strategy === 'string') ? ext.strategy : 'extend-arrays'
     const baseFile = toPosix(resolve(posix.dirname(file), extPath))
+    if (confineTo !== undefined && !pathStartsWith(canonicalize(baseFile) ?? baseFile, confineTo)) {
+      throw new Error(`${file}: refusing to extend ${extPath}, which lies outside the dependency`)
+    }
     const baseText = readFileOrNull(baseFile)
     if (baseText === null) throw new Error(`${file}: the inherited config file does not exist: ${extPath}`)
-    const base = parseFoundryToml(baseText)
+    const base = parseFoundryToml(baseText).profiles
     if (base.get(profile)?.has('extends')) {
       throw new Error(`${file}: nested inheritance is not allowed (${extPath} has an 'extends' field in profile '${profile}')`)
     }
@@ -459,7 +487,7 @@ function readFoundryProfiles(file, profile) {
     profiles = mergeExtended(base, profiles, strategy)
     files.push(baseFile)
   }
-  return { profiles, files }
+  return { profiles, topLevel, files }
 }
 
 // `[profile.default]` overlaid with the selected profile (a missing selected profile falls back to
@@ -470,11 +498,21 @@ function selectProfile(profiles, profile) {
   return dict
 }
 
-// A foundry.toml text's own `remappings` for `profile` (`[profile.default]` overlaid by it), as
-// written: `--mapping=foundry.toml` takes these and nothing else.
+// The `remappings` a foundry.toml's profiles set for `profile` (`[profile.default]` overlaid by
+// it), else the file's top-level `remappings` (a mapping file written for stasis), as written.
+const profileRemappings = ({ profiles, topLevel }, profile) =>
+  (stringList(selectProfile(profiles, profile).get('remappings')) ?? stringList(topLevel.get('remappings')) ?? []).map(parseRemapping).filter(Boolean)
+
+// A foundry.toml text's own remappings for `profile` (see profileRemappings).
 export function foundryTomlRemappings(text, profile = 'default') {
-  const dict = selectProfile(parseFoundryToml(text), profile)
-  return (stringList(dict.get('remappings')) ?? []).map(parseRemapping).filter(Boolean)
+  return profileRemappings(parseFoundryToml(text), profile)
+}
+
+// The same for a foundry.toml file, with its `extends` base: what `--mapping=foundry.toml` takes.
+// `files` lists what was read.
+export function readFoundryTomlRemappings(file, profile = 'default') {
+  const read = readFoundryProfiles(toPosix(resolve(file)), profile)
+  return { remappings: profileRemappings(read, profile), files: read.files }
 }
 
 // `ProjectPathsConfig::find_source_dir`: `src` unless only `contracts` exists.
@@ -492,9 +530,10 @@ const stringList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'stri
 
 // The selected profile's settings for a Foundry project at `root` (absolute POSIX), defaults
 // filled in the way forge fills them. `remappings` are the profile's own, unnormalized. Null
-// `remappings` means one didn't parse (forge rejects such a config).
-function loadFoundryConfig(root, profile) {
-  const { profiles, files } = readFoundryProfiles(rustJoin(root, FOUNDRY_TOML), profile)
+// `remappings` means one didn't parse (forge rejects such a config). `confineTo`: see
+// readFoundryProfiles.
+function loadFoundryConfig(root, profile, { confineTo } = {}) {
+  const { profiles, files } = readFoundryProfiles(rustJoin(root, FOUNDRY_TOML), profile, { confineTo })
   const dict = selectProfile(profiles, profile)
   const str = (k) => (typeof dict.get(k) === 'string' ? dict.get(k) : null)
   const remappings = (stringList(dict.get('remappings')) ?? []).map(parseRemapping)
@@ -553,9 +592,16 @@ function rebaseNested(r, canonical, lexical) {
 }
 
 // A dependency's config as forge's `load_nested_config` reads it: remappings rebased onto its
-// canonical root, its remappings.txt, its src and libs. Null when forge would reject the config.
+// canonical root, its remappings.txt, its src and libs. Null when forge would reject the config,
+// or when its `extends` reaches outside the dependency (warned).
 function loadNestedConfig(canonical, profile) {
-  const config = loadFoundryConfig(canonical, profile)
+  let config
+  try {
+    config = loadFoundryConfig(canonical, profile, { confineTo: canonical })
+  } catch (err) {
+    console.warn(`[loader.solidity] Skipping a dependency's config: ${err.message}`)
+    return null
+  }
   if (config.remappings === null) return null
   const text = readFileOrNull(rustJoin(canonical, REMAPPINGS_TXT))
   return {
@@ -723,10 +769,17 @@ function providerRemappings(root, { userRemappings, libs, autoDetect, profile, f
   return all.intoInner()
 }
 
+// The lib dirs `forge build` uses for the Foundry project at `baseDir` (its selected profile's
+// `libs`, else the detected ones).
+export function foundryLibs(baseDir, { env = process.env } = {}) {
+  return loadFoundryConfig(toPosix(resolve(baseDir)), foundryProfile(env)).libs
+}
+
 // The Foundry project at `baseDir`: what `forge build` would use. `remappings` are
 // `{ context, prefix, target }` relative to the root, in forge's order; `libs` the lib dirs;
-// `files` the config files read (project-relative, when inside the project). `env` supplies
-// FOUNDRY_PROFILE and FOUNDRY_REMAPPINGS / DAPP_REMAPPINGS.
+// `files` the config files read (project-relative, when inside the project); `envUsed` the
+// environment variables that shaped them. `env` supplies FOUNDRY_PROFILE and FOUNDRY_REMAPPINGS /
+// DAPP_REMAPPINGS.
 export function foundryProject(baseDir, { env = process.env } = {}) {
   const root = toPosix(resolve(baseDir))
   const profile = foundryProfile(env)
@@ -759,5 +812,37 @@ export function foundryProject(baseDir, { env = process.env } = {}) {
     .map(toSolcRemapping)
 
   const relFiles = [...files].map((f) => stripPrefix(f, root)).filter((f) => f !== null && f !== '')
-  return { remappings, libs: config.libs, files: relFiles }
+  const envUsed = [...(env.FOUNDRY_PROFILE ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []), ...(envName === null ? [] : [envName])]
+  return { remappings, libs: config.libs, files: relFiles, envUsed }
+}
+
+// --- Carrying configs (`--manifests`) -------------------------------------------------------
+
+// What in a foundry.toml holds credentials rather than build settings: the RPC endpoint and
+// Etherscan tables (provider URLs embed API keys), wherever they sit, and keys named like one.
+const SECRET_TABLES = new Set(['rpc_endpoints', 'etherscan'])
+const SECRET_KEY_RE = /^(?:eth_rpc_url|eth_rpc_jwt|eth_rpc_headers|fork_url)$|(?:^|_)(?:api_key|key|secret|token|password|passphrase|mnemonic|private_key|jwt)$/u
+
+// `scheme://user:password@host` or `scheme://token@host` -> `scheme://host`, anywhere in a text.
+export const scrubUrlCredentials = (text) => text.replaceAll(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@"'<>]+@/giu, '$1')
+
+// A foundry.toml without its credentials: a SECRET_TABLES table goes whole (every line up to the
+// next header), a pair under one or keyed like a secret goes line for line, and URLs lose their
+// user info. Everything else is kept verbatim.
+export function redactFoundryToml(text) {
+  const lines = text.split('\n')
+  const entries = [...tomlEntries(text)]
+  const drop = new Set()
+  const isSecretTable = (segs) => segs.some((seg) => SECRET_TABLES.has(seg))
+  entries.forEach((e, idx) => {
+    const segs = e.path.map(snakeCase)
+    if (e.header) {
+      if (!isSecretTable(segs)) return
+      const next = entries.slice(idx + 1).find((x) => x.header)
+      for (let i = e.first; i < (next ? next.first : lines.length); i++) drop.add(i)
+    } else if (isSecretTable(segs) || SECRET_KEY_RE.test(segs.at(-1))) {
+      for (let i = e.first; i <= e.last; i++) drop.add(i)
+    }
+  })
+  return scrubUrlCredentials(lines.filter((_, i) => !drop.has(i)).join('\n'))
 }
