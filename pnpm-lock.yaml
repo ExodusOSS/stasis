@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@exodus/test@1.0.0-rc.116':
+    hash: 91700ea042ce1ab37dd135b5344f098bb4c862d12dd9cd2c053bc006aaa5be94
+    path: patches/@exodus__test@1.0.0-rc.116.patch
+
 importers:
 
   .:
@@ -31,7 +36,7 @@ importers:
         version: link:stasis-plugins
       '@exodus/test':
         specifier: 1.0.0-rc.116
-        version: 1.0.0-rc.116
+        version: 1.0.0-rc.116(patch_hash=91700ea042ce1ab37dd135b5344f098bb4c862d12dd9cd2c053bc006aaa5be94)
       babel-plugin-module-resolver:
         specifier: ^3.2.0
         version: 3.2.0
@@ -2685,7 +2690,7 @@ snapshots:
 
   '@exodus/bytes@1.15.0': {}
 
-  '@exodus/test@1.0.0-rc.116': {}
+  '@exodus/test@1.0.0-rc.116(patch_hash=91700ea042ce1ab37dd135b5344f098bb4c862d12dd9cd2c053bc006aaa5be94)': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
