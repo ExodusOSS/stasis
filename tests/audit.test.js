@@ -338,16 +338,15 @@ test('collectReasons unions reasons across multiple files', withTmp((t, tmp) => 
   t.assert.deepEqual([...reasons.get('foo@2.0.0')].toSorted(), ['run', 'webpack'])
 }))
 
+// A row as @preventive/upstream's advisories() answers it.
+const found = (name, versions, fields = {}) => ({ ecosystem: 'npm', name, source: 'registry', id: 'GHSA-aaaa-bbbb-cccc', aliases: [], cwe: [], range: '*', versions, ...fields })
+
 test('flattenAdvisories sorts by severity then package', (t) => {
-  const result = {
-    foo: [
-      { id: 1, severity: 'low', title: 't1', url: 'u1', vulnerable_versions: '<2' },
-      { id: 2, severity: 'critical', title: 't2', url: 'u2', vulnerable_versions: '<2' },
-    ],
-    bar: [
-      { id: 3, severity: 'critical', title: 'aaa', url: 'u3', vulnerable_versions: '<5' },
-    ],
-  }
+  const result = [
+    found('bar', ['1.0.0'], { severity: 'critical', title: 'aaa', range: '<5' }),
+    found('foo', ['1.0.0'], { severity: 'low', title: 't1', range: '<2' }),
+    found('foo', ['1.0.0'], { severity: 'critical', title: 't2', range: '<2' }),
+  ]
   const rows = flattenAdvisories(result)
   t.assert.deepEqual(rows.map((r) => [r.severity, r.package, r.title]), [
     ['critical', 'bar', 'aaa'],
@@ -356,96 +355,67 @@ test('flattenAdvisories sorts by severity then package', (t) => {
   ])
 })
 
-test('flattenAdvisories joins installed versions matching vulnerable_versions', (t) => {
-  const packages = [
-    { name: 'foo', version: '1.0.0' },
-    { name: 'foo', version: '3.0.0' },
-    { name: 'bar', version: '2.0.0' },
-  ]
-  const result = {
-    foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '<2' }],
-    bar: [{ severity: 'low', title: 'y', url: 'u', vulnerable_versions: '*' }],
-  }
-  const rows = flattenAdvisories(result, packages)
-  const foo = rows.find((r) => r.package === 'foo')
-  const bar = rows.find((r) => r.package === 'bar')
-  t.assert.equal(foo.installed, '1.0.0', 'only the affected installed version of foo is listed')
-  t.assert.equal(bar.installed, '2.0.0')
+test('flattenAdvisories lists the covered versions and carries range, title and id', (t) => {
+  const rows = flattenAdvisories([found('foo', ['1.0.0', '1.5.0'], { severity: 'high', title: 'x', range: '<2' })])
+  t.assert.deepEqual(rows, [{ package: 'foo', installed: '1.0.0, 1.5.0', vulnerable: '<2', severity: 'high', title: 'x', id: 'GHSA-aaaa-bbbb-cccc', reason: '' }])
 })
 
 test('flattenAdvisories joins the reasons of the affected versions, sorted', (t) => {
-  const packages = [
-    { name: 'foo', version: '1.0.0' },
-    { name: 'foo', version: '3.0.0' },
-  ]
-  const result = {
-    foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '<2' }],
-  }
+  // foo@3.0.0 is installed too, but the advisory covers only 1.0.0: only its reasons show,
+  // ordered plugins then run.
+  const result = [found('foo', ['1.0.0'], { severity: 'high', title: 'x', range: '<2' })]
   const reasons = new Map([
     ['foo@1.0.0', new Set(['run', 'webpack'])],
     ['foo@3.0.0', new Set(['metro'])],
   ])
-  const rows = flattenAdvisories(result, packages, reasons)
-  // Only 1.0.0 matches `<2`, so only its reasons show, ordered plugins then run.
+  const rows = flattenAdvisories(result, reasons)
   t.assert.equal(rows.length, 1)
   t.assert.equal(rows[0].installed, '1.0.0')
   t.assert.equal(rows[0].reason, 'webpack, run')
 })
 
 test('flattenAdvisories leaves reason empty when a package has none', (t) => {
-  const packages = [{ name: 'foo', version: '1.0.0' }]
-  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '<2' }] }
-  const rows = flattenAdvisories(result, packages)
+  const rows = flattenAdvisories([found('foo', ['1.0.0'], { severity: 'high', title: 'x', range: '<2' })])
   t.assert.equal(rows[0].reason, '')
 })
 
 test('flattenAdvisories uses the --why paths (newline-joined) as the reason cell', (t) => {
-  const packages = [{ name: 'foo', version: '1.0.0' }]
-  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
+  const result = [found('foo', ['1.0.0'], { severity: 'high', title: 'x' })]
   const why = new Map([['foo@1.0.0', new Set(['run: a -> foo', 'webpack: b -> foo'])]])
-  const rows = flattenAdvisories(result, packages, undefined, why)
+  const rows = flattenAdvisories(result, undefined, why)
   // The why map wins over the (absent) consumer list; consumers order plugins then run.
   t.assert.equal(rows[0].reason, 'webpack: b -> foo\nrun: a -> foo')
 })
 
 test('flattenAdvisories orders --why consumers plugins -> run -> add', (t) => {
-  const packages = [{ name: 'foo', version: '1.0.0' }]
-  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
+  const result = [found('foo', ['1.0.0'], { severity: 'high', title: 'x' })]
   const why = new Map([['foo@1.0.0', new Set(['add: foo', 'run: foo', 'metro: a -> foo'])]])
-  const rows = flattenAdvisories(result, packages, undefined, why)
+  const rows = flattenAdvisories(result, undefined, why)
   t.assert.equal(rows[0].reason, 'metro: a -> foo\nrun: foo\nadd: foo')
 })
 
 test('flattenAdvisories groups a consumer\'s --why lines across affected versions', (t) => {
-  const packages = [
-    { name: 'foo', version: '1.0.0' },
-    { name: 'foo', version: '2.0.0' },
-  ]
-  const result = { foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }] }
+  const result = [found('foo', ['1.0.0', '2.0.0'], { severity: 'high', title: 'x' })]
   // Each version contributes a metro and a run line; unioned naively they would
   // interleave (metro, run, metro). Grouping keeps all metro lines together, then run.
   const why = new Map([
     ['foo@1.0.0', new Set(['metro: a -> foo', 'run: foo'])],
     ['foo@2.0.0', new Set(['metro: b -> foo', 'run: foo'])],
   ])
-  const rows = flattenAdvisories(result, packages, undefined, why)
+  const rows = flattenAdvisories(result, undefined, why)
   t.assert.equal(rows[0].reason, 'metro: a -> foo\nmetro: b -> foo\nrun: foo')
 })
 
 test('flattenAdvisories --reason narrows the consumer list and drops unrelated rows', (t) => {
-  const packages = [
-    { name: 'foo', version: '1.0.0' },
-    { name: 'bar', version: '1.0.0' },
+  const result = [
+    found('bar', ['1.0.0'], { severity: 'low', title: 'y' }),
+    found('foo', ['1.0.0'], { severity: 'high', title: 'x' }),
   ]
-  const result = {
-    foo: [{ severity: 'high', title: 'x', url: 'u', vulnerable_versions: '*' }],
-    bar: [{ severity: 'low', title: 'y', url: 'u', vulnerable_versions: '*' }],
-  }
   const reasons = new Map([
     ['foo@1.0.0', new Set(['run', 'webpack'])],
     ['bar@1.0.0', new Set(['webpack'])],
   ])
-  const rows = flattenAdvisories(result, packages, reasons, null, 'run')
+  const rows = flattenAdvisories(result, reasons, null, 'run')
   // bar is only webpack -> dropped; foo's cell is narrowed to run.
   t.assert.deepEqual(rows.map((r) => [r.package, r.reason]), [['foo', 'run']])
 })
@@ -465,7 +435,7 @@ test('printAuditReport renders the --why reason column across multiple lines', (
     {
       why: true,
       packages: [{ name: 'foo', version: '1.0.0' }],
-      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '*', title: 't', url: 'u', reason: 'run: a -> foo\nrun: b -> foo' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '*', title: 't', id: 'GHSA-aaaa-bbbb-cccc', reason: 'run: a -> foo\nrun: b -> foo' }],
     },
     { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
   )
@@ -478,7 +448,7 @@ test('printAuditReport shows a reason column when a row has reasons', (t) => {
   printAuditReport(
     {
       packages: [{ name: 'foo', version: '1.0.0' }],
-      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run, webpack' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', id: 'GHSA-aaaa-bbbb-cccc', reason: 'run, webpack' }],
     },
     { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
   )
@@ -492,7 +462,7 @@ test('printAuditReport omits the reason column when no row has reasons', (t) => 
   printAuditReport(
     {
       packages: [{ name: 'foo', version: '1.0.0' }],
-      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: '' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', id: 'GHSA-aaaa-bbbb-cccc', reason: '' }],
     },
     { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
   )
@@ -506,7 +476,7 @@ test('printAuditReport hides the reason column under --reason without --why', (t
       reason: 'run',
       packages: [{ name: 'foo', version: '1.0.0' }],
       // Every cell would just repeat the filter value ('run'), so the column is noise.
-      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', id: 'GHSA-aaaa-bbbb-cccc', reason: 'run' }],
     },
     { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
   )
@@ -520,13 +490,31 @@ test('printAuditReport keeps the reason column under --reason WITH --why', (t) =
       reason: 'run',
       why: true,
       packages: [{ name: 'foo', version: '1.0.0' }],
-      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', url: 'u', reason: 'run: a -> foo' }],
+      rows: [{ severity: 'high', package: 'foo', installed: '1.0.0', vulnerable: '<2', title: 't', id: 'GHSA-aaaa-bbbb-cccc', reason: 'run: a -> foo' }],
     },
     { out: { write: (s) => out.push(s) }, err: { write: () => {} } }
   )
   const text = stripVTControlCharacters(out.join(''))
   t.assert.match(text, /│ reason/u)
   t.assert.match(text, /run: a -> foo/u)
+})
+
+test('printAuditReport summarizes the alerts by severity, most severe first', (t) => {
+  const err = []
+  const row = (severity) => ({ severity, package: 'foo', installed: '1.0.0', vulnerable: '*', title: 't', id: 'GHSA-aaaa-bbbb-cccc', reason: '' })
+  printAuditReport(
+    { packages: [{ name: 'foo', version: '1.0.0' }, { name: 'bar', version: '1.0.0' }, { name: 'baz', version: '1.0.0' }], rows: [row('critical'), row('high'), row('high'), row('low'), row('')] },
+    { out: { write: () => {} }, err: { write: (s) => err.push(s) } }
+  )
+  t.assert.equal(err.join(''), 'Scanned 3 packages: 5 alerts, 1 critical, 2 high, 1 low, 1 unrated\n')
+})
+
+test('printAuditReport reports 0 alerts and prints no table', (t) => {
+  const out = []
+  const err = []
+  printAuditReport({ packages: [{ name: 'foo', version: '1.0.0' }], rows: [] }, { out: { write: (s) => out.push(s) }, err: { write: (s) => err.push(s) } })
+  t.assert.equal(err.join(''), 'Scanned 1 package: 0 alerts\n')
+  t.assert.deepEqual(out, [])
 })
 
 test('printAuditReport hints when nothing was scanned', (t) => {
@@ -778,7 +766,7 @@ test('audit() wraps non-2xx npm responses in a helpful error', withFetch(
     const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
     try {
       const lock = writeLock(tmp)
-      await t.assert.rejects(() => audit([lock]), /npm advisories request failed: 503/)
+      await t.assert.rejects(() => audit([lock]), /npm advisories request failed: POST https:\/\/registry\.npmjs\.org\/-\/npm\/v1\/security\/advisories\/bulk 503: boom/)
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
@@ -798,15 +786,24 @@ test('audit() wraps network/abort errors with the cause preserved', withFetch(
   }
 ))
 
-test('flattenAdvisories drops advisories that match no installed version', (t) => {
-  const packages = [{ name: 'foo', version: '5.0.0' }]
-  const result = {
+test('audit() lists only the installed versions a range covers, and drops ranges covering none', withFetch(
+  () => new Response(JSON.stringify({
     foo: [
-      { severity: 'high', title: 'old', url: 'u', vulnerable_versions: '<2' },
-      { severity: 'low', title: 'current', url: 'u', vulnerable_versions: '>=5' },
+      { id: 1, severity: 'high', title: 'old', url: 'https://github.com/advisories/GHSA-2222-3333-4444', vulnerable_versions: '<1' },
+      { id: 2, severity: 'low', title: 'current', url: 'https://github.com/advisories/GHSA-5555-6666-7777', vulnerable_versions: '>=1.2.0 <2' },
     ],
+    bar: [{ id: 3, severity: 'moderate', title: 'any', url: 'https://x', vulnerable_versions: '*' }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), 'stasis-audit-'))
+    try {
+      const report = await audit([writeLock(tmp)])
+      t.assert.deepEqual(report.rows.map((r) => [r.package, r.installed, r.vulnerable, r.title, r.id]), [
+        ['bar', '4.5.6', '*', 'any', 'npm:3'],
+        ['foo', '1.2.3', '>=1.2.0 <2', 'current', 'GHSA-5555-6666-7777'],
+      ])
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
   }
-  const rows = flattenAdvisories(result, packages)
-  t.assert.equal(rows.length, 1)
-  t.assert.equal(rows[0].title, 'current')
-})
+))

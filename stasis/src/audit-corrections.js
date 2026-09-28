@@ -1,4 +1,4 @@
-import semver from './apis/npm/semver.cjs'
+import { satisfies, valid } from '@preventive/upstream/semver.js'
 
 // Manual corrections to audit findings: files that must NOT count as evidence
 // that a (potentially vulnerable) package's code is present. An import edge whose
@@ -37,7 +37,7 @@ const CORRECTIONS = [
 function isCorrectedFile(name, version, rel) {
   for (const { name: pkg, files, range } of CORRECTIONS) {
     if (pkg !== name || !files.has(rel)) continue
-    if (semver.valid(version) && semver.satisfies(version, range)) return true
+    if (valid(version) && satisfies(version, range)) return true
   }
   return false
 }

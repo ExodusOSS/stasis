@@ -3,9 +3,9 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { basename, dirname, extname, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
-import { constants as osConstants } from 'node:os'
+import { homedir, constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
 import { parseBrotliQuality, parseLeadingOptions, parseResourcesOption } from '@exodus/stasis-core/util'
 import pkg from '../package.json' with { type: 'json' }
@@ -66,12 +66,15 @@ function usage(prefix = '') {
  stasis extract [--output=path/to/dir] path/to/bundle.stasis.code.br
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
- stasis audit [--why|--why-deep] [--why-full] [--reason=consumer] path/to/file ...
+ stasis audit [--why|--why-deep] [--why-full] [--reason=consumer] [--repo-advisories] path/to/file ...
  (--why lists, per advisory, the cross-module import paths that pull the package in,
   prefixed by the bundle consumer that imports each chain at the top level, e.g. "run: a -> b -> c";
   it skips chains whose full tail is already listed as its own chain -- --why-deep keeps them all;
   --why-full spells every chain out instead of collapsing repeated tails to "a -> b -> ... -> d";
-  --reason=consumer shows only advisories related to that consumer, and with --why only its chains)
+  --reason=consumer shows only advisories related to that consumer, and with --why only its chains;
+  --repo-advisories also asks each package's GitHub repository for the advisories its maintainers
+  published there, before GitHub reviews them into npm's database; it needs a token in GITHUB_TOKEN,
+  and caches each package's repository for a month in the user cache dir, e.g. ~/.cache/stasis)
  stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
  (streams to stdout by default; --output=- is explicit stdout)
 `.trim())
@@ -82,6 +85,14 @@ function setEnv(name, value) {
   const env = process.env[name]
   if (env && env !== value) throw new Error(`env conflict: ${name}="${env}", effective: "${value}"`)
   process.env[name] = value === undefined ? '' : value
+}
+
+// The per-user cache directory, as each platform names it (XDG ignores a relative path).
+function userCacheDir() {
+  if (isAbsolute(process.env.XDG_CACHE_HOME ?? '')) return join(process.env.XDG_CACHE_HOME, 'stasis')
+  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Caches', 'stasis')
+  if (process.platform === 'win32') return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'stasis', 'Cache')
+  return join(homedir(), '.cache', 'stasis')
 }
 
 const command = argv.shift()
@@ -500,11 +511,18 @@ if (command === '-v' || command === '--version') {
   const { removed, validated } = prune({ root })
   console.warn(`[stasis] prune: validated ${validated.length} file(s), removed ${removed.length} file(s)`)
 } else if (command === 'audit') {
-  const values = parseLeadingOptions(argv, { why: { type: 'boolean' }, 'why-deep': { type: 'boolean' }, 'why-full': { type: 'boolean' }, reason: { type: 'string' } }, { valueFlags: ['--reason'], onError: usage })
+  const values = parseLeadingOptions(argv, { why: { type: 'boolean' }, 'why-deep': { type: 'boolean' }, 'why-full': { type: 'boolean' }, reason: { type: 'string' }, 'repo-advisories': { type: 'boolean' } }, { valueFlags: ['--reason'], onError: usage })
   if (argv.length === 0) usage('Nothing to audit: no path to file given')
+  const repoAdvisories = Boolean(values['repo-advisories'])
+  if (repoAdvisories && !process.env.GITHUB_TOKEN) usage('Error: --repo-advisories requires a GitHub token in GITHUB_TOKEN')
+  const github = repoAdvisories ? (await import('@preventive/upstream/github.js')).createClient({ token: process.env.GITHUB_TOKEN }) : undefined
+  // Upstream caches what it looks up (a package's GitHub repo, a month each) only where told to, and
+  // answers from it without asking: a per-user directory, never one shared with less trusted jobs.
+  const { setCacheDir } = await import('@preventive/upstream/npm.js')
+  setCacheDir(userCacheDir())
   const { audit, printAuditReport } = await import('../src/audit.js')
   const files = argv.map((f) => resolve(f))
-  const report = await audit(files, { why: Boolean(values.why), whyDeep: Boolean(values['why-deep']), whyFull: Boolean(values['why-full']), reason: values.reason })
+  const report = await audit(files, { why: Boolean(values.why), whyDeep: Boolean(values['why-deep']), whyFull: Boolean(values['why-full']), reason: values.reason, repoAdvisories, github })
   printAuditReport(report)
   process.exitCode = report.rows.length === 0 ? 0 : 1
 } else if (command === 'sbom') {
