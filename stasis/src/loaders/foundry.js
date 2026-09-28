@@ -409,13 +409,14 @@ const STANDALONE_SECTIONS = new Set([
 // names lowercased, keys snake_cased as forge does) from the `[profile.<name>]` tables and the
 // legacy top-level `[<name>]` ones forge still reads, the former winning key by key; sub-tables
 // other than `extends` are skipped. `topLevel` holds keys set outside any table (forge rejects
-// those; a `--mapping` file may list its `remappings` there).
-function parseFoundryToml(text) {
+// those; a `--mapping` file may list its `remappings` there). Throws a TomlError naming `file` on
+// text that isn't TOML, as forge refuses the file.
+function parseFoundryToml(text, file = null) {
   const current = new Map()
   const legacy = new Map()
   const topLevel = new Map()
   const dictOf = (map, name) => map.get(name) ?? map.set(name, new Map()).get(name)
-  for (const { path, header, value } of tomlEntries(text)) {
+  for (const { path, header, value } of tomlEntries(text, { file })) {
     let map
     let rest
     if (path[0] === 'profile' && path.length >= 2) {
@@ -465,7 +466,7 @@ function mergeExtended(base, local, strategy) {
 function readFoundryProfiles(file, profile, { confineTo } = {}) {
   const text = readFileOrNull(file)
   if (text === null) return { profiles: new Map(), topLevel: new Map(), files: [] }
-  let { profiles, topLevel } = parseFoundryToml(text)
+  let { profiles, topLevel } = parseFoundryToml(text, file)
   const files = [file]
   const ext = profiles.get(profile)?.get('extends')
   const extPath = typeof ext === 'string' ? ext : ext?.path
@@ -477,7 +478,7 @@ function readFoundryProfiles(file, profile, { confineTo } = {}) {
     }
     const baseText = readFileOrNull(baseFile)
     if (baseText === null) throw new Error(`${file}: the inherited config file does not exist: ${extPath}`)
-    const base = parseFoundryToml(baseText).profiles
+    const base = parseFoundryToml(baseText, baseFile).profiles
     if (base.get(profile)?.has('extends')) {
       throw new Error(`${file}: nested inheritance is not allowed (${extPath} has an 'extends' field in profile '${profile}')`)
     }
@@ -829,10 +830,11 @@ export const scrubUrlCredentials = (text) => text.replaceAll(/\b([a-z][a-z0-9+.-
 
 // A foundry.toml without its credentials: a SECRET_TABLES table goes whole (every line up to the
 // next header), a pair under one or keyed like a secret goes line for line, and URLs lose their
-// user info. Everything else is kept verbatim.
-export function redactFoundryToml(text) {
+// user info. Everything else is kept verbatim. Throws a TomlError naming `file` on text that
+// isn't TOML: what can't be read can't be redacted.
+export function redactFoundryToml(text, file = null) {
   const lines = text.split('\n')
-  const entries = [...tomlEntries(text)]
+  const entries = tomlEntries(text, { file })
   const drop = new Set()
   const isSecretTable = (segs) => segs.some((seg) => SECRET_TABLES.has(seg))
   entries.forEach((e, idx) => {

@@ -1,4 +1,4 @@
-// Cargo manifests for the Rust loader: a Cargo.toml / Cargo.lock reader (over the TOML subset in
+// Cargo manifests for the Rust loader: a Cargo.toml / Cargo.lock reader (over the TOML reader in
 // toml.js), per-bundle package lookup, dependency resolution among in-tree crates (the package's
 // own lib, workspace `path` deps, `cargo vendor`ed registry crates) and feature resolution done the
 // way `cargo build` does it, so `#[cfg(feature = "…")]` can be decided per crate.
@@ -9,7 +9,7 @@ import { dirname, isAbsolute, join, posix, relative } from 'node:path'
 
 import { toPosix } from '@exodus/stasis-core/util'
 
-import { KEY_VALUE_RE, TABLE_HEADER_RE, logicalLines, parseTomlValue } from './toml.js'
+import { tomlEntries } from './toml.js'
 
 // `cargo vendor` copies registry crates in-tree under this dir.
 export const VENDOR_DIR = 'vendor'
@@ -45,7 +45,6 @@ export function normalizeRel(dir, sub) {
 
 // --- Cargo.toml -----------------------------------------------------------------------
 
-const DEP_TABLE_RE = /^(?:target\..+\.)?(dependencies|dev-dependencies|build-dependencies)(?:\.(.+))?$/u
 const DEP_KINDS = { dependencies: 'normal', 'dev-dependencies': 'dev', 'build-dependencies': 'build' }
 // Entries of a `[features]` list beyond a plain feature name: `dep:key` and `key/feat` / `key?/feat`.
 const DEP_IMPLICATION_RE = /^dep:(.+)$/u
@@ -73,7 +72,10 @@ export function isTestTargetPath(pkgDir, fileRel) {
 // (kind, `path`/`version`/`package`/`workspace`, `optional`, `default-features`, `features`),
 // `[features]`, `[patch.*]` path overrides and the workspace tables members inherit from.
 // Dependency keys are normalized to the `use` spelling (`-` → `_`); feature names keep theirs.
-export function parseCargoManifest(text) {
+// Each pair is read by the table path it lands at, so `[dependencies.foo] features = […]`,
+// `[dependencies] foo.features = […]` and `foo = { features = […] }` are one thing. Throws a
+// TomlError naming `file` on text that isn't TOML.
+export function parseCargoManifest(text, file = null) {
   const manifest = {
     package: null, // { name, version, versionFromWorkspace, edition }
     resolver: null, // "1" | "2" | "3" from [workspace] or [package]
@@ -116,49 +118,44 @@ export function parseCargoManifest(text) {
     if (defaults === true || defaults === false) request.defaultFeatures = defaults
     if (Array.isArray(table.features)) request.features = [...new Set([...request.features, ...table.features.filter((f) => typeof f === 'string')])]
   }
-  let table = ''
-  for (const raw of logicalLines(text)) {
-    const line = raw.trim()
-    const header = TABLE_HEADER_RE.exec(line)
-    if (header) {
-      table = header[1].trim()
-      if (table === 'workspace') manifest.isWorkspace = true
-      continue
-    }
-    const kv = KEY_VALUE_RE.exec(line)
-    if (!kv) continue
-    const key = kv[1].replaceAll(/["']/gu, '')
-    const value = parseTomlValue(kv[2])
-    if (table === 'package') {
+  for (const { path, header, value } of tomlEntries(text, { file })) {
+    // A `[workspace]` table, however it is spelled out, makes this a workspace root.
+    if (path[0] === 'workspace') manifest.isWorkspace = true
+    if (header) continue
+    const [head, key, sub, extra] = path
+    if (head === 'package') {
       manifest.package ??= { name: null, version: null, versionFromWorkspace: false, edition: null }
-      if (key === 'name' && typeof value === 'string') manifest.package.name = value
-      else if (key === 'version' && typeof value === 'string') manifest.package.version = value
-      else if ((key === 'version' && value?.workspace === true) || (key === 'version.workspace' && value === true)) manifest.package.versionFromWorkspace = true
-      else if (key === 'edition' && typeof value === 'string') manifest.package.edition = value
-      else if (key === 'resolver' && typeof value === 'string') manifest.resolver = value
-    } else if (table === 'workspace') {
-      if (key === 'resolver' && typeof value === 'string') manifest.resolver = value
-    } else if (table === 'lib') {
+      if (path.length === 2) {
+        if (key === 'name' && typeof value === 'string') manifest.package.name = value
+        else if (key === 'version' && typeof value === 'string') manifest.package.version = value
+        else if (key === 'version' && value?.workspace === true) manifest.package.versionFromWorkspace = true
+        else if (key === 'edition' && typeof value === 'string') manifest.package.edition = value
+        else if (key === 'resolver' && typeof value === 'string') manifest.resolver = value
+      } else if (path.length === 3 && key === 'version' && sub === 'workspace' && value === true) manifest.package.versionFromWorkspace = true
+    } else if (head === 'lib' && path.length === 2) {
       if (key === 'name' && typeof value === 'string') manifest.lib.name = value
       else if (key === 'path' && typeof value === 'string') manifest.lib.path = value
-    } else if (table === 'workspace.package') {
-      if (key === 'version' && typeof value === 'string') manifest.workspacePackage.version = value
-    } else if (table === 'features') {
+    } else if (head === 'features' && path.length === 2) {
       if (Array.isArray(value)) manifest.features.set(key, value.filter((v) => typeof v === 'string'))
-    } else if (table.startsWith('patch.')) {
-      if (typeof value?.path === 'string') manifest.patches.set(normName(key), value.path)
+    } else if (head === 'patch') {
+      // `[patch.<registry>] crate = { path = "…" }` or `[patch.<registry>.crate] path = "…"`
+      const patch = path.length === 3 ? value?.path : (path.length === 4 && extra === 'path' ? value : undefined)
+      if (typeof patch === 'string') manifest.patches.set(normName(sub), patch)
+    } else if (head === 'workspace' && path.length === 2 && key === 'resolver' && typeof value === 'string') {
+      manifest.resolver = value
+    } else if (head === 'workspace' && path.length === 3 && key === 'package' && sub === 'version' && typeof value === 'string') {
+      manifest.workspacePackage.version = value
     } else {
-      const ws = table.startsWith('workspace.')
-      const m = DEP_TABLE_RE.exec(ws ? table.slice('workspace.'.length) : table)
-      if (!m) continue
-      const map = ws ? manifest.workspaceDeps : manifest.deps
-      // `[dependencies.foo]` sub-table: each line is one field of `foo`; a dotted `foo.features = […]`
-      // line is one field too; else each line is one dep.
-      const dot = m[2] ? -1 : key.indexOf('.')
-      const depName = m[2] ?? (dot === -1 ? key : key.slice(0, dot))
-      const field = m[2] ? key : (dot === -1 ? null : key.slice(dot + 1))
-      const dep = depOf(map, depName, { flat: ws })
-      setDepFields(dep, field === null ? value : { [field]: value }, ws ? null : DEP_KINDS[m[1]])
+      // `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, under `target.<cfg>` or
+      // `workspace`: then the dep's name, then possibly one field of it.
+      const ws = head === 'workspace'
+      const segs = ws ? path.slice(1) : path
+      const kindAt = segs[0] === 'target' ? 2 : 0
+      const kind = DEP_KINDS[segs[kindAt]]
+      const [depName, field, more] = segs.slice(kindAt + 1)
+      if (kind === undefined || depName === undefined || more !== undefined) continue
+      const dep = depOf(ws ? manifest.workspaceDeps : manifest.deps, depName, { flat: ws })
+      setDepFields(dep, field === undefined ? value : { [field]: value }, ws ? null : kind)
     }
   }
   if (manifest.package && !manifest.package.name) manifest.package = null
@@ -169,8 +166,9 @@ export function parseCargoManifest(text) {
 
 // `Cargo.lock` → `{ byId: Map<"name version", { name, version, deps: [{ name, version }] }>,
 // byName: Map<name, [...] > }`, or null for no text. The lock is what says which of several
-// vendored versions of a crate a given package depends on.
-export function parseCargoLock(text) {
+// vendored versions of a crate a given package depends on. Throws a TomlError naming `file` on
+// text that isn't TOML.
+export function parseCargoLock(text, file = null) {
   if (text === null) return null
   const packages = []
   let cur = null // the [[package]] being read; null inside any other table
@@ -179,20 +177,17 @@ export function parseCargoLock(text) {
     const [name, version] = s.split(' ')
     return { name: normName(name), version: version ?? null }
   }
-  for (const raw of logicalLines(text)) {
-    const line = raw.trim()
-    const header = TABLE_HEADER_RE.exec(line)
+  for (const { path, header, value } of tomlEntries(text, { file })) {
     if (header) {
-      cur = header[1].trim() === 'package' ? { name: null, version: null, deps: [] } : null
+      cur = path.length === 1 && path[0] === 'package' ? { name: null, version: null, deps: [] } : null
       if (cur) packages.push(cur)
       continue
     }
-    const kv = cur === null ? null : KEY_VALUE_RE.exec(line)
-    if (!kv) continue
-    const value = parseTomlValue(kv[2])
-    if (kv[1] === 'name' && typeof value === 'string') cur.name = normName(value)
-    else if (kv[1] === 'version' && typeof value === 'string') cur.version = value
-    else if (kv[1] === 'dependencies' && Array.isArray(value)) {
+    if (cur === null || path.length !== 2) continue
+    const key = path[1]
+    if (key === 'name' && typeof value === 'string') cur.name = normName(value)
+    else if (key === 'version' && typeof value === 'string') cur.version = value
+    else if (key === 'dependencies' && Array.isArray(value)) {
       for (const s of value) if (typeof s === 'string') cur.deps.push(dep(s))
     }
   }
@@ -373,8 +368,9 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   const manifests = new Map()
   const readManifest = (dir) => {
     if (!manifests.has(dir)) {
-      const text = readFileOrNull(join(baseDir, dir, 'Cargo.toml'))
-      manifests.set(dir, text === null ? null : { dir, ...parseCargoManifest(text) })
+      const file = posix.join(dir, 'Cargo.toml')
+      const text = readFileOrNull(join(baseDir, file))
+      manifests.set(dir, text === null ? null : { dir, ...parseCargoManifest(text, file) })
     }
     return manifests.get(dir)
   }
@@ -453,7 +449,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   }
   let lock
   const lockfile = () => {
-    if (lock === undefined) lock = parseCargoLock(readFileOrNull(join(baseDir, 'Cargo.lock')))
+    if (lock === undefined) lock = parseCargoLock(readFileOrNull(join(baseDir, 'Cargo.lock')), 'Cargo.lock')
     return lock
   }
   // `--cargo`: the graph and features as cargo resolved them, with registry packages it read from

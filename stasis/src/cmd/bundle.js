@@ -268,7 +268,7 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep) {
     }
     if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
     const text = buf.toString('utf8')
-    out.set(rel, rel.endsWith('.toml') ? redactFoundryToml(text) : scrubUrlCredentials(text))
+    out.set(rel, rel.endsWith('.toml') ? redactFoundryToml(text, rel) : scrubUrlCredentials(text))
   }
   return out
 }
