@@ -14,6 +14,20 @@ enableGlobalVirtualStore: false
 # the project root.
 extendNodePath: false
 
+# @exodus/test's optional deps back engines/features the suite doesn't use (other engines and browsers,
+# bundling, coverage, --jest, --esbuild/TS, network replay); test discovery falls back to fs.glob.
+ignoredOptionalDependencies:
+  - '@chalker/queue'
+  - '@exodus/replay'
+  - '@exodus/test-bundler'
+  - c8
+  - expect
+  - fast-glob
+  - playwright-core
+  - pretty-format
+  - puppeteer-core
+  - tsx
+
 ignoreWorkspaceRootCheck: true
 
 linkWorkspacePackages: true
