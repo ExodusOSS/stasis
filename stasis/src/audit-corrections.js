@@ -48,10 +48,33 @@ function isCorrectedFile(name, version, rel) {
 // them alongside bundled files, but no package code ships through one.
 const isManifest = (rel) => rel === 'package.json' || rel.endsWith('/package.json')
 
-// Is `rel` evidence that `name@version`'s REAL code is present? This is the one
-// rule every audit surface shares -- package presence, the reason column, and
-// the --why chain graph all count a file (or an edge targeting it) only when it
-// passes. Manifests never do; corrected files don't within their verified range.
-export function isEvidenceFile(name, version, rel) {
+// Outside npm a package's real code is its language's sources -- a vendored crate's `.rs`, a
+// Composer package's `.php`, a GitHub-hosted Solidity library's `.sol` -- never the manifests and
+// configs a bundle carries beside them (Cargo.toml, composer.json, foundry.toml, remappings.txt).
+const CODE_FILE = { cargo: /\.rs$/u, composer: /\.php$/u, github: /\.sol$/u }
+
+// Is `rel` evidence that `ecosystem`'s `name@version`'s REAL code is present? This is the one
+// rule every audit surface shares -- package presence, the reason column, and the --why chain
+// graph all count a file (or an edge targeting it) only when it passes. npm manifests never do,
+// nor corrected files within their verified range; elsewhere only source files do.
+export function isEvidenceFile(ecosystem, name, version, rel) {
+  if (ecosystem !== 'npm') return CODE_FILE[ecosystem]?.test(rel) === true
   return !isManifest(rel) && !isCorrectedFile(name, version, rel)
 }
+
+// Ecosystems with an advisory source besides npm: RustSec and Packagist through OSV, and the
+// repository's own published advisories for a GitHub-hosted dependency. Soldeer has none.
+const AUDITED = new Set(['cargo', 'composer', 'github'])
+
+// The ecosystem a module bucket is audited in, or null for one that is not. npm's are its
+// node_modules buckets, tagged or not (artifacts from before the per-bucket `ecosystem` field tag
+// none); any other bucket counts only when tagged as a dependency -- an untagged one is
+// first-party code, which must not be sent to a public database (leaks names, adds noise).
+export function auditedEcosystem(dir, ecosystem = 'npm') {
+  if (ecosystem === 'npm') return dir.includes('node_modules') ? 'npm' : null
+  return AUDITED.has(ecosystem) ? ecosystem : null
+}
+
+// A package's identity across the audit surfaces: `name@version`, prefixed with the ecosystem
+// outside npm, so a crate never merges with an npm package of the same name and version.
+export const packageKey = (ecosystem, name, version) => `${ecosystem === 'npm' ? '' : `${ecosystem}:`}${name}@${version}`

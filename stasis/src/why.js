@@ -1,5 +1,5 @@
 import { moduleFileKey } from '@exodus/stasis-core/util'
-import { isEvidenceFile } from './audit-corrections.js'
+import { auditedEcosystem, isEvidenceFile, packageKey } from './audit-corrections.js'
 import { parseFile } from './parse.js'
 
 // `stasis audit --why` support: from an artifact's resolution graph (`imports`)
@@ -49,7 +49,7 @@ const PATH_CAP = 2000
 const TERMINAL_PACKAGES = new Set(['@babel/core', 'react-native', 'metro'])
 
 // Index one parsed artifact: map every project-relative file to its owning module
-// dir, record each dir's package identity + whether it's a node_modules dep, and
+// dir, record each dir's package identity + the ecosystem it is an audited dep in, and
 // keep each dir's EVIDENCE file list (for the target's-own-reason lookup).
 // `fileToDir` is complete; `dirFiles` only holds files that count as real code of
 // the dir (see audit-corrections.js) -- a consumer that recorded nothing of a
@@ -59,13 +59,14 @@ function moduleIndex(artifact) {
   const fileToDir = new Map()
   const dirInfo = new Map()
   const dirFiles = new Map()
-  for (const [dir, { name, version, files }] of artifact.modules) {
-    dirInfo.set(dir, { name: name ?? null, version: version ?? null, dep: dir.includes('node_modules') })
+  for (const [dir, { name, version, ecosystem: tag, files }] of artifact.modules) {
+    const ecosystem = auditedEcosystem(dir, tag)
+    dirInfo.set(dir, { name: name ?? null, version: version ?? null, ecosystem, dep: ecosystem !== null })
     const list = []
     for (const rel of Object.keys(files)) {
       const f = moduleFileKey(dir, rel)
       fileToDir.set(f, dir)
-      if (isEvidenceFile(name ?? null, version ?? null, rel)) list.push(f)
+      if (isEvidenceFile(ecosystem, name ?? null, version ?? null, rel)) list.push(f)
     }
     dirFiles.set(dir, list)
   }
@@ -122,7 +123,7 @@ function bucketGraphs(edges, fileToDir, dirInfo, fileReasons) {
     // sibling packages' manifests for Haste/asset resolution) or a corrected file
     // (ws's noop browser.js stub) is not a dependency on the module and must not
     // pull it into the --why graph -- no chain may end (or pass) through one.
-    if (!isEvidenceFile(tdi.name, tdi.version, tf.slice(td.length + 1))) continue
+    if (!isEvidenceFile(tdi.ecosystem, tdi.name, tdi.version, tf.slice(td.length + 1))) continue
     // The consumers this edge belongs to: those that recorded its parent file.
     const buckets = fileReasons === null ? [''] : (fileReasons.get(pf) ?? [])
     const dep = dirInfo.get(pd).dep
@@ -379,14 +380,14 @@ export function collectWhy(files, targetKeys, reasonFilter = null, { deep = fals
     const graphs = bucketGraphs(edges, fileToDir, dirInfo, fileReasons)
     const dirReasons = dirReasonsIndex(dirFiles, fileReasons)
     // Terminal packages end a chain regardless of what imports them.
-    const isTerminal = (node) => TERMINAL_PACKAGES.has(dirInfo.get(node)?.name)
+    const isTerminal = (node) => dirInfo.get(node)?.ecosystem === 'npm' && TERMINAL_PACKAGES.has(dirInfo.get(node).name)
 
-    // Group target dirs by `name@version` (a package can appear at several dirs,
+    // Group target dirs by package (packageKey: a package can appear at several dirs,
     // e.g. nested node_modules); paths from every matching dir are unioned.
     const dirsByKey = new Map()
     for (const [dir, info] of dirInfo) {
       if (!info.dep || !info.name || !info.version) continue
-      const key = `${info.name}@${info.version}`
+      const key = packageKey(info.ecosystem, info.name, info.version)
       if (targetKeys && !targetKeys.has(key)) continue
       let arr = dirsByKey.get(key)
       if (arr === undefined) dirsByKey.set(key, (arr = []))

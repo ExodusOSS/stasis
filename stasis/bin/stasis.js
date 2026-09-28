@@ -67,14 +67,17 @@ function usage(prefix = '') {
  stasis diff --stat [--imports] path/to/(lockfile|bundle) path/to/(lockfile|bundle)
  stasis prune [path/to/project]
  stasis audit [--why|--why-deep] [--why-full] [--reason=consumer] [--repo-advisories] path/to/file ...
- (--why lists, per advisory, the cross-module import paths that pull the package in,
+ (audits npm's node_modules packages, vendored crates (RustSec), Composer's vendor packages (Packagist)
+  and GitHub-hosted Solidity libraries in lib/ (their repos' advisories; GITHUB_TOKEN if set);
+  --why lists, per advisory, the cross-module import paths that pull the package in,
   prefixed by the bundle consumer that imports each chain at the top level, e.g. "run: a -> b -> c";
   it skips chains whose full tail is already listed as its own chain -- --why-deep keeps them all;
   --why-full spells every chain out instead of collapsing repeated tails to "a -> b -> ... -> d";
   --reason=consumer shows only advisories related to that consumer, and with --why only its chains;
   --repo-advisories also asks each package's GitHub repository for the advisories its maintainers
   published there, before GitHub reviews them into npm's database; it needs a token in GITHUB_TOKEN,
-  and caches each package's repository for a month in the user cache dir, e.g. ~/.cache/stasis)
+  takes an npm package's repository from its bundled package.json when present, else looks it up
+  and caches it for a month in the user cache dir, e.g. ~/.cache/stasis)
  stasis sbom --format=(spdx|cyclonedx) [--output=(path|-)] path/to/(lockfile|bundle) ...
  (streams to stdout by default; --output=- is explicit stdout)
 `.trim())
@@ -515,7 +518,10 @@ if (command === '-v' || command === '--version') {
   if (argv.length === 0) usage('Nothing to audit: no path to file given')
   const repoAdvisories = Boolean(values['repo-advisories'])
   if (repoAdvisories && !process.env.GITHUB_TOKEN) usage('Error: --repo-advisories requires a GitHub token in GITHUB_TOKEN')
-  const github = repoAdvisories ? (await import('@preventive/upstream/github.js')).createClient({ token: process.env.GITHUB_TOKEN }) : undefined
+  // A GitHub-hosted dependency (a Solidity library in lib/) is audited through its repo's published
+  // advisories: with GITHUB_TOKEN when set, else anonymously (60 requests an hour).
+  const { createClient } = await import('@preventive/upstream/github.js')
+  const github = createClient({ token: process.env.GITHUB_TOKEN || null })
   // Upstream caches what it looks up (a package's GitHub repo, a month each) only where told to, and
   // answers from it without asking: a per-user directory, never one shared with less trusted jobs.
   const { setCacheDir } = await import('@preventive/upstream/npm.js')

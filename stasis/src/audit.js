@@ -1,12 +1,14 @@
 import { moduleFileKey } from '@exodus/stasis-core/util'
 import { advisories } from '@preventive/upstream/advisories.js'
-import { compareVersions } from '@preventive/upstream/semver.js'
-import { isEvidenceFile } from './audit-corrections.js'
-import { parseFile } from './parse.js'
+import { getRepo } from '@preventive/upstream/package.js'
+import { compareVersions, valid } from '@preventive/upstream/semver.js'
+import { auditedEcosystem, isEvidenceFile, packageKey } from './audit-corrections.js'
+import { parseFile, parseFileWithKind } from './parse.js'
 import { collectWhy } from './why.js'
 
-// Only audit installed dependencies; first-party packages live under non-`node_modules` keys and
-// must not be sent to the public registry (leaks names, adds noise).
+// Only audit installed dependencies: npm's node_modules packages, vendored crates, Composer's
+// vendor packages and GitHub-hosted Solidity libraries (see auditedEcosystem). First-party code
+// must not be sent to a public database (leaks names, adds noise).
 //
 // A package counts as present only when its REAL code is, and recorded = present:
 // an artifact records exactly the files it ships or attested -- imported, entry,
@@ -18,32 +20,64 @@ import { collectWhy } from './why.js'
 // while one whose real code was bundled stays. Which consumers and import EDGES
 // reach that code is the reason column's concern -- collectReasons and why.js
 // apply the same evidence rule per file/edge there.
+//
+// A Composer dev version (`dev-main`, `1.x-dev`) names a branch, not a release: no advisory
+// database lists one, and upstream refuses it, so such a package is left out.
+//
+// A bundle carries file contents (a lockfile only their hashes), so an npm package bundled with
+// its package.json names its GitHub repo there, and --repo-advisories needs no registry lookup
+// for it: the installed version's own repository, not whatever `latest` names.
 export function collectPackagesFromFile(file) {
+  const { kind, artifact } = parseFileWithKind(file)
   const out = []
-  for (const [dir, { name, version, files }] of parseFile(file).modules) {
-    if (!dir.includes('node_modules')) continue
-    if (!name || !version) continue
-    if (!Object.keys(files).some((rel) => isEvidenceFile(name, version, rel))) continue
-    out.push({ name, version })
+  for (const [dir, { name, version, ecosystem: tag, files }] of artifact.modules) {
+    const ecosystem = auditedEcosystem(dir, tag)
+    if (!ecosystem || !name || !version) continue
+    if (ecosystem === 'composer' && /^dev-|-dev$/iu.test(version)) continue
+    if (!Object.keys(files).some((rel) => isEvidenceFile(ecosystem, name, version, rel))) continue
+    const github = kind === 'bundle' && ecosystem === 'npm' ? packageJsonRepo(files['package.json']) : undefined
+    out.push({ ecosystem, name, version, ...(github && { github }) })
   }
   return out
 }
 
-export function collectPackages(files) {
-  const seen = new Set()
-  const out = []
-  for (const file of files) {
-    for (const { name, version } of collectPackagesFromFile(file)) {
-      const key = `${name}@${version}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push({ name, version })
-    }
+// The GitHub repo a package.json names (bugs, repository or homepage), if it parses to one.
+function packageJsonRepo(text) {
+  if (typeof text !== 'string') return undefined
+  try {
+    return getRepo(JSON.parse(text)).github
+  } catch {
+    return undefined // not an object: the registry lookup stands in
   }
-  return out.toSorted((a, b) => a.name.localeCompare(b.name) || compareVersions(a.version, b.version))
 }
 
-// Map each audited node_modules package (`name@version`) to the bundle consumers ("reasons") that
+// Versions compare as semver where both are one (a Composer `v1.2.3` or a git branch is not).
+const byVersion = (a, b) => (valid(a) && valid(b) ? compareVersions(a, b) : a.localeCompare(b))
+
+export function collectPackages(files) {
+  const seen = new Map()
+  for (const file of files) {
+    for (const pkg of collectPackagesFromFile(file)) {
+      const key = packageKey(pkg.ecosystem, pkg.name, pkg.version)
+      // A lockfile names no repo; a bundle of the same package does.
+      if (!seen.get(key)?.github) seen.set(key, pkg)
+    }
+  }
+  return [...seen.values()].toSorted((a, b) => a.ecosystem.localeCompare(b.ecosystem) || a.name.localeCompare(b.name) || byVersion(a.version, b.version))
+}
+
+// What advisories() is asked: each package name once, with its audited versions and the repo its
+// bundled package.json names -- only when every one naming a repo names the same (GitHub's names
+// are case-insensitive). Upstream refuses two repos for a name; the registry lookup decides then.
+export function advisoryPackages(packages) {
+  return [...Map.groupBy(packages, (p) => `${p.ecosystem}:${p.name}`).values()].map((list) => {
+    const { ecosystem, name } = list[0]
+    const repos = new Map(list.filter((p) => p.github).map((p) => [p.github.toLowerCase(), p.github]))
+    return { ecosystem, name, versions: list.map((p) => p.version), ...(repos.size === 1 && { github: [...repos.values()][0] }) }
+  })
+}
+
+// Map each audited package (by packageKey) to the bundle consumers ("reasons") that
 // recorded its files. Only bundles carry a reason map ({ consumer: [file, ...] }); lockfiles omit
 // it. Each file is resolved back to its owning package via the module file listing. Only evidence
 // files attribute (see audit-corrections.js): a consumer that recorded nothing of a package but a
@@ -56,11 +90,12 @@ export function collectReasons(files) {
     const reason = artifact.reason
     if (!reason) continue
     const fileToPkg = new Map()
-    for (const [dir, { name, version, files: modFiles }] of artifact.modules) {
-      if (!dir.includes('node_modules') || !name || !version) continue
+    for (const [dir, { name, version, ecosystem: tag, files: modFiles }] of artifact.modules) {
+      const ecosystem = auditedEcosystem(dir, tag)
+      if (!ecosystem || !name || !version) continue
       for (const rel of Object.keys(modFiles)) {
-        if (!isEvidenceFile(name, version, rel)) continue
-        fileToPkg.set(moduleFileKey(dir, rel), `${name}@${version}`)
+        if (!isEvidenceFile(ecosystem, name, version, rel)) continue
+        fileToPkg.set(moduleFileKey(dir, rel), packageKey(ecosystem, name, version))
       }
     }
     for (const [consumer, list] of Object.entries(reason)) {
@@ -92,11 +127,11 @@ const byConsumerOrder = (a, b) => consumerRank(a) - consumerRank(b) || a.localeC
 // `reasonFilter`, when set, narrows the cell to a single consumer: the `--why`
 // chains are already filtered upstream (see collectWhy), so only the consumer
 // list needs pruning here.
-function reasonCell(pkg, affected, reasonsByPkg, whyByPkg, reasonFilter) {
+function reasonCell(adv, reasonsByPkg, whyByPkg, reasonFilter) {
   const parts = new Set()
   const source = whyByPkg ?? reasonsByPkg
-  for (const v of affected) {
-    for (const p of source.get(`${pkg}@${v}`) ?? []) parts.add(p)
+  for (const v of adv.versions) {
+    for (const p of source.get(packageKey(adv.ecosystem, adv.name, v)) ?? []) parts.add(p)
   }
   // --why: group `consumer: path` lines by consumer and order the groups
   // plugins -> run -> add (this also re-unites a consumer's lines when they were
@@ -122,12 +157,12 @@ function reasonCell(pkg, affected, reasonsByPkg, whyByPkg, reasonFilter) {
 export function flattenAdvisories(found, reasonsByPkg = new Map(), whyByPkg = null, reasonFilter = null) {
   const rows = []
   for (const adv of found) {
-    const reason = reasonCell(adv.name, adv.versions, reasonsByPkg, whyByPkg, reasonFilter)
+    const reason = reasonCell(adv, reasonsByPkg, whyByPkg, reasonFilter)
     // --reason keeps only advisories tied to that consumer: once the cell is
     // narrowed to it, an empty cell means this package isn't related to it.
     if (reasonFilter && reason === '') continue
     rows.push({
-      package: adv.name,
+      package: adv.ecosystem === 'npm' ? adv.name : `${adv.ecosystem}:${adv.name}`,
       installed: adv.versions.join(', '),
       vulnerable: adv.range ?? '',
       severity: adv.severity ?? '',
@@ -186,7 +221,8 @@ export function formatTable(rows, columns, { multiline = [] } = {}) {
   ].join('\n')
 }
 
-// `repoAdvisories` and `github` (a @preventive/upstream/github.js client) go to advisories() as they are.
+// `repoAdvisories` and `github` (a @preventive/upstream/github.js client) go to advisories() as they
+// are; a GitHub-hosted dependency is audited only through `github`, so it needs one.
 export async function audit(files, { why = false, whyDeep = false, whyFull = false, reason = null, repoAdvisories = false, github } = {}) {
   // --why-deep and --why-full imply --why. Deep keeps every chain instead of the
   // default pruning of chains whose full suffix is already a chain (see
@@ -198,12 +234,12 @@ export async function audit(files, { why = false, whyDeep = false, whyFull = fal
   }
   let result
   try {
-    result = await advisories(packages.map(({ name, version }) => ({ ecosystem: 'npm', name, versions: [version] })), { repoAdvisories, github })
+    result = await advisories(advisoryPackages(packages), { repoAdvisories, github })
   } catch (cause) {
     // Refused input or a malformed answer is an assertion that says so itself; a transport or
     // HTTP failure gets the context of which request it was.
     if (cause?.code === 'ERR_ASSERTION') throw cause
-    throw new Error(`${repoAdvisories ? 'npm/GitHub' : 'npm'} advisories request failed: ${cause.message}`, { cause })
+    throw new Error(`advisories request failed: ${cause.message}`, { cause })
   }
   // `--why` REPLACES the consumer list with per-consumer import paths, so only
   // one of the two is computed. Restrict the (potentially expensive) path search
@@ -212,7 +248,7 @@ export async function audit(files, { why = false, whyDeep = false, whyFull = fal
   // to a single consumer, dropping advisories unrelated to it.
   let rows
   if (why) {
-    const targetKeys = new Set(result.flatMap((adv) => adv.versions.map((v) => `${adv.name}@${v}`)))
+    const targetKeys = new Set(result.flatMap((adv) => adv.versions.map((v) => packageKey(adv.ecosystem, adv.name, v))))
     rows = flattenAdvisories(result, undefined, collectWhy(files, targetKeys, reason, { deep: whyDeep, full: whyFull }), reason)
   } else {
     rows = flattenAdvisories(result, collectReasons(files), null, reason)
@@ -230,7 +266,7 @@ function alertStats(rows) {
 export function printAuditReport({ packages, rows, why = false, reason = null }, { out = process.stdout, err = process.stderr } = {}) {
   const scanned = `Scanned ${packages.length} package${packages.length === 1 ? '' : 's'}`
   if (packages.length === 0) {
-    err.write(`${scanned}\nNo node_modules entries found in the input files\n`)
+    err.write(`${scanned}\nNo dependencies found in the input files\n`)
     return
   }
   err.write(`${scanned}: ${alertStats(rows)}\n`)

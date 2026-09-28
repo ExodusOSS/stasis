@@ -75,13 +75,13 @@ _Lockfiles (npm/pnpm/etc) not mentioned: they are like the "tarball" column, but
 | `stasis extract app.stasis.code.br` | unpack a bundle back to sources + a `stasis.lock.json` |
 | `stasis diff --stat a.lock.json b.stasis.code.br` | summarize module/file differences between two lockfiles/bundles |
 | `stasis prune` | trim `node_modules` to the lockfile, verifying the rest |
-| `stasis audit stasis.lock.json` | report npm advisories for a lockfile's dependencies |
-| `stasis audit app.stasis.code.br` | report npm advisories for a bundle's dependencies |
+| `stasis audit stasis.lock.json` | report advisories for a lockfile's dependencies: npm packages (npm's database), vendored crates (RustSec), Composer packages (Packagist, through OSV) and GitHub-hosted Solidity libraries in `lib/` (their repositories' published advisories, with `GITHUB_TOKEN` when set, else anonymously) |
+| `stasis audit app.stasis.code.br` | report advisories for a bundle's dependencies, as above |
 | `stasis audit --why app.stasis.code.br` | same, with the cross-module import paths that pull each flagged package in (`run: a -> b -> c`), prefixed by the consumer that imports each chain at the top level; a chain is skipped when its full tail is already listed as its own chain |
 | `stasis audit --why-deep app.stasis.code.br` | like `--why`, but keep those longer chains too (every path, shared tails collapsed to `a -> b -> ... -> d`) |
 | `stasis audit --why-full app.stasis.code.br` | like `--why`, but spell every chain out with no `...` collapse (combine with `--why-deep` for the complete raw listing) |
 | `stasis audit --reason=run app.stasis.code.br` | show only advisories related to one consumer (`run`); with `--why`, keep only that consumer's chains |
-| `GITHUB_TOKEN=... stasis audit --repo-advisories stasis.lock.json` | also ask each dependency's GitHub repository for the advisories its maintainers published there, which npm's database has only once GitHub reviews them; needs a GitHub token in `GITHUB_TOKEN`. Each package's repository is cached for a month in the user cache directory (`$XDG_CACHE_HOME/stasis`, `~/.cache/stasis`, `~/Library/Caches/stasis` on macOS, `%LOCALAPPDATA%\stasis\Cache` on Windows) |
+| `GITHUB_TOKEN=... stasis audit --repo-advisories stasis.lock.json` | also ask each dependency's GitHub repository for the advisories its maintainers published there, which npm's database has only once GitHub reviews them; needs a GitHub token in `GITHUB_TOKEN`. An npm package's repository comes from its bundled `package.json` when the bundle has one; otherwise it is looked up and cached for a month in the user cache directory (`$XDG_CACHE_HOME/stasis`, `~/.cache/stasis`, `~/Library/Caches/stasis` on macOS, `%LOCALAPPDATA%\stasis\Cache` on Windows) |
 | `stasis sbom --format=spdx stasis.lock.json` | export an SPDX SBOM for a lockfile or bundle |
 | `stasis sbom --format=cyclonedx app.stasis.code.br` | export a CycloneDX SBOM for a lockfile or bundle |
 
