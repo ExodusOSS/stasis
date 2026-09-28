@@ -17,7 +17,8 @@ import { posix, resolve } from 'node:path'
 
 import { toPosix } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
-import { readFileOrNull, tomlEntries } from './cargo.js'
+import { readFileOrNull } from './cargo.js'
+import { tomlEntries } from './toml.js'
 
 export const FOUNDRY_TOML = 'foundry.toml'
 export const REMAPPINGS_TXT = 'remappings.txt'

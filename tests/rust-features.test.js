@@ -11,10 +11,10 @@ import {
   parseCargoLock,
   parseCargoManifest,
   parseFeatureList,
-  parseTomlValue,
   resolutionFromMetadata,
   satisfiesCargoReq,
 } from '../stasis/src/loaders/cargo.js'
+import { parseTomlValue } from '../stasis/src/loaders/toml.js'
 import { buildRustBundle } from '../stasis/src/cmd/bundle.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
