@@ -9,10 +9,35 @@ allowBuilds:
 
 enableGlobalVirtualStore: false
 
+# Keep bin shims (e.g. exodus-test) from exporting NODE_PATH: it leaks into every stasis child the
+# tests spawn, where CJS bare specifiers then fall back to hoisted .pnpm/node_modules packages outside
+# the project root.
+extendNodePath: false
+
+# @exodus/test's optional deps back engines/features the suite doesn't use (other engines and browsers,
+# bundling, coverage, --jest, --esbuild/TS, network replay); test discovery falls back to fs.glob.
+ignoredOptionalDependencies:
+  - '@chalker/queue'
+  - '@exodus/replay'
+  - '@exodus/test-bundler'
+  - c8
+  - expect
+  - fast-glob
+  - playwright-core
+  - pretty-format
+  - puppeteer-core
+  - tsx
+
 ignoreWorkspaceRootCheck: true
 
 linkWorkspacePackages: true
 
 lockfileIncludeTarballUrl: true
+
+# exodus-test preloads a module.registerHooks resolve hook (loader/remap.cjs, for tape/@jest/globals
+# imports this suite doesn't use) into every node:test process. On Node 26 any such hook makes
+# require.resolve(spec, { conditions }) ignore the conditions the scanner/resolver pass, so skip it.
+patchedDependencies:
+  '@exodus/test@1.0.0-rc.116': patches/@exodus__test@1.0.0-rc.116.patch
 
 preferWorkspacePackages: true

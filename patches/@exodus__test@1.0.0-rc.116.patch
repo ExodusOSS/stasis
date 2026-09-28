@@ -1,0 +1,13 @@
+diff --git a/bin/index.js b/bin/index.js
+index 158a4092d797c11a551e9a77bdfa8f6dbcba7265..f1fce8efb3b8ba2a9a0253220b8cd544e581f61d 100755
+--- a/bin/index.js
++++ b/bin/index.js
+@@ -360,7 +360,7 @@ if (process.env.EXODUS_TEST_IGNORE) {
+ // This might be used in presets, so has to be loaded before jest
+ if (options.flow && !options.bundle) args.push('--import', import.meta.resolve('../loader/flow.js'))
+ if (['node:test', 'electron-as-node:test', 'deno:test', 'deno:pure'].includes(options.engine)) {
+-  args.push('--import', import.meta.resolve('../loader/remap.cjs'))
++  if (options.engine !== 'node:test') args.push('--import', import.meta.resolve('../loader/remap.cjs'))
+   if (options.engine === 'deno:test') {
+     args.push('--import-map', import.meta.resolve('../loader/deno-import-map.json'))
+   } else if (options.engine === 'deno:pure') {

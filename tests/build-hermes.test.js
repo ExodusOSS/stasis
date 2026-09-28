@@ -42,7 +42,7 @@ const runCli = async (args, { cwd } = {}) => {
 const runNode = (t, file, { cwd } = {}) => {
   const r = spawnSync(process.execPath, [file], { encoding: 'utf-8', cwd })
   t.assert.equal(r.status, 0, `running ${file} failed: ${r.stderr}`)
-  return r.stdout
+  return stripVTControlCharacters(r.stdout)
 }
 
 const withTmp = (fn) => async (t) => {

@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@exodus/test@1.0.0-rc.116':
+    hash: 91700ea042ce1ab37dd135b5344f098bb4c862d12dd9cd2c053bc006aaa5be94
+    path: patches/@exodus__test@1.0.0-rc.116.patch
+
 importers:
 
   .:
@@ -29,6 +34,9 @@ importers:
       '@exodus/stasis-plugins':
         specifier: workspace:*
         version: link:stasis-plugins
+      '@exodus/test':
+        specifier: 1.0.0-rc.116
+        version: 1.0.0-rc.116(patch_hash=91700ea042ce1ab37dd135b5344f098bb4c862d12dd9cd2c053bc006aaa5be94)
       babel-plugin-module-resolver:
         specifier: ^3.2.0
         version: 3.2.0
@@ -361,6 +369,25 @@ packages:
       '@noble/hashes': ^1.8.0 || ^2.0.0
     peerDependenciesMeta:
       '@noble/hashes':
+        optional: true
+
+  '@exodus/test@1.0.0-rc.116':
+    resolution: {integrity: sha512-JrVzY785bRaZhpdKAwKw7IUBvVIkUY3AEp733DlUO7AJ99a3nw8C0zO3Oh9itoKnC7+jIWvSzZdE8TX4nN0bAg==, tarball: https://registry.npmjs.org/@exodus/test/-/test-1.0.0-rc.116.tgz}
+    engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
+    hasBin: true
+    peerDependencies:
+      '@babel/register': ^7.0.0
+      electron: '*'
+      jsdom: '*'
+      workerd: '*'
+    peerDependenciesMeta:
+      '@babel/register':
+        optional: true
+      electron:
+        optional: true
+      jsdom:
+        optional: true
+      workerd:
         optional: true
 
   '@jridgewell/gen-mapping@0.3.13':
@@ -2410,6 +2437,18 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==, tarball: https://registry.npmjs.org/yallist/-/yallist-3.1.1.tgz}
 
+ignoredOptionalDependencies:
+  - '@chalker/queue'
+  - '@exodus/replay'
+  - '@exodus/test-bundler'
+  - c8
+  - expect
+  - fast-glob
+  - playwright-core
+  - pretty-format
+  - puppeteer-core
+  - tsx
+
 snapshots:
 
   '@babel/code-frame@7.29.7':
@@ -2650,6 +2689,8 @@ snapshots:
     optional: true
 
   '@exodus/bytes@1.15.0': {}
+
+  '@exodus/test@1.0.0-rc.116(patch_hash=91700ea042ce1ab37dd135b5344f098bb4c862d12dd9cd2c053bc006aaa5be94)': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
