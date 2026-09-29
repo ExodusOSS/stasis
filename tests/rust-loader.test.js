@@ -1271,7 +1271,7 @@ test('scanRustItems skips the else branches of a dead `if`, and takes a bare mac
   t.assert.deepEqual([...items.invocations].toSorted(), ['helper', 'other'])
 })
 
-test('buildRustTree resolves through several globs of one module, and the first import that leads somewhere', (t) => {
+test('buildRustTree resolves through several globs of one module, and through each import under its own cfg', (t) => {
   const sources = new Map([
     ['src/lib.rs', ['mod foo;', 'mod b;', 'mod user;', 'pub use foo::a::*;', 'pub use foo::b::*;', '#[cfg(unix)]', 'pub use notvendored::X;', '#[cfg(windows)]', 'pub use crate::b::X;'].join('\n')],
     ['src/foo.rs', 'pub mod a;\npub mod b;\n'],
@@ -1284,7 +1284,9 @@ test('buildRustTree resolves through several globs of one module, and the first 
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.deepEqual(edges(resolutions.get('src/user.rs')), {
     'crate::deep::D': 'src/foo/b/deep.rs', // `deep` through the second glob
-    'crate::X': 'src/b.rs', // the `#[cfg(windows)]` import: the `#[cfg(unix)]` one leads to a crate that isn't in-tree
+    // Under unix the `pub use notvendored::X` binds it -- a crate that isn't in-tree, so the name
+    // is lib.rs's as far as the bundle knows -- under windows `crate::b::X`.
+    'crate::X': { unix: 'src/lib.rs', windows: 'src/b.rs' },
   })
 })
 
@@ -2217,6 +2219,28 @@ test('buildRustTree lets a child module under a custom cfg give way to an import
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.deepEqual(edges(resolutions.get('src/private.rs')), { 'use serde_core': 'vendor/serde_core/src/lib.rs' })
   t.assert.deepEqual(edges(resolutions.get('src/docs.rs')), { 'crate::de::Error': 'src/de.rs' })
+})
+
+test('buildRustTree ranks a module\'s own items with its imports, one leading out of the bundle included', (t) => {
+  const gate = (name, cfg) => `macro_rules! ${name} {\n    ($($item:item)*) => {\n        $(\n            #[cfg(${cfg})]\n            $item\n        )*\n    }\n}\n`
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod macros;\nmod atomic_u64;\nmod trace;\nmod user;\n'],
+    ['src/macros.rs', gate('cfg_has_atomic_u64', 'target_has_atomic = "64"') + gate('cfg_not_has_atomic_u64', 'not(target_has_atomic = "64")') + gate('cfg_taskdump', 'test') + gate('cfg_not_taskdump', 'not(test)')],
+    // tokio: std's `AtomicU64` re-exported in one variant file, a mutex-based one defined in the other.
+    ['src/atomic_u64.rs', 'cfg_has_atomic_u64! {\n    #[path = "native.rs"]\n    mod imp;\n}\ncfg_not_has_atomic_u64! {\n    #[path = "as_mutex.rs"]\n    mod imp;\n}\npub(crate) use imp::AtomicU64;\n'],
+    ['src/native.rs', 'pub(crate) use std::sync::atomic::{AtomicU64, Ordering};\n'],
+    ['src/as_mutex.rs', 'pub(crate) struct AtomicU64;\n'],
+    // tokio's `mod trace`: an import under a gate that is off (`taskdump`; here `test`), the fn
+    // defined under its negation.
+    ['src/trace.rs', 'cfg_taskdump! {\n    pub(crate) use crate::user::trace_leaf;\n}\ncfg_not_taskdump! {\n    pub(crate) fn trace_leaf() {}\n}\n'],
+    ['src/user.rs', 'use crate::atomic_u64::AtomicU64;\npub(crate) fn trace_leaf() {}\nfn f() { crate::trace::trace_leaf(); }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), {
+    'crate::atomic_u64::AtomicU64': { 'target_has_atomic = "64"': 'src/native.rs', 'not(target_has_atomic = "64")': 'src/as_mutex.rs' },
+    'crate::trace::trace_leaf': 'src/trace.rs',
+    'crate::atomic_u64': 'src/atomic_u64.rs',
+  })
 })
 
 test('buildRustTree reads `extern crate self as x;` as the crate root from every module: no crate `x` to report', (t) => {

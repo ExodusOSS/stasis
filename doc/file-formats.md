@@ -627,7 +627,13 @@ leads to another in-tree crate records that crate
 (`use serde_core`); one that leads out of the bundle, to the sysroot (`pub use
 core::result::Result`) or to a crate that isn't vendored, binds the name to
 its own file as far as the bundle knows (serde's `$crate::__private::Result`
-records the file of the `lib` module that re-exports `core::result`). The
+records the file of the `lib` module that re-exports `core::result`) -- a
+candidate like any other, under its cfgs: tokio's `imp::AtomicU64` is std's,
+re-exported in one variant file, or the mutex-based one the other defines. A
+module's own items rank with its named imports, ahead of what its globs bring
+in, which never shadows them (tokio's `crate::trace::trace_leaf` is the fn
+defined under `cfg_not_taskdump!`, not the import under the `cfg_taskdump!`
+that is off). The
 module an import was first followed from is a dependency too: when nothing
 else in the file points at its file, the path's prefix naming it is recorded
 (`crate::__private` → private/mod.rs) -- unless that file is the crate root,

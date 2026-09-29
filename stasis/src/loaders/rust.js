@@ -1603,13 +1603,12 @@ function provided(root, at, name, from, ctx, asker, typesOnly = false) {
 // kept on the import per asker -- unless the answer came out of an import cycle still being
 // resolved (see memoized). An import being followed that is met again leads back to itself (`use
 // log;` in every platform file of a module asks the module for `log`, which is these imports):
-// nothing here. An import that leads nowhere the bundle can see is passed over, and -- when it is
-// a path, not a crate named outright (`use serde;`) -- stands in as the last resort: the name is
-// an item here, as far as the bundle knows. A value where a type is wanted (`typesOnly`: a `fn`
+// nothing here. An import that leads nowhere the bundle can see -- when it is a path, not a crate
+// named outright (`use serde;`, passed over) -- answers where it is: the name is an item of its
+// file, as far as the bundle knows. A value where a type is wanted (`typesOnly`: a `fn`
 // defined here, an import of one) is passed over too, and when nothing else answers, the answer
 // is VALUE_ONLY rather than nothing: the name is taken, but not in this namespace.
 function pick(candidates, root, ctx, asker, typesOnly = false) {
-  let unseen = null
   const maybes = [] // the compatible answers under no doubt, for when none is entailed (see withAlternatives)
   let doubted = null // the first compatible answer under a doubtful cfg, for when there is nothing else
   let lastResort = null // the first under a cfg the asker's build can't compile (see deadUnder)
@@ -1647,9 +1646,13 @@ function pick(candidates, root, ctx, asker, typesOnly = false) {
         ctx.hits.delete(depth)
         if (minHit(ctx) > depth) (im.answers ??= new Map()).set(key, r)
       }
+      // An import leading out of the bundle (`pub(crate) use std::sync::atomic::AtomicU64;`, a
+      // crate that isn't vendored) binds the name all the same: an item of its own file, as far
+      // as the bundle knows, under its cfgs. One naming a crate outright (`use serde;`) answers
+      // nothing: the lead is the crate's to report.
       if (r === null) {
-        if (im.segments.length > 1) unseen ??= c
-        continue
+        if (im.segments.length === 1) continue
+        r = { kind: 'item', file: im.file }
       }
       if (r === VALUE_ONLY) {
         valueOnly = true
@@ -1664,7 +1667,6 @@ function pick(candidates, root, ctx, asker, typesOnly = false) {
   if (maybes.length > 0) return withAlternatives(maybes, asker)
   if (doubted !== null) return doubted
   if (lastResort !== null) return lastResort
-  if (unseen !== null) return { kind: 'item', file: unseen.import.file, through: unseen.through }
   return valueOnly ? VALUE_ONLY : null
 }
 
@@ -1729,6 +1731,16 @@ function providedAll(root, at, name, seeing, ctx) {
     ctx.walking--
     list = new Lazy(function* () {
       yield* importsOf(root, at, name, seeing, ctx)
+      // The module's own items rank with its named imports -- two explicit bindings of one name
+      // are rustc's error unless their cfgs differ (tokio's `imp` re-exports std's `AtomicU64` in
+      // one variant file and defines its own in the other) -- ahead of what globs bring in, which
+      // never shadows them. The module's tree file first; visibility is the path's to break.
+      const defs = ctx.defined.get(root)?.get(at)?.get(name)
+      if (defs !== undefined) {
+        const own = ctx.trees.get(root).get(at)
+        for (const d of defs) if (d.file === own) yield { answer: { kind: 'item', file: d.file }, leaves: d.leaves, ns: d.ns }
+        for (const d of defs) if (d.file !== own) yield { answer: { kind: 'item', file: d.file }, leaves: d.leaves, ns: d.ns }
+      }
       // Of the closure's modules (hundreds, in libc), only the ones with something of the name
       // (`having`), in closure order.
       const having = ctx.having.get(root)?.get(name)
