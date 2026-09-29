@@ -442,9 +442,10 @@ is the project's own code.
 
 The config files are read, not bundled. `--manifests` bundles the build
 description too: every config file the resolution read, whatever it's called (an
-`extends = "base.conf"`, a `--mapping=remaps`; an `extends` base by the real
-path of the file read), the root's `foundry.lock`, `soldeer.lock`, `.gitmodules`
-and `package.json`, and the `package.json`, `foundry.toml` and `remappings.txt`
+`extends = "base.conf"`, a `--mapping=remaps`), by its path in the project (by
+its real path once a `..` or an absolute or `/proc/self/cwd` lib leads
+elsewhere), the root's `foundry.lock`, `soldeer.lock`, `.gitmodules` and
+`package.json`, and the `package.json`, `foundry.toml` and `remappings.txt`
 of every package the bundle holds files of — `json` for a `package.json`,
 `resource` otherwise, so `stasis extract` restores them. They are carried as
 written, as `--package-json` carries `package.json`: stasis doesn't edit them,

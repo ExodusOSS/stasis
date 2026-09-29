@@ -25,7 +25,7 @@ export function isFile(path) {
   }
 }
 
-export function readFileOrNull(file) {
+function readFileOrNull(file) {
   try {
     return readFileSync(file, 'utf8')
   } catch {

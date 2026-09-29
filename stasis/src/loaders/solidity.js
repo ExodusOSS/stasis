@@ -27,7 +27,7 @@ import {
   readFoundryTomlRemappings,
   toSolcRemapping,
 } from './foundry.js'
-import { projectOwnership, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
+import { projectOwnership, projectRelative, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
 
 // --- Import scan ------------------------------------------------------------------------------
 
@@ -186,19 +186,12 @@ export async function discoverSolidityConfig(baseDir, { mappingFile, env = proce
   if (forge && !mappingFile) return foundryProject(baseDir, { env })
   const { libs, profiled } = forge ? foundryLibs(baseDir, { env }) : { libs: [], profiled: false }
   const ownership = projectOwnership(baseDir, libs, { soldeer: forge })
-  // Project-relative, by real path when not inside lexically; `../` when outside the project (for
-  // --manifests to refuse: it can't be carried).
-  const projectRelative = (abs) => {
-    const rel = toPosix(relative(baseDir, abs))
-    if (!rel.startsWith('..') && !isAbsolute(rel)) return rel
-    return toPosix(relative(realpathOrNull(baseDir) ?? baseDir, realpathOrNull(abs) ?? abs))
-  }
   if (mappingFile) {
     const abs = resolve(baseDir, mappingFile)
     const { remappings, files, profiled: mappingProfiled } = readMapping(abs, { env, forge })
     // The profile picks the mapping file's remappings (a .toml) or the root foundry.toml's libs.
     const envUsed = profiled || mappingProfiled ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []
-    return { remappings, libs, ownership, files: files.map(projectRelative), envUsed }
+    return { remappings, libs, ownership, files: files.map((f) => projectRelative(baseDir, f)), envUsed }
   }
   const txt = join(baseDir, REMAPPINGS_TXT)
   const remappings = isFile(txt) ? readMapping(txt, { env, forge }).remappings : []
@@ -363,10 +356,7 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings,
   const sources = new Map()
   const knownEntries = new Set(entries)
   const realBase = realpathSync(baseDir)
-  for (const entry of entries) {
-    const { reason } = ownership.of(entry)
-    if (reason) throw new Error(`Refusing entry ${entry}: ${reason}`)
-  }
+  for (const entry of entries) ownership.assert(entry, 'entry ')
 
   const processWave = async (wave) => {
     const toLoad = [...new Set(wave)].filter((p) => !sources.has(p))

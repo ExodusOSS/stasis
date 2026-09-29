@@ -628,6 +628,23 @@ test('buildSolidityBundle refuses a dependency config reached through an absolut
   }
 }))
 
+test('buildSolidityBundle with manifests carries the config of a /proc lib by its path in the project', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    'foundry.toml': '[profile.default]\nlibs = ["/proc/self/cwd/lib"]\n',
+    'src/A.sol': 'contract A {}\n',
+    'lib/x/foundry.toml': '[profile.default]\n',
+    'lib/x/remappings.txt': 'y/=src/\n',
+  })
+  const cwd = process.cwd()
+  process.chdir(tmp)
+  try {
+    const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} })
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['foundry.toml', 'lib/x/foundry.toml', 'lib/x/remappings.txt', 'src/A.sol'])
+  } finally {
+    process.chdir(cwd)
+  }
+}))
+
 test('buildSolidityBundle refuses a path the ownership walk reads differently from the OS', withTmp(async (t, tmp) => {
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\n',

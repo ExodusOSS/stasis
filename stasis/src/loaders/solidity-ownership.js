@@ -19,6 +19,19 @@ const toSlashes = (p) => (sep === '\\' ? p.replaceAll('\\', '/') : p)
 // `p`'s real path as the OS resolves it (realpath(3): the filesystem's own spelling), or null.
 export const realpathOrNull = (p) => osRealpath(p).real
 
+// A path relative to a dir (slashes) that stays inside it.
+const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)
+
+// `abs`, a file the resolution read, relative to the project `root` (slashes): as spelled when that
+// lies inside it with no `..` to resolve (a linked lib's files keep the lib's path), else by real
+// paths -- where the read went (an absolute or `/proc/self/cwd` lib; a `..` after a symlink) --
+// `../` when outside the project.
+export function projectRelative(root, abs) {
+  const rel = toSlashes(relative(root, abs))
+  if (inRoot(rel) && !toSlashes(abs).split('/').includes('..')) return rel
+  return toSlashes(relative(realpathOrNull(root) ?? root, realpathOrNull(abs) ?? abs))
+}
+
 // realpath(3) of `p`: `{ real }`, or `{ real: null, missing }`, `missing` false when something is
 // there that the OS can't resolve (a real path past PATH_MAX, a loop, a dir it may not search).
 function osRealpath(p) {
@@ -121,30 +134,29 @@ const TARGET_SEPARATORS = sep === '\\' ? /[\\/]/u : /\//u
 // Who owns each project-relative path, decided from how it resolves on disk. The dependencies are
 // every `node_modules/<pkg>` (`@scope/<pkg>`), each entry of the `dirs` (forge's libs, Soldeer's
 // `dependencies/`; a linked entry is the dependency where it points, as a symlinked
-// `lib/forge-std`), and the `packages` (git submodules). `of(path)` gives `{ real, outside,
-// dependency, escape }`:
+// `lib/forge-std`), and the `packages` (git submodules). `assert(path)` throws for a path `of`
+// refuses; `of(path)` gives `{ real, outside, dependency, escape }`:
 // - `real`: the real path, spelled as the filesystem spells it (project-relative; null when
 //   nothing is there), `outside` when it's out of the root;
 // - `dependency`: the real path lies in a dependency, however the path got there (a project's
 //   `src/vendor -> ../lib/dep/src` holds the dependency's code);
 // - `escape`: `{ link, root, why }` (and `reason`, saying so) when the path may not be read: it
-//   crosses a symlink that no one
-//   trusted placed -- one planted inside the dependency `root` that leads out of it to anything but
-//   another dependency (`lib/evil/src/Evil.sol -> ../../../.env`), or one outside the project
-//   (`root` null) that leads back into it (a dependency linked from elsewhere: `lib/evil ->
-//   ../../shared/evil` holding `Evil.sol -> ../../proj/.env`) -- or (`why: 'unresolved'`) the walk
-//   below can't vouch for it: it resolves the path link by link, and where that doesn't land where
-//   the OS's realpath does (a link target it can't read as the OS does, one that isn't UTF-8), or
-//   the OS can't resolve it at all (a real path past PATH_MAX), the path is refused rather than
-//   trusted. `real` null with no `escape` means nothing is there. A link the project placed (a
-//   workspace package in node_modules, a linked `lib/` entry) may lead anywhere in the root, and
-//   so may one on the path the project was named by (a symlinked checkout, macOS's `/tmp`).
+//   crosses a symlink that no one trusted placed -- one planted inside the dependency `root` that
+//   leads out of it to anything but another dependency (`lib/evil/src/Evil.sol -> ../../../.env`),
+//   or one outside the project (`root` null) that leads back into it (a dependency linked from
+//   elsewhere: `lib/evil -> ../../shared/evil` holding `Evil.sol -> ../../proj/.env`) -- or
+//   (`why: 'unresolved'`) the walk below can't vouch for it: it resolves the path link by link, and
+//   where that doesn't land where the OS's realpath does (a link target it can't read as the OS
+//   does, one that isn't UTF-8), or the OS can't resolve it at all (a real path past PATH_MAX), the
+//   path is refused rather than trusted. `real` null with no `escape` means nothing is there. A
+//   link the project placed (a workspace package in node_modules, a linked `lib/` entry) may lead
+//   anywhere in the root, and so may one on the path the project was named by (a symlinked
+//   checkout, macOS's `/tmp`).
 export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   const realBase = realpathSync.native(baseDir)
   const named = resolve(baseDir)
   const onNamedPath = (abs) => named === abs || named.startsWith(abs.endsWith(sep) ? abs : `${abs}${sep}`)
   const toRel = (abs) => toSlashes(relative(realBase, abs)) || '.'
-  const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)
   const inside = (rel) => rel !== '.' && inRoot(rel)
   const under = (rel, dir) => rel === dir || rel.startsWith(`${dir}/`)
   const clean = (d) => posix.normalize(toSlashes(d)).replace(/\/+$/u, '')
@@ -262,7 +274,12 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
     }
     return owner
   }
-  return { of }
+  // Throws, saying why, for a path `of` refuses; `what` names it (`'entry '`).
+  const assert = (rel, what = '') => {
+    const { reason } = of(rel)
+    if (reason) throw new Error(`Refusing ${what}${rel}: ${reason}`)
+  }
+  return { of, assert }
 }
 
 // The ownership of the project at `baseDir` given its lib dirs (`soldeer`: forge's `dependencies/`
