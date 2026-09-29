@@ -17,11 +17,15 @@ const toSlashes = (p) => (sep === '\\' ? p.replaceAll('\\', '/') : p)
 // --- Reading --------------------------------------------------------------------------------
 
 // `p`'s real path as the OS resolves it (realpath(3): the filesystem's own spelling), or null.
-export function realpathOrNull(p) {
+export const realpathOrNull = (p) => osRealpath(p).real
+
+// realpath(3) of `p`: `{ real }`, or `{ real: null, missing }`, `missing` false when something is
+// there that the OS can't resolve (a real path past PATH_MAX, a loop, a dir it may not search).
+function osRealpath(p) {
   try {
-    return realpathSync.native(p)
-  } catch {
-    return null
+    return { real: realpathSync.native(p), missing: false }
+  } catch (err) {
+    return { real: null, missing: err.code === 'ENOENT' || err.code === 'ENOTDIR' }
   }
 }
 
@@ -130,10 +134,11 @@ const TARGET_SEPARATORS = sep === '\\' ? /[\\/]/u : /\//u
 //   (`root` null) that leads back into it (a dependency linked from elsewhere: `lib/evil ->
 //   ../../shared/evil` holding `Evil.sol -> ../../proj/.env`) -- or (`why: 'unresolved'`) the walk
 //   below can't vouch for it: it resolves the path link by link, and where that doesn't land where
-//   the OS's realpath does (a link target it can't read as the OS does, one that isn't UTF-8), the
-//   path is refused rather than trusted. A link the project placed (a workspace package in
-//   node_modules, a linked `lib/` entry) may lead anywhere in the root, and so may one on the path
-//   the project was named by (a symlinked checkout, macOS's `/tmp`).
+//   the OS's realpath does (a link target it can't read as the OS does, one that isn't UTF-8), or
+//   the OS can't resolve it at all (a real path past PATH_MAX), the path is refused rather than
+//   trusted. `real` null with no `escape` means nothing is there. A link the project placed (a
+//   workspace package in node_modules, a linked `lib/` entry) may lead anywhere in the root, and
+//   so may one on the path the project was named by (a symlinked checkout, macOS's `/tmp`).
 export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   const realBase = realpathSync.native(baseDir)
   const named = resolve(baseDir)
@@ -236,12 +241,13 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
     if (owner === undefined) {
       const path = join(realBase, rel)
       let { abs, escape } = walk(realBase, rel.split('/'), 0)
-      // The OS's answer is the one a read gets: the walk must agree with it, or the path is refused.
+      // The OS's answer is the one a read gets: the walk must agree with it, or the path is refused,
+      // as it is when the OS can't resolve it at all, though a read may still get through.
       // (Past its last link the walk's path is spelled as given; with none, it's `path` itself.)
-      const os = realpathOrNull(path)
+      const { real: os, missing } = osRealpath(path)
       if (escape === null) {
         const walked = abs === null ? null : abs === path ? os : realpathOrNull(abs)
-        if (walked !== os) escape = { link: rel, root: null, why: 'unresolved' }
+        if (walked !== os || (os === null && !missing)) escape = { link: rel, root: null, why: 'unresolved' }
         abs = os
       }
       const real = abs === null ? null : toRel(abs)

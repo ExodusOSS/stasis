@@ -179,23 +179,26 @@ export async function readRemappingsFile(mappingFile, { env = process.env, forge
 // `libs` are forge's lib dirs whenever the root has a foundry.toml (an absolute import inside a
 // library resolves against it); `ownership` tells the dependencies' files from the project's
 // (solidityOwnership: forge's libs, Soldeer's `dependencies/`, git submodules, node_modules);
-// `files` the project-relative config files read; `envUsed` the environment variables that
-// shaped the result.
+// `files` the project-relative config files read (`../` for one outside the project); `envUsed`
+// the environment variables that shaped the result.
 export async function discoverSolidityConfig(baseDir, { mappingFile, env = process.env } = {}) {
   const forge = isFile(join(baseDir, FOUNDRY_TOML))
   if (forge && !mappingFile) return foundryProject(baseDir, { env })
   const { libs, profiled } = forge ? foundryLibs(baseDir, { env }) : { libs: [], profiled: false }
   const ownership = projectOwnership(baseDir, libs, { soldeer: forge })
-  const within = (abs) => {
+  // Project-relative, by real path when not inside lexically; `../` when outside the project (for
+  // --manifests to refuse: it can't be carried).
+  const projectRelative = (abs) => {
     const rel = toPosix(relative(baseDir, abs))
-    return rel.startsWith('..') || isAbsolute(rel) ? [] : [rel]
+    if (!rel.startsWith('..') && !isAbsolute(rel)) return rel
+    return toPosix(relative(realpathOrNull(baseDir) ?? baseDir, realpathOrNull(abs) ?? abs))
   }
   if (mappingFile) {
     const abs = resolve(baseDir, mappingFile)
     const { remappings, files, profiled: mappingProfiled } = readMapping(abs, { env, forge })
     // The profile picks the mapping file's remappings (a .toml) or the root foundry.toml's libs.
     const envUsed = profiled || mappingProfiled ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []
-    return { remappings, libs, ownership, files: files.flatMap(within), envUsed }
+    return { remappings, libs, ownership, files: files.map(projectRelative), envUsed }
   }
   const txt = join(baseDir, REMAPPINGS_TXT)
   const remappings = isFile(txt) ? readMapping(txt, { env, forge }).remappings : []

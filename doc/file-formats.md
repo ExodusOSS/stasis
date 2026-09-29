@@ -422,15 +422,17 @@ that leads out of it to anything but another dependency (`lib/evil/src/Evil.sol
 dependency linked from elsewhere, `lib/evil -> ../../shared/evil`, holding a
 link to the project's `.env`). Links are followed one by one and the result
 checked against the OS's own realpath: a path the two resolve differently (a
-link target that isn't UTF-8, one whose `\` the OS reads as part of a name) is
-refused, not trusted. Whoever's import, entry or manifest the path is, the
-import is refused, the entry rejected, the manifest not carried, and a
-dependency's own `foundry.toml`, `extends` base or `remappings.txt` skipped with
-a warning (one that is another dependency's file is read). A dependency's config
-reaches only what the path from the root does: one found through an absolute or
-`/proc/self/cwd` lib is judged by its real path, a dependency outside the root
-reads nothing, and a dir a dependency's `libs` names must be a dependency
-itself. A `package.json` that decides a file's package is refused the same way
+link target that isn't UTF-8, one whose `\` the OS reads as part of a name), or
+one the OS can't resolve at all (a real path past `PATH_MAX`), is refused, not
+trusted. An `extends` path is joined as forge joins it and resolved by the OS,
+so a `..` after a symlink leads where forge's does. Whoever's import, entry or
+manifest the path is, the import is refused, the entry rejected, the manifest
+not carried, and a dependency's own `foundry.toml`, `extends` base or
+`remappings.txt` skipped with a warning (one that is another dependency's file
+is read). A dependency's config reaches only what the path from the root does:
+one found through an absolute or `/proc/self/cwd` lib is judged by its real
+path, a dependency outside the root reads nothing, and a dir a dependency's
+`libs` names must be a dependency itself. A `package.json` that decides a file's package is refused the same way
 when a dependency planted it as a link, and one that doesn't parse is an error
 naming it (not quoting it) rather than giving its files to the parent package. A
 link the project placed (a workspace package linked into `node_modules`, a
@@ -440,17 +442,21 @@ is the project's own code.
 
 The config files are read, not bundled. `--manifests` bundles the build
 description too: every config file the resolution read, whatever it's called (an
-`extends = "base.conf"`, a `--mapping=remaps`), the root's `foundry.lock`,
-`soldeer.lock`, `.gitmodules` and `package.json`, and the `package.json`,
-`foundry.toml` and `remappings.txt` of every package the bundle holds files of —
-`json` for a `package.json`, `resource` otherwise, so `stasis extract` restores
-them. They are carried as written, as `--package-json` carries `package.json`:
-stasis doesn't edit them, so whatever they hold — an `eth_rpc_url` or
-`[rpc_endpoints]` URL with its API key, an `[etherscan]` key, the credentials in
-a `.gitmodules` URL — is in the bundle too. Keep secrets in the environment
-(`${VAR}` in `foundry.toml`) rather than in these files, or don't pass
-`--manifests`. `hardhat.config.*`, being code, and `.env` files are never
-carried.
+`extends = "base.conf"`, a `--mapping=remaps`; an `extends` base by the real
+path of the file read), the root's `foundry.lock`, `soldeer.lock`, `.gitmodules`
+and `package.json`, and the `package.json`, `foundry.toml` and `remappings.txt`
+of every package the bundle holds files of — `json` for a `package.json`,
+`resource` otherwise, so `stasis extract` restores them. They are carried as
+written, as `--package-json` carries `package.json`: stasis doesn't edit them,
+so whatever they hold — an `eth_rpc_url` or `[rpc_endpoints]` URL with its API
+key, an `[etherscan]` key, the credentials in a `.gitmodules` URL — is in the
+bundle too. Keep secrets in the environment (`${VAR}` in `foundry.toml`) rather
+than in these files, or don't pass `--manifests`. `hardhat.config.*`, being
+code, and `.env` files are never carried. A config the resolution read that
+can't be carried — one outside the bundle root (`extends =
+"../shared-base.toml"`), a `.env` one (`base.env`, `.env.toml`, `.env.local`),
+or one the ownership rules refuse — fails `--manifests`, naming it: without it
+the bundle couldn't reproduce the resolution.
 
 Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
 `tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does,

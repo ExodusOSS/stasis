@@ -234,13 +234,22 @@ function packageLookup(baseDir, check) {
 }
 
 // The build-description files of a Solidity bundle (--manifests), as Map<path, text>: `configFiles`
-// (what discoverSolidityConfig read, whatever they're called; neverCarried aside) plus the
+// (what discoverSolidityConfig read, whatever they're called: each must be carried) plus the
 // SOLIDITY_*_MANIFESTS that exist, for the root and for each package dir `classifyDep`/`packageOf`
-// places a bundled source in. Files inside the root only, and none whose path `ownership` refuses
-// (see solidityOwnership). Carried as written: whatever they hold (an RPC URL with its API key, an
-// Etherscan key, a URL's credentials) is in the bundle too, as with --package-json.
+// places a bundled source in. Files inside the root only, never a neverCarried one, and none whose
+// path `ownership` refuses (see solidityOwnership). Carried as written: whatever they hold (an RPC
+// URL with its API key, an Etherscan key, a URL's credentials) is in the bundle too, as with
+// --package-json.
 function solidityManifests(baseDir, sources, configFiles, { classifyDep, packageOf, ownership }) {
-  const wanted = new Set([...configFiles.filter((f) => !neverCarried(f)), ...SOLIDITY_ROOT_MANIFESTS])
+  // Every config the resolution read is carried, or the bundle couldn't be reproduced: one that
+  // can't be (outside the root, never carried, refused) is an error, not a skip.
+  const unreproducible = (rel, why) => new Error(`--manifests can't carry ${rel}, which the Solidity resolution read: ${why}`)
+  for (const rel of configFiles) {
+    if (rel.startsWith('../') || posix.isAbsolute(rel)) throw unreproducible(rel, 'it lies outside the bundle root')
+    if (neverCarried(rel)) throw unreproducible(rel, '.env files and hardhat.config.* are never carried')
+  }
+  const required = new Set(configFiles)
+  const wanted = new Set([...configFiles, ...SOLIDITY_ROOT_MANIFESTS])
   const dirs = new Set()
   for (const path of sources.keys()) {
     const dep = classifyDep(path)
@@ -254,9 +263,10 @@ function solidityManifests(baseDir, sources, configFiles, { classifyDep, package
   const realBase = host.realpath(baseDir)
   const out = new Map()
   for (const rel of [...wanted].toSorted()) {
-    if (sources.has(rel) || posix.isAbsolute(rel) || rel.startsWith('../')) continue
+    if (sources.has(rel)) continue
     const { reason } = ownership.of(rel)
     if (reason) {
+      if (required.has(rel)) throw unreproducible(rel, reason)
       console.warn(`[stasis] Not carrying ${rel}: ${reason}`)
       continue
     }
@@ -265,8 +275,9 @@ function solidityManifests(baseDir, sources, configFiles, { classifyDep, package
       assertRealPathWithinBase(realBase, baseDir, rel, host)
       buf = host.readFile(join(baseDir, rel))
     } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'EISDIR') continue
-      throw err
+      if (err.code !== 'ENOENT' && err.code !== 'EISDIR') throw err
+      if (required.has(rel)) throw unreproducible(rel, 'it is gone')
+      continue
     }
     if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
     out.set(rel, buf.toString('utf8'))
