@@ -76,6 +76,9 @@ importers:
       '@exodus/stasis-plugins':
         specifier: 1.0.0-beta.4
         version: link:../stasis-plugins
+      '@preventive/lockfile':
+        specifier: 1.0.0-alpha.1
+        version: 1.0.0-alpha.1
       '@preventive/upstream':
         specifier: 1.0.0-alpha.0
         version: 1.0.0-alpha.0
@@ -644,6 +647,10 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [win32]
+
+  '@preventive/lockfile@1.0.0-alpha.1':
+    resolution: {integrity: sha512-enrcy7d1hUZXXYOM7LNdshTQeiHhJCBoLlEkmJRR9cLsL7bDt6b5wvNUweo3UFmvutgdxg/6oy5vz3ig6nLR8Q==, tarball: https://registry.npmjs.org/@preventive/lockfile/-/lockfile-1.0.0-alpha.1.tgz}
+    engines: {node: '>=24.14.0'}
 
   '@preventive/upstream@1.0.0-alpha.0':
     resolution: {integrity: sha512-xqVwQ0QOzanNQy8LHOs7RxGMNggMhvUAAQIZ80FIiYZp7l4/9SqrdZnkO8JqZqDIRlqMOHxU5pyk3e/G1iv+dg==, tarball: https://registry.npmjs.org/@preventive/upstream/-/upstream-1.0.0-alpha.0.tgz}
@@ -2841,6 +2848,8 @@ snapshots:
 
   '@oxlint/binding-win32-x64-msvc@1.52.0':
     optional: true
+
+  '@preventive/lockfile@1.0.0-alpha.1': {}
 
   '@preventive/upstream@1.0.0-alpha.0': {}
 

@@ -9,7 +9,7 @@ import { dirname, isAbsolute, join, posix, relative } from 'node:path'
 
 import { toPosix } from '@exodus/stasis-core/util'
 
-import { tomlEntries } from './toml.js'
+import { isTomlTable, readToml } from './toml.js'
 
 // `cargo vendor` copies registry crates in-tree under this dir.
 export const VENDOR_DIR = 'vendor'
@@ -45,7 +45,7 @@ export function normalizeRel(dir, sub) {
 
 // --- Cargo.toml -----------------------------------------------------------------------
 
-const DEP_KINDS = { dependencies: 'normal', 'dev-dependencies': 'dev', 'build-dependencies': 'build' }
+const DEP_KINDS = { __proto__: null, dependencies: 'normal', 'dev-dependencies': 'dev', 'build-dependencies': 'build' }
 // Entries of a `[features]` list beyond a plain feature name: `dep:key` and `key/feat` / `key?/feat`.
 const DEP_IMPLICATION_RE = /^dep:(.+)$/u
 const DEP_FEATURE_RE = /^([^/?]+)(\?)?\/(.+)$/u
@@ -72,9 +72,9 @@ export function isTestTargetPath(pkgDir, fileRel) {
 // (kind, `path`/`version`/`package`/`workspace`, `optional`, `default-features`, `features`),
 // `[features]`, `[patch.*]` path overrides and the workspace tables members inherit from.
 // Dependency keys are normalized to the `use` spelling (`-` → `_`); feature names keep theirs.
-// Each pair is read by the table path it lands at, so `[dependencies.foo] features = […]`,
-// `[dependencies] foo.features = […]` and `foo = { features = […] }` are one thing. Throws a
-// TomlError naming `file` on text that isn't TOML.
+// It reads the parsed table tree, so `[dependencies.foo] features = […]`, `[dependencies]
+// foo.features = […]` and `foo = { features = […] }` are one thing. Throws a TomlError naming
+// `file` on text that isn't TOML.
 export function parseCargoManifest(text, file = null) {
   const manifest = {
     package: null, // { name, version, versionFromWorkspace, edition }
@@ -100,65 +100,68 @@ export function parseCargoManifest(text, file = null) {
     }
     return map.get(key)
   }
-  // Apply one table (or one `[dependencies.foo]` line) to a dependency: identity fields on the
-  // record, request fields on the entry for `kind` (or on the record itself for a flat one).
-  const setDepFields = (dep, table, kind) => {
+  // Apply one dependency's spec to its record: identity fields on the record, request fields on
+  // the entry for `kind` (or on the record itself for a flat one).
+  const setDepFields = (dep, spec, kind) => {
     const request = kind === null ? dep : (dep.kinds.get(kind) ?? dep.kinds.set(kind, newRequest()).get(kind))
-    if (typeof table === 'string') {
-      dep.version = table // `foo = "1.2"`: a registry dep
+    if (typeof spec === 'string') {
+      dep.version = spec // `foo = "1.2"`: a registry dep
       return
     }
-    if (typeof table !== 'object' || table === null) return
-    if (typeof table.version === 'string') dep.version = table.version
-    if (typeof table.path === 'string') dep.path = table.path
-    if (typeof table.package === 'string') dep.package = table.package
-    if (table.workspace === true) dep.workspace = true
-    if (table.optional === true) request.optional = true
-    const defaults = table['default-features'] ?? table.default_features
+    if (!isTomlTable(spec)) return
+    if (typeof spec.version === 'string') dep.version = spec.version
+    if (typeof spec.path === 'string') dep.path = spec.path
+    if (typeof spec.package === 'string') dep.package = spec.package
+    if (spec.workspace === true) dep.workspace = true
+    if (spec.optional === true) request.optional = true
+    const defaults = spec['default-features'] ?? spec.default_features
     if (defaults === true || defaults === false) request.defaultFeatures = defaults
-    if (Array.isArray(table.features)) request.features = [...new Set([...request.features, ...table.features.filter((f) => typeof f === 'string')])]
+    if (Array.isArray(spec.features)) request.features = [...new Set([...request.features, ...spec.features.filter((f) => typeof f === 'string')])]
   }
-  for (const { path, header, value } of tomlEntries(text, { file })) {
-    // A `[workspace]` table, however it is spelled out, makes this a workspace root.
-    if (path[0] === 'workspace') manifest.isWorkspace = true
-    if (header) continue
-    const [head, key, sub, extra] = path
-    if (head === 'package') {
-      manifest.package ??= { name: null, version: null, versionFromWorkspace: false, edition: null }
-      if (path.length === 2) {
-        if (key === 'name' && typeof value === 'string') manifest.package.name = value
-        else if (key === 'version' && typeof value === 'string') manifest.package.version = value
-        else if (key === 'version' && value?.workspace === true) manifest.package.versionFromWorkspace = true
-        else if (key === 'edition' && typeof value === 'string') manifest.package.edition = value
-        else if (key === 'resolver' && typeof value === 'string') manifest.resolver = value
-      } else if (path.length === 3 && key === 'version' && sub === 'workspace' && value === true) manifest.package.versionFromWorkspace = true
-    } else if (head === 'lib' && path.length === 2) {
-      if (key === 'name' && typeof value === 'string') manifest.lib.name = value
-      else if (key === 'path' && typeof value === 'string') manifest.lib.path = value
-    } else if (head === 'features' && path.length === 2) {
-      if (Array.isArray(value)) manifest.features.set(key, value.filter((v) => typeof v === 'string'))
-    } else if (head === 'patch') {
-      // `[patch.<registry>] crate = { path = "…" }` or `[patch.<registry>.crate] path = "…"`
-      const patch = path.length === 3 ? value?.path : (path.length === 4 && extra === 'path' ? value : undefined)
-      if (typeof patch === 'string') manifest.patches.set(normName(sub), patch)
-    } else if (head === 'workspace' && path.length === 2 && key === 'resolver' && typeof value === 'string') {
-      manifest.resolver = value
-    } else if (head === 'workspace' && path.length === 3 && key === 'package' && sub === 'version' && typeof value === 'string') {
-      manifest.workspacePackage.version = value
-    } else {
-      // `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, under `target.<cfg>` or
-      // `workspace`: then the dep's name, then possibly one field of it.
-      const ws = head === 'workspace'
-      const segs = ws ? path.slice(1) : path
-      const kindAt = segs[0] === 'target' ? 2 : 0
-      const kind = DEP_KINDS[segs[kindAt]]
-      const [depName, field, more] = segs.slice(kindAt + 1)
-      if (kind === undefined || depName === undefined || more !== undefined) continue
-      const dep = depOf(ws ? manifest.workspaceDeps : manifest.deps, depName, { flat: ws })
-      setDepFields(dep, field === undefined ? value : { [field]: value }, ws ? null : kind)
+  const doc = readToml(text, file)
+  const str = (v) => (typeof v === 'string' ? v : null)
+  const table = (v) => (isTomlTable(v) ? v : null)
+  const pkg = table(doc.package)
+  if (pkg !== null && typeof pkg.name === 'string') {
+    manifest.package = {
+      name: pkg.name,
+      version: str(pkg.version),
+      versionFromWorkspace: table(pkg.version)?.workspace === true,
+      edition: str(pkg.edition),
     }
   }
-  if (manifest.package && !manifest.package.name) manifest.package = null
+  const ws = table(doc.workspace)
+  // A `[workspace]` table, however it is spelled out, makes this a workspace root.
+  manifest.isWorkspace = 'workspace' in doc
+  manifest.resolver = str(ws?.resolver) ?? str(pkg?.resolver)
+  manifest.workspacePackage.version = str(table(ws?.package)?.version)
+  const lib = table(doc.lib)
+  manifest.lib = { name: str(lib?.name), path: str(lib?.path) }
+  for (const [name, list] of Object.entries(table(doc.features) ?? {})) {
+    if (Array.isArray(list)) manifest.features.set(name, list.filter((v) => typeof v === 'string'))
+  }
+  // `[patch.<registry>] crate = { path = "…" }`, however it is spelled out.
+  for (const registry of Object.values(table(doc.patch) ?? {})) {
+    for (const [crate, spec] of Object.entries(table(registry) ?? {})) {
+      const patch = str(table(spec)?.path)
+      if (patch !== null) manifest.patches.set(normName(crate), patch)
+    }
+  }
+  // `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, under `target.<cfg>` or
+  // `workspace`, in the order the manifest has them: each dependency a version string or a table.
+  const depTables = (scope, into, flat) => {
+    for (const [key, value] of Object.entries(scope)) {
+      if (key === 'target') {
+        for (const cfg of Object.values(table(value) ?? {})) depTables(table(cfg) ?? {}, into, flat)
+        continue
+      }
+      const kind = DEP_KINDS[key]
+      if (kind === undefined) continue
+      for (const [depName, spec] of Object.entries(table(value) ?? {})) setDepFields(depOf(into, depName, { flat }), spec, flat ? null : kind)
+    }
+  }
+  depTables(doc, manifest.deps, false)
+  if (ws !== null) depTables(ws, manifest.workspaceDeps, true)
   return manifest
 }
 
@@ -170,26 +173,20 @@ export function parseCargoManifest(text, file = null) {
 // text that isn't TOML.
 export function parseCargoLock(text, file = null) {
   if (text === null) return null
-  const packages = []
-  let cur = null // the [[package]] being read; null inside any other table
   // A dependency is `"name"`, or `"name version"` when several versions of it are locked.
   const dep = (s) => {
     const [name, version] = s.split(' ')
     return { name: normName(name), version: version ?? null }
   }
-  for (const { path, header, value } of tomlEntries(text, { file })) {
-    if (header) {
-      cur = path.length === 1 && path[0] === 'package' ? { name: null, version: null, deps: [] } : null
-      if (cur) packages.push(cur)
-      continue
-    }
-    if (cur === null || path.length !== 2) continue
-    const key = path[1]
-    if (key === 'name' && typeof value === 'string') cur.name = normName(value)
-    else if (key === 'version' && typeof value === 'string') cur.version = value
-    else if (key === 'dependencies' && Array.isArray(value)) {
-      for (const s of value) if (typeof s === 'string') cur.deps.push(dep(s))
-    }
+  const packages = []
+  const locked = readToml(text, file).package
+  for (const p of Array.isArray(locked) ? locked : []) {
+    if (!isTomlTable(p)) continue
+    packages.push({
+      name: typeof p.name === 'string' ? normName(p.name) : null,
+      version: typeof p.version === 'string' ? p.version : null,
+      deps: Array.isArray(p.dependencies) ? p.dependencies.filter((d) => typeof d === 'string').map(dep) : [],
+    })
   }
   const byId = new Map()
   const byName = new Map()

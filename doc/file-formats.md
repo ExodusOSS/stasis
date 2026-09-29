@@ -407,7 +407,11 @@ test code reaches for. Two kinds of cfg are decided:
   The crate a versioned dependency resolves to comes from `Cargo.lock`, so two
   vendored versions of one crate each get their own features and edges. A
   package the resolved build doesn't pull in has unknown features, and its gated
-  code is kept.
+  code is kept. The manifests and the lock are read with `@preventive/lockfile`'s
+  strict TOML parser (so is a `foundry.toml`): a `Cargo.toml` or `Cargo.lock`
+  that exists but isn't TOML stops the build, naming the file and line, and so
+  does TOML those files are never written in (a local date, a byte order mark,
+  U+FFFD where bytes weren't UTF-8).
 
 `all(…)`/`any(…)`/`not(…)` compose; a predicate that reduces to true (`not(test)`,
 an enabled feature) is as firm as no cfg, so a missing module behind it is fatal.

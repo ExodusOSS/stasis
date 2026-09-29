@@ -523,6 +523,15 @@ test('foundryProject honours auto_detect_remappings = false and `extends`', with
   t.assert.deepEqual(foundryProject(dir, { env: {} }).files.toSorted(), ['base.toml', 'foundry.toml'])
 }))
 
+test('foundryProject reads a profile\'s sub-tables however they are spelled: `extends` as a table, a `no-collision` over `fuzz`', withProject({
+  'foundry.toml': '[profile.default]\nremappings = ["@local/=lib/local/"]\n\n[profile.default.extends]\npath = "base.toml"\nstrategy = "no-collision"\n\n[profile.default.fuzz]\nruns = 1\n',
+  'base.toml': '[profile.default]\nfuzz = { runs = 2 }\n',
+  'lib/forge-std/src/Test.sol': '',
+}, (t, dir) => {
+  // forge compares the profile's keys, sub-tables included: `fuzz` is set on both sides.
+  t.assert.throws(() => foundryProject(dir, { env: {} }), { message: /key collision in profile 'default' when extending base\.toml: fuzz$/u })
+}))
+
 test('discoverSolidityConfig: --mapping takes exactly that file; no foundry.toml falls back to remappings.txt', withProject({
   'foundry.toml': '[profile.default]\n',
   'mapping.txt': '@m/=lib/m/\nforge-std=lib/forge-std/src\nconsole.sol=lib/forge-std/src/console.sol\n',
@@ -608,7 +617,7 @@ test('foundry.toml profiles: legacy [<name>] tables, case-insensitive names, quo
 })
 
 test('foundryTomlRemappings names the line of a foundry.toml that isn\'t TOML', (t) => {
-  t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["a/=b/"\n'), { name: 'TomlError', message: 'line 2: unterminated array' })
+  t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["a/=b/"\n'), { name: 'TomlError', message: 'expected "," or "]", found the end of the text at line 3' })
 })
 
 test('resolveSolImport refuses a non-.sol target, one outside the root, and a dependency reaching the project', withProject({

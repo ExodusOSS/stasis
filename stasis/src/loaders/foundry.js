@@ -18,7 +18,7 @@ import { posix, resolve } from 'node:path'
 import { toPosix } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
 import { readFileOrNull } from './cargo.js'
-import { tomlEntries } from './toml.js'
+import { isTomlTable, readToml } from './toml.js'
 
 export const FOUNDRY_TOML = 'foundry.toml'
 export const REMAPPINGS_TXT = 'remappings.txt'
@@ -407,37 +407,25 @@ const STANDALONE_SECTIONS = new Set([
 
 // foundry.toml -> `{ profiles, topLevel }`. `profiles` is Map<profile, Map<key, value>> (profile
 // names lowercased, keys snake_cased as forge does) from the `[profile.<name>]` tables and the
-// legacy top-level `[<name>]` ones forge still reads, the former winning key by key; sub-tables
-// other than `extends` are skipped. `topLevel` holds keys set outside any table (forge rejects
-// those; a `--mapping` file may list its `remappings` there). Throws a TomlError naming `file` on
-// text that isn't TOML, as forge refuses the file.
+// legacy top-level `[<name>]` ones forge still reads, the former winning key by key; a profile's
+// sub-tables are its values like any other (`extends`, `fuzz`: forge compares them all for a
+// `no-collision` extends). `topLevel` holds the values set outside any table (forge rejects those;
+// a `--mapping` file may list its `remappings` there). Throws a TomlError naming `file` on text
+// that isn't TOML, as forge refuses the file.
 function parseFoundryToml(text, file = null) {
   const current = new Map()
   const legacy = new Map()
   const topLevel = new Map()
-  const dictOf = (map, name) => map.get(name) ?? map.set(name, new Map()).get(name)
-  for (const { path, header, value } of tomlEntries(text, { file })) {
-    let map
-    let rest
-    if (path[0] === 'profile' && path.length >= 2) {
-      map = current
-      rest = path.slice(2)
-    } else if (path.length >= (header ? 1 : 2) && !STANDALONE_SECTIONS.has(path[0])) {
-      map = legacy
-      rest = path.slice(1)
-    } else {
-      if (!header && path.length === 1) topLevel.set(snakeCase(path[0]), value)
-      continue
-    }
-    const dict = dictOf(map, (map === current ? path[1] : path[0]).toLowerCase())
-    if (header || rest.length === 0) continue
-    const k = snakeCase(rest[0])
-    if (rest.length === 1) {
-      dict.set(k, value)
-    } else if (k === 'extends' && rest.length === 2) {
-      const ext = dict.get('extends')
-      dict.set('extends', { ...(ext && typeof ext === 'object' ? ext : {}), [rest[1]]: value })
-    }
+  const read = (map, name, table) => {
+    const profile = name.toLowerCase()
+    const dict = map.get(profile) ?? map.set(profile, new Map()).get(profile)
+    for (const [key, value] of Object.entries(table)) dict.set(snakeCase(key), value)
+  }
+  for (const [key, value] of Object.entries(readToml(text, file))) {
+    if (!isTomlTable(value)) topLevel.set(snakeCase(key), value)
+    else if (key === 'profile') {
+      for (const [name, table] of Object.entries(value)) if (isTomlTable(table)) read(current, name, table)
+    } else if (!STANDALONE_SECTIONS.has(key)) read(legacy, key, value)
   }
   const profiles = new Map([...legacy].map(([name, dict]) => [name, new Map(dict)]))
   for (const [name, dict] of current) profiles.set(name, new Map([...(profiles.get(name) ?? []), ...dict]))

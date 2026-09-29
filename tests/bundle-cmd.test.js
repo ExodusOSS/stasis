@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -2749,8 +2749,9 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   // exited 0 with no warning at all. The setup error must propagate with its
   // install hint instead. Exercised against a copy of stasis whose node_modules
   // carries only the zero-dep @exodus/stasis-core (so the moved-module shims
-  // resolve and the bundle command loads) but no oxc-parser, so the lazy lookup
-  // (createRequire from src/scan.js) genuinely misses.
+  // resolve) and @preventive/lockfile (whose TOML parser the loaders import), so
+  // the bundle command loads, but no oxc-parser, so the lazy lookup (createRequire
+  // from src/scan.js) genuinely misses.
   const stasisCopy = join(tmp, 'stasis')
   mkdirSync(stasisCopy)
   for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis', entry), join(stasisCopy, entry), { recursive: true })
@@ -2761,6 +2762,8 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   mkdirSync(coreDest, { recursive: true })
   for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis-core', entry), join(coreDest, entry), { recursive: true })
   cpSync(join(here, '..', 'stasis-core', 'package.json'), join(coreDest, 'package.json'))
+  // pnpm links it from its store: the real directory is what gets copied.
+  cpSync(realpathSync(join(here, '..', 'stasis', 'node_modules', '@preventive', 'lockfile')), join(stasisCopy, 'node_modules', '@preventive', 'lockfile'), { recursive: true })
   const proj = join(tmp, 'proj')
   mkdirSync(proj)
   jsProject(proj, { 'file.mjs': 'export * from "@noble/ciphers/_arx.js"\n' })
