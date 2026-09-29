@@ -365,8 +365,9 @@ resolve the way solc does under the project's build tool:
   ones (the former wins key by key; `extends` counts only in the former, as in
   forge); names match case-insensitively. Not
   read: `~/.foundry/foundry.toml`, `FOUNDRY_CONFIG` and the other `FOUNDRY_*`
-  overrides. When `FOUNDRY_PROFILE` or a remapping variable shapes the
-  result, `stasis bundle` says so on stderr; the bundle doesn't record it.
+  overrides. When `FOUNDRY_PROFILE` (a profile the `foundry.toml` has; one it
+  hasn't is warned about) or a remapping variable shapes the result, `stasis
+  bundle` says so on stderr; the bundle doesn't record it.
   Without a `foundry.toml`, a root `remappings.txt` applies as written, as solc
   and Hardhat apply it (`@oz/=lib/oz` makes `@oz/X.sol` `lib/ozX.sol`; `x/=`
   makes `x/A.sol` `A.sol`).
@@ -385,27 +386,35 @@ resolve the way solc does under the project's build tool:
   `@scope/pkg/contracts/X.sol`; a package's `exports` map doesn't apply to
   Solidity files). `--mapping` changes none of these lookups: a root
   `foundry.toml` still gives the `libs` (the default ones, warned, when forge
-  would reject the file), and `FOUNDRY_PROFILE` picking them is reported.
+  would reject the file), and `FOUNDRY_PROFILE` picking them is reported (one
+  that isn't a profile of the `foundry.toml` is warned about instead, as without
+  `--mapping`).
 
-Dependencies are input the project didn't write, so whatever resolves an
-import, the result must be a `.sol` file inside the bundle root (an `import
-".env";` or a remapping to `/opt/x/` is refused, stating why), and who owns a
-file is decided by where it really is. The dependencies are the entries of
-forge's `libs` (a symlinked `lib/forge-std` is the dependency where it points),
-Soldeer's `dependencies/`, git submodules and every `node_modules` package; a
-file is a dependency's when its real path lies in one, however the path got
-there (`src/vendor -> ../lib/dep/src` holds the dependency's code). An import
-from a dependency must land on a dependency's file too: it may import its own
-files and another dependency's (forge-std's `ds-test`), never the project's,
-whether through a relative path, a base-path lookup, its own remappings or a
-symlink. A symlink planted inside a dependency that leads out of it to anything
-but another dependency (`lib/evil/src/Evil.sol -> ../../../.env`) is never
-followed, whoever's import, entry or manifest the path is: the import is
-refused, the entry rejected, the manifest not carried, and the dependency's own
-`foundry.toml`, its `extends` base or its `remappings.txt` skipped with a
-warning. A link the project placed (a workspace package linked into
-`node_modules`, a linked `lib/` entry, `src/vendor`) may lead anywhere in the
-root; a workspace package is the project's own code.
+Dependencies are input the project didn't write, so whatever resolves an import,
+the result must be a `.sol` file inside the bundle root (an `import ".env";` or
+a remapping to `/opt/x/` is refused, stating why), and who owns a file is
+decided by where it really is, spelled as the filesystem spells it (on a
+case-insensitive one, `LIB/evil` is `lib/evil`). The dependencies are the
+entries of forge's `libs` (a symlinked `lib/forge-std` is the dependency where
+it points), Soldeer's `dependencies/`, git submodules (`.gitmodules` read as git
+reads it: quoted and escaped paths too) and every `node_modules` package; a file
+is a dependency's when its real path lies in one, however the path got there
+(`src/vendor -> ../lib/dep/src` holds the dependency's code). An import from a
+dependency must land on a dependency's file too: it may import its own files and
+another dependency's (forge-std's `ds-test`), never the project's, whether
+through a relative path, a base-path lookup, its own remappings or a symlink. A
+symlink no one trusted placed is never followed: one planted inside a dependency
+that leads out of it to anything but another dependency (`lib/evil/src/Evil.sol
+-> ../../../.env`), and one outside the project that leads back into it (a
+dependency linked from elsewhere, `lib/evil -> ../../shared/evil`, holding a
+link to the project's `.env`). Whoever's import, entry or manifest the path is,
+the import is refused, the entry rejected, the manifest not carried, and a
+dependency's own `foundry.toml`, `extends` base or `remappings.txt` skipped with
+a warning (one that is another dependency's file is read). A link the project
+placed (a workspace package linked into `node_modules`, a linked `lib/` entry,
+`src/vendor`) may lead anywhere in the root, and so may one on the path the
+project was named by (a symlinked checkout); a workspace package is the
+project's own code.
 
 The config files are read, not bundled. `--manifests` bundles the build
 description too: the `*.toml`/`*.txt` config files the resolution read, the

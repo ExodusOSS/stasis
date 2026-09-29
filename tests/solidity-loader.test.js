@@ -1,5 +1,6 @@
 import { test } from 'node:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import fs, { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +20,7 @@ import {
   solidityOwnership,
 } from '../stasis/src/loaders/solidity.js'
 import { findRemappingsWithContext, foundryProject, foundryTomlRemappings } from '../stasis/src/loaders/foundry.js'
+import { parseGitmodules } from '../stasis/src/loaders/solidity-ownership.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'solidity-bundle')
 
@@ -680,6 +682,77 @@ test('solidityOwnership decides a path\'s owner from where it really is, and cat
   t.assert.deepEqual(of('lib/dep/src/Nope.sol'), { real: null, outside: false, dependency: false, escape: null })
 }))
 
+test('solidityOwnership: a link from outside the root back into it is untrusted, unless the root was named through it', async (t) => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'stasis-sol-')))
+  try {
+    const proj = join(tmp, 'proj')
+    mkdirSync(join(proj, 'lib'), { recursive: true })
+    mkdirSync(join(tmp, 'shared/evil/src'), { recursive: true })
+    writeFileSync(join(proj, '.env'), 'K=1\n')
+    writeFileSync(join(proj, 'Own.sol'), '')
+    symlinkSync('../../shared/evil', join(proj, 'lib/evil')) // the project's link to a dependency elsewhere
+    symlinkSync('../../../proj/.env', join(tmp, 'shared/evil/src/Evil.sol')) // ...which links back in
+    t.assert.deepEqual(solidityOwnership(proj, { dirs: ['lib'] }).of('lib/evil/src/Evil.sol').escape, { link: '../shared/evil/src/Evil.sol', root: null })
+    // Named through a link (a symlinked checkout), an absolute link through that name is fine.
+    symlinkSync(proj, join(tmp, 'named'))
+    symlinkSync(join(tmp, 'named/Own.sol'), join(proj, 'Abs.sol'))
+    t.assert.deepEqual(solidityOwnership(join(tmp, 'named')).of('Abs.sol'), { real: 'Own.sol', outside: false, dependency: false, escape: null })
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('solidityOwnership judges the path as the filesystem spells it (a case-insensitive one)', async (t) => {
+  // Emulate a case-insensitive filesystem under `tmp`, whose names are lowercase on disk.
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'stasis-sol-')))
+  const lower = (p) => (typeof p === 'string' && p.startsWith(tmp) ? tmp + p.slice(tmp.length).toLowerCase() : p)
+  const saved = {}
+  for (const name of ['lstatSync', 'statSync', 'readlinkSync', 'readdirSync']) {
+    saved[name] = fs[name]
+    fs[name] = (p, ...rest) => saved[name](lower(p), ...rest)
+  }
+  saved.native = fs.realpathSync.native
+  fs.realpathSync.native = (p, ...rest) => saved.native(lower(p), ...rest)
+  syncBuiltinESMExports()
+  try {
+    mkdirSync(join(tmp, 'lib/evil/src'), { recursive: true })
+    writeFileSync(join(tmp, '.env'), 'K=1\n')
+    symlinkSync('../../../.env', join(tmp, 'lib/evil/src/test.sol'))
+    const { of } = solidityOwnership(tmp, { dirs: ['lib'] })
+    // A dependency's remapping to `../../LIB/evil/src/` names the same link.
+    for (const p of ['lib/evil/src/test.sol', 'LIB/evil/src/Test.sol', 'Lib/Evil/SRC/TEST.sol']) t.assert.equal(of(p).escape?.root, 'lib/evil', p)
+  } finally {
+    for (const name of ['lstatSync', 'statSync', 'readlinkSync', 'readdirSync']) fs[name] = saved[name]
+    fs.realpathSync.native = saved.native
+    syncBuiltinESMExports()
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('parseGitmodules reads .gitmodules as git does: quotes, escapes, comments, key case, continuations', (t) => {
+  const text = [
+    '[submodule "a"]',
+    '\tpath = "vendor/a" ; a comment',
+    '\tURL = https://github.com/o/a',
+    '[submodule "b"]',
+    '\tpath = lib/b\\',
+    'x',
+    '\turl = "https://github.com/o/b" # comment',
+    '[core]',
+    '\tpath = not/a/submodule',
+    '[submodule "a"]',
+    '\tbranch = "v1 \\"x\\""',
+    '[submodule.c]',
+    '\tpath = lib/c  ',
+    '',
+  ].join('\n')
+  t.assert.deepEqual(parseGitmodules(text), [
+    { name: 'a', path: 'vendor/a', url: 'https://github.com/o/a', branch: 'v1 "x"' },
+    { name: 'b', path: 'lib/bx', url: 'https://github.com/o/b' },
+    { name: 'c', path: 'lib/c' },
+  ])
+})
+
 test('a remappings.txt taken as written (solc) may map a prefix to nothing', (t) => {
   const remappings = parseRemappings('x/=\nctx:y/=\n=z\n')
   t.assert.deepEqual(remappings, [{ context: null, prefix: 'x/', target: '' }, { context: 'ctx', prefix: 'y/', target: '' }])
@@ -695,23 +768,30 @@ test('a legacy [default] table\'s `extends` is ignored, as forge ignores it', wi
   t.assert.deepEqual(remappings, [])
 }))
 
-test('discoverSolidityConfig with a mapping file: a foundry.toml forge rejects still gives lib dirs, and FOUNDRY_PROFILE is reported', withProject({
+test('discoverSolidityConfig with a mapping file: a foundry.toml forge rejects still gives lib dirs, and FOUNDRY_PROFILE is reported when it picks them', withProject({
   'foundry.toml': '[profile.default]\nextends = "missing.toml"\n',
   'remappings.txt': 'x/=lib/x/\n',
+  'ci/foundry.toml': '[profile.default]\n[profile.ci]\nlibs = ["deps"]\n',
+  'ci/remappings.txt': 'x/=deps/x/\n',
 }, async (t, dir) => {
   const warn = console.warn
   const lines = []
   console.warn = (...a) => lines.push(a.join(' '))
+  const discover = (sub, env) => discoverSolidityConfig(join(dir, sub), { mappingFile: 'remappings.txt', env })
   try {
-    const config = await discoverSolidityConfig(dir, { mappingFile: 'remappings.txt', env: {} })
-    t.assert.deepEqual(config.libs, ['lib'])
-    t.assert.deepEqual(config.envUsed, [])
-    // The profile picks the lib dirs, so it's reported.
-    t.assert.deepEqual((await discoverSolidityConfig(dir, { mappingFile: 'remappings.txt', env: { FOUNDRY_PROFILE: 'ci' } })).envUsed, ['FOUNDRY_PROFILE=ci'])
+    const root = await discover('.', {})
+    t.assert.deepEqual([root.libs, root.envUsed], [['lib'], []])
+    t.assert.ok(lines.some((l) => l.includes('Using the default lib dirs') && l.includes('missing.toml')))
+    const ci = await discover('ci', { FOUNDRY_PROFILE: 'ci' })
+    t.assert.deepEqual([ci.libs, ci.envUsed], [['deps'], ['FOUNDRY_PROFILE=ci']])
+    // A profile foundry.toml doesn't have picks nothing: said, and not reported as shaping the result.
+    lines.length = 0
+    const nope = await discover('ci', { FOUNDRY_PROFILE: 'nope' })
+    t.assert.deepEqual([nope.libs, nope.envUsed], [['lib'], []])
+    t.assert.deepEqual(lines, ['[loader.solidity] FOUNDRY_PROFILE=nope is not a profile in foundry.toml; using [profile.default]'])
   } finally {
     console.warn = warn
   }
-  t.assert.ok(lines.some((l) => l.includes('Using the default lib dirs') && l.includes('missing.toml')))
 }))
 
 test('resolveSolImport starts a library lookup at the importer directory\'s parent, as foundry-compilers does', withProject({

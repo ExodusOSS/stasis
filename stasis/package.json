@@ -43,6 +43,7 @@
     "src/loaders/foundry.js",
     "src/loaders/rust.js",
     "src/loaders/solidity.js",
+    "src/loaders/solidity-ownership.js",
     "src/loaders/toml.js",
     "src/loaders/php.js",
     "src/lockfile.js",

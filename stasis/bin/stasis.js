@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import { homedir, constants as osConstants } from 'node:os'
 import assert from 'node:assert/strict'
@@ -250,17 +250,10 @@ if (command === '-v' || command === '--version') {
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
   // A directory entry stands for the .sol files under it (Solidity only); an extensionless path
   // that doesn't exist is a missing one (skipped with a warning).
-  const { isDir } = await import('../src/resolve-typescript.js')
-  const dirEntries = argv.filter((f) => isDir(resolve(f)) || (extname(f) === '' && !existsSync(resolve(f))))
-  const allSol = argv.every((f) => f.endsWith('.sol') || dirEntries.includes(f))
-  // Only missing extensionless paths: a mistyped file, not a project without these dirs.
-  if (allSol && argv.every((f) => !f.endsWith('.sol') && !existsSync(resolve(f)))) usage(`Error: no such file or directory: ${argv[0]}`)
-  if (dirEntries.length > 0 && !allSol) {
-    const missing = dirEntries.find((f) => !existsSync(resolve(f)))
-    usage(missing === undefined
-      ? `Error: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirEntries[0]}`
-      : `Error: no such file or directory: ${missing}`)
-  }
+  const { directoryEntryError, isDirEntry } = await import('../src/cmd/bundle.js')
+  const dirError = directoryEntryError(argv)
+  if (dirError !== null) usage(`Error: ${dirError}`)
+  const allSol = argv.every((f) => f.endsWith('.sol') || isDirEntry(resolve(f)))
   const allPhp = argv.every((f) => f.endsWith('.php'))
   const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
   const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))

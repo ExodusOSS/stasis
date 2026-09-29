@@ -570,6 +570,46 @@ test('buildSolidityBundle with manifests carries no dependency config reached th
   t.assert.ok(lines.some((l) => l === '[stasis] Not carrying lib/evil/package.json: lib/evil/package.json is a link out of the dependency lib/evil'))
 }))
 
+test('buildSolidityBundle never follows a link from outside the root back into it', withTmp(async (t, tmp) => {
+  const proj = join(tmp, 'proj')
+  writeProject(proj, { 'foundry.toml': '[profile.default]\n', '.env': 'PRIVATE_KEY=0xabc\n', 'src/A.sol': 'import "evil/Evil.sol";\n' })
+  mkdirSync(join(tmp, 'shared/evil/src'), { recursive: true })
+  symlinkSync('../../../proj/.env', join(tmp, 'shared/evil/src/Evil.sol'))
+  mkdirSync(join(proj, 'lib'))
+  symlinkSync('../../shared/evil', join(proj, 'lib/evil'))
+  await captureStderr(() => t.assert.rejects(
+    () => buildSolidityBundle({ cwd: proj, entries: ['src'], env: {} }),
+    /refused: it resolves to lib\/evil\/src\/Evil\.sol through \.\.\/shared\/evil\/src\/Evil\.sol, a link from outside the project root back into it/u,
+  ))
+}))
+
+test('buildSolidityBundle reads .gitmodules paths as git does, so a quoted submodule is a dependency', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    '.env': 'PRIVATE_KEY=0xabc\n',
+    '.gitmodules': '[submodule "evil"]\n\tpath = "vendor/evil"\n\turl = https://github.com/e/evil\n',
+    'contracts/A.sol': 'import "../vendor/evil/E.sol";\n',
+  })
+  mkdirSync(join(tmp, 'vendor/evil'), { recursive: true })
+  symlinkSync('../../.env', join(tmp, 'vendor/evil/E.sol'))
+  await captureStderr(() => t.assert.rejects(
+    () => buildSolidityBundle({ cwd: tmp, entries: ['contracts'], env: {} }),
+    /refused: vendor\/evil\/E\.sol is a link out of the dependency vendor\/evil/u,
+  ))
+}))
+
+test('buildSolidityBundle follows a dependency\'s config linked into another dependency', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    'foundry.toml': '[profile.default]\n',
+    'src/A.sol': 'import "x/X.sol";\n',
+    'lib/a/foundry.toml': '[profile.default]\n',
+    'lib/shared/remappings.txt': 'x/=../b/src/\n',
+    'lib/b/src/X.sol': 'contract X {}\n',
+  })
+  symlinkSync('../shared/remappings.txt', join(tmp, 'lib/a/remappings.txt'))
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['lib/b/src/X.sol', 'src/A.sol'])
+}))
+
 test('buildSolidityBundle with --mapping bundles when forge would reject the root foundry.toml', withTmp(async (t, tmp) => {
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\nextends = "missing.toml"\n',

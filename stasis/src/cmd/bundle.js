@@ -24,6 +24,7 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
+import { parseGitmodules } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -86,34 +87,14 @@ function githubSlug(url) {
   return m ? `${m[1]}/${m[2]}` : null
 }
 
-// Parse `.gitmodules` (git-config INI) into Map<submodulePath, { name, branch }>,
-// github.com submodules only.
-function parseGithubSubmodules(baseDir, host) {
+// `.gitmodules` (as git reads it) -> Map<submodulePath, { name, branch }>, github.com submodules
+// only.
+function parseGithubSubmodules(baseDir) {
   const byPath = new Map()
-  const text = readText(host, join(baseDir, '.gitmodules'))
-  if (!text) return byPath
-  let cur = null
-  const flush = () => {
-    if (cur?.path && cur?.url) {
-      const name = githubSlug(cur.url)
-      if (name) byPath.set(cur.path.replace(/\/+$/u, ''), { name, branch: cur.branch })
-    }
-    cur = null
+  for (const { path, url, branch } of parseGitmodules(readFileSyncOrNull(join(baseDir, '.gitmodules')) ?? '')) {
+    const name = path && url ? githubSlug(url) : null
+    if (name) byPath.set(path.replace(/\/+$/u, ''), { name, branch })
   }
-  for (const raw of text.split('\n')) {
-    const line = raw.trim()
-    if (line.startsWith('[')) {
-      flush()
-      cur = line.startsWith('[submodule') ? {} : null
-      continue
-    }
-    if (!cur) continue
-    const eq = line.indexOf('=')
-    if (eq === -1) continue
-    const key = line.slice(0, eq).trim()
-    if (key === 'path' || key === 'url' || key === 'branch') cur[key] = line.slice(eq + 1).trim()
-  }
-  flush()
   return byPath
 }
 
@@ -273,7 +254,21 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep, ownership
 
 // An entry `stasis bundle` takes for a directory: one that is, or an extensionless path that
 // doesn't exist (a project without `script/` still bundles with `src test script`).
-const isDirEntry = (abs, host = diskHost) => isDir(abs, host) || (extname(abs) === '' && host.stat(abs) === null)
+export const isDirEntry = (abs, host = diskHost) => isDir(abs, host) || (extname(abs) === '' && host.stat(abs) === null)
+
+// What's wrong with `entries`' directory entries (resolved against `cwd`), or null: a directory
+// entry stands for the .sol files under it, so it goes with Solidity entries only; and entries
+// that are all missing extensionless paths are a mistyped file, not a project without those dirs.
+export function directoryEntryError(entries, cwd = process.cwd(), host = diskHost) {
+  const exists = (e) => host.stat(resolve(cwd, e)) !== null
+  const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e), host))
+  const missing = dirs.find((e) => !exists(e))
+  if (dirs.length === entries.length && !dirs.some(exists)) return `no such file or directory: ${dirs[0]}`
+  if (dirs.length === 0 || entries.every((e) => e.endsWith('.sol') || dirs.includes(e))) return null
+  return missing === undefined
+    ? `a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirs[0]}`
+    : `no such file or directory: ${missing}`
+}
 
 // Build an in-memory Bundle from entry .sol files and directories (a directory stands for the .sol
 // files under it, as forge's src/test/script dirs and Hardhat's contracts dir do; a missing or
@@ -1005,18 +1000,11 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
-  const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e), host))
-  const files = entries.filter((e) => !dirs.includes(e))
+  const dirError = directoryEntryError(entries, cwd, host)
+  if (dirError !== null) throw new Error(`${name}: ${dirError}`)
   let kind
-  if (files.every((e) => e.endsWith('.sol'))) {
-    // Only missing extensionless paths: a mistyped file, not a project without these dirs.
-    if (files.length === 0 && !dirs.some((e) => host.stat(resolve(cwd, e)) !== null)) throw new Error(`${name}: no such file or directory: ${dirs[0]}`)
-    kind = 'sol'
-  } else if (dirs.length > 0) {
-    const missing = dirs.find((e) => host.stat(resolve(cwd, e)) === null)
-    if (missing !== undefined) throw new Error(`${name}: no such file or directory: ${missing}`)
-    throw new Error(`${name}: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirs[0]}`)
-  } else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
+  if (entries.every((e) => e.endsWith('.sol') || isDirEntry(resolve(cwd, e), host))) kind = 'sol'
+  else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
   else if (entries.every((e) => JS_EXTS.has(extname(e)))) kind = 'js'
   else if (entries.every((e) => BASH_EXTS.has(extname(e)))) kind = 'bash'
   else if (entries.every((e) => RUST_EXTS.has(extname(e)))) kind = 'rust'

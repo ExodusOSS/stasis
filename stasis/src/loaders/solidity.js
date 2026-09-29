@@ -8,7 +8,7 @@
 // a dependency's imports only its own and other dependencies' files (by real path), and nothing
 // is read through a link a dependency planted out of itself (solidityOwnership).
 
-import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 
@@ -27,6 +27,9 @@ import {
   readFoundryTomlRemappings,
   toSolcRemapping,
 } from './foundry.js'
+import { escapeReason, projectOwnership, solidityOwnership } from './solidity-ownership.js'
+
+export { solidityOwnership } from './solidity-ownership.js'
 
 // --- Import scan ------------------------------------------------------------------------------
 
@@ -138,14 +141,6 @@ const realpathOrNull = (p, host) => {
   }
 }
 
-const readdirOrEmpty = (dir) => {
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return []
-  }
-}
-
 // Loader-side shape: `{ context, prefix, target }` (context null = global).
 const toLoaderRemapping = ({ context, name, path }) => ({ context, prefix: name, target: path })
 
@@ -167,8 +162,8 @@ export function parseRemappingsFromToml(tomlContent, { env = process.env } = {})
 // Otherwise (solc, Hardhat) a remappings.txt applies as written.
 function readMapping(mappingFile, { env, forge, host }) {
   if (mappingFile.endsWith('.toml')) {
-    const { remappings, files } = readFoundryTomlRemappings(mappingFile, foundryProfile(env), host)
-    return { remappings: remappings.map(toSolcRemapping), files }
+    const { remappings, files, profiled } = readFoundryTomlRemappings(mappingFile, foundryProfile(env))
+    return { remappings: remappings.map(toSolcRemapping), files, profiled }
   }
   const listed = parseRemappingLines(await readFile(mappingFile, 'utf8'), mappingFile, { emptyPath: !forge })
   return { remappings: listed.map(forge ? toSolcRemapping : toLoaderRemapping), files: [mappingFile] }
@@ -179,124 +174,6 @@ function readMapping(mappingFile, { env, forge, host }) {
 export function readRemappingsFile(mappingFile, { env = process.env, forge = false, host = diskHost } = {}) {
   return readMapping(mappingFile, { env, forge, host }).remappings
 }
-
-// The directories of `.gitmodules`' submodules: dependencies, whatever their host.
-function gitSubmodulePaths(baseDir, host) {
-  const text = readText(host, join(baseDir, '.gitmodules')) ?? ''
-  return [...text.matchAll(/^\s*path\s*=\s*(.+?)\s*$/gmu)].map((m) => m[1])
-}
-
-// --- Ownership ----------------------------------------------------------------------------------
-
-// Who owns each project-relative path, decided from how it resolves on disk. The dependencies are
-// every `node_modules/<pkg>` (`@scope/<pkg>`), each entry of the `dirs` (forge's libs, Soldeer's
-// `dependencies/`; a linked entry is the dependency where it points, as a symlinked
-// `lib/forge-std`), and the `packages` (git submodules). `of(path)` gives `{ real, outside,
-// dependency, escape }`:
-// - `real`: the real path (project-relative; null when nothing is there), `outside` when it's out
-//   of the root;
-// - `dependency`: the real path lies in a dependency, however the path got there (a project's
-//   `src/vendor -> ../lib/dep/src` holds the dependency's code);
-// - `escape`: `{ link, root }` when the path crosses a symlink planted inside the dependency `root`
-//   that leads out of it to anything but another dependency (`lib/evil/src/Evil.sol ->
-//   ../../../.env`): such a path is never read. A link the project placed (a workspace package in
-//   node_modules, a linked `lib/` entry) may lead anywhere in the root.
-export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
-  const realBase = realpathSync.native(baseDir)
-  const toRel = (abs) => toPosix(relative(realBase, abs)) || '.'
-  const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)
-  const inside = (rel) => rel !== '.' && inRoot(rel)
-  const under = (rel, dir) => rel === dir || rel.startsWith(`${dir}/`)
-  const realRel = (rel) => {
-    const real = realpathOrNull(join(baseDir, rel))
-    return real === null ? null : toRel(real)
-  }
-  const clean = (d) => posix.normalize(toPosix(d)).replace(/\/+$/u, '')
-
-  // Dirs whose entries are dependencies, and dependency dirs themselves; each by its real path too.
-  const holders = new Set()
-  const roots = new Set()
-  const addReal = (set, rel) => {
-    const real = realRel(rel)
-    if (real !== null && inside(real)) set.add(real)
-  }
-  for (const d of dirs.map(clean).filter(inside)) {
-    if (posix.basename(d) === 'node_modules') continue // a package's own rule, below
-    holders.add(d)
-    addReal(holders, d)
-    for (const e of readdirOrEmpty(join(baseDir, d))) if (e.isSymbolicLink() && isDir(join(baseDir, d, e.name))) addReal(roots, `${d}/${e.name}`)
-  }
-  for (const p of packages.map(clean).filter(inside)) {
-    roots.add(p)
-    addReal(roots, p)
-  }
-  const inDependency = (rel) => inside(rel) && (rel.split('/').includes('node_modules') || [...holders, ...roots].some((d) => under(rel, d)))
-  // The innermost dependency holding `rel`, a real path.
-  const rootOf = (rel) => {
-    if (!inside(rel)) return null
-    const parts = rel.split('/')
-    let best = null
-    const take = (r) => {
-      if (best === null || r.length > best.length) best = r
-    }
-    for (let i = 0; i < parts.length; i++) {
-      const end = i + (parts[i + 1]?.startsWith('@') ? 3 : 2)
-      if (parts[i] === 'node_modules' && end <= parts.length) take(parts.slice(0, end).join('/'))
-    }
-    for (const d of holders) if (rel.startsWith(`${d}/`)) take(`${d}/${rel.slice(d.length + 1).split('/')[0]}`)
-    for (const r of roots) if (under(rel, r)) take(r)
-    return best
-  }
-
-  // Resolve `parts` from the real dir `start` as realpath does, checking each symlink crossed
-  // (and those its target crosses): `{ abs, escape }`, `abs` null when nothing is there.
-  const walk = (start, parts, depth) => {
-    let cur = start
-    for (const part of parts) {
-      if (part === '' || part === '.') continue
-      if (part === '..') {
-        cur = dirname(cur)
-        continue
-      }
-      const next = join(cur, part)
-      let target
-      try {
-        if (!lstatSync(next).isSymbolicLink()) {
-          cur = next
-          continue
-        }
-        target = readlinkSync(next)
-      } catch {
-        return { abs: null, escape: null }
-      }
-      if (depth >= 40) return { abs: null, escape: null } // ELOOP
-      const r = walk(isAbsolute(target) ? '/' : cur, toPosix(target).split('/'), depth + 1)
-      if (r.abs === null || r.escape !== null) return r
-      const root = rootOf(toRel(cur))
-      const to = toRel(r.abs)
-      if (root !== null && !under(to, root) && !inDependency(to)) return { abs: r.abs, escape: { link: toRel(next), root } }
-      cur = r.abs
-    }
-    return { abs: cur, escape: null }
-  }
-
-  const owners = new Map()
-  const of = (rel) => {
-    let owner = owners.get(rel)
-    if (owner === undefined) {
-      const { abs, escape } = walk(realBase, rel.split('/'), 0)
-      const real = abs === null ? null : toRel(abs)
-      owner = { real, outside: real !== null && !inRoot(real), dependency: real !== null && inDependency(real), escape }
-      owners.set(rel, owner)
-    }
-    return owner
-  }
-  return { of }
-}
-
-// Why a path crossing a dependency's link out of itself is refused (see solidityOwnership).
-const escapeReason = (path, { link, root }) =>
-  link === path ? `${path} is a link out of the dependency ${root}` : `it resolves to ${path} through ${link}, a link out of the dependency ${root}`
 
 // --- Resolution ---------------------------------------------------------------------------------
 
@@ -314,19 +191,22 @@ const escapeReason = (path, { link, root }) =>
 // shaped the result.
 export async function discoverSolidityConfig(baseDir, { mappingFile, env = process.env } = {}) {
   const forge = isFile(join(baseDir, FOUNDRY_TOML))
-  const project = forge && !mappingFile ? foundryProject(baseDir, { env }) : null
-  const libs = project?.libs ?? (forge ? foundryLibs(baseDir, { env }) : [])
-  const ownership = solidityOwnership(baseDir, { dirs: [...libs, ...(forge ? ['dependencies'] : [])], packages: gitSubmodulePaths(baseDir) })
-  if (project) return { remappings: project.remappings, libs, ownership, files: project.files, envUsed: project.envUsed }
+  if (forge && !mappingFile) {
+    const { remappings, libs, ownership, files, envUsed } = foundryProject(baseDir, { env })
+    return { remappings, libs, ownership, files, envUsed }
+  }
+  const { libs, profiled } = forge ? foundryLibs(baseDir, { env }) : { libs: [], profiled: false }
+  const ownership = projectOwnership(baseDir, libs, { soldeer: forge })
   const within = (abs) => {
     const rel = toPosix(relative(baseDir, abs))
     return rel.startsWith('..') || isAbsolute(rel) ? [] : [rel]
   }
   if (mappingFile) {
     const abs = resolve(baseDir, mappingFile)
-    const { remappings, files } = await readMapping(abs, { env, forge })
+    const read = await readMapping(abs, { env, forge })
+    const { remappings, files } = read
     // The profile picks the mapping file's remappings (a .toml) or the root foundry.toml's libs.
-    const envUsed = (forge || abs.endsWith('.toml')) && env.FOUNDRY_PROFILE ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []
+    const envUsed = profiled || read.profiled ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []
     return { remappings, libs, ownership, files: files.flatMap(within), envUsed }
   }
   const txt = join(baseDir, REMAPPINGS_TXT)
