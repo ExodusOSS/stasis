@@ -27,7 +27,7 @@ import {
 import { decodeUtf8 } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
-import { createCargoContext } from '../loaders/cargo.js'
+import { TARGET_UNIT, createCargoContext } from '../loaders/cargo.js'
 import {
   bucketizePhpSources,
   buildPhpTree,
@@ -467,32 +467,42 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
   const formats = new Map()
   const sources = new Map()
   // The crate roots: the entries, then -- with `cargoManifests` -- the build script of every
-  // package the walk reaches, each a crate root of its own, until no package is new. Build scripts
-  // and what they reach compile for the host, not the target (`hostFiles`).
+  // package the walk reaches, each a crate root of its own, until no package is new. Each file is
+  // compiled as the units `units` records (cargo.js unitKey): a build script for the host, with
+  // its package's features, and so what it reaches; a proc-macro crate and what it depends on for
+  // the host too.
   const roots = [...normalized]
-  const hostFiles = new Set()
+  const units = new Map()
+  // Record `file` as compiled as each of `more` too; whether that is news.
+  const addUnits = (file, more) => {
+    const have = units.get(file) ?? units.set(file, new Set()).get(file)
+    if (more.isSubsetOf(have)) return false
+    for (const u of more) have.add(u)
+    return true
+  }
   const walk = async (wave) => {
-    await collectRustFilesFromDisk(baseDir, wave, { cargo: cargoCtx, formats, sources, hostFiles })
+    await collectRustFilesFromDisk(baseDir, wave, { cargo: cargoCtx, formats, sources, units })
     if (!cargoManifests) return
     const scripts = new Set()
     for (const path of sources.keys()) {
       const script = formats.has(path) ? null : cargoCtx.buildScriptOf(path)
-      if (script !== null && !roots.includes(script)) scripts.add(script)
+      if (script === null) continue
+      const as = new Set([...(units.get(path) ?? [TARGET_UNIT])].map((u) => cargoCtx.buildScriptUnit(u)))
+      if (addUnits(script, as)) scripts.add(script)
     }
     if (scripts.size === 0) return
-    roots.push(...scripts)
-    for (const s of scripts) hostFiles.add(s)
+    for (const s of scripts) if (!roots.includes(s)) roots.push(s)
     await walk([...scripts])
   }
   await walk(normalized)
   // The tree pass may name in-tree crate roots the walk left out (a crate whose name a file also
-  // binds as a value, `use crate::util::log;` beside `log::info!`: buildRustTree's wantedRoots):
-  // load them and build again, until none is new.
+  // binds as a value, `use crate::util::log;` beside `log::info!`), or walked as fewer units than
+  // it is named as: buildRustTree's wantedRoots. Load them and build again, until none is new.
   const complete = async () => {
-    const built = buildRustTree(sources, { roots, baseDir, cargo: cargoCtx, formats, hostFiles })
-    const wanted = built.wantedRoots.filter((r) => !roots.includes(r))
+    const built = buildRustTree(sources, { roots, baseDir, cargo: cargoCtx, formats, units })
+    const wanted = built.wantedRoots.filter((r) => addUnits(r, built.wantedUnits.get(r)) || !sources.has(r))
     if (wanted.length === 0) return built
-    roots.push(...wanted)
+    for (const r of wanted) if (!roots.includes(r)) roots.push(r)
     await walk(wanted)
     return complete()
   }

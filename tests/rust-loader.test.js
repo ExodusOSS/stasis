@@ -174,14 +174,15 @@ test('buildRustTree keeps every file of same-name mods a cfg_if! or cfg macros d
   ])
   const { resolutions, missing, unresolvedCrates } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.deepEqual([missing, [...unresolvedCrates]], [[], []]) // `static_macro` is a module, not a crate
+  // No definition of the gate macros here: which variant a path means is each's, under its gate.
   t.assert.deepEqual(edges(resolutions.get('src/atomic.rs')), {
     'mod imp': { 'cfg_has_atomic_u64!': 'src/atomic_native.rs', 'cfg_not_has_atomic_u64!': 'src/atomic_as_mutex.rs' },
-    'imp::AtomicU64': 'src/atomic_native.rs',
+    'imp::AtomicU64': { 'cfg_has_atomic_u64!': 'src/atomic_native.rs', 'cfg_not_has_atomic_u64!': 'src/atomic_as_mutex.rs' },
   })
   // The second variant's own declarations and paths resolve: it is in the module tree.
   t.assert.deepEqual(edges(resolutions.get('src/atomic_as_mutex.rs')), {
     'mod static_macro': { 'cfg_has_const_mutex_new!': 'src/static_const_new.rs', 'cfg_not_has_const_mutex_new!': 'src/static_once_cell.rs' },
-    'static_macro::StaticAtomicU64': 'src/static_const_new.rs',
+    'static_macro::StaticAtomicU64': { 'cfg_has_const_mutex_new!': 'src/static_const_new.rs', 'cfg_not_has_const_mutex_new!': 'src/static_once_cell.rs' },
   })
   // The `else` branch is keyed by what it means: the earlier cfg not holding.
   t.assert.deepEqual(edges(resolutions.get('src/sys.rs')), { 'mod imp': { unix: 'src/sys/unix.rs', 'not(unix)': 'src/sys/other.rs' }, imp: 'src/sys/unix.rs' })
@@ -752,7 +753,7 @@ test('parseCargoManifest reads package, lib, dependencies in every shape, and wo
     '[workspace.dependencies]', 'shared = { path = "crates/shared" }',
   ].join('\n'))
   t.assert.deepEqual(m.package, { name: 'my-app', version: null, versionFromWorkspace: true, edition: '2021', editionFromWorkspace: false, build: null })
-  t.assert.deepEqual(m.lib, { name: 'myapp_lib', path: 'src/the_lib.rs' })
+  t.assert.deepEqual(m.lib, { name: 'myapp_lib', path: 'src/the_lib.rs', procMacro: false })
   const dep = (k) => {
     const d = m.deps.get(k)
     return { path: d.path, package: d.package, workspace: d.workspace, kinds: [...d.kinds.keys()].toSorted() }
@@ -944,7 +945,7 @@ test('buildModuleTrees handles a pathologically deep mod chain without overflowi
 test('buildRustTree records mod edges and crate:: use edges', async (t) => {
   const sources = await collectRustFilesFromDisk(join(fixtures, 'use-crate'), ['src/main.rs'])
   const tree = buildRustTree(sources)
-  t.assert.deepEqual(Object.keys(tree).toSorted(), ['missing', 'resolutions', 'sources', 'unresolvedCrates', 'wantedRoots'])
+  t.assert.deepEqual(Object.keys(tree).toSorted(), ['missing', 'resolutions', 'sources', 'unresolvedCrates', 'wantedRoots', 'wantedUnits'])
   t.assert.deepEqual(tree.wantedRoots, [])
   t.assert.deepEqual(tree.missing, [])
   t.assert.deepEqual([...tree.unresolvedCrates], [])
@@ -1241,7 +1242,8 @@ test('buildRustTree prefers a mod file to an inline module of the same name what
   ])
   const { resolutions, missing } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.deepEqual(missing, [])
-  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'crate::imp::f': 'src/imp.rs' })
+  // The file is the module in the tree; the path means either, each under its cfg.
+  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'crate::imp::f': { unix: 'src/imp.rs', 'not(unix)': 'src/lib.rs' } })
 })
 
 test('scanRustItems skips the else branches of a dead `if`, and takes a bare macro call after a single `:` for one', (t) => {
@@ -1287,8 +1289,8 @@ test('buildRustTree prefers a mod file to an inline module of the same name, and
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.deepEqual(edges(resolutions.get('src/lib.rs'))['mod sys'], { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs' })
   t.assert.deepEqual(edges(resolutions.get('src/user.rs')), {
-    'crate::imp::f': 'src/imp.rs',
-    'crate::sys::Handle': 'src/u.rs', // the first variant's import
+    'crate::imp::f': { unix: 'src/imp.rs', 'not(unix)': 'src/lib.rs' },
+    'crate::sys::Handle': { unix: 'src/u.rs', windows: 'src/w.rs' }, // each variant's import, under its cfg
     'crate::sys': 'src/sys/unix.rs', // the module the paths went through, in the file whose import was followed first
     'crate::sys::Other': 'src/w.rs', // only windows.rs binds `Other`: its import is the one followed
   })
@@ -1401,7 +1403,11 @@ test('buildRustTree keeps a path under one platform out of the other platforms\'
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.deepEqual(edges(resolutions.get('src/unix/linux.rs')), { 'crate::c_int': 'src/unix.rs' })
   t.assert.deepEqual(edges(resolutions.get('src/unix.rs')), { 'mod linux': 'src/unix/linux.rs', 'self::linux::sigset_t': 'src/unix/linux.rs', 'crate::sigset_t::default': 'src/unix/linux.rs' })
-  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'crate::c_int': 'src/windows.rs', 'crate::sigset_t': 'src/windows.rs' })
+  // A file under no platform cfg: every platform's, each under its cfg -- not the first written.
+  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), {
+    'crate::c_int': { windows: 'src/windows.rs', 'target_os = "fuchsia"': 'src/fuchsia.rs', unix: 'src/unix.rs' },
+    'crate::sigset_t': { windows: 'src/windows.rs', 'target_os = "fuchsia"': 'src/fuchsia.rs', unix: 'src/unix/linux.rs' },
+  })
   // mio: two `pub use … Waker` in one file, in exclusive `cfg_if!` branches; a file mounted in one
   // branch means that branch's.
   const mio = new Map([
@@ -1539,10 +1545,9 @@ test('buildRustTree follows `extern crate … as` like a use, and `extern crate 
   t.assert.deepEqual(edges(resolutions.get('src/user.rs')), {
     'use serde_core': 'vendor/serde_core/src/lib.rs', // `s::Value`, through the alias
     'use serde_json': 'vendor/serde_json/src/lib.rs', // `crate::json::Value`, through the root's `pub extern crate … as json`
+    'me::util::f': 'src/util.rs', // `crate::util::f`: the root's `extern crate self as me` is in the extern prelude
   })
   t.assert.deepEqual(edges(resolutions.get('src/lib.rs')), { 'use serde_json': 'vendor/serde_json/src/lib.rs', 'mod util': 'src/util.rs', 'mod user': 'src/user.rs' })
-  // `me::util::f` is `crate::util::f`: recorded under its lead once the crate root's alias is known.
-  t.assert.equal(resolutions.get('src/user.rs').get('me::util::f'), undefined)
 })
 
 test('buildRustTree records no via edge for the crate root, however the path reaches it', (t) => {
@@ -1708,7 +1713,7 @@ test('buildRustTree skips test/doc-only code: no files, no edges, no dev-dep pul
     'mod sys': { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs' }, // same-name cfg-exclusive declarations, merged
     'mod backend': 'src/backend.rs', // the `test` path variant is dropped
     'real::go': 'src/real.rs',
-    'sys::name': 'src/sys/unix.rs',
+    'sys::name': { unix: 'src/sys/unix.rs', windows: 'src/sys/windows.rs' },
     'backend::b': 'src/backend.rs',
   })
 })
@@ -1861,7 +1866,7 @@ test('buildRustTree gives the same answers whatever order the sources come in', 
   }
   t.assert.equal(answers.size, 1)
   const [only] = answers
-  t.assert.equal(JSON.parse(only).find(([f]) => f === 'src/user.rs')[1]['crate::sys::Thing'], 'src/sys/u.rs') // the first variant declared
+  t.assert.deepEqual(JSON.parse(only).find(([f]) => f === 'src/user.rs')[1]['crate::sys::Thing'], { unix: 'src/sys/u.rs', windows: 'src/sys/w.rs' }) // each variant, under its cfg
 })
 
 test('buildRustTree keeps a file mounted under several cfgs under any of them, and an any(…) branch out of another target_os', (t) => {
@@ -1996,10 +2001,10 @@ test('buildRustTree reads a #[cfg] on a macro invocation as gating its body, and
   t.assert.deepEqual(items.imports.map((im) => [im.segments.join('::'), im.cfg, im.macro]), [['self::unix', 'any(unix, target_os = "hermit")', 'cfg_os_poll'], ['self::shell', null, 'cfg_not_os_poll']])
   // mio: a unix waker's `crate::sys::Selector` is its own platform's selector, not the windows
   // one (whose `#[cfg(windows)]` sits on the `cfg_os_poll!` invocation) nor the shell one (under
-  // `cfg_not_os_poll!`, the negation of the gate the waker sits behind -- a gate the loader can't
-  // see into is never "certainly compiled", so it can't beat a compatible candidate either).
+  // `cfg_not_os_poll!`, whose definition wraps items in the negation of the waker's gate).
   const sources = new Map([
-    ['src/lib.rs', 'mod sys;\n'],
+    ['src/lib.rs', '#[macro_use]\nmod macros;\nmod sys;\n'],
+    ['src/macros.rs', 'macro_rules! cfg_os_poll { ($($i:item)*) => { $( #[cfg(feature = "os-poll")] $i )* } }\nmacro_rules! cfg_not_os_poll { ($($i:item)*) => { $( #[cfg(not(feature = "os-poll"))] $i )* } }\n'],
     ['src/sys/mod.rs', '#[cfg(any(unix, target_os = "hermit"))]\ncfg_os_poll! {\n    mod unix;\n    pub use self::unix::*;\n}\n#[cfg(windows)]\ncfg_os_poll! {\n    mod windows;\n    pub use self::windows::*;\n}\ncfg_not_os_poll! {\n    mod shell;\n    pub(crate) use self::shell::*;\n}\n'],
     ['src/sys/unix/mod.rs', 'cfg_os_poll! {\n    #[cfg_attr(target_os = "linux", path = "selector/epoll.rs")]\n    #[cfg_attr(target_os = "macos", path = "selector/kqueue.rs")]\n    mod selector;\n    pub(crate) use self::selector::*;\n    #[cfg_attr(target_os = "linux", path = "waker/eventfd.rs")]\n    #[cfg_attr(target_os = "macos", path = "waker/kqueue.rs")]\n    mod waker;\n    pub(crate) use self::waker::Waker;\n}\n'],
     ['src/sys/unix/selector/epoll.rs', 'pub struct Selector;\n'],
@@ -2065,15 +2070,19 @@ test('buildRustTree walks on from a module a second glob path reaches under anot
 
 test('buildRustTree puts a mod a template declares at the invocation in another file, for textual macro scope', (t) => {
   // serde: core/crate_root.rs's `crate_root! { … pub mod de; … }` is invoked in lib.rs after
-  // `#[macro_use] mod macros;`, so de sees `forward_to_deserialize_any!`.
+  // `#[macro_use] mod macros;`, so de sees `forward_to_deserialize_any!` -- and is lib.rs's
+  // module, found beside lib.rs (src/de.rs), not beside crate_root.rs (src/core/de.rs).
   const sources = new Map([
     ['src/lib.rs', '#[macro_use]\n#[path = "core/crate_root.rs"]\nmod crate_root;\n#[macro_use]\n#[path = "core/macros.rs"]\nmod macros;\ncrate_root!();\n'],
     ['src/core/crate_root.rs', 'macro_rules! crate_root { () => { pub mod de; } }\n'],
     ['src/core/macros.rs', 'macro_rules! forward_to_deserialize_any { () => {} }\n'],
-    ['src/core/de.rs', 'fn f() { forward_to_deserialize_any!(); }\n'],
+    ['src/de.rs', 'fn f() { forward_to_deserialize_any!(); }\n'],
+    ['src/core/de.rs', ''],
   ])
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
-  t.assert.deepEqual(edges(resolutions.get('src/core/de.rs')), { 'forward_to_deserialize_any!': 'src/core/macros.rs' })
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod de'), 'src/de.rs')
+  t.assert.equal(resolutions.get('src/core/crate_root.rs').get('mod de'), undefined)
+  t.assert.deepEqual(edges(resolutions.get('src/de.rs')), { 'forward_to_deserialize_any!': 'src/core/macros.rs' })
 })
 
 test('buildRustTree decides a bare macro call\'s scope at the call: a later definition in the file does not shadow it', (t) => {
@@ -2095,7 +2104,128 @@ test('buildRustTree takes a candidate under a custom cfg only after one under no
     ['src/user.rs', 'fn f() { crate::X; crate::Y; }\n'],
   ])
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
-  // `any(loom, target_os = "aix")` may hold on aix: no target, so it is only written order that
-  // puts a's Y first, and it stays.
-  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'crate::X': 'src/b.rs', 'crate::Y': 'src/a.rs' })
+  // `any(loom, target_os = "aix")` may hold on aix: no target, so a's Y is one of two.
+  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'crate::X': 'src/b.rs', 'crate::Y': { 'any(loom, target_os = "aix")': 'src/a.rs', unix: 'src/b.rs' } })
+})
+
+test('scanRustItems reads the cfg a gate macro\'s definition wraps items in; buildRustTree ranks by it', (t) => {
+  const macros = [
+    'macro_rules! cfg_rt { ($($item:item)*) => { $( #[cfg(feature = "rt")] #[cfg_attr(docsrs, doc(cfg(feature = "rt")))] $item )* } }',
+    'macro_rules! cfg_not_rt { ($($item:item)*) => { $( #[cfg(not(feature = "rt"))] $item )* } }',
+    'macro_rules! cfg_both { ($($item:item)*) => { $( #[cfg(unix)] #[cfg(feature = "rt")] $item )* } }',
+    'macro_rules! cfg_plain { ($($item:item)*) => { $( $item )* } }', // wraps nothing in a cfg: unreadable
+    'macro_rules! cfg_not_plain { ($($item:item)*) => { $( $item )* } }',
+  ].join('\n')
+  t.assert.deepEqual(scanRustItems(macros).macros.map((m) => [m.name, m.gate]), [
+    ['cfg_rt', 'feature = "rt"'], ['cfg_not_rt', 'not(feature = "rt")'], ['cfg_both', 'all(feature = "rt", unix)'], ['cfg_plain', null], ['cfg_not_plain', null],
+  ])
+  const sources = new Map([
+    ['src/lib.rs', `#[macro_use]\nmod macros;\nmod a;\nmod b;\nmod user;\ncfg_rt! { pub use a::X; }\ncfg_not_rt! { pub use b::X; }\ncfg_plain! { pub use a::Y; }\ncfg_not_plain! { pub use b::Y; }\n`],
+    ['src/macros.rs', macros],
+    ['src/a.rs', 'pub struct X;\npub struct Y;\n'],
+    ['src/b.rs', 'pub struct X;\npub struct Y;\n'],
+    ['src/user.rs', 'fn f() { crate::X; crate::Y; }\n'],
+  ])
+  // No features known: either, each under its gate's cfg; `rt` off: `cfg_not_rt!`'s is what the
+  // build compiles, and it is taken though written second.
+  t.assert.deepEqual(edges(buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs'))['crate::X'], { 'feature = "rt"': 'src/a.rs', 'not(feature = "rt")': 'src/b.rs' })
+  const features = new Set()
+  const cargo = { packageInfo: () => ({ dir: '.' }), isTestTarget: () => false, isVendored: () => false, featuresFor: () => features, maybeFeaturesFor: () => null, platformOf: () => null, cfgsSetFor: () => null, resolveCrate: () => null, isLibRoot: () => false, unitOfCrate: (_, u) => u }
+  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'], cargo }).resolutions.get('src/user.rs'))['crate::X'], 'src/b.rs')
+  features.add('rt')
+  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'], cargo }).resolutions.get('src/user.rs'))['crate::X'], 'src/a.rs')
+})
+
+test('buildRustTree takes `cfg_x!` and `cfg_not_x!` for each other\'s negation only when their definitions say so', (t) => {
+  // A file under `cfg_x!` asks for a name only `cfg_not_x!`'s body provides: exclusive by name, it
+  // was never taken; the definitions say `feature = "x"` and `feature = "y"`, which may hold together.
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod macros;\ncfg_x! { mod user; }\ncfg_not_x! { mod b; pub use b::Z; }\n'],
+    ['src/macros.rs', 'macro_rules! cfg_x { ($($i:item)*) => { $( #[cfg(feature = "x")] $i )* } }\nmacro_rules! cfg_not_x { ($($i:item)*) => { $( #[cfg(feature = "y")] $i )* } }\n'],
+    ['src/b.rs', 'pub struct Z;\n'],
+    ['src/user.rs', 'fn f() { crate::Z; }\n'],
+  ])
+  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs'))['crate::Z'], 'src/b.rs')
+  // Written as the negation: exclusive, as the two cfgs are -- the path stays on the module it reached.
+  sources.set('src/macros.rs', 'macro_rules! cfg_x { ($($i:item)*) => { $( #[cfg(feature = "x")] $i )* } }\nmacro_rules! cfg_not_x { ($($i:item)*) => { $( #[cfg(not(feature = "x"))] $i )* } }\n')
+  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs'))['crate::Z'], 'src/lib.rs')
+})
+
+test('buildRustTree resolves a template\'s bare calls where the macro is invoked, and a recursive arm is no invocation', (t) => {
+  // `outer!(a)` in user.rs expands `outer!(b)`, then `inner!()`: both resolved in user.rs's scope
+  // at that call, where m2's `inner` is in scope -- not in m1.rs, where the template is written.
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod m1;\n#[macro_use]\nmod m2;\nmod user;\n'],
+    ['src/m1.rs', 'macro_rules! outer { (a) => { outer!(b); }; (b) => { inner!(); }; }\n'],
+    ['src/m2.rs', 'macro_rules! inner { () => {}; }\n'],
+    ['src/user.rs', 'fn f() { outer!(a); }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'outer!': 'src/m1.rs', 'inner!': 'src/m2.rs' })
+  t.assert.deepEqual(edges(resolutions.get('src/m1.rs')), {})
+  // What a template emits stands at the file's real invocation, not at a recursive arm's call
+  // inside the definition: `made` is in scope in late.rs, not in early.rs.
+  const made = new Map([
+    ['src/lib.rs', 'macro_rules! make { () => { make!(@go); }; (@go) => { macro_rules! made { () => {} } }; }\nmod early;\nmake!();\nmod late;\n'],
+    ['src/early.rs', 'fn f() { made!(); }\n'],
+    ['src/late.rs', 'fn f() { made!(); }\n'],
+  ])
+  const tree = buildRustTree(made, { roots: ['src/lib.rs'] }).resolutions
+  t.assert.deepEqual([edges(tree.get('src/early.rs'))['made!'], edges(tree.get('src/late.rs'))['made!']], [undefined, 'src/lib.rs'])
+})
+
+test('buildRustTree resolves a template\'s mod beside the files invoking the macro, else beside its definition', (t) => {
+  // lib.rs defines `decl!`, a.rs invokes it: `mod gm1` is a's (src/a/gm1.rs), and what `use
+  // a::*;` brings the root. `lone!` is invoked nowhere by bare name (`crate::lone!()` only): its
+  // `mod solo;` stays beside the definition.
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_export]\nmacro_rules! lone { () => { mod solo; } }\nmacro_rules! decl { () => { pub mod gm1; } }\nmod a;\nuse a::*;\nuse gm1::X;\ncrate::lone!();\n'],
+    ['src/a.rs', 'decl!();\n'],
+    ['src/a/gm1.rs', 'pub struct X;\n'],
+    ['src/gm1.rs', ''],
+    ['src/solo.rs', ''],
+  ])
+  const { resolutions, unresolvedCrates } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual([...unresolvedCrates], [])
+  t.assert.deepEqual(edges(resolutions.get('src/a.rs')), { 'decl!': 'src/lib.rs', 'mod gm1': 'src/a/gm1.rs' })
+  t.assert.equal(resolutions.get('src/lib.rs').get('gm1::X'), 'src/a/gm1.rs')
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod gm1'), undefined)
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod solo'), 'src/solo.rs')
+})
+
+test('buildRustTree lets a child module under a custom cfg give way to an import of its name, but not for an asker under that cfg', (t) => {
+  // serde: `mod de` only under docsrs (its crate_root.rs), `pub use serde_core::de` otherwise.
+  const sources = new Map([
+    ['src/lib.rs', '#[cfg(docsrs)]\npub mod de;\n#[cfg(not(docsrs))]\npub use serde_core::de;\nmod private;\n#[cfg(docsrs)]\nmod docs;\n'],
+    ['src/de.rs', 'pub trait Error {}\n'],
+    ['src/private.rs', 'use crate::de::Error;\n'],
+    ['src/docs.rs', 'use crate::de::Error;\n'],
+    ['vendor/serde_core/src/lib.rs', 'pub mod de { pub trait Error {} }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual(edges(resolutions.get('src/private.rs')), { 'use serde_core': 'vendor/serde_core/src/lib.rs' })
+  t.assert.deepEqual(edges(resolutions.get('src/docs.rs')), { 'crate::de::Error': 'src/de.rs' })
+})
+
+test('buildRustTree reads `extern crate self as x;` as the crate root from every module: no crate `x` to report', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'extern crate self as gm1;\nmod b;\npub struct X;\n'],
+    ['src/b.rs', 'use gm1::X;\nmod inner { use gm1::X; }\n'],
+  ])
+  const { resolutions, unresolvedCrates } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual([...unresolvedCrates], [])
+  t.assert.deepEqual(edges(resolutions.get('src/b.rs')), { 'gm1::X': 'src/lib.rs' })
+})
+
+test('buildRustTree places a template\'s mod at an invocation in its own crate, never in another crate\'s file', (t) => {
+  // Only the app invokes `a`'s `decl!`, with a `helper` of its own in scope: the `x` resolved
+  // beside a's lib.rs is still `a`'s module, where `a`'s helper is in scope -- not one standing in
+  // the app's file.
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nextern crate a;\nmacro_rules! helper { () => {} }\ndecl!();\n'],
+    ['vendor/a/src/lib.rs', 'macro_rules! helper { () => {} }\n#[macro_export]\nmacro_rules! decl { () => { mod x; } }\n'],
+    ['vendor/a/src/x.rs', 'fn f() { helper!(); }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.equal(edges(resolutions.get('vendor/a/src/x.rs'))['helper!'], 'vendor/a/src/lib.rs')
 })

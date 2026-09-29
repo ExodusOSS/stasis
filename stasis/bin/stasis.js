@@ -48,8 +48,8 @@ function usage(prefix = '') {
   feature flags are cargo's --features / --no-default-features / --all-features for those packages;
   --cargo-target asks rustc for the target's cfgs so #[cfg(unix)]-style code for other targets stays
   out too, otherwise it is all kept; --cargo-manifests also bundles each bundled package's Cargo.toml
-  and build script, the workspace Cargo.toml, Cargo.lock and .cargo/config.toml, as written: tokens
-  and URL credentials in them included)
+  and build script (a vendored crate's .cargo-checksum.json too), the workspace Cargo.toml, Cargo.lock
+  and cargo configs, as written: tokens and URL credentials in them included)
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
