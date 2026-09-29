@@ -23,7 +23,6 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
-import { redactFoundryToml, scrubUrlCredentials } from '../loaders/foundry.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -240,8 +239,8 @@ function assembleCodeBundle({
 // The build-description files of a Solidity bundle (--manifests), as Map<path, text>: `configFiles`
 // (what discoverSolidityConfig read, when named `*.toml`/`*.txt`) plus the SOLIDITY_*_MANIFESTS
 // that exist, for the root and for each package dir `classifyDep`/package.json places a bundled
-// source in. Files inside the root only. Credentials stay behind: a `.toml` config loses its RPC
-// endpoint and Etherscan tables and secret-named keys, and every file its URLs' user info.
+// source in. Files inside the root only, carried as written: whatever they hold (an RPC URL with
+// its API key, an Etherscan key, a URL's credentials) is in the bundle too, as with --package-json.
 function solidityManifests(baseDir, sources, configFiles, classifyDep) {
   const wanted = new Set([...configFiles.filter((f) => f.endsWith('.toml') || f.endsWith('.txt')), ...SOLIDITY_ROOT_MANIFESTS])
   const dirs = new Set()
@@ -267,8 +266,7 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep) {
       throw err
     }
     if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
-    const text = buf.toString('utf8')
-    out.set(rel, rel.endsWith('.toml') ? redactFoundryToml(text, rel) : scrubUrlCredentials(text))
+    out.set(rel, buf.toString('utf8'))
   }
   return out
 }

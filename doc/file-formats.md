@@ -334,12 +334,13 @@ description too: the `*.toml`/`*.txt` config files the resolution read, the
 root's `foundry.lock`, `soldeer.lock`, `.gitmodules` and `package.json`, and the
 `package.json`, `foundry.toml` and `remappings.txt` of every package the bundle
 holds files of — `json` for a `package.json`, `resource` otherwise, so `stasis
-extract` restores them. Credentials stay behind: a `.toml` config loses its
-`[rpc_endpoints]` and `[etherscan]` tables (at the top level or in a profile)
-and keys such as `eth_rpc_url` or `etherscan_api_key` (any key named like a
-key, token, secret or password), every carried file loses the user info of its
-URLs (`https://user:token@host` is `https://host`), and `hardhat.config.*`,
-being code that may hold keys, is never carried.
+extract` restores them. They are carried as written, as `--package-json` carries
+`package.json`: stasis doesn't edit them, so whatever they hold — an
+`eth_rpc_url` or `[rpc_endpoints]` URL with its API key, an `[etherscan]` key,
+the credentials in a `.gitmodules` URL — is in the bundle too. Keep secrets in
+the environment (`${VAR}` in `foundry.toml`) rather than in these files, or
+don't pass `--manifests`. `hardhat.config.*`, being code, and `.env` files are
+never carried.
 
 Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
 `tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does,
