@@ -19,10 +19,9 @@ import {
   parseRemappingsFromToml,
   readRemappingsFile,
   resolveSolImport,
-  solidityOwnership,
 } from '../stasis/src/loaders/solidity.js'
 import { findRemappingsWithContext, foundryProject, foundryTomlRemappings } from '../stasis/src/loaders/foundry.js'
-import { parseGitmodules } from '../stasis/src/loaders/solidity-ownership.js'
+import { parseGitmodules, solidityOwnership } from '../stasis/src/loaders/solidity-ownership.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'solidity-bundle')
 
@@ -685,7 +684,7 @@ test('solidityOwnership decides a path\'s owner from where it really is, and cat
   t.assert.equal(owner('node_modules/foo/F.sol'), 'dependency')
   t.assert.equal(owner('node_modules/.pnpm/foo@1/node_modules/bar/B.sol'), 'dependency')
   t.assert.equal(owner('secrets/Keys.sol'), 'project')
-  t.assert.deepEqual(of('lib/dep/src/Nope.sol'), { real: null, outside: false, dependency: false, escape: null })
+  t.assert.deepEqual(of('lib/dep/src/Nope.sol'), { real: null, outside: false, dependency: false, escape: null, reason: null })
 }))
 
 test('solidityOwnership: a link from outside the root back into it is untrusted, unless the root was named through it', async (t) => {
@@ -702,7 +701,7 @@ test('solidityOwnership: a link from outside the root back into it is untrusted,
     // Named through a link (a symlinked checkout), an absolute link through that name is fine.
     symlinkSync(proj, join(tmp, 'named'))
     symlinkSync(join(tmp, 'named/Own.sol'), join(proj, 'Abs.sol'))
-    t.assert.deepEqual(solidityOwnership(join(tmp, 'named')).of('Abs.sol'), { real: 'Own.sol', outside: false, dependency: false, escape: null })
+    t.assert.deepEqual(solidityOwnership(join(tmp, 'named')).of('Abs.sol'), { real: 'Own.sol', outside: false, dependency: false, escape: null, reason: null })
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }

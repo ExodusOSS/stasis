@@ -132,13 +132,13 @@ export function parseRemapping(entry, { emptyPath = false } = {}) {
 
 // A remappings.txt / env var body: one remapping per non-blank (trimmed) line. A line that isn't
 // one throws, naming `label` (the file or variable) and the line, as forge and solc refuse the
-// file. `options`: see parseRemapping.
-export function parseRemappingLines(text, label = 'remappings', options = undefined) {
+// file. `emptyPath`: see parseRemapping.
+export function parseRemappingLines(text, { label = 'remappings', emptyPath = false } = {}) {
   const out = []
   text.split('\n').forEach((raw, i) => {
     const line = rustTrim(raw)
     if (line === '') return
-    const r = parseRemapping(line, options)
+    const r = parseRemapping(line, { emptyPath })
     if (r === null) throw new Error(`${label}:${i + 1}: invalid remapping ${JSON.stringify(line)}`)
     out.push(r)
   })
@@ -147,7 +147,7 @@ export function parseRemappingLines(text, label = 'remappings', options = undefi
 
 // A foundry.toml's `remappings` value, parsed. One forge rejects -- not an array of strings, or an
 // entry that isn't `[context:]name=path` -- throws, naming `file` when given.
-function configRemappings(value, file = null) {
+function configRemappings(value, file) {
   const where = `${file === null ? '' : `${file}: `}\`remappings\``
   if (!Array.isArray(value)) throw new Error(`${where} is not an array of strings`)
   return value.map((entry) => {
@@ -483,12 +483,9 @@ function readFoundryProfiles(file, profile, { readable } = {}) {
   let { profiles, topLevel } = parseFoundryToml(text, file)
   const files = [file]
   const ext = profiles.get(profile)?.get('extends')
-  if (ext !== undefined && !isExtends(ext)) {
-    throw new Error(`${file}: \`extends\` must be a path, or a table with a \`path\` and an optional \`strategy\` (${[...EXTEND_STRATEGIES].join(', ')})`)
-  }
   if (ext !== undefined) {
-    const extPath = typeof ext === 'string' ? ext : ext.path
-    const strategy = typeof ext === 'string' ? 'extend-arrays' : (ext.strategy ?? 'extend-arrays')
+    if (!isExtends(ext)) throw new Error(`${file}: \`extends\` must be a path, or a table with a \`path\` and an optional \`strategy\` (${[...EXTEND_STRATEGIES].join(', ')})`)
+    const { path: extPath, strategy = 'extend-arrays' } = typeof ext === 'string' ? { path: ext } : ext
     const baseFile = toPosix(resolve(posix.dirname(file), extPath))
     if (readable && !readable(baseFile)) throw new ConfigRefused(`${file}: refusing to extend ${extPath}, which lies outside the dependency`)
     const baseText = readUtf8OrNull(baseFile)
@@ -532,16 +529,19 @@ export function foundryTomlRemappings(text, profile = 'default') {
 // `files` lists what was read; `profiled` whether the selected `profile` is one of the file's.
 export function readFoundryTomlRemappings(file, profile = 'default') {
   const read = readFoundryProfiles(toPosix(resolve(file)), profile)
-  return { remappings: profileRemappings(read, profile, file), files: read.files, profiled: profile !== 'default' && read.profiles.has(profile) }
+  return { remappings: profileRemappings(read, profile, file), files: read.files, profiled: hasProfile(read.profiles, profile) }
 }
 
-// Whether the selected `profile` is one of the root foundry.toml's `profiles` (forge uses
-// `[profile.default]` for one that isn't: warned).
+// Whether the selected `profile` is one of `profiles` (not the default, which always applies).
+const hasProfile = (profiles, profile) => profile !== 'default' && profiles.has(profile)
+
+// hasProfile, for the root foundry.toml: one that isn't there is warned about (forge uses
+// `[profile.default]` for it).
 function profileApplies(profiles, profile) {
-  if (profile === 'default') return false
-  if (profiles.has(profile)) return true
-  console.warn(`[loader.solidity] FOUNDRY_PROFILE=${profile} is not a profile in foundry.toml; using [profile.default]`)
-  return false
+  if (profile !== 'default' && !profiles.has(profile)) {
+    console.warn(`[loader.solidity] FOUNDRY_PROFILE=${profile} is not a profile in foundry.toml; using [profile.default]`)
+  }
+  return hasProfile(profiles, profile)
 }
 
 // `ProjectPathsConfig::find_source_dir`: `src` unless only `contracts` exists.
@@ -639,18 +639,16 @@ function loadNestedConfig(canonical, profile, readable) {
     return null
   }
   const txt = rustJoin(canonical, REMAPPINGS_TXT)
-  let text = readUtf8OrNull(txt)
-  if (text !== null && !readable(txt)) {
-    console.warn(`[loader.solidity] Skipping a dependency's ${txt}: it is a link out of the dependency`)
-    text = null
-  }
+  const allowed = readable(txt) // (true when nothing is there)
+  if (!allowed) console.warn(`[loader.solidity] Skipping a dependency's ${txt}: it is a link out of the dependency`)
+  const text = allowed ? readUtf8OrNull(txt) : null
   return {
     src: config.src,
     libs: config.libs,
     files: [...config.files, ...(text === null ? [] : [txt])],
     // `sanitized()` roots them, then `Remapping::from` makes the path absolute and slash-terminated.
     remappings: config.remappings.map((r) => fromRelative(relativePreservingBoundary(fromRelative({ ...r, path: { parent: null, path: r.path } }), canonical))),
-    fileRemappings: text === null ? [] : parseRemappingLines(text, txt),
+    fileRemappings: text === null ? [] : parseRemappingLines(text, { label: txt }),
   }
 }
 
@@ -857,10 +855,10 @@ export function foundryProject(baseDir, { env = process.env } = {}) {
   const files = new Set(config.files)
 
   const envName = env.DAPP_REMAPPINGS !== undefined ? 'DAPP_REMAPPINGS' : env.FOUNDRY_REMAPPINGS !== undefined ? 'FOUNDRY_REMAPPINGS' : null
-  const envRemappings = envName === null ? [] : parseRemappingLines(env[envName], envName)
+  const envRemappings = envName === null ? [] : parseRemappingLines(env[envName], { label: envName })
   const txt = readUtf8OrNull(rustJoin(root, REMAPPINGS_TXT))
   if (txt !== null) files.add(rustJoin(root, REMAPPINGS_TXT))
-  const userRemappings = [...envRemappings, ...(txt === null ? [] : parseRemappingLines(txt, rustJoin(root, REMAPPINGS_TXT))), ...config.remappings]
+  const userRemappings = [...envRemappings, ...(txt === null ? [] : parseRemappingLines(txt, { label: rustJoin(root, REMAPPINGS_TXT) })), ...config.remappings]
 
   const provided = providerRemappings(root, { userRemappings, libs: config.libs, autoDetect: config.autoDetect, profile, files, ownership })
     .map((r) => displayRelative(relativePreservingBoundary(r, root)))

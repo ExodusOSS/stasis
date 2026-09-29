@@ -7,6 +7,7 @@ import { isUtf8 } from 'node:buffer'
 import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, parse, posix, relative, resolve, sep } from 'node:path'
 
+import { hasNodeModulesSegment } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
 
 // `/`-separated, as the loader's paths are: only Windows' separator is converted (on POSIX a `\\` is
@@ -96,10 +97,8 @@ export function parseGitmodules(text) {
   return [...byName.values()]
 }
 
-// The directories of `.gitmodules`' submodules: dependencies, whatever their host.
-export function gitSubmodulePaths(baseDir) {
-  return parseGitmodules(readUtf8OrNull(join(baseDir, '.gitmodules')) ?? '').map((s) => s.path).filter(Boolean)
-}
+// The submodules of the project at `baseDir` (its `.gitmodules`, see parseGitmodules).
+export const readGitmodules = (baseDir) => parseGitmodules(readUtf8OrNull(join(baseDir, '.gitmodules')) ?? '')
 
 // --- Ownership --------------------------------------------------------------------------------
 
@@ -124,7 +123,8 @@ const TARGET_SEPARATORS = sep === '\\' ? /[\\/]/u : /\//u
 //   nothing is there), `outside` when it's out of the root;
 // - `dependency`: the real path lies in a dependency, however the path got there (a project's
 //   `src/vendor -> ../lib/dep/src` holds the dependency's code);
-// - `escape`: `{ link, root, why }` when the path may not be read: it crosses a symlink that no one
+// - `escape`: `{ link, root, why }` (and `reason`, saying so) when the path may not be read: it
+//   crosses a symlink that no one
 //   trusted placed -- one planted inside the dependency `root` that leads out of it to anything but
 //   another dependency (`lib/evil/src/Evil.sol -> ../../../.env`), or one outside the project
 //   (`root` null) that leads back into it (a dependency linked from elsewhere: `lib/evil ->
@@ -167,7 +167,8 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
     roots.add(p)
     addReal(roots, p)
   }
-  const inDependency = (rel) => inside(rel) && (rel.split('/').includes('node_modules') || [...holders, ...roots].some((d) => under(rel, d)))
+  const dependencyDirs = [...holders, ...roots]
+  const inDependency = (rel) => inside(rel) && (hasNodeModulesSegment(rel) || dependencyDirs.some((d) => under(rel, d)))
   // The innermost dependency holding `rel`, a real path.
   const rootOf = (rel) => {
     if (!inside(rel)) return null
@@ -186,8 +187,9 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   }
 
   // Resolve `parts` from the real dir `start` as realpath does, checking each symlink crossed
-  // (and those its target crosses): `{ abs, escape }`, `abs` null when nothing is there. Each
-  // component takes the filesystem's spelling (a case-insensitive one finds `lib` for `LIB`).
+  // (and those its target crosses): `{ abs, escape }`, `abs` null when nothing is there, and
+  // spelled as given past the last link. A link's dir and target take the filesystem's spelling (a
+  // case-insensitive one finds `lib` for `LIB`) before their owners are judged.
   const walk = (start, parts, depth) => {
     let cur = start
     for (const part of parts) {
@@ -200,7 +202,7 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
       let target
       try {
         if (!lstatSync(next).isSymbolicLink()) {
-          cur = realpathOrNull(next) ?? next
+          cur = next
           continue
         }
         const bytes = readlinkSync(next, { encoding: 'buffer' })
@@ -212,15 +214,18 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
       if (depth >= 40) return NOTHING // ELOOP
       const r = walk(isAbsolute(target) ? parse(target).root : cur, target.split(TARGET_SEPARATORS), depth + 1)
       if (r.abs === null || r.escape !== null) return r
-      const at = toRel(next)
-      const to = toRel(r.abs)
+      const dir = realpathOrNull(cur) ?? cur
+      const abs = realpathOrNull(r.abs)
+      if (abs === null) return NOTHING
+      const at = toRel(join(dir, part))
+      const to = toRel(abs)
       if (inside(at)) {
-        const root = rootOf(toRel(cur))
-        if (root !== null && !under(to, root) && !inDependency(to)) return { abs: r.abs, escape: { link: at, root } }
+        const root = rootOf(toRel(dir))
+        if (root !== null && !under(to, root) && !inDependency(to)) return { abs, escape: { link: at, root } }
       } else if (inRoot(to) && !onNamedPath(next)) {
-        return { abs: r.abs, escape: { link: at, root: null } }
+        return { abs, escape: { link: at, root: null } }
       }
-      cur = r.abs
+      cur = abs
     }
     return { abs: cur, escape: null }
   }
@@ -229,12 +234,24 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   const of = (rel) => {
     let owner = owners.get(rel)
     if (owner === undefined) {
+      const path = join(realBase, rel)
       let { abs, escape } = walk(realBase, rel.split('/'), 0)
       // The OS's answer is the one a read gets: the walk must agree with it, or the path is refused.
-      const os = realpathOrNull(join(realBase, rel))
-      if (escape === null && abs !== os) [abs, escape] = [os, { link: rel, root: null, why: 'unresolved' }]
+      // (Past its last link the walk's path is spelled as given; with none, it's `path` itself.)
+      const os = realpathOrNull(path)
+      if (escape === null) {
+        const walked = abs === null ? null : abs === path ? os : realpathOrNull(abs)
+        if (walked !== os) escape = { link: rel, root: null, why: 'unresolved' }
+        abs = os
+      }
       const real = abs === null ? null : toRel(abs)
-      owner = { real, outside: real !== null && !inRoot(real), dependency: real !== null && inDependency(real), escape }
+      owner = {
+        real,
+        outside: real !== null && !inRoot(real),
+        dependency: real !== null && inDependency(real),
+        escape,
+        reason: escape && escapeReason(rel, escape),
+      }
       owners.set(rel, owner)
     }
     return owner
@@ -245,10 +262,10 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
 // The ownership of the project at `baseDir` given its lib dirs (`soldeer`: forge's `dependencies/`
 // holds dependencies too), with its git submodules.
 export const projectOwnership = (baseDir, libs, { soldeer = false } = {}) =>
-  solidityOwnership(baseDir, { dirs: [...libs, ...(soldeer ? ['dependencies'] : [])], packages: gitSubmodulePaths(baseDir) })
+  solidityOwnership(baseDir, { dirs: [...libs, ...(soldeer ? ['dependencies'] : [])], packages: readGitmodules(baseDir).map((s) => s.path).filter(Boolean) })
 
 // Why a path is refused (see solidityOwnership).
-export function escapeReason(path, { link, root, why }) {
+function escapeReason(path, { link, root, why }) {
   if (why === 'unresolved') return `${path} crosses a link stasis can't follow the way the filesystem does`
   const what = root === null ? 'a link from outside the project root back into it' : `a link out of the dependency ${root}`
   return link === path ? `${path} is ${what}` : `it resolves to ${path} through ${link}, ${what}`

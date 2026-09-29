@@ -27,9 +27,7 @@ import {
   readFoundryTomlRemappings,
   toSolcRemapping,
 } from './foundry.js'
-import { escapeReason, projectOwnership, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
-
-export { solidityOwnership } from './solidity-ownership.js'
+import { projectOwnership, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
 
 // --- Import scan ------------------------------------------------------------------------------
 
@@ -139,7 +137,7 @@ const toLoaderRemapping = ({ context, name, path }) => ({ context, prefix: name,
 // remappings.txt text -> remappings as written, one `[context:]prefix=target` per line (lines
 // trimmed, blank ones skipped; an empty target is solc's, valid). A line that isn't one throws.
 export function parseRemappings(content) {
-  return parseRemappingLines(content, undefined, { emptyPath: true }).map(toLoaderRemapping)
+  return parseRemappingLines(content, { emptyPath: true }).map(toLoaderRemapping)
 }
 
 // foundry.toml text -> the `remappings` of `[profile.default]`, overlaid by the selected profile's
@@ -152,21 +150,21 @@ export function parseRemappingsFromToml(tomlContent, { env = process.env } = {})
 // foundry.toml (its selected profile, with its `extends` base) is forge's, and so is a
 // remappings.txt when `forge` says forge reads it: slash-terminated the way forge reads them.
 // Otherwise (solc, Hardhat) a remappings.txt applies as written.
-function readMapping(mappingFile, { env, forge, host }) {
+function readMapping(mappingFile, { env, forge }) {
   if (mappingFile.endsWith('.toml')) {
     const { remappings, files, profiled } = readFoundryTomlRemappings(mappingFile, foundryProfile(env))
     return { remappings: remappings.map(toSolcRemapping), files, profiled }
   }
   const text = readUtf8OrNull(mappingFile)
   if (text === null) throw new Error(`${mappingFile}: no such file`)
-  const listed = parseRemappingLines(text, mappingFile, { emptyPath: !forge })
+  const listed = parseRemappingLines(text, { label: mappingFile, emptyPath: !forge })
   return { remappings: listed.map(forge ? toSolcRemapping : toLoaderRemapping), files: [mappingFile] }
 }
 
 // Read a foundry.toml/remappings.txt mapping file -> its remappings (see readMapping; `forge`
 // defaults to a remappings.txt applying as written). The file itself is not added to sources.
-export function readRemappingsFile(mappingFile, { env = process.env, forge = false, host = diskHost } = {}) {
-  return readMapping(mappingFile, { env, forge, host }).remappings
+export async function readRemappingsFile(mappingFile, { env = process.env, forge = false } = {}) {
+  return readMapping(mappingFile, { env, forge }).remappings
 }
 
 // --- Resolution ---------------------------------------------------------------------------------
@@ -185,10 +183,7 @@ export function readRemappingsFile(mappingFile, { env = process.env, forge = fal
 // shaped the result.
 export async function discoverSolidityConfig(baseDir, { mappingFile, env = process.env } = {}) {
   const forge = isFile(join(baseDir, FOUNDRY_TOML))
-  if (forge && !mappingFile) {
-    const { remappings, libs, ownership, files, envUsed } = foundryProject(baseDir, { env })
-    return { remappings, libs, ownership, files, envUsed }
-  }
+  if (forge && !mappingFile) return foundryProject(baseDir, { env })
   const { libs, profiled } = forge ? foundryLibs(baseDir, { env }) : { libs: [], profiled: false }
   const ownership = projectOwnership(baseDir, libs, { soldeer: forge })
   const within = (abs) => {
@@ -197,14 +192,13 @@ export async function discoverSolidityConfig(baseDir, { mappingFile, env = proce
   }
   if (mappingFile) {
     const abs = resolve(baseDir, mappingFile)
-    const read = await readMapping(abs, { env, forge })
-    const { remappings, files } = read
+    const { remappings, files, profiled: mappingProfiled } = readMapping(abs, { env, forge })
     // The profile picks the mapping file's remappings (a .toml) or the root foundry.toml's libs.
-    const envUsed = profiled || read.profiled ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []
+    const envUsed = profiled || mappingProfiled ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []
     return { remappings, libs, ownership, files: files.flatMap(within), envUsed }
   }
   const txt = join(baseDir, REMAPPINGS_TXT)
-  const remappings = isFile(txt) ? (await readMapping(txt, { env, forge })).remappings : []
+  const remappings = isFile(txt) ? readMapping(txt, { env, forge }).remappings : []
   return { remappings, libs, ownership, files: isFile(txt) ? [REMAPPINGS_TXT] : [], envUsed: [] }
 }
 
@@ -304,7 +298,7 @@ function resolveImport(specifier, fromFile, { remappings = [], baseDir, libs = [
   if (!baseDir) return { path }
   const own = ownership ?? solidityOwnership(baseDir)
   const target = own.of(path)
-  if (target.escape) return { reason: escapeReason(path, target.escape) }
+  if (target.reason) return { reason: target.reason }
   // (A link out of the root is refused when the file is read.)
   if (target.real !== null && !target.outside && !target.dependency && own.of(fromFile).dependency) return { reason: `a dependency may not import the project's own ${path}` }
   return { path }
@@ -367,8 +361,8 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings,
   const knownEntries = new Set(entries)
   const realBase = realpathSync(baseDir)
   for (const entry of entries) {
-    const { escape } = ownership.of(entry)
-    if (escape) throw new Error(`Refusing entry ${entry}: ${escapeReason(entry, escape)}`)
+    const { reason } = ownership.of(entry)
+    if (reason) throw new Error(`Refusing entry ${entry}: ${reason}`)
   }
 
   const processWave = async (wave) => {

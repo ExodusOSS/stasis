@@ -578,12 +578,10 @@ test('buildSolidityBundle refuses a package.json a dependency planted as a link,
     'lib/evil/src/E.sol': 'contract E {}\n',
   })
   symlinkSync('../../.env', join(tmp, 'lib/evil/package.json'))
-  for (const manifests of [false, true]) {
-    await t.assert.rejects(
-      () => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests, env: {} }),
-      (err) => err.message === 'Refusing lib/evil/package.json: lib/evil/package.json is a link out of the dependency lib/evil' && !String(err.cause ?? '').includes('0xabc'),
-    )
-  }
+  await Promise.all([false, true].map((manifests) => t.assert.rejects(
+    () => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests, env: {} }),
+    (err) => err.message === 'Refusing lib/evil/package.json: lib/evil/package.json is a link out of the dependency lib/evil' && !String(err.cause ?? '').includes('0xabc'),
+  )))
 }))
 
 test('buildSolidityBundle fails on a package.json that doesn\'t parse, rather than giving its files to the parent package', withTmp(async (t, tmp) => {
@@ -620,6 +618,7 @@ test('buildSolidityBundle refuses a dependency config reached through an absolut
     const cwd = process.cwd()
     process.chdir(tmp)
     try {
+      // eslint-disable-next-line no-await-in-loop -- each run rewrites foundry.toml and needs the cwd
       const { result: bundle, lines } = await captureStderr(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} }))
       t.assert.ok(!bundle.sources.has('secrets.toml'))
       t.assert.ok(lines.some((l) => l.includes("Skipping a dependency's config") && l.includes(refused)), lines.join('\n'))
@@ -665,6 +664,7 @@ test('buildSolidityBundle fails on a config that isn\'t UTF-8 or holds a mistype
     ['extends = { path = "b.toml", strategy = "merge" }', '`extends` must be a path, or a table with a `path` and an optional `strategy` (extend-arrays, replace-arrays, no-collision)'],
   ]) {
     writeFileSync(join(tmp, 'foundry.toml'), `[profile.default]\n${setting}\n`)
+    // eslint-disable-next-line no-await-in-loop -- each run rewrites foundry.toml
     await captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: `${join(tmp, 'foundry.toml')}: ${message}` }))
   }
 }))
