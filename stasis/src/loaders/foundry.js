@@ -109,8 +109,9 @@ const readDir = (dir, host) => listDir(dir, host).filter((e) => !e.name.startsWi
 // --- Remapping values ----------------------------------------------------------------------
 
 // `[context:]name=path`, as forge (`Remapping::from_str`) and solc split it: at the first `=`, then
-// the first `:` before it. An empty context is global; an empty name or path is invalid (null).
-export function parseRemapping(entry) {
+// the first `:` before it. An empty context is global; an empty name or path is invalid (null),
+// but for solc (`emptyPath`) only an empty name is: `x/=` maps `x/A.sol` to `A.sol`.
+export function parseRemapping(entry, { emptyPath = false } = {}) {
   const eq = entry.indexOf('=')
   if (eq === -1) return null
   let name = entry.slice(0, eq)
@@ -121,17 +122,18 @@ export function parseRemapping(entry) {
     context = name.slice(0, colon)
     name = name.slice(colon + 1)
   }
-  if (name.trim() === '' || path.trim() === '') return null
+  if (name.trim() === '' || (!emptyPath && path.trim() === '')) return null
   if (context !== null && context.trim() === '') context = null
   return { context, name, path }
 }
 
 // A remappings.txt / env var body: one remapping per non-blank (trimmed) line; invalid lines
 // (forge rejects the whole file on one) are skipped, and reported when a `label` names the source.
-export function parseRemappingLines(text, label) {
+// `options`: see parseRemapping.
+export function parseRemappingLines(text, label, options) {
   const out = []
   for (const line of text.split('\n').map((l) => l.trim()).filter(Boolean)) {
-    const r = parseRemapping(line)
+    const r = parseRemapping(line, options)
     if (r) out.push(r)
     else if (label !== undefined) console.warn(`[loader.solidity] Invalid remapping in ${label}: ${line}`)
   }
@@ -398,11 +400,11 @@ const STANDALONE_SECTIONS = new Set([
 
 // foundry.toml -> `{ profiles, topLevel }`. `profiles` is Map<profile, Map<key, value>> (profile
 // names lowercased, keys snake_cased as forge does) from the `[profile.<name>]` tables and the
-// legacy top-level `[<name>]` ones forge still reads, the former winning key by key; a profile's
-// sub-tables are its values like any other (`extends`, `fuzz`: forge compares them all for a
-// `no-collision` extends). `topLevel` holds the values set outside any table (forge rejects those;
-// a `--mapping` file may list its `remappings` there). Throws a TomlError naming `file` on text
-// that isn't TOML, as forge refuses the file.
+// legacy top-level `[<name>]` ones forge still reads (not for `extends`), the former winning key
+// by key; a profile's sub-tables are its values like any other (`extends`, `fuzz`: forge compares
+// them all for a `no-collision` extends). `topLevel` holds the values set outside any table (forge
+// rejects those; a `--mapping` file may list its `remappings` there). Throws a TomlError naming
+// `file` on text that isn't TOML, as forge refuses the file.
 function parseFoundryToml(text, file = null) {
   const current = new Map()
   const legacy = new Map()
@@ -410,7 +412,10 @@ function parseFoundryToml(text, file = null) {
   const read = (map, name, table) => {
     const profile = name.toLowerCase()
     const dict = map.get(profile) ?? map.set(profile, new Map()).get(profile)
-    for (const [key, value] of Object.entries(table)) dict.set(snakeCase(key), value)
+    for (const [key, value] of Object.entries(table)) {
+      const k = snakeCase(key)
+      if (k !== 'extends' || map === current) dict.set(k, value) // forge reads `extends` from `[profile.<name>]` only
+    }
   }
   for (const [key, value] of Object.entries(readToml(text, file))) {
     if (!isTomlTable(value)) topLevel.set(snakeCase(key), value)
@@ -438,13 +443,18 @@ function mergeExtended(base, local, strategy) {
   return out
 }
 
+// Whether `file`'s real path lies in the real dir `root` (always, with no `root`).
+const confinedTo = (file, root) => root === undefined || pathStartsWith(canonicalize(file) ?? file, root)
+
 // A foundry.toml's profiles, with the selected profile's `extends` base merged in (forge's
 // `TomlFileProvider`). `files` lists what was read; `topLevel` is the file's own (see
 // parseFoundryToml). Throws where forge refuses the config, and where `confineTo` (a dependency's
-// real root) doesn't hold the base: a dependency's config may not read the project's files.
-function readFoundryProfiles(file, profile, { confineTo, host }) {
-  const text = readText(host, file)
+// real root) doesn't hold the file or its base (a link out of it): a dependency's config may not
+// read the project's files.
+function readFoundryProfiles(file, profile, { confineTo } = {}) {
+  const text = readFileOrNull(file)
   if (text === null) return { profiles: new Map(), topLevel: new Map(), files: [] }
+  if (!confinedTo(file, confineTo)) throw new Error(`${file}: refusing to read it, a link out of the dependency`)
   let { profiles, topLevel } = parseFoundryToml(text, file)
   const files = [file]
   const ext = profiles.get(profile)?.get('extends')
@@ -452,10 +462,8 @@ function readFoundryProfiles(file, profile, { confineTo, host }) {
   if (typeof extPath === 'string') {
     const strategy = (typeof ext === 'object' && typeof ext.strategy === 'string') ? ext.strategy : 'extend-arrays'
     const baseFile = toPosix(resolve(posix.dirname(file), extPath))
-    if (confineTo !== undefined && !pathStartsWith(canonicalize(baseFile, host) ?? baseFile, confineTo)) {
-      throw new Error(`${file}: refusing to extend ${extPath}, which lies outside the dependency`)
-    }
-    const baseText = readText(host, baseFile)
+    if (!confinedTo(baseFile, confineTo)) throw new Error(`${file}: refusing to extend ${extPath}, which lies outside the dependency`)
+    const baseText = readFileOrNull(baseFile)
     if (baseText === null) throw new Error(`${file}: the inherited config file does not exist: ${extPath}`)
     const base = parseFoundryToml(baseText, baseFile).profiles
     if (base.get(profile)?.has('extends')) {
@@ -574,8 +582,9 @@ function rebaseNested(r, canonical, lexical) {
 
 // A dependency's config as forge's `load_nested_config` reads it: remappings rebased onto its
 // canonical root, its remappings.txt, its src and libs. Null when forge would reject the config,
-// or when its `extends` reaches outside the dependency (warned).
-function loadNestedConfig(canonical, profile, host) {
+// or when it or its `extends` base lies outside the dependency (warned); a remappings.txt that does
+// is skipped (warned).
+function loadNestedConfig(canonical, profile) {
   let config
   try {
     config = loadFoundryConfig(canonical, profile, { confineTo: canonical, host })
@@ -584,14 +593,19 @@ function loadNestedConfig(canonical, profile, host) {
     return null
   }
   if (config.remappings === null) return null
-  const text = readText(host, rustJoin(canonical, REMAPPINGS_TXT))
+  const txt = rustJoin(canonical, REMAPPINGS_TXT)
+  let text = readFileOrNull(txt)
+  if (text !== null && !confinedTo(txt, canonical)) {
+    console.warn(`[loader.solidity] Skipping a dependency's ${txt}: it is a link out of the dependency`)
+    text = null
+  }
   return {
     src: config.src,
     libs: config.libs,
-    files: [...config.files, ...(text === null ? [] : [rustJoin(canonical, REMAPPINGS_TXT)])],
+    files: [...config.files, ...(text === null ? [] : [txt])],
     // `sanitized()` roots them, then `Remapping::from` makes the path absolute and slash-terminated.
     remappings: config.remappings.map((r) => fromRelative(relativePreservingBoundary(fromRelative({ ...r, path: { parent: null, path: r.path } }), canonical))),
-    fileRemappings: text === null ? [] : parseRemappingLines(text, rustJoin(canonical, REMAPPINGS_TXT)),
+    fileRemappings: text === null ? [] : parseRemappingLines(text, txt),
   }
 }
 
@@ -751,9 +765,16 @@ function providerRemappings(root, { userRemappings, libs, autoDetect, profile, f
 }
 
 // The lib dirs `forge build` uses for the Foundry project at `baseDir` (its selected profile's
-// `libs`, else the detected ones).
-export function foundryLibs(baseDir, { env = process.env, host = diskHost } = {}) {
-  return loadFoundryConfig(toPosix(resolve(baseDir)), foundryProfile(env), { host }).libs
+// `libs`, else the detected ones; also those, warned, when forge would reject the foundry.toml:
+// with a pinned mapping file, nothing else is read from it).
+export function foundryLibs(baseDir, { env = process.env } = {}) {
+  const root = toPosix(resolve(baseDir))
+  try {
+    return loadFoundryConfig(root, foundryProfile(env)).libs
+  } catch (err) {
+    console.warn(`[loader.solidity] Using the default lib dirs: ${err.message}`)
+    return detectLibs(root)
+  }
 }
 
 // The Foundry project at `baseDir`: what `forge build` would use. `remappings` are

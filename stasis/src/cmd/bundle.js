@@ -232,9 +232,11 @@ function assembleCodeBundle({
 // The build-description files of a Solidity bundle (--manifests), as Map<path, text>: `configFiles`
 // (what discoverSolidityConfig read, when named `*.toml`/`*.txt`) plus the SOLIDITY_*_MANIFESTS
 // that exist, for the root and for each package dir `classifyDep`/package.json places a bundled
-// source in. Files inside the root only, carried as written: whatever they hold (an RPC URL with
-// its API key, an Etherscan key, a URL's credentials) is in the bundle too, as with --package-json.
-function solidityManifests(baseDir, sources, configFiles, classifyDep, host) {
+// source in. Files inside the root only, and none reached through a link a dependency planted out
+// of itself (`ownership`, see solidityOwnership). Carried as written: whatever they hold (an RPC
+// URL with its API key, an Etherscan key, a URL's credentials) is in the bundle too, as with
+// --package-json.
+function solidityManifests(baseDir, sources, configFiles, classifyDep, ownership) {
   const wanted = new Set([...configFiles.filter((f) => f.endsWith('.toml') || f.endsWith('.txt')), ...SOLIDITY_ROOT_MANIFESTS])
   const dirs = new Set()
   for (const path of sources.keys()) {
@@ -250,6 +252,11 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep, host) {
   const out = new Map()
   for (const rel of [...wanted].toSorted()) {
     if (sources.has(rel) || posix.isAbsolute(rel) || rel.startsWith('../')) continue
+    const { escape } = ownership.of(rel)
+    if (escape) {
+      console.warn(`[stasis] Not carrying ${rel}: ${escape.link} is a link out of the dependency ${escape.root}`)
+      continue
+    }
     let buf
     try {
       assertRealPathWithinBase(realBase, baseDir, rel, host)
@@ -289,11 +296,11 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   }
   const expanded = expandSolidityEntries(baseDir, normalized, host)
 
-  const { remappings, libs, dependencyDirs, files: configFiles, envUsed } = discoverSolidityConfig(baseDir, { mappingFile, env, host })
+  const { remappings, libs, ownership, files: configFiles, envUsed } = await discoverSolidityConfig(baseDir, { mappingFile, env })
   // The bundle doesn't record the environment, so say when it shaped the resolution.
   if (envUsed.length > 0) console.warn(`[stasis] Solidity imports resolved with ${envUsed.join(', ')} from the environment`)
-  const sources = collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs, dependencyDirs, host })
-  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs, dependencyDirs, host })
+  const sources = await collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs, ownership })
+  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs, ownership })
 
   // Bundles must be self-contained: fail on a missing entry or unresolved import.
   const issues = []
@@ -311,7 +318,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const bundled = new Map(sources)
   const formats = new Map()
   if (manifests) {
-    for (const [path, text] of solidityManifests(baseDir, sources, configFiles, classifyDep, host)) {
+    for (const [path, text] of solidityManifests(baseDir, sources, configFiles, classifyDep, ownership)) {
       bundled.set(path, text)
       formats.set(path, path.endsWith('.json') ? 'json' : 'resource')
     }
@@ -1001,8 +1008,11 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e), host))
   const files = entries.filter((e) => !dirs.includes(e))
   let kind
-  if (files.every((e) => e.endsWith('.sol'))) kind = 'sol'
-  else if (dirs.length > 0) {
+  if (files.every((e) => e.endsWith('.sol'))) {
+    // Only missing extensionless paths: a mistyped file, not a project without these dirs.
+    if (files.length === 0 && !dirs.some((e) => host.stat(resolve(cwd, e)) !== null)) throw new Error(`${name}: no such file or directory: ${dirs[0]}`)
+    kind = 'sol'
+  } else if (dirs.length > 0) {
     const missing = dirs.find((e) => host.stat(resolve(cwd, e)) === null)
     if (missing !== undefined) throw new Error(`${name}: no such file or directory: ${missing}`)
     throw new Error(`${name}: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirs[0]}`)

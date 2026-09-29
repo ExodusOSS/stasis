@@ -253,6 +253,8 @@ if (command === '-v' || command === '--version') {
   const { isDir } = await import('../src/resolve-typescript.js')
   const dirEntries = argv.filter((f) => isDir(resolve(f)) || (extname(f) === '' && !existsSync(resolve(f))))
   const allSol = argv.every((f) => f.endsWith('.sol') || dirEntries.includes(f))
+  // Only missing extensionless paths: a mistyped file, not a project without these dirs.
+  if (allSol && argv.every((f) => !f.endsWith('.sol') && !existsSync(resolve(f)))) usage(`Error: no such file or directory: ${argv[0]}`)
   if (dirEntries.length > 0 && !allSol) {
     const missing = dirEntries.find((f) => !existsSync(resolve(f)))
     usage(missing === undefined

@@ -16,6 +16,7 @@ import {
   parseRemappingsFromToml,
   readRemappingsFile,
   resolveSolImport,
+  solidityOwnership,
 } from '../stasis/src/loaders/solidity.js'
 import { findRemappingsWithContext, foundryProject, foundryTomlRemappings } from '../stasis/src/loaders/foundry.js'
 
@@ -629,11 +630,88 @@ test('resolveSolImport refuses a non-.sol target, one outside the root, and a de
 }, (t, dir) => {
   t.assert.equal(resolveSolImport('../../.env', 'lib/dep/src/A.sol', { baseDir: dir }), null)
   t.assert.equal(resolveSolImport('x/Y.sol', 'src/A.sol', { baseDir: dir, remappings: [{ context: null, prefix: 'x/', target: '/abs/' }] }), null)
-  const opts = { baseDir: dir, libs: ['lib'], dependencyDirs: ['lib'] }
+  const opts = { baseDir: dir, libs: ['lib'], ownership: solidityOwnership(dir, { dirs: ['lib'] }) }
   t.assert.equal(resolveSolImport('secret.sol', 'lib/dep/src/A.sol', opts), null)
   t.assert.equal(resolveSolImport('secret.sol', 'src/Main.sol', opts), 'secret.sol')
   t.assert.equal(resolveSolImport('../../other/src/B.sol', 'lib/dep/src/A.sol', opts), 'lib/other/src/B.sol')
   t.assert.equal(resolveSolImport('../../../node_modules/pkg/C.sol', 'lib/dep/src/A.sol', opts), 'node_modules/pkg/C.sol')
+}))
+
+test('solidityOwnership decides a path\'s owner from where it really is, and catches a dependency\'s link out of itself', withProject({
+  '.env': 'K=1\n',
+  'secrets/Keys.sol': '',
+  'lib/dep/src/A.sol': '',
+  'lib/forge-std/src/Test.sol': '',
+  'vendor/linked/src/L.sol': '',
+  'packages/ws/W.sol': '',
+  'node_modules/.pnpm/foo@1/node_modules/foo/F.sol': '',
+  'node_modules/.pnpm/bar@1/node_modules/bar/B.sol': '',
+}, (t, dir) => {
+  const link = (target, at) => {
+    mkdirSync(dirname(join(dir, at)), { recursive: true })
+    symlinkSync(target, join(dir, at))
+  }
+  link('../../../.env', 'lib/dep/src/Evil.sol') // planted by the dependency: out of it
+  link('../../forge-std/src', 'lib/dep/src/fs') // into another dependency: fine
+  link('../../../secrets', 'lib/dep/node_modules/x') // a package slot inside the dependency is still its own
+  link('../lib/dep/src', 'src/vendor') // the project's link into the dependency
+  link('../vendor/linked', 'lib/linked') // a linked lib entry: the dependency is where it points
+  link('../../packages/ws', 'node_modules/@org/ws') // a workspace package: the project's own
+  link('.pnpm/foo@1/node_modules/foo', 'node_modules/foo')
+  link('../../bar@1/node_modules/bar', 'node_modules/.pnpm/foo@1/node_modules/bar')
+  const { of } = solidityOwnership(dir, { dirs: ['lib'] })
+  const owner = (p) => {
+    const o = of(p)
+    return o.escape ? `escape ${o.escape.link} (${o.escape.root})` : o.dependency ? 'dependency' : 'project'
+  }
+  t.assert.equal(owner('lib/dep/src/A.sol'), 'dependency')
+  t.assert.equal(owner('lib/dep/src/Evil.sol'), 'escape lib/dep/src/Evil.sol (lib/dep)')
+  t.assert.equal(owner('lib/dep/src/fs/Test.sol'), 'dependency')
+  t.assert.equal(owner('lib/dep/node_modules/x/Keys.sol'), 'escape lib/dep/node_modules/x (lib/dep)')
+  t.assert.equal(owner('src/vendor/A.sol'), 'dependency')
+  // Reached through the project's own link, the dependency's link out is still caught.
+  t.assert.equal(owner('src/vendor/Evil.sol'), 'escape lib/dep/src/Evil.sol (lib/dep)')
+  t.assert.equal(owner('lib/linked/src/L.sol'), 'dependency')
+  t.assert.equal(owner('vendor/linked/src/L.sol'), 'dependency')
+  t.assert.equal(owner('node_modules/@org/ws/W.sol'), 'project')
+  t.assert.equal(owner('node_modules/foo/F.sol'), 'dependency')
+  t.assert.equal(owner('node_modules/.pnpm/foo@1/node_modules/bar/B.sol'), 'dependency')
+  t.assert.equal(owner('secrets/Keys.sol'), 'project')
+  t.assert.deepEqual(of('lib/dep/src/Nope.sol'), { real: null, outside: false, dependency: false, escape: null })
+}))
+
+test('a remappings.txt taken as written (solc) may map a prefix to nothing', (t) => {
+  const remappings = parseRemappings('x/=\nctx:y/=\n=z\n')
+  t.assert.deepEqual(remappings, [{ context: null, prefix: 'x/', target: '' }, { context: 'ctx', prefix: 'y/', target: '' }])
+  t.assert.equal(resolveSolImport('x/A.sol', 'src/B.sol', { remappings }), 'A.sol')
+})
+
+test('a legacy [default] table\'s `extends` is ignored, as forge ignores it', withProject({
+  'foundry.toml': '[default]\nextends = "base.toml"\n',
+  'base.toml': '[profile.default]\nremappings = ["x/=lib/elsewhere/"]\n',
+}, (t, dir) => {
+  const { remappings, files } = foundryProject(dir, { env: {} })
+  t.assert.deepEqual(files, ['foundry.toml'])
+  t.assert.deepEqual(remappings, [])
+}))
+
+test('discoverSolidityConfig with a mapping file: a foundry.toml forge rejects still gives lib dirs, and FOUNDRY_PROFILE is reported', withProject({
+  'foundry.toml': '[profile.default]\nextends = "missing.toml"\n',
+  'remappings.txt': 'x/=lib/x/\n',
+}, async (t, dir) => {
+  const warn = console.warn
+  const lines = []
+  console.warn = (...a) => lines.push(a.join(' '))
+  try {
+    const config = await discoverSolidityConfig(dir, { mappingFile: 'remappings.txt', env: {} })
+    t.assert.deepEqual(config.libs, ['lib'])
+    t.assert.deepEqual(config.envUsed, [])
+    // The profile picks the lib dirs, so it's reported.
+    t.assert.deepEqual((await discoverSolidityConfig(dir, { mappingFile: 'remappings.txt', env: { FOUNDRY_PROFILE: 'ci' } })).envUsed, ['FOUNDRY_PROFILE=ci'])
+  } finally {
+    console.warn = warn
+  }
+  t.assert.ok(lines.some((l) => l.includes('Using the default lib dirs') && l.includes('missing.toml')))
 }))
 
 test('resolveSolImport starts a library lookup at the importer directory\'s parent, as foundry-compilers does', withProject({

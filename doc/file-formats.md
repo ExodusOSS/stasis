@@ -340,7 +340,8 @@ follows them: a symlinked directory that is one already on the walk is a loop
 and skipped, anything else is walked, so two links to one directory give two
 copies. A directory entry that is missing or holds no `.sol` file is skipped
 with a warning (a project without `script/` bundles with `src test script`);
-only when no entry yields a file is it an error. Imports are found by a scan
+only when no entry yields a file is it an error (when none exists, a mistyped
+path: `no such file or directory`). Imports are found by a scan
 that skips comments (a `//` comment ends at `\n` or `\r`) and string literals
 (read as bytes: `\xNN` is one byte, and the path is those bytes as UTF-8), and
 resolve the way solc does under the project's build tool:
@@ -361,12 +362,14 @@ resolve the way solc does under the project's build tool:
   copy of a package; aliases of the project's own `src`/`test`/`script` dirs
   are dropped, and `auto_detect_remappings = false` turns detection off.
   Profiles are `[profile.<name>]` tables and the legacy top-level `[<name>]`
-  ones (the former wins key by key); names match case-insensitively. Not
+  ones (the former wins key by key; `extends` counts only in the former, as in
+  forge); names match case-insensitively. Not
   read: `~/.foundry/foundry.toml`, `FOUNDRY_CONFIG` and the other `FOUNDRY_*`
   overrides. When `FOUNDRY_PROFILE` or a remapping variable shapes the
   result, `stasis bundle` says so on stderr; the bundle doesn't record it.
   Without a `foundry.toml`, a root `remappings.txt` applies as written, as solc
-  and Hardhat apply it (`@oz/=lib/oz` makes `@oz/X.sol` `lib/ozX.sol`).
+  and Hardhat apply it (`@oz/=lib/oz` makes `@oz/X.sol` `lib/ozX.sol`; `x/=`
+  makes `x/A.sol` `A.sol`).
   `--mapping=<file>` replaces the remappings with exactly the ones that file
   lists: a `foundry.toml`'s selected profile (with its `extends` base; a
   `remappings` key outside any table is taken too), or a `remappings.txt`. A
@@ -380,17 +383,29 @@ resolve the way solc does under the project's build tool:
   base path: `import "src/A.sol"`), then as a package file in `node_modules`,
   from the importer's directory up (Hardhat and Node: `hardhat/console.sol`,
   `@scope/pkg/contracts/X.sol`; a package's `exports` map doesn't apply to
-  Solidity files). `--mapping` changes none of these lookups.
+  Solidity files). `--mapping` changes none of these lookups: a root
+  `foundry.toml` still gives the `libs` (the default ones, warned, when forge
+  would reject the file), and `FOUNDRY_PROFILE` picking them is reported.
 
 Dependencies are input the project didn't write, so whatever resolves an
 import, the result must be a `.sol` file inside the bundle root (an `import
-".env";` or a remapping to `/opt/x/` is refused, stating why), and an import
-from a dependency — a file under forge's `libs`, Soldeer's `dependencies/`, a
-git submodule or any `node_modules` — must land, by real path, on a dependency's
-file too: a dependency may import another (forge-std's `ds-test`), never the
-project's own files, whether through a relative path, a base-path lookup, its
-own remappings or a symlink. A dependency's `foundry.toml` whose `extends`
-lies outside it is skipped with a warning.
+".env";` or a remapping to `/opt/x/` is refused, stating why), and who owns a
+file is decided by where it really is. The dependencies are the entries of
+forge's `libs` (a symlinked `lib/forge-std` is the dependency where it points),
+Soldeer's `dependencies/`, git submodules and every `node_modules` package; a
+file is a dependency's when its real path lies in one, however the path got
+there (`src/vendor -> ../lib/dep/src` holds the dependency's code). An import
+from a dependency must land on a dependency's file too: it may import its own
+files and another dependency's (forge-std's `ds-test`), never the project's,
+whether through a relative path, a base-path lookup, its own remappings or a
+symlink. A symlink planted inside a dependency that leads out of it to anything
+but another dependency (`lib/evil/src/Evil.sol -> ../../../.env`) is never
+followed, whoever's import, entry or manifest the path is: the import is
+refused, the entry rejected, the manifest not carried, and the dependency's own
+`foundry.toml`, its `extends` base or its `remappings.txt` skipped with a
+warning. A link the project placed (a workspace package linked into
+`node_modules`, a linked `lib/` entry, `src/vendor`) may lead anywhere in the
+root; a workspace package is the project's own code.
 
 The config files are read, not bundled. `--manifests` bundles the build
 description too: the `*.toml`/`*.txt` config files the resolution read, the
