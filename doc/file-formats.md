@@ -743,6 +743,10 @@ test code reaches for. Two kinds of cfg are decided:
 
 `all(…)`/`any(…)`/`not(…)` compose; a predicate that reduces to true (`not(test)`,
 an enabled feature) is as firm as no cfg, so a missing module behind it is fatal.
+One an undecided leaf occurs in more than once is decided when it comes out the
+same whatever that leaf is: an item's cfg joined with its enclosing blocks'
+`all(any(test, kani), not(kani))` never holds (zerocopy's test-only `use
+rand::…`), and `any(unix, not(unix))` always does.
 Without a target, target cfgs stay undecided and their code is kept. A
 `cfg_attr` that applies a non-cfg attribute (`#[cfg_attr(docsrs, doc(cfg(…)))]`)
 gates nothing.

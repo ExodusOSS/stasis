@@ -349,6 +349,18 @@ test('evalCfg decides test/doc-only predicates and leaves target/feature ones un
   t.assert.equal(evalCfg('any()'), false)
 })
 
+test('evalCfg decides a predicate an unknown leaf repeats in when it holds, or fails, whatever that leaf is', (t) => {
+  // zerocopy: `#[cfg(any(test, kani))] mod tests { #[cfg(not(kani))] mod compatibility { use rand::…; } }`
+  t.assert.equal(evalCfg('all(any(test, kani), not(kani))'), false)
+  t.assert.equal(evalCfg('any(unix, not(unix))'), true)
+  t.assert.equal(evalCfg('all(target_os = "linux", not(target_os="linux"))'), false)
+  t.assert.equal(evalCfg('any(all(a, b), all(a, not(b)))'), null) // `a`: not decided
+  t.assert.equal(evalCfg('all(unix, windows)'), null) // two leaves, each once: left to the ranking (cfgExclusive)
+  t.assert.equal(evalCfg('all(feature = "x", not(feature = "x"), kani)', { features: null }), false)
+  const { refs } = scanRustItems('#[cfg(any(test, kani))]\nmod tests {\n    #[cfg(not(kani))]\n    mod compatibility {\n        pub(super) use rand::Rng;\n    }\n    use proptest::prelude::*;\n}\n')
+  t.assert.deepEqual(refs.map((r) => r.spec), ['proptest::prelude']) // under kani, which may be set
+})
+
 test('evalCfg decides target predicates against a target cfg set, profile and custom ones never', (t) => {
   const target = new Set(['unix', 'target_os="linux"', 'target_family="unix"', 'target_arch="x86_64"', 'target_pointer_width="64"', 'target_feature="sse2"', 'target_has_atomic="64"', 'debug_assertions', 'panic="unwind"'])
   t.assert.equal(evalCfg('unix', { target }), true)

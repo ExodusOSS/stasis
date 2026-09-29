@@ -343,26 +343,53 @@ export const TARGET_CFG_KEYS = new Set(['unix', 'windows', 'target_abi', 'target
 // (rustcTargetCfgs), and unknown without one; every other leaf stays unknown. `env.units`, a list
 // of such envs, is code compiled several ways (a crate built for the target and, as a
 // build-dependency, for the host): false only when false in each, true only when true in each.
+// A predicate an unknown leaf occurs in more than once is decided when it comes out the same
+// whatever the unknown leaves are (up to six of them): `all(any(test, kani), not(kani))` -- zerocopy's
+// `#[cfg(any(test, kani))] mod tests { #[cfg(not(kani))] mod compatibility { … } }` -- never holds.
+const MAX_FREE_CFG_LEAVES = 6
 export function evalCfg(pred, env = {}) {
   if (env.units) {
     const each = env.units.map((u) => evalCfg(pred, u))
     return each.every((r) => r === false) ? false : (each.every((r) => r === true) ? true : null)
   }
+  const free = { counts: null } // unknown leaf → how often it occurs, once one is met
+  const r = evalCfgWith(pred, env, null, free)
+  if (r !== null || free.counts === null || free.counts.size > MAX_FREE_CFG_LEAVES || [...free.counts.values()].every((n) => n === 1)) return r
+  const leaves = [...free.counts.keys()]
+  let out
+  for (let bits = 0; bits < 1 << leaves.length; bits++) {
+    const v = evalCfgWith(pred, env, new Map(leaves.map((l, k) => [l, ((bits >> k) & 1) === 1])))
+    if (out === undefined) out = v
+    else if (v !== out) return null
+  }
+  return out
+}
+// evalCfg's three-valued pass: an unknown leaf takes its value from `assume` (leaf → value) when
+// that has it, else is counted in `free.counts`.
+function evalCfgWith(pred, env, assume, free = null) {
   const p = pred.trim()
   const m = /^(all|any|not)\s*\(([\s\S]*)\)$/u.exec(p)
   if (!m) {
-    if (p === 'test') return env.test === true
-    if (p === 'doctest' || p === 'doc') return false
-    const feature = FEATURE_CFG_RE.exec(p)
-    if (feature) return env.features ? (env.features.has(feature[1]) ? true : (env.maybeFeatures?.has(feature[1]) ? null : false)) : null
-    const leaf = CFG_LEAF_RE.exec(p)
-    if (leaf && env.target && TARGET_CFG_KEYS.has(leaf[1])) return env.target.has(leaf[2] === undefined ? leaf[1] : `${leaf[1]}="${leaf[2]}"`)
+    const known = evalCfgLeaf(p, env)
+    if (known !== null) return known
+    const leaf = p.replaceAll(/\s+/gu, '')
+    if (assume?.has(leaf)) return assume.get(leaf)
+    if (free !== null) (free.counts ??= new Map()).set(leaf, (free.counts.get(leaf) ?? 0) + 1)
     return null
   }
-  const args = splitTopLevel(m[2]).map((a) => a.trim()).filter(Boolean).map((a) => evalCfg(a, env))
+  const args = splitTopLevel(m[2]).map((a) => a.trim()).filter(Boolean).map((a) => evalCfgWith(a, env, assume, free))
   if (m[1] === 'not') return args.length === 1 && args[0] !== null ? !args[0] : null
   if (m[1] === 'all') return args.includes(false) ? false : (args.every((a) => a === true) ? true : null)
   return args.includes(true) ? true : (args.every((a) => a === false) ? false : null)
+}
+function evalCfgLeaf(p, env) {
+  if (p === 'test') return env.test === true
+  if (p === 'doctest' || p === 'doc') return false
+  const feature = FEATURE_CFG_RE.exec(p)
+  if (feature) return env.features ? (env.features.has(feature[1]) ? true : (env.maybeFeatures?.has(feature[1]) ? null : false)) : null
+  const leaf = CFG_LEAF_RE.exec(p)
+  if (leaf && env.target && TARGET_CFG_KEYS.has(leaf[1])) return env.target.has(leaf[2] === undefined ? leaf[1] : `${leaf[1]}="${leaf[2]}"`)
+  return null
 }
 
 // `rustc --print cfg` output → the set of cfg leaves as printed, one per line (`unix`,
