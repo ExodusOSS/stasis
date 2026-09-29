@@ -610,6 +610,32 @@ test('buildSolidityBundle follows a dependency\'s config linked into another dep
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['lib/b/src/X.sol', 'src/A.sol'])
 }))
 
+test('buildSolidityBundle fails on a foundry.toml that isn\'t TOML, naming the file and line', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    'foundry.toml': '[profile.default]\n',
+    'src/A.sol': 'import "dep/D.sol";\n',
+    'lib/dep/src/D.sol': 'contract D {}\n',
+    // forge skips a dependency's config it can't read; here it's an error, not a config left out.
+    'lib/dep/foundry.toml': '[profile.default]\nremappings = ["x/=y/"\n',
+  })
+  await captureStderr(() => t.assert.rejects(
+    () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
+    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/foundry.toml')}:2: unterminated array` },
+  ))
+  // ...and so is its `extends` base.
+  writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\nextends = "base.toml"\n', 'lib/dep/base.toml': '[profile.default]\nsrc = "src" junk\n' })
+  await captureStderr(() => t.assert.rejects(
+    () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
+    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/base.toml')}:2: unexpected text after the value` },
+  ))
+  // With a pinned mapping file, the root foundry.toml is still read for its lib dirs.
+  writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\n', 'foundry.toml': '[profile.default]\nlibs = ["lib"\n', 'remappings.txt': 'dep/=lib/dep/src/\n' })
+  await captureStderr(() => t.assert.rejects(
+    () => buildSolidityBundle({ cwd: tmp, entries: ['src'], mappingFile: 'remappings.txt', env: {} }),
+    { name: 'TomlError', message: `${join(tmp, 'foundry.toml')}:2: unterminated array` },
+  ))
+}))
+
 test('buildSolidityBundle with --mapping bundles when forge would reject the root foundry.toml', withTmp(async (t, tmp) => {
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\nextends = "missing.toml"\n',

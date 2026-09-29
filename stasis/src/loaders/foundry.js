@@ -21,7 +21,7 @@ import { toPosix } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
 import { readFileOrNull } from './cargo.js'
 import { projectOwnership } from './solidity-ownership.js'
-import { isTomlTable, readToml } from './toml.js'
+import { TomlError, isTomlTable, readToml } from './toml.js'
 
 export const FOUNDRY_TOML = 'foundry.toml'
 export const REMAPPINGS_TXT = 'remappings.txt'
@@ -591,12 +591,14 @@ function rebaseNested(r, canonical, lexical) {
 // A dependency's config as forge's `load_nested_config` reads it: remappings rebased onto its
 // canonical root, its remappings.txt, its src and libs. Null when forge would reject the config,
 // or when `readable` refuses it or its `extends` base (warned); a remappings.txt it refuses is
-// skipped (warned).
+// skipped (warned). One that isn't TOML throws: forge skips it, but what can't be read is an
+// error here, not a config quietly left out.
 function loadNestedConfig(canonical, profile, readable) {
   let config
   try {
     config = loadFoundryConfig(canonical, profile, { readable })
   } catch (err) {
+    if (err instanceof TomlError) throw err
     console.warn(`[loader.solidity] Skipping a dependency's config: ${err.message}`)
     return null
   }
@@ -780,8 +782,8 @@ function providerRemappings(root, { userRemappings, libs, autoDetect, profile, f
 
 // The lib dirs `forge build` uses for the Foundry project at `baseDir`, `{ libs, profiled }`: the
 // selected profile's `libs` (`profiled` when that profile is the file's), else the detected ones;
-// also those, warned, when forge would reject the foundry.toml (with a pinned mapping file,
-// nothing else is read from it).
+// also those, warned, when forge would reject the foundry.toml's settings (with a pinned mapping
+// file, nothing else is read from it). A foundry.toml that isn't TOML throws.
 export function foundryLibs(baseDir, { env = process.env } = {}) {
   const root = toPosix(resolve(baseDir))
   const profile = foundryProfile(env)
@@ -789,6 +791,7 @@ export function foundryLibs(baseDir, { env = process.env } = {}) {
     const config = loadFoundryConfig(root, profile)
     return { libs: config.libs, profiled: profileApplies(config.profiles, profile) }
   } catch (err) {
+    if (err instanceof TomlError) throw err
     console.warn(`[loader.solidity] Using the default lib dirs: ${err.message}`)
     return { libs: detectLibs(root), profiled: false }
   }
