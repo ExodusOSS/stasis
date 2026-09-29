@@ -145,7 +145,7 @@ const realpathOrNull = (p, host) => {
 const toLoaderRemapping = ({ context, name, path }) => ({ context, prefix: name, target: path })
 
 // remappings.txt text -> remappings as written, one `[context:]prefix=target` per line (lines
-// trimmed; blank and invalid lines skipped; an empty target is solc's, valid).
+// trimmed, blank ones skipped; an empty target is solc's, valid). A line that isn't one throws.
 export function parseRemappings(content) {
   return parseRemappingLines(content, undefined, { emptyPath: true }).map(toLoaderRemapping)
 }

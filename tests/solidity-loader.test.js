@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { toPosix } from '@exodus/stasis-core/util'
+
 import {
   applyRemappings,
   buildSolidityTree,
@@ -77,12 +79,14 @@ test('extractSolImports finds remapped imports', (t) => {
   t.assert.deepEqual(extractSolImports(src), ['@openzeppelin/contracts/utils/Math.sol'])
 })
 
-test('parseRemappings handles one-per-line entries and ignores invalid lines', (t) => {
-  const out = parseRemappings('@a/=lib/a/\n  @b/=lib/b/\r\ngarbage line\n=empty-prefix\n')
+test('parseRemappings handles one-per-line entries and refuses an invalid line, naming it', (t) => {
+  const out = parseRemappings('@a/=lib/a/\n  @b/=lib/b/\r\n\n')
   t.assert.deepEqual(out, [
     { context: null, prefix: '@a/', target: 'lib/a/' },
     { context: null, prefix: '@b/', target: 'lib/b/' },
   ])
+  t.assert.throws(() => parseRemappings('@a/=lib/a/\ngarbage line\n'), { message: 'remappings:2: invalid remapping "garbage line"' })
+  t.assert.throws(() => parseRemappings('\n=empty-prefix\n'), { message: 'remappings:2: invalid remapping "=empty-prefix"' })
 })
 
 test('parseRemappings reads a `context:` before the prefix', (t) => {
@@ -754,10 +758,24 @@ test('parseGitmodules reads .gitmodules as git does: quotes, escapes, comments, 
 })
 
 test('a remappings.txt taken as written (solc) may map a prefix to nothing', (t) => {
-  const remappings = parseRemappings('x/=\nctx:y/=\n=z\n')
+  const remappings = parseRemappings('x/=\nctx:y/=\n')
   t.assert.deepEqual(remappings, [{ context: null, prefix: 'x/', target: '' }, { context: 'ctx', prefix: 'y/', target: '' }])
   t.assert.equal(resolveSolImport('x/A.sol', 'src/B.sol', { remappings }), 'A.sol')
 })
+
+test('an invalid remapping in a foundry.toml or remappings variable is an error, naming where it is', withProject({
+  'foundry.toml': '[profile.default]\nremappings = ["a/=b/", "nope"]\n',
+  'list/foundry.toml': '[profile.default]\nremappings = "a/=b/"\n',
+  'num/foundry.toml': '[profile.default]\nremappings = [1]\n',
+  'ok/foundry.toml': '[profile.default]\n',
+}, (t, dir) => {
+  const root = toPosix(dir)
+  t.assert.throws(() => foundryProject(dir, { env: {} }), { message: `${root}/foundry.toml: \`remappings\`: invalid remapping "nope"` })
+  t.assert.throws(() => foundryProject(join(dir, 'list'), { env: {} }), { message: `${root}/list/foundry.toml: \`remappings\` is not an array of strings` })
+  t.assert.throws(() => foundryProject(join(dir, 'num'), { env: {} }), { message: `${root}/num/foundry.toml: \`remappings\`: invalid remapping 1` })
+  t.assert.throws(() => foundryProject(join(dir, 'ok'), { env: { FOUNDRY_REMAPPINGS: 'x/=y/\nbad' } }), { message: 'FOUNDRY_REMAPPINGS:2: invalid remapping "bad"' })
+  t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["=x/"]\n'), { message: '`remappings`: invalid remapping "=x/"' })
+}))
 
 test('a legacy [default] table\'s `extends` is ignored, as forge ignores it', withProject({
   'foundry.toml': '[default]\nextends = "base.toml"\n',

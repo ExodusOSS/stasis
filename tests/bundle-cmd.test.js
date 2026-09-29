@@ -636,6 +636,29 @@ test('buildSolidityBundle fails on a foundry.toml that isn\'t TOML, naming the f
   ))
 }))
 
+test('buildSolidityBundle fails on an invalid remapping, the project\'s or a dependency\'s, naming the file and line', withTmp(async (t, tmp) => {
+  const root = realpathSync(tmp)
+  writeProject(tmp, {
+    'foundry.toml': '[profile.default]\n',
+    'remappings.txt': 'dep/=lib/dep/src/\n# not a remapping\n',
+    'src/A.sol': 'import "dep/D.sol";\n',
+    'lib/dep/src/D.sol': 'contract D {}\n',
+  })
+  const fails = (opts, message) => captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {}, ...opts }), { message }))
+  await fails({}, `${join(tmp, 'remappings.txt')}:2: invalid remapping "# not a remapping"`)
+  // As written for solc, and as a pinned mapping file, alike.
+  await fails({ mappingFile: 'remappings.txt' }, `${join(tmp, 'remappings.txt')}:2: invalid remapping "# not a remapping"`)
+  writeFileSync(join(tmp, 'remappings.txt'), 'dep/=lib/dep/src/\n')
+  // forge skips a dependency's config holding one; here it's an error, not a config left out.
+  writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\nremappings = ["x"]\n' })
+  await fails({}, `${join(root, 'lib/dep/foundry.toml')}: \`remappings\`: invalid remapping "x"`)
+  writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\n', 'lib/dep/remappings.txt': 'y/=src/\n=z\n' })
+  await fails({}, `${join(root, 'lib/dep/remappings.txt')}:2: invalid remapping "=z"`)
+  writeFileSync(join(tmp, 'lib/dep/remappings.txt'), 'y/=src/\n')
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['lib/dep/src/D.sol', 'src/A.sol'])
+}))
+
 test('buildSolidityBundle with --mapping bundles when forge would reject the root foundry.toml', withTmp(async (t, tmp) => {
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\nextends = "missing.toml"\n',

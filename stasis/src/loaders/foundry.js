@@ -21,7 +21,7 @@ import { toPosix } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
 import { readFileOrNull } from './cargo.js'
 import { projectOwnership } from './solidity-ownership.js'
-import { TomlError, isTomlTable, readToml } from './toml.js'
+import { isTomlTable, readToml } from './toml.js'
 
 export const FOUNDRY_TOML = 'foundry.toml'
 export const REMAPPINGS_TXT = 'remappings.txt'
@@ -129,18 +129,38 @@ export function parseRemapping(entry, { emptyPath = false } = {}) {
   return { context, name, path }
 }
 
-// A remappings.txt / env var body: one remapping per non-blank (trimmed) line; invalid lines
-// (forge rejects the whole file on one) are skipped, and reported when a `label` names the source.
-// `options`: see parseRemapping.
-export function parseRemappingLines(text, label, options) {
+// A remappings.txt / env var body: one remapping per non-blank (trimmed) line. A line that isn't
+// one throws, naming `label` (the file or variable) and the line, as forge and solc refuse the
+// file. `options`: see parseRemapping.
+export function parseRemappingLines(text, label = 'remappings', options = undefined) {
   const out = []
-  for (const line of text.split('\n').map((l) => l.trim()).filter(Boolean)) {
+  text.split('\n').forEach((raw, i) => {
+    const line = raw.trim()
+    if (line === '') return
     const r = parseRemapping(line, options)
-    if (r) out.push(r)
-    else if (label !== undefined) console.warn(`[loader.solidity] Invalid remapping in ${label}: ${line}`)
-  }
+    if (r === null) throw new Error(`${label}:${i + 1}: invalid remapping ${JSON.stringify(line)}`)
+    out.push(r)
+  })
   return out
 }
+
+// A foundry.toml's `remappings` value, parsed. One forge rejects -- not an array of strings, or an
+// entry that isn't `[context:]name=path` -- throws, naming `file` when given.
+function configRemappings(value, file = null) {
+  const where = `${file === null ? '' : `${file}: `}\`remappings\``
+  if (!Array.isArray(value)) throw new Error(`${where} is not an array of strings`)
+  return value.map((entry) => {
+    const r = typeof entry === 'string' ? parseRemapping(entry) : null
+    if (r === null) throw new Error(`${where}: invalid remapping ${typeof entry === 'string' ? JSON.stringify(entry) : String(entry)}`)
+    return r
+  })
+}
+
+// A config forge refuses for its settings (a missing or nested `extends`, colliding keys) or that a
+// dependency may not read (a link out of it): forge skips such a dependency's config, and so does
+// loadNestedConfig. Anything else wrong with a config -- text that isn't TOML, an invalid
+// remapping -- is another error, and fatal.
+class ConfigRefused extends Error {}
 
 // Forge's trailing `/` on a remapping's name and path, unless they end in `/` or `.sol`.
 const withSlash = (s) => (s.endsWith('/') || s.endsWith('.sol') ? s : `${s}/`)
@@ -453,7 +473,7 @@ function mergeExtended(base, local, strategy) {
 function readFoundryProfiles(file, profile, { readable } = {}) {
   const text = readFileOrNull(file)
   if (text === null) return { profiles: new Map(), topLevel: new Map(), files: [] }
-  if (readable && !readable(file)) throw new Error(`${file}: refusing to read it, a link out of the dependency`)
+  if (readable && !readable(file)) throw new ConfigRefused(`${file}: refusing to read it, a link out of the dependency`)
   let { profiles, topLevel } = parseFoundryToml(text, file)
   const files = [file]
   const ext = profiles.get(profile)?.get('extends')
@@ -461,16 +481,16 @@ function readFoundryProfiles(file, profile, { readable } = {}) {
   if (typeof extPath === 'string') {
     const strategy = (typeof ext === 'object' && typeof ext.strategy === 'string') ? ext.strategy : 'extend-arrays'
     const baseFile = toPosix(resolve(posix.dirname(file), extPath))
-    if (readable && !readable(baseFile)) throw new Error(`${file}: refusing to extend ${extPath}, which lies outside the dependency`)
+    if (readable && !readable(baseFile)) throw new ConfigRefused(`${file}: refusing to extend ${extPath}, which lies outside the dependency`)
     const baseText = readFileOrNull(baseFile)
-    if (baseText === null) throw new Error(`${file}: the inherited config file does not exist: ${extPath}`)
+    if (baseText === null) throw new ConfigRefused(`${file}: the inherited config file does not exist: ${extPath}`)
     const base = parseFoundryToml(baseText, baseFile).profiles
     if (base.get(profile)?.has('extends')) {
-      throw new Error(`${file}: nested inheritance is not allowed (${extPath} has an 'extends' field in profile '${profile}')`)
+      throw new ConfigRefused(`${file}: nested inheritance is not allowed (${extPath} has an 'extends' field in profile '${profile}')`)
     }
     if (strategy === 'no-collision') {
       const collisions = [...(profiles.get(profile)?.keys() ?? [])].filter((k) => k !== 'extends' && base.get(profile)?.has(k))
-      if (collisions.length > 0) throw new Error(`${file}: key collision in profile '${profile}' when extending ${extPath}: ${collisions.join(', ')}`)
+      if (collisions.length > 0) throw new ConfigRefused(`${file}: key collision in profile '${profile}' when extending ${extPath}: ${collisions.join(', ')}`)
     }
     profiles = mergeExtended(base, profiles, strategy)
     files.push(baseFile)
@@ -487,9 +507,12 @@ function selectProfile(profiles, profile) {
 }
 
 // The `remappings` a foundry.toml's profiles set for `profile` (`[profile.default]` overlaid by
-// it), else the file's top-level `remappings` (a mapping file written for stasis), as written.
-const profileRemappings = ({ profiles, topLevel }, profile) =>
-  (stringList(selectProfile(profiles, profile).get('remappings')) ?? stringList(topLevel.get('remappings')) ?? []).map(parseRemapping).filter(Boolean)
+// it), else the file's top-level `remappings` (a mapping file written for stasis), as written; an
+// invalid one throws (configRemappings, naming `file`).
+function profileRemappings({ profiles, topLevel }, profile, file = null) {
+  const value = selectProfile(profiles, profile).get('remappings') ?? topLevel.get('remappings')
+  return value === undefined ? [] : configRemappings(value, file)
+}
 
 // A foundry.toml text's own remappings for `profile` (see profileRemappings).
 export function foundryTomlRemappings(text, profile = 'default') {
@@ -500,7 +523,7 @@ export function foundryTomlRemappings(text, profile = 'default') {
 // `files` lists what was read; `profiled` whether the selected `profile` is one of the file's.
 export function readFoundryTomlRemappings(file, profile = 'default') {
   const read = readFoundryProfiles(toPosix(resolve(file)), profile)
-  return { remappings: profileRemappings(read, profile), files: read.files, profiled: profile !== 'default' && read.profiles.has(profile) }
+  return { remappings: profileRemappings(read, profile, file), files: read.files, profiled: profile !== 'default' && read.profiles.has(profile) }
 }
 
 // Whether the selected `profile` is one of the root foundry.toml's `profiles` (forge uses
@@ -526,22 +549,21 @@ function detectLibs(root, host) {
 const stringList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : null)
 
 // The selected profile's settings for a Foundry project at `root` (absolute POSIX), defaults
-// filled in the way forge fills them. `remappings` are the profile's own, unnormalized. Null
-// `remappings` means one didn't parse (forge rejects such a config). `readable`: see
-// readFoundryProfiles.
+// filled in the way forge fills them. `remappings` are the profile's own, unnormalized; an invalid
+// one throws (configRemappings). `readable`: see readFoundryProfiles.
 function loadFoundryConfig(root, profile, { readable } = {}) {
-  const { profiles, files } = readFoundryProfiles(rustJoin(root, FOUNDRY_TOML), profile, { readable })
+  const file = rustJoin(root, FOUNDRY_TOML)
+  const { profiles, files } = readFoundryProfiles(file, profile, { readable })
   const dict = selectProfile(profiles, profile)
   const str = (k) => (typeof dict.get(k) === 'string' ? dict.get(k) : null)
-  const remappings = (stringList(dict.get('remappings')) ?? []).map(parseRemapping)
   return {
     profiles,
     files,
     src: str('src') ?? findSourceDir(root, host),
     test: str('test') ?? 'test',
     script: str('script') ?? 'script',
-    libs: stringList(dict.get('libs')) ?? detectLibs(root, host),
-    remappings: remappings.includes(null) ? null : remappings,
+    libs: stringList(dict.get('libs')) ?? detectLibs(root),
+    remappings: dict.has('remappings') ? configRemappings(dict.get('remappings'), file) : [],
     autoDetect: dict.get('auto_detect_remappings') !== false,
   }
 }
@@ -590,19 +612,19 @@ function rebaseNested(r, canonical, lexical) {
 
 // A dependency's config as forge's `load_nested_config` reads it: remappings rebased onto its
 // canonical root, its remappings.txt, its src and libs. Null when forge would reject the config,
-// or when `readable` refuses it or its `extends` base (warned); a remappings.txt it refuses is
-// skipped (warned). One that isn't TOML throws: forge skips it, but what can't be read is an
-// error here, not a config quietly left out.
+// or when `readable` refuses it or its `extends` base (warned: ConfigRefused); a remappings.txt it
+// refuses is skipped (warned). One that isn't TOML or holds an invalid remapping throws: forge
+// refuses a bad remappings.txt line too, and skips a foundry.toml it can't read, which here is an
+// error rather than a config quietly left out.
 function loadNestedConfig(canonical, profile, readable) {
   let config
   try {
     config = loadFoundryConfig(canonical, profile, { readable })
   } catch (err) {
-    if (err instanceof TomlError) throw err
+    if (!(err instanceof ConfigRefused)) throw err
     console.warn(`[loader.solidity] Skipping a dependency's config: ${err.message}`)
     return null
   }
-  if (config.remappings === null) return null
   const txt = rustJoin(canonical, REMAPPINGS_TXT)
   let text = readFileOrNull(txt)
   if (text !== null && !readable(txt)) {
@@ -782,8 +804,9 @@ function providerRemappings(root, { userRemappings, libs, autoDetect, profile, f
 
 // The lib dirs `forge build` uses for the Foundry project at `baseDir`, `{ libs, profiled }`: the
 // selected profile's `libs` (`profiled` when that profile is the file's), else the detected ones;
-// also those, warned, when forge would reject the foundry.toml's settings (with a pinned mapping
-// file, nothing else is read from it). A foundry.toml that isn't TOML throws.
+// also those, warned, when forge would reject the foundry.toml's settings (ConfigRefused; with a
+// pinned mapping file, nothing else is read from it). A foundry.toml that isn't TOML or holds an
+// invalid remapping throws.
 export function foundryLibs(baseDir, { env = process.env } = {}) {
   const root = toPosix(resolve(baseDir))
   const profile = foundryProfile(env)
@@ -791,7 +814,7 @@ export function foundryLibs(baseDir, { env = process.env } = {}) {
     const config = loadFoundryConfig(root, profile)
     return { libs: config.libs, profiled: profileApplies(config.profiles, profile) }
   } catch (err) {
-    if (err instanceof TomlError) throw err
+    if (!(err instanceof ConfigRefused)) throw err
     console.warn(`[loader.solidity] Using the default lib dirs: ${err.message}`)
     return { libs: detectLibs(root), profiled: false }
   }
@@ -809,14 +832,13 @@ export function foundryProject(baseDir, { env = process.env } = {}) {
   const config = loadFoundryConfig(root, profile)
   const profiled = profileApplies(config.profiles, profile)
   const ownership = projectOwnership(baseDir, config.libs, { soldeer: true })
-  if (config.remappings === null) throw new Error(`${rustJoin(root, FOUNDRY_TOML)}: invalid remapping in \`remappings\``)
   const files = new Set(config.files)
 
   const envName = env.DAPP_REMAPPINGS !== undefined ? 'DAPP_REMAPPINGS' : env.FOUNDRY_REMAPPINGS !== undefined ? 'FOUNDRY_REMAPPINGS' : null
   const envRemappings = envName === null ? [] : parseRemappingLines(env[envName], envName)
   const txt = readText(host, rustJoin(root, REMAPPINGS_TXT))
   if (txt !== null) files.add(rustJoin(root, REMAPPINGS_TXT))
-  const userRemappings = [...envRemappings, ...(txt === null ? [] : parseRemappingLines(txt, REMAPPINGS_TXT)), ...config.remappings]
+  const userRemappings = [...envRemappings, ...(txt === null ? [] : parseRemappingLines(txt, rustJoin(root, REMAPPINGS_TXT))), ...config.remappings]
 
   const provided = providerRemappings(root, { userRemappings, libs: config.libs, autoDetect: config.autoDetect, profile, files, ownership })
     .map((r) => displayRelative(relativePreservingBoundary(r, root)))

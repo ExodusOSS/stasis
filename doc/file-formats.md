@@ -361,11 +361,15 @@ resolve the way solc does under the project's build tool:
   including the contextual ones that scope a dependency's imports to its own
   copy of a package; aliases of the project's own `src`/`test`/`script` dirs
   are dropped, and `auto_detect_remappings = false` turns detection off.
-  A `foundry.toml` or `extends` base that isn't TOML is an error naming the
-  file and line, whosever it is and in every mode (forge quietly skips a
-  dependency's); a dependency's config forge rejects for its settings (a
-  missing `extends` base, nested inheritance) is skipped with a warning, as
-  forge skips it.
+  A `foundry.toml` or `extends` base that isn't TOML, and an invalid remapping
+  (a `remappings.txt` line or `FOUNDRY_REMAPPINGS` entry that isn't
+  `[context:]prefix=target`, or a `remappings` value that isn't an array of
+  such strings), is an error naming the file and line, whosever it is and in
+  every mode (forge refuses an invalid `remappings.txt` line too, but quietly
+  skips a dependency's `foundry.toml` that isn't TOML or holds a bad
+  remapping); a dependency's config forge rejects for its settings (a missing
+  `extends` base, nested inheritance) is skipped with a warning, as forge skips
+  it.
   Profiles are `[profile.<name>]` tables and the legacy top-level `[<name>]`
   ones (the former wins key by key; `extends` counts only in the former, as in
   forge); names match case-insensitively. Not
