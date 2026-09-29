@@ -96,11 +96,11 @@ test('parseCargoManifest reads a pair by the table it lands in, whichever way th
 
 test('parseCargoManifest and parseCargoLock refuse text that is not TOML, naming the file and line', (t) => {
   t.assert.throws(() => parseCargoManifest('[package]\nname = "app"\nversion = 0.1.0\n', 'crates/app/Cargo.toml'), {
-    name: 'TomlError', message: 'crates/app/Cargo.toml:3: invalid value "0.1.0"',
+    name: 'TomlError', message: 'crates/app/Cargo.toml: expected a value, found "0.1.0" at line 3',
   })
-  t.assert.throws(() => parseCargoManifest('[dependencies]\nserde = { version = "1", version = "2" }\n'), { message: 'line 2: duplicate key "dependencies.serde.version"' })
+  t.assert.throws(() => parseCargoManifest('[dependencies]\nserde = { version = "1", version = "2" }\n'), { message: 'duplicate key "version" at line 2' })
   t.assert.throws(() => parseCargoLock('version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["a" "b"]\n', 'Cargo.lock'), {
-    name: 'TomlError', message: 'Cargo.lock:6: expected a comma or "]" after the array item',
+    name: 'TomlError', message: 'Cargo.lock: expected "," or "]", found "\\"b\\"]" at line 6',
   })
   // through the context, with the manifest's project-relative path
   const tmp = mkdtempSync(join(tmpdir(), 'stasis-toml-'))
@@ -109,7 +109,7 @@ test('parseCargoManifest and parseCargoLock refuse text that is not TOML, naming
     writeFileSync(join(tmp, 'Cargo.toml'), '[workspace]\nmembers = ["crates/app"]\n')
     writeFileSync(join(tmp, 'crates', 'app', 'Cargo.toml'), '[package]\nname = "app"\nversion = "0.1.0\n')
     writeFileSync(join(tmp, 'crates', 'app', 'src', 'main.rs'), 'fn main() {}\n')
-    t.assert.throws(() => createCargoContext(tmp).packageInfo('crates/app/src/main.rs'), { name: 'TomlError', message: 'crates/app/Cargo.toml:3: unterminated string' })
+    t.assert.throws(() => createCargoContext(tmp).packageInfo('crates/app/src/main.rs'), { name: 'TomlError', message: 'crates/app/Cargo.toml: unterminated string at line 3', line: 2 })
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
