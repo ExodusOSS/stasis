@@ -3,12 +3,40 @@
 // (foundry.js) and the bundler's --manifests. Dependencies are untrusted input: a link one plants
 // out of itself is never followed.
 
-import { lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs'
+import { isUtf8 } from 'node:buffer'
+import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, parse, posix, relative, resolve, sep } from 'node:path'
 
-import { toPosix } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
-import { readFileOrNull } from './cargo.js'
+
+// `/`-separated, as the loader's paths are: only Windows' separator is converted (on POSIX a `\\` is
+// part of a name, and must not read as a directory boundary).
+const toSlashes = (p) => (sep === '\\' ? p.replaceAll('\\', '/') : p)
+
+// --- Reading --------------------------------------------------------------------------------
+
+// `p`'s real path as the OS resolves it (realpath(3): the filesystem's own spelling), or null.
+export function realpathOrNull(p) {
+  try {
+    return realpathSync.native(p)
+  } catch {
+    return null
+  }
+}
+
+// A config file's text, or null when there's no file. One that isn't UTF-8 throws: forge and git
+// refuse it, and a text read with U+FFFD in it isn't the one they read. A byte-order mark stays.
+export function readUtf8OrNull(file) {
+  let buf
+  try {
+    buf = readFileSync(file)
+  } catch (err) {
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR' || err.code === 'EISDIR') return null
+    throw err
+  }
+  if (!isUtf8(buf)) throw new Error(`${file}: not valid UTF-8`)
+  return buf.toString('utf8')
+}
 
 // --- .gitmodules ------------------------------------------------------------------------------
 
@@ -41,8 +69,9 @@ function gitConfigValue(raw) {
 }
 
 // `.gitmodules` text -> its submodules, `{ name, path, url, branch }` (those set), as git reads the
-// file: keys case-insensitive, values unquoted and unescaped, a line ending in `\` continued, and a
-// submodule's sections merged by name.
+// file: keys case-insensitive, values unquoted and unescaped, a line ending in `\` continued, a
+// key after a section header on its line (`[submodule "x"] path = lib/x`), and a submodule's
+// sections merged by name.
 export function parseGitmodules(text) {
   const byName = new Map()
   let cur = null
@@ -57,7 +86,7 @@ export function parseGitmodules(text) {
       if (section === 'submodule' && header[2] !== undefined) name = header[2].replaceAll(/\\(.)/gu, '$1')
       else if (section.startsWith('submodule.')) name = header[1].slice('submodule.'.length)
       cur = name === null ? null : (byName.get(name) ?? byName.set(name, { name }).get(name))
-      continue
+      line = line.slice(header[0].length)
     }
     const pair = cur && /^\s*([a-z][\w-]*)\s*(?:=(.*))?$/iu.exec(line)
     if (!pair) continue
@@ -69,18 +98,10 @@ export function parseGitmodules(text) {
 
 // The directories of `.gitmodules`' submodules: dependencies, whatever their host.
 export function gitSubmodulePaths(baseDir) {
-  return parseGitmodules(readFileOrNull(join(baseDir, '.gitmodules')) ?? '').map((s) => s.path).filter(Boolean)
+  return parseGitmodules(readUtf8OrNull(join(baseDir, '.gitmodules')) ?? '').map((s) => s.path).filter(Boolean)
 }
 
 // --- Ownership --------------------------------------------------------------------------------
-
-const realpathOrNull = (p) => {
-  try {
-    return realpathSync.native(p)
-  } catch {
-    return null
-  }
-}
 
 const readdirOrEmpty = (dir) => {
   try {
@@ -91,6 +112,8 @@ const readdirOrEmpty = (dir) => {
 }
 
 const NOTHING = { abs: null, escape: null }
+// A link target's separators, as the OS reads them (a `\\` is part of a name on POSIX).
+const TARGET_SEPARATORS = sep === '\\' ? /[\\/]/u : /\//u
 
 // Who owns each project-relative path, decided from how it resolves on disk. The dependencies are
 // every `node_modules/<pkg>` (`@scope/<pkg>`), each entry of the `dirs` (forge's libs, Soldeer's
@@ -101,22 +124,25 @@ const NOTHING = { abs: null, escape: null }
 //   nothing is there), `outside` when it's out of the root;
 // - `dependency`: the real path lies in a dependency, however the path got there (a project's
 //   `src/vendor -> ../lib/dep/src` holds the dependency's code);
-// - `escape`: `{ link, root }` when the path crosses a symlink that no one trusted placed: one
-//   planted inside the dependency `root` that leads out of it to anything but another dependency
-//   (`lib/evil/src/Evil.sol -> ../../../.env`), or one outside the project (`root` null) that leads
-//   back into it (a dependency linked from elsewhere: `lib/evil -> ../../shared/evil` holding
-//   `Evil.sol -> ../../proj/.env`). Such a path is never read. A link the project placed (a
-//   workspace package in node_modules, a linked `lib/` entry) may lead anywhere in the root, and so
-//   may one on the path the project was named by (a symlinked checkout, macOS's `/tmp`).
+// - `escape`: `{ link, root, why }` when the path may not be read: it crosses a symlink that no one
+//   trusted placed -- one planted inside the dependency `root` that leads out of it to anything but
+//   another dependency (`lib/evil/src/Evil.sol -> ../../../.env`), or one outside the project
+//   (`root` null) that leads back into it (a dependency linked from elsewhere: `lib/evil ->
+//   ../../shared/evil` holding `Evil.sol -> ../../proj/.env`) -- or (`why: 'unresolved'`) the walk
+//   below can't vouch for it: it resolves the path link by link, and where that doesn't land where
+//   the OS's realpath does (a link target it can't read as the OS does, one that isn't UTF-8), the
+//   path is refused rather than trusted. A link the project placed (a workspace package in
+//   node_modules, a linked `lib/` entry) may lead anywhere in the root, and so may one on the path
+//   the project was named by (a symlinked checkout, macOS's `/tmp`).
 export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   const realBase = realpathSync.native(baseDir)
   const named = resolve(baseDir)
   const onNamedPath = (abs) => named === abs || named.startsWith(abs.endsWith(sep) ? abs : `${abs}${sep}`)
-  const toRel = (abs) => toPosix(relative(realBase, abs)) || '.'
+  const toRel = (abs) => toSlashes(relative(realBase, abs)) || '.'
   const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)
   const inside = (rel) => rel !== '.' && inRoot(rel)
   const under = (rel, dir) => rel === dir || rel.startsWith(`${dir}/`)
-  const clean = (d) => posix.normalize(toPosix(d)).replace(/\/+$/u, '')
+  const clean = (d) => posix.normalize(toSlashes(d)).replace(/\/+$/u, '')
 
   // Dirs whose entries are dependencies, and dependency dirs themselves; each by its real path too.
   const holders = new Set()
@@ -125,7 +151,13 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
     const real = realpathOrNull(join(baseDir, rel))
     if (real !== null && inside(toRel(real))) set.add(toRel(real))
   }
-  for (const d of dirs.map(clean).filter(inside)) {
+  // A dir as the project names it: relative to the root, or (an absolute lib) by its real path.
+  const projectDir = (d) => {
+    if (!isAbsolute(d)) return clean(d)
+    const real = realpathOrNull(d)
+    return real === null ? null : toRel(real)
+  }
+  for (const d of dirs.map(projectDir).filter((rel) => rel !== null && inside(rel))) {
     if (posix.basename(d) === 'node_modules') continue // a package's own rule, below
     holders.add(d)
     addReal(holders, d)
@@ -171,12 +203,14 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
           cur = realpathOrNull(next) ?? next
           continue
         }
-        target = readlinkSync(next)
+        const bytes = readlinkSync(next, { encoding: 'buffer' })
+        if (!isUtf8(bytes)) return NOTHING // not a name a string path can spell: unresolved
+        target = bytes.toString('utf8')
       } catch {
         return NOTHING
       }
       if (depth >= 40) return NOTHING // ELOOP
-      const r = walk(isAbsolute(target) ? parse(target).root : cur, target.split(/[\\/]/u), depth + 1)
+      const r = walk(isAbsolute(target) ? parse(target).root : cur, target.split(TARGET_SEPARATORS), depth + 1)
       if (r.abs === null || r.escape !== null) return r
       const at = toRel(next)
       const to = toRel(r.abs)
@@ -195,7 +229,10 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   const of = (rel) => {
     let owner = owners.get(rel)
     if (owner === undefined) {
-      const { abs, escape } = walk(realBase, rel.split('/'), 0)
+      let { abs, escape } = walk(realBase, rel.split('/'), 0)
+      // The OS's answer is the one a read gets: the walk must agree with it, or the path is refused.
+      const os = realpathOrNull(join(realBase, rel))
+      if (escape === null && abs !== os) [abs, escape] = [os, { link: rel, root: null, why: 'unresolved' }]
       const real = abs === null ? null : toRel(abs)
       owner = { real, outside: real !== null && !inRoot(real), dependency: real !== null && inDependency(real), escape }
       owners.set(rel, owner)
@@ -210,8 +247,9 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
 export const projectOwnership = (baseDir, libs, { soldeer = false } = {}) =>
   solidityOwnership(baseDir, { dirs: [...libs, ...(soldeer ? ['dependencies'] : [])], packages: gitSubmodulePaths(baseDir) })
 
-// Why a path crossing an untrusted link is refused (see solidityOwnership).
-export function escapeReason(path, { link, root }) {
+// Why a path is refused (see solidityOwnership).
+export function escapeReason(path, { link, root, why }) {
+  if (why === 'unresolved') return `${path} crosses a link stasis can't follow the way the filesystem does`
   const what = root === null ? 'a link from outside the project root back into it' : `a link out of the dependency ${root}`
   return link === path ? `${path} is ${what}` : `it resolves to ${path} through ${link}, ${what}`
 }

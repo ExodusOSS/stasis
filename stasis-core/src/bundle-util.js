@@ -24,25 +24,39 @@ export function packageType(file, host = diskHost) {
 // Nearest package.json (walking up) that identifies a bucket; pkgDir is relative to baseDir ("."
 // at the root). Inside node_modules both name and version are required; a workspace package
 // outside node_modules may omit version (the name alone claims the bucket, matching
-// State#locateModule). Null if none.
-export function findPackageMetadata(baseDir, fileRelPath, host = diskHost) {
+// State#locateModule). Null if none. A malformed one is walked past, or with `strict` throws
+// (its files would otherwise land in the parent package). `check(rel)`, when given, sees each
+// package.json's path before it is read, and may throw to refuse it. Read through `host`.
+export function findPackageMetadata(baseDir, fileRelPath, { strict = false, check, host = diskHost } = {}) {
   let dir = dirname(fileRelPath)
   while (true) {
     const pkgPath = join(baseDir, dir, 'package.json')
     if (host.stat(pkgPath)?.isFile()) {
+      check?.(toPosix(join(dir, 'package.json')))
+      let pkg
       try {
-        const pkg = JSON.parse(packageJSONText(host.readFile(pkgPath)))
-        if (pkg.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
-          // `?? undefined` folds a literal `"version": null` into the one absent-version spelling.
-          return { pkgDir: dir, name: pkg.name, version: pkg.version ?? undefined }
-        }
-      } catch { /* malformed -- keep walking */ }
+        pkg = JSON.parse(host.readFile(pkgPath).toString('utf8'))
+      } catch (err) {
+        if (strict) throw jsonError(toPosix(join(dir, 'package.json')), err)
+      }
+      if (pkg?.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
+        // `?? undefined` folds a literal `"version": null` into the one absent-version spelling.
+        return { pkgDir: dir, name: pkg.name, version: pkg.version ?? undefined }
+      }
     }
     if (dir === '.' || dir === '/' || dir === '') return null
     const parent = dirname(dir)
     if (parent === dir) return null
     dir = parent
   }
+}
+
+// `rel` isn't valid JSON: said with the parser's line and column, never its message, which quotes
+// the text (a file that isn't JSON may be anything, a secret included).
+export function jsonError(rel, err) {
+  const at = /\(line \d+ column \d+\)/u.exec(err.message)?.[0]
+  // eslint-disable-next-line preserve-caught-error -- the parser's error quotes the file
+  return new Error(`${rel} is not valid JSON${at ? ` ${at}` : ''}`)
 }
 
 export function normalizeEntries(entries, cwd) {

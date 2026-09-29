@@ -13,14 +13,14 @@
 // other keys (`FOUNDRY_PROFILE` and the remapping env vars are). The project is read through a
 // `host` (@exodus/stasis-core/host), the disk's by default.
 
+import { existsSync, lstatSync, opendirSync, statSync } from 'node:fs'
 import { posix, resolve } from 'node:path'
 
 import { readText } from '@exodus/stasis-core/bundle-util'
 import { diskHost } from '@exodus/stasis-core/host'
 import { toPosix } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
-import { readFileOrNull } from './cargo.js'
-import { projectOwnership } from './solidity-ownership.js'
+import { projectOwnership, readUtf8OrNull, realpathOrNull } from './solidity-ownership.js'
 import { isTomlTable, readToml } from './toml.js'
 
 export const FOUNDRY_TOML = 'foundry.toml'
@@ -69,12 +69,9 @@ function cmpPath(a, b) {
   return x.length - y.length
 }
 
-function canonicalize(p, host) {
-  try {
-    return toPosix(host.realpath(p))
-  } catch {
-    return null
-  }
+function canonicalize(p) {
+  const real = realpathOrNull(p)
+  return real === null ? null : toPosix(real)
 }
 
 const isSymlinkPath = (p, host) => {
@@ -110,6 +107,10 @@ const readDir = (dir, host) => listDir(dir, host).filter((e) => !e.name.startsWi
 
 // --- Remapping values ----------------------------------------------------------------------
 
+// Rust's `str::trim`: Unicode White_Space only, so a byte-order mark (U+FEFF, which JS's `trim`
+// takes) stays, as it does for forge.
+const rustTrim = (s) => s.replaceAll(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
+
 // `[context:]name=path`, as forge (`Remapping::from_str`) and solc split it: at the first `=`, then
 // the first `:` before it. An empty context is global; an empty name or path is invalid (null),
 // but for solc (`emptyPath`) only an empty name is: `x/=` maps `x/A.sol` to `A.sol`.
@@ -124,8 +125,8 @@ export function parseRemapping(entry, { emptyPath = false } = {}) {
     context = name.slice(0, colon)
     name = name.slice(colon + 1)
   }
-  if (name.trim() === '' || (!emptyPath && path.trim() === '')) return null
-  if (context !== null && context.trim() === '') context = null
+  if (rustTrim(name) === '' || (!emptyPath && rustTrim(path) === '')) return null
+  if (context !== null && rustTrim(context) === '') context = null
   return { context, name, path }
 }
 
@@ -135,7 +136,7 @@ export function parseRemapping(entry, { emptyPath = false } = {}) {
 export function parseRemappingLines(text, label = 'remappings', options = undefined) {
   const out = []
   text.split('\n').forEach((raw, i) => {
-    const line = raw.trim()
+    const line = rustTrim(raw)
     if (line === '') return
     const r = parseRemapping(line, options)
     if (r === null) throw new Error(`${label}:${i + 1}: invalid remapping ${JSON.stringify(line)}`)
@@ -465,24 +466,32 @@ function mergeExtended(base, local, strategy) {
   return out
 }
 
+// forge's `Extends`: a path, or `{ path, strategy? }`.
+const EXTEND_STRATEGIES = new Set(['extend-arrays', 'replace-arrays', 'no-collision'])
+const isExtends = (v) => typeof v === 'string'
+  || (v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.path === 'string' && (v.strategy === undefined || EXTEND_STRATEGIES.has(v.strategy)))
+
 // A foundry.toml's profiles, with the selected profile's `extends` base merged in (forge's
 // `TomlFileProvider`). `files` lists what was read; `topLevel` is the file's own (see
 // parseFoundryToml). Throws where forge refuses the config, and where `readable` (a dependency's
 // config: see findNestedFoundryRemappings) refuses the file or its base: a dependency's config may
 // not read the project's files.
 function readFoundryProfiles(file, profile, { readable } = {}) {
-  const text = readFileOrNull(file)
-  if (text === null) return { profiles: new Map(), topLevel: new Map(), files: [] }
   if (readable && !readable(file)) throw new ConfigRefused(`${file}: refusing to read it, a link out of the dependency`)
+  const text = readUtf8OrNull(file)
+  if (text === null) return { profiles: new Map(), topLevel: new Map(), files: [] }
   let { profiles, topLevel } = parseFoundryToml(text, file)
   const files = [file]
   const ext = profiles.get(profile)?.get('extends')
-  const extPath = typeof ext === 'string' ? ext : ext?.path
-  if (typeof extPath === 'string') {
-    const strategy = (typeof ext === 'object' && typeof ext.strategy === 'string') ? ext.strategy : 'extend-arrays'
+  if (ext !== undefined && !isExtends(ext)) {
+    throw new Error(`${file}: \`extends\` must be a path, or a table with a \`path\` and an optional \`strategy\` (${[...EXTEND_STRATEGIES].join(', ')})`)
+  }
+  if (ext !== undefined) {
+    const extPath = typeof ext === 'string' ? ext : ext.path
+    const strategy = typeof ext === 'string' ? 'extend-arrays' : (ext.strategy ?? 'extend-arrays')
     const baseFile = toPosix(resolve(posix.dirname(file), extPath))
     if (readable && !readable(baseFile)) throw new ConfigRefused(`${file}: refusing to extend ${extPath}, which lies outside the dependency`)
-    const baseText = readFileOrNull(baseFile)
+    const baseText = readUtf8OrNull(baseFile)
     if (baseText === null) throw new ConfigRefused(`${file}: the inherited config file does not exist: ${extPath}`)
     const base = parseFoundryToml(baseText, baseFile).profiles
     if (base.get(profile)?.has('extends')) {
@@ -546,8 +555,6 @@ function detectLibs(root, host) {
   return lib ? ['lib', 'node_modules'] : ['node_modules']
 }
 
-const stringList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : null)
-
 // The selected profile's settings for a Foundry project at `root` (absolute POSIX), defaults
 // filled in the way forge fills them. `remappings` are the profile's own, unnormalized; an invalid
 // one throws (configRemappings). `readable`: see readFoundryProfiles.
@@ -555,16 +562,22 @@ function loadFoundryConfig(root, profile, { readable } = {}) {
   const file = rustJoin(root, FOUNDRY_TOML)
   const { profiles, files } = readFoundryProfiles(file, profile, { readable })
   const dict = selectProfile(profiles, profile)
-  const str = (k) => (typeof dict.get(k) === 'string' ? dict.get(k) : null)
+  // A setting of the wrong type throws, as forge refuses the config: no quiet default.
+  const setting = (key, ok, what) => {
+    const value = dict.get(key)
+    if (value !== undefined && !ok(value)) throw new Error(`${file}: \`${key}\` must be ${what}`)
+    return value
+  }
+  const isString = (v) => typeof v === 'string'
   return {
     profiles,
     files,
-    src: str('src') ?? findSourceDir(root, host),
-    test: str('test') ?? 'test',
-    script: str('script') ?? 'script',
-    libs: stringList(dict.get('libs')) ?? detectLibs(root),
+    src: setting('src', isString, 'a string') ?? findSourceDir(root),
+    test: setting('test', isString, 'a string') ?? 'test',
+    script: setting('script', isString, 'a string') ?? 'script',
+    libs: setting('libs', (v) => Array.isArray(v) && v.every(isString), 'an array of strings') ?? detectLibs(root),
     remappings: dict.has('remappings') ? configRemappings(dict.get('remappings'), file) : [],
-    autoDetect: dict.get('auto_detect_remappings') !== false,
+    autoDetect: setting('auto_detect_remappings', (v) => typeof v === 'boolean', 'a boolean') !== false,
   }
 }
 
@@ -626,7 +639,7 @@ function loadNestedConfig(canonical, profile, readable) {
     return null
   }
   const txt = rustJoin(canonical, REMAPPINGS_TXT)
-  let text = readFileOrNull(txt)
+  let text = readUtf8OrNull(txt)
   if (text !== null && !readable(txt)) {
     console.warn(`[loader.solidity] Skipping a dependency's ${txt}: it is a link out of the dependency`)
     text = null
@@ -647,9 +660,18 @@ function loadNestedConfig(canonical, profile, readable) {
 // solidityOwnership), as forge would find them from its lexical path.
 function findNestedFoundryRemappings(root, libPaths, profile, files, ownership) {
   const canonicalRoot = canonicalize(root) ?? root
+  // Whether the config of the dependency at `entry` may read `file` (a path from its canonical
+  // dir): judged by the path from the root, the lexical one or else the canonical one (an absolute
+  // lib, `/proc/self/cwd/...`). It may read its own files and other dependencies'; a dependency
+  // outside the root reads nothing, and one a dependency's `libs` named must be a dependency itself
+  // (not the project's own dir passed off as one). Nothing there (the OS agrees:
+  // solidityOwnership) is left for the read to find missing.
   const readable = (entry) => (file) => {
-    const o = ownership.of(`${stripPrefix(entry.path, root)}/${posix.relative(entry.canonical, file)}`)
-    return o.real === null || (o.escape === null && (o.dependency || pathStartsWith(canonicalize(file) ?? file, entry.canonical)))
+    const dir = stripPrefix(entry.path, root) ?? stripPrefix(entry.canonical, canonicalRoot)
+    if (dir === null || (entry.viaDependency && !ownership.of(dir).dependency)) return false
+    const o = ownership.of(`${dir}/${posix.relative(entry.canonical, file)}`)
+    if (o.escape !== null || o.outside) return false
+    return o.real === null || o.dependency || pathStartsWith(rustJoin(canonicalRoot, o.real), entry.canonical)
   }
   // A BTreeSet popped in (canonical, path) order.
   const pending = new Map()
@@ -679,7 +701,7 @@ function findNestedFoundryRemappings(root, libPaths, profile, files, ownership) 
     if (!entry.isSymlink && !seen.has(entry.canonical)) {
       seen.add(entry.canonical)
       for (const lib of config.libs) {
-        for (const e of foundryTomlDirEntries(rustJoin(entry.path, lib), host)) if (!e.isSymlink) addPending(e)
+        for (const e of foundryTomlDirEntries(rustJoin(entry.path, lib))) if (!e.isSymlink) addPending({ ...e, viaDependency: true })
       }
     }
     // A custom (or missing) source dir isn't auto-detected: forge synthesizes `<dep>/=<dep>/<src>/`.
@@ -836,7 +858,7 @@ export function foundryProject(baseDir, { env = process.env } = {}) {
 
   const envName = env.DAPP_REMAPPINGS !== undefined ? 'DAPP_REMAPPINGS' : env.FOUNDRY_REMAPPINGS !== undefined ? 'FOUNDRY_REMAPPINGS' : null
   const envRemappings = envName === null ? [] : parseRemappingLines(env[envName], envName)
-  const txt = readText(host, rustJoin(root, REMAPPINGS_TXT))
+  const txt = readUtf8OrNull(rustJoin(root, REMAPPINGS_TXT))
   if (txt !== null) files.add(rustJoin(root, REMAPPINGS_TXT))
   const userRemappings = [...envRemappings, ...(txt === null ? [] : parseRemappingLines(txt, rustJoin(root, REMAPPINGS_TXT))), ...config.remappings]
 

@@ -13,7 +13,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest, readText } from '@exodus/stasis-core/bundle-util'
+import { detectRepo, findPackageMetadata, jsonError, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import { diskHost } from '@exodus/stasis-core/host'
 import {
@@ -24,7 +24,7 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
-import { parseGitmodules } from '../loaders/solidity-ownership.js'
+import { escapeReason, parseGitmodules, readUtf8OrNull } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -91,7 +91,7 @@ function githubSlug(url) {
 // only.
 function parseGithubSubmodules(baseDir) {
   const byPath = new Map()
-  for (const { path, url, branch } of parseGitmodules(readFileSyncOrNull(join(baseDir, '.gitmodules')) ?? '')) {
+  for (const { path, url, branch } of parseGitmodules(readUtf8OrNull(join(baseDir, '.gitmodules')) ?? '')) {
     const name = path && url ? githubSlug(url) : null
     if (name) byPath.set(path.replace(/\/+$/u, ''), { name, branch })
   }
@@ -100,9 +100,9 @@ function parseGithubSubmodules(baseDir) {
 
 // Classify a Solidity file's dep bucket: Soldeer (`dependencies/<name>-<version>/`) or a
 // github submodule (`lib/`, via `.gitmodules`), else null to defer to the node_modules/
-// workspace logic.
-function makeSolidityClassifier(baseDir, host) {
-  const submodules = parseGithubSubmodules(baseDir, host)
+// workspace logic. `check` vets a package.json path before it is read (readableBy).
+function makeSolidityClassifier(baseDir, check) {
+  const submodules = parseGithubSubmodules(baseDir)
   return (path) => {
     if (path.startsWith('dependencies/')) {
       const seg = path.slice('dependencies/'.length).split('/')[0]
@@ -113,7 +113,7 @@ function makeSolidityClassifier(baseDir, host) {
     }
     for (const [sub, { name, branch }] of submodules) {
       if (path === sub || path.startsWith(`${sub}/`)) {
-        const pkg = readJson(join(baseDir, sub, 'package.json'), host)
+        const pkg = readPackageJsonOrNull(baseDir, moduleFileKey(sub, 'package.json'), check)
         return { bucketDir: sub, name, version: pkg?.version ?? branch ?? '0.0.0', ecosystem: 'github' }
       }
     }
@@ -156,7 +156,7 @@ function executableSources(baseDir, sources, host) {
 // every file; `formats` (Map<path,format>) overrides it per file. `resolutions` values are
 // a flat target string or a Map<platform,target>; both round-trip untouched.
 function assembleCodeBundle({
-  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep, host,
+  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep, host, checkManifest,
 }) {
   const modules = new Map()
   const ensureBucket = (dir, name, version, bucketEcosystem) => {
@@ -174,7 +174,7 @@ function assembleCodeBundle({
       ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem).files[fileInBucket(dep.bucketDir, path)] = content
       continue
     }
-    const meta = findPackageMetadata(baseDir, path, host)
+    const meta = findPackageMetadata(baseDir, path, { strict: true, check: checkManifest, host })
     const inNodeModules = splitNodeModulesPath(path) !== null
     if (meta) {
       if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
@@ -210,20 +210,43 @@ function assembleCodeBundle({
   }).withReason('bundle')
 }
 
+// Files never carried, whatever reads them: `.env` files, and Hardhat's config, which is code.
+const NEVER_CARRIED = (name) => name === '.env' || name.startsWith('.env.') || name.startsWith('hardhat.config.')
+
+// A check for findPackageMetadata: throws for a path `ownership` refuses (see solidityOwnership),
+// as a package.json that decides a file's package may not be read through a planted link.
+const readableBy = (ownership) => (rel) => {
+  const { escape } = ownership.of(rel)
+  if (escape) throw new Error(`Refusing ${rel}: ${escapeReason(rel, escape)}`)
+}
+
+// A package.json's contents, or null when there's none; one that doesn't parse throws, and so does
+// one `check` refuses.
+function readPackageJsonOrNull(baseDir, rel, check) {
+  const text = readFileSyncOrNull(join(baseDir, rel))
+  if (text === null) return null
+  check?.(rel)
+  try {
+    return JSON.parse(text)
+  } catch (err) {
+    throw jsonError(rel, err)
+  }
+}
+
 // The build-description files of a Solidity bundle (--manifests), as Map<path, text>: `configFiles`
-// (what discoverSolidityConfig read, when named `*.toml`/`*.txt`) plus the SOLIDITY_*_MANIFESTS
-// that exist, for the root and for each package dir `classifyDep`/package.json places a bundled
-// source in. Files inside the root only, and none reached through a link a dependency planted out
-// of itself (`ownership`, see solidityOwnership). Carried as written: whatever they hold (an RPC
-// URL with its API key, an Etherscan key, a URL's credentials) is in the bundle too, as with
-// --package-json.
+// (what discoverSolidityConfig read, whatever they're called; NEVER_CARRIED aside) plus the
+// SOLIDITY_*_MANIFESTS that exist, for the root and for each package dir `classifyDep`/package.json
+// places a bundled source in. Files inside the root only, and none whose path `ownership` refuses
+// (see solidityOwnership). Carried as written: whatever they hold (an RPC URL with its API key, an
+// Etherscan key, a URL's credentials) is in the bundle too, as with --package-json.
 function solidityManifests(baseDir, sources, configFiles, classifyDep, ownership) {
-  const wanted = new Set([...configFiles.filter((f) => f.endsWith('.toml') || f.endsWith('.txt')), ...SOLIDITY_ROOT_MANIFESTS])
+  const check = readableBy(ownership)
+  const wanted = new Set([...configFiles.filter((f) => !NEVER_CARRIED(posix.basename(f))), ...SOLIDITY_ROOT_MANIFESTS])
   const dirs = new Set()
   for (const path of sources.keys()) {
     const dep = classifyDep(path)
     if (dep) dirs.add(dep.bucketDir)
-    const meta = findPackageMetadata(baseDir, path, host)
+    const meta = findPackageMetadata(baseDir, path, { strict: true, check })
     if (meta) dirs.add(meta.pkgDir)
   }
   for (const dir of dirs) {
@@ -235,7 +258,7 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep, ownership
     if (sources.has(rel) || posix.isAbsolute(rel) || rel.startsWith('../')) continue
     const { escape } = ownership.of(rel)
     if (escape) {
-      console.warn(`[stasis] Not carrying ${rel}: ${escape.link} is a link out of the dependency ${escape.root}`)
+      console.warn(`[stasis] Not carrying ${rel}: ${escapeReason(rel, escape)}`)
       continue
     }
     let buf
@@ -309,7 +332,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  const classifyDep = makeSolidityClassifier(baseDir, host)
+  const classifyDep = makeSolidityClassifier(baseDir, readableBy(ownership))
   const bundled = new Map(sources)
   const formats = new Map()
   if (manifests) {
@@ -330,7 +353,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     formats,
     conditionKey: 'solidity',
     classifyDep,
-    host,
+    checkManifest: readableBy(ownership),
   })
 }
 
@@ -930,7 +953,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     for (const abs of reached) {
       const rel = toRel(abs)
       const dir = dirname(rel)
-      if (!metaByDir.has(dir)) metaByDir.set(dir, findPackageMetadata(baseDir, rel, host))
+      if (!metaByDir.has(dir)) metaByDir.set(dir, findPackageMetadata(baseDir, rel, { host }))
       const meta = metaByDir.get(dir)
       if (meta) pkgDirs.add(meta.pkgDir)
       else if (!splitNodeModulesPath(rel)) pkgDirs.add('.')

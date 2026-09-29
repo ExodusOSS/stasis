@@ -27,7 +27,7 @@ import {
   readFoundryTomlRemappings,
   toSolcRemapping,
 } from './foundry.js'
-import { escapeReason, projectOwnership, solidityOwnership } from './solidity-ownership.js'
+import { escapeReason, projectOwnership, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
 
 export { solidityOwnership } from './solidity-ownership.js'
 
@@ -133,14 +133,6 @@ export function extractSolImports(content) {
 
 // --- Remappings ---------------------------------------------------------------------------------
 
-const realpathOrNull = (p, host) => {
-  try {
-    return host.realpath(p)
-  } catch {
-    return null
-  }
-}
-
 // Loader-side shape: `{ context, prefix, target }` (context null = global).
 const toLoaderRemapping = ({ context, name, path }) => ({ context, prefix: name, target: path })
 
@@ -165,7 +157,9 @@ function readMapping(mappingFile, { env, forge, host }) {
     const { remappings, files, profiled } = readFoundryTomlRemappings(mappingFile, foundryProfile(env))
     return { remappings: remappings.map(toSolcRemapping), files, profiled }
   }
-  const listed = parseRemappingLines(await readFile(mappingFile, 'utf8'), mappingFile, { emptyPath: !forge })
+  const text = readUtf8OrNull(mappingFile)
+  if (text === null) throw new Error(`${mappingFile}: no such file`)
+  const listed = parseRemappingLines(text, mappingFile, { emptyPath: !forge })
   return { remappings: listed.map(forge ? toSolcRemapping : toLoaderRemapping), files: [mappingFile] }
 }
 

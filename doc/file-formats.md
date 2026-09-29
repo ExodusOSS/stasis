@@ -361,15 +361,18 @@ resolve the way solc does under the project's build tool:
   including the contextual ones that scope a dependency's imports to its own
   copy of a package; aliases of the project's own `src`/`test`/`script` dirs
   are dropped, and `auto_detect_remappings = false` turns detection off.
-  A `foundry.toml` or `extends` base that isn't TOML, and an invalid remapping
-  (a `remappings.txt` line or `FOUNDRY_REMAPPINGS` entry that isn't
-  `[context:]prefix=target`, or a `remappings` value that isn't an array of
-  such strings), is an error naming the file and line, whosever it is and in
-  every mode (forge refuses an invalid `remappings.txt` line too, but quietly
-  skips a dependency's `foundry.toml` that isn't TOML or holds a bad
-  remapping); a dependency's config forge rejects for its settings (a missing
-  `extends` base, nested inheritance) is skipped with a warning, as forge skips
-  it.
+A `foundry.toml` or `extends` base that isn't TOML, a config that isn't UTF-8
+  (`foundry.toml`, `remappings.txt`, `.gitmodules`), a setting of the wrong type
+  (`libs = "deps"`, a `src` that isn't a string, an `extends` that isn't a path
+  or `{ path, strategy }`), and an invalid remapping (a `remappings.txt` line or
+  `FOUNDRY_REMAPPINGS` entry that isn't `[context:]prefix=target`, or a
+  `remappings` value that isn't an array of such strings), is an error naming
+  the file, whosever it is and in every mode: nothing falls back to a default
+  (forge refuses these too, but quietly skips a dependency's `foundry.toml` it
+  can't read). A `remappings.txt` line is trimmed as forge trims it, so a
+  byte-order mark stays part of the first remapping. A dependency's config forge
+  rejects for its settings (a missing `extends` base, nested inheritance) is
+  skipped with a warning, as forge skips it.
   Profiles are `[profile.<name>]` tables and the legacy top-level `[<name>]`
   ones (the former wins key by key; `extends` counts only in the former, as in
   forge); names match case-insensitively. Not
@@ -404,9 +407,10 @@ the result must be a `.sol` file inside the bundle root (an `import ".env";` or
 a remapping to `/opt/x/` is refused, stating why), and who owns a file is
 decided by where it really is, spelled as the filesystem spells it (on a
 case-insensitive one, `LIB/evil` is `lib/evil`). The dependencies are the
-entries of forge's `libs` (a symlinked `lib/forge-std` is the dependency where
-it points), Soldeer's `dependencies/`, git submodules (`.gitmodules` read as git
-reads it: quoted and escaped paths too) and every `node_modules` package; a file
+entries of forge's `libs` (an absolute one by its real path; a symlinked
+`lib/forge-std` is the dependency where it points), Soldeer's `dependencies/`,
+git submodules (`.gitmodules` read as git reads it: quoted and escaped paths,
+and a key on its section header's line) and every `node_modules` package; a file
 is a dependency's when its real path lies in one, however the path got there
 (`src/vendor -> ../lib/dep/src` holds the dependency's code). An import from a
 dependency must land on a dependency's file too: it may import its own files and
@@ -416,27 +420,37 @@ symlink no one trusted placed is never followed: one planted inside a dependency
 that leads out of it to anything but another dependency (`lib/evil/src/Evil.sol
 -> ../../../.env`), and one outside the project that leads back into it (a
 dependency linked from elsewhere, `lib/evil -> ../../shared/evil`, holding a
-link to the project's `.env`). Whoever's import, entry or manifest the path is,
-the import is refused, the entry rejected, the manifest not carried, and a
+link to the project's `.env`). Links are followed one by one and the result
+checked against the OS's own realpath: a path the two resolve differently (a
+link target that isn't UTF-8, one whose `\` the OS reads as part of a name) is
+refused, not trusted. Whoever's import, entry or manifest the path is, the
+import is refused, the entry rejected, the manifest not carried, and a
 dependency's own `foundry.toml`, `extends` base or `remappings.txt` skipped with
-a warning (one that is another dependency's file is read). A link the project
-placed (a workspace package linked into `node_modules`, a linked `lib/` entry,
-`src/vendor`) may lead anywhere in the root, and so may one on the path the
-project was named by (a symlinked checkout); a workspace package is the
-project's own code.
+a warning (one that is another dependency's file is read). A dependency's config
+reaches only what the path from the root does: one found through an absolute or
+`/proc/self/cwd` lib is judged by its real path, a dependency outside the root
+reads nothing, and a dir a dependency's `libs` names must be a dependency
+itself. A `package.json` that decides a file's package is refused the same way
+when a dependency planted it as a link, and one that doesn't parse is an error
+naming it (not quoting it) rather than giving its files to the parent package. A
+link the project placed (a workspace package linked into `node_modules`, a
+linked `lib/` entry, `src/vendor`) may lead anywhere in the root, and so may one
+on the path the project was named by (a symlinked checkout); a workspace package
+is the project's own code.
 
 The config files are read, not bundled. `--manifests` bundles the build
-description too: the `*.toml`/`*.txt` config files the resolution read, the
-root's `foundry.lock`, `soldeer.lock`, `.gitmodules` and `package.json`, and the
-`package.json`, `foundry.toml` and `remappings.txt` of every package the bundle
-holds files of — `json` for a `package.json`, `resource` otherwise, so `stasis
-extract` restores them. They are carried as written, as `--package-json` carries
-`package.json`: stasis doesn't edit them, so whatever they hold — an
-`eth_rpc_url` or `[rpc_endpoints]` URL with its API key, an `[etherscan]` key,
-the credentials in a `.gitmodules` URL — is in the bundle too. Keep secrets in
-the environment (`${VAR}` in `foundry.toml`) rather than in these files, or
-don't pass `--manifests`. `hardhat.config.*`, being code, and `.env` files are
-never carried.
+description too: every config file the resolution read, whatever it's called (an
+`extends = "base.conf"`, a `--mapping=remaps`), the root's `foundry.lock`,
+`soldeer.lock`, `.gitmodules` and `package.json`, and the `package.json`,
+`foundry.toml` and `remappings.txt` of every package the bundle holds files of —
+`json` for a `package.json`, `resource` otherwise, so `stasis extract` restores
+them. They are carried as written, as `--package-json` carries `package.json`:
+stasis doesn't edit them, so whatever they hold — an `eth_rpc_url` or
+`[rpc_endpoints]` URL with its API key, an `[etherscan]` key, the credentials in
+a `.gitmodules` URL — is in the bundle too. Keep secrets in the environment
+(`${VAR}` in `foundry.toml`) rather than in these files, or don't pass
+`--manifests`. `hardhat.config.*`, being code, and `.env` files are never
+carried.
 
 Rust entries are crate roots (`src/main.rs`, `src/lib.rs`, `src/bin/*.rs`,
 `tests/*.rs`, …): their `mod` declarations resolve as siblings, as rustc does,

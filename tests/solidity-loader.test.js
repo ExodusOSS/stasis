@@ -86,6 +86,8 @@ test('parseRemappings handles one-per-line entries and refuses an invalid line, 
     { context: null, prefix: '@b/', target: 'lib/b/' },
   ])
   t.assert.throws(() => parseRemappings('@a/=lib/a/\ngarbage line\n'), { message: 'remappings:2: invalid remapping "garbage line"' })
+  // Lines are trimmed as Rust trims them: a byte-order mark isn't whitespace, and stays.
+  t.assert.deepEqual(parseRemappings('\uFEFFx/=a/\n'), [{ context: null, prefix: '\uFEFFx/', target: 'a/' }])
   t.assert.throws(() => parseRemappings('\n=empty-prefix\n'), { message: 'remappings:2: invalid remapping "=empty-prefix"' })
 })
 
@@ -748,12 +750,15 @@ test('parseGitmodules reads .gitmodules as git does: quotes, escapes, comments, 
     '\tbranch = "v1 \\"x\\""',
     '[submodule.c]',
     '\tpath = lib/c  ',
+    // A key may follow its section header on the line.
+    '[submodule "d"] path = vendor/d',
     '',
   ].join('\n')
   t.assert.deepEqual(parseGitmodules(text), [
     { name: 'a', path: 'vendor/a', url: 'https://github.com/o/a', branch: 'v1 "x"' },
     { name: 'b', path: 'lib/bx', url: 'https://github.com/o/b' },
     { name: 'c', path: 'lib/c' },
+    { name: 'd', path: 'vendor/d' },
   ])
 })
 
