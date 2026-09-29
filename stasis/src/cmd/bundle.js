@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
@@ -27,7 +27,7 @@ import {
 import { decodeUtf8 } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
-import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
+import { createCargoContext } from '../loaders/cargo.js'
 import {
   bucketizePhpSources,
   buildPhpTree,
@@ -123,21 +123,44 @@ function makeSolidityClassifier(baseDir, ownership, host) {
   }
 }
 
-// Classify a Rust file by the nearest Cargo.toml `[package]`: a `cargo vendor`ed crate under
-// `vendor/<dir>/` is a dependency (tagged `cargo`); any other package (the crate itself, a
-// workspace member reached through a `path` dependency) is first-party, so no ecosystem. Null
-// (no manifest above the file) defers to the package.json/placeholder logic.
+// Classify a Rust file by the nearest Cargo.toml `[package]`: a `cargo vendor`ed crate under the
+// vendor dir (`vendor/<dir>/`, or where .cargo/config.toml points) is a dependency (tagged
+// `cargo`); any other package (the crate itself, a workspace member reached through a `path`
+// dependency) is first-party, so no ecosystem. Null (no manifest above the file) defers to the
+// package.json/placeholder logic.
 function makeRustClassifier(cargo) {
   return (path) => {
     const pkg = cargo.packageInfo(path)
     if (!pkg) return null
-    const vendored = pkg.dir.startsWith(`${CARGO_VENDOR_DIR}/`)
+    const vendored = pkg.dir.startsWith(`${cargo.vendorDir}/`)
     return { bucketDir: pkg.dir, name: pkg.name, version: pkg.version, ecosystem: vendored ? 'cargo' : undefined }
   }
 }
 
 // A file's key inside its bucket: the inverse of moduleFileKey.
 const fileInBucket = (bucketDir, path) => (bucketDir === '.' ? path : path.slice(bucketDir.length + 1))
+
+// A file of the bundle root, its bytes, by project-relative path, or null when it isn't a regular
+// file there (a manifest the context saw may have gone since; a FIFO would hang a read) or, with
+// `within` a directory, doesn't really lie in it (a vendored crate's manifest linked to a project
+// file).
+function readFileWithinBase(baseDir, rel, within = '.') {
+  try {
+    assertRealPathWithinBase(realpathSync(baseDir), baseDir, rel)
+    if (within !== '.') {
+      const real = relative(realpathSync(join(baseDir, within)), realpathSync(join(baseDir, rel))).split(/[\\/]/u).join('/')
+      if (real.startsWith('..') || isAbsolute(real)) {
+        console.warn(`[loader.cargo] Refusing file outside its package: ${rel} (a link out of ${within})`)
+        return null
+      }
+    }
+    if (!statSync(join(baseDir, rel)).isFile()) return null
+    return readFileSync(join(baseDir, rel))
+  } catch (err) {
+    if (err.code === 'ENOENT' || err.code === 'EISDIR') return null
+    throw err
+  }
+}
 
 // Project-relative paths in `sources` whose on-disk file carries a POSIX execute bit -- the
 // `executable` list both artifacts record. The State-driven path derives this in addFile; the
@@ -414,7 +437,12 @@ export async function buildBashBundle({ cwd = process.cwd(), entries } = {}) {
 // that is off stays out; `cargo` takes them from `cargo metadata` instead (opt-in: it runs cargo).
 // `cargoFeatures` / `cargoNoDefaultFeatures` / `cargoAllFeatures` are cargo's `--features` /
 // `--no-default-features` / `--all-features` for the entries' packages, in either mode.
-export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false } = {}) {
+// `cargoTarget` (a triple, or `host`) names the build's target: its cfgs, asked of rustc, decide
+// `#[cfg(unix)]`-style code and target-specific dependency tables, which are otherwise all kept.
+// `cargoManifests` also carries what describes each bundled package's build: its Cargo.toml (and
+// the workspace's), its build script -- walked like a crate root, so its modules and the in-tree
+// build-dependencies it reaches come along -- plus the root's Cargo.lock and .cargo/config.toml.
+export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false, cargoTarget = null, cargoManifests = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildRustBundle: at least one entry .rs file is required')
   }
@@ -433,9 +461,58 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     features: cargoFeatures,
     noDefaultFeatures: cargoNoDefaultFeatures,
     allFeatures: cargoAllFeatures,
+    target: cargoTarget,
   })
-  const sources = await collectRustFilesFromDisk(baseDir, normalized, { cargo: cargoCtx })
-  const { resolutions, missing, unresolvedCrates } = buildRustTree(sources, { roots: normalized, baseDir, cargo: cargoCtx })
+  // `include_str!` / `include_bytes!` assets ride along as resources: the walk records their format.
+  const formats = new Map()
+  const sources = new Map()
+  // The crate roots: the entries, then -- with `cargoManifests` -- the build script of every
+  // package the walk reaches, each a crate root of its own, until no package is new. Build scripts
+  // and what they reach compile for the host, not the target (`hostFiles`).
+  const roots = [...normalized]
+  const hostFiles = new Set()
+  const walk = async (wave) => {
+    await collectRustFilesFromDisk(baseDir, wave, { cargo: cargoCtx, formats, sources, hostFiles })
+    if (!cargoManifests) return
+    const scripts = new Set()
+    for (const path of sources.keys()) {
+      const script = formats.has(path) ? null : cargoCtx.buildScriptOf(path)
+      if (script !== null && !roots.includes(script)) scripts.add(script)
+    }
+    if (scripts.size === 0) return
+    roots.push(...scripts)
+    for (const s of scripts) hostFiles.add(s)
+    await walk([...scripts])
+  }
+  await walk(normalized)
+  // The tree pass may name in-tree crate roots the walk left out (a crate whose name a file also
+  // binds as a value, `use crate::util::log;` beside `log::info!`: buildRustTree's wantedRoots):
+  // load them and build again, until none is new.
+  const complete = async () => {
+    const built = buildRustTree(sources, { roots, baseDir, cargo: cargoCtx, formats, hostFiles })
+    const wanted = built.wantedRoots.filter((r) => !roots.includes(r))
+    if (wanted.length === 0) return built
+    roots.push(...wanted)
+    await walk(wanted)
+    return complete()
+  }
+  const tree = await complete()
+  if (cargoManifests) {
+    // Each bundled package's manifests, and its workspace's lockfile and cargo config, carried as
+    // written: whatever they hold (a registry token, a `git` URL's credentials) is in the bundle
+    // too, as with --package-json. A file that isn't UTF-8 text is refused, not altered.
+    const files = new Set()
+    for (const path of sources.keys()) for (const f of cargoCtx.buildFilesFor(path)) files.add(f.path)
+    for (const rel of files) {
+      if (sources.has(rel)) continue
+      const buf = readFileWithinBase(baseDir, rel, cargoCtx.isVendored(rel) ? cargoCtx.packageInfo(rel).dir : '.')
+      if (buf === null) continue
+      if (!isUtf8(buf)) throw new Error(`Rust manifest is not valid UTF-8: ${rel}`)
+      sources.set(rel, buf.toString('utf8'))
+      formats.set(rel, 'resource')
+    }
+  }
+  const { resolutions, missing, unresolvedCrates } = tree
 
   const issues = []
   for (const entry of normalized) {
@@ -460,8 +537,8 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     }
   }
 
-  // Deps live outside the bundle root unless vendored; with no `vendor/` dir the fix is one command.
-  if (unresolvedCrates.size > 0 && !existsSync(join(baseDir, CARGO_VENDOR_DIR))) {
+  // Deps live outside the bundle root unless vendored; with no vendor dir the fix is one command.
+  if (unresolvedCrates.size > 0 && !existsSync(join(baseDir, cargoCtx.vendorDir))) {
     const names = [...unresolvedCrates].toSorted()
     const shown = names.slice(0, 10).join(', ') + (names.length > 10 ? `, ... and ${names.length - 10} more` : '')
     console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not found in the bundle root: ${shown}`)
@@ -476,6 +553,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     workspaceName: RUST_WORKSPACE_NAME,
     workspaceVersion: RUST_WORKSPACE_VERSION,
     format: RUST_FORMAT,
+    formats,
     conditionKey: 'rust',
     classifyDep: makeRustClassifier(cargoCtx),
   })
@@ -1037,7 +1115,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes
 // errors. A directory entry (resolved against `cwd`, on `host`) stands for the .sol files under it: Solidity only.
-function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, host = diskHost, fetched }) {
+function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, cargoTarget, cargoManifests, host = diskHost, fetched }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
@@ -1066,6 +1144,8 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
     if (Array.isArray(cargoFeatures) && cargoFeatures.length > 0) throw new Error(`${name}: --cargo-features is only valid for Rust bundles`)
     if (cargoNoDefaultFeatures) throw new Error(`${name}: --cargo-no-default-features is only valid for Rust bundles`)
     if (cargoAllFeatures) throw new Error(`${name}: --cargo-all-features is only valid for Rust bundles`)
+    if (cargoTarget) throw new Error(`${name}: --cargo-target is only valid for Rust bundles`)
+    if (cargoManifests) throw new Error(`${name}: --cargo-manifests is only valid for Rust bundles`)
   }
   if (scope !== undefined && kind !== 'js') {
     throw new Error(`${name}: --scope is only valid for JS bundles`)
@@ -1209,12 +1289,12 @@ export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageMa
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
 // writing to disk. Files are attributed to the `bundle` consumer. Option applicability
 // (--mapping|--manifests/.sol, --scope|--conditions|--mainFields|--metro|--jsx|--flow|--typescript/JS) is enforced by classifyEntries.
-export async function buildBundle({ cwd = process.cwd(), env = process.env, entries, mappingFile, manifests = false, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false } = {}) {
-  const kind = classifyEntries('buildBundle', { cwd, entries, mappingFile, manifests, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
+export async function buildBundle({ cwd = process.cwd(), env = process.env, entries, mappingFile, manifests = false, scope, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false, cargoTarget = null, cargoManifests = false } = {}) {
+  const kind = classifyEntries('buildBundle', { cwd, entries, mappingFile, manifests, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, cargoTarget, cargoManifests })
   if (kind === 'sol') return buildSolidityBundle({ cwd, env, entries, mappingFile, manifests })
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
-  if (kind === 'rust') return buildRustBundle({ cwd, entries, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
+  if (kind === 'rust') return buildRustBundle({ cwd, entries, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, cargoTarget, cargoManifests })
   return (await buildJs({ cwd, env, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })).bundle
 }
 
@@ -1228,8 +1308,8 @@ const DEFAULT_BUNDLE_FILE = 'stasis.code.br'
 // `stasis run --lock=frozen` (which doesn't replay them) fails closed -- pair it with
 // `--bundle=load` or replay the conditions. `add` unions the fresh build into the bundle
 // already on disk (strict; a conflicting file throws) and can't target stdout.
-export async function bundleCommand({ cwd = process.cwd(), env = process.env, entries, mappingFile, manifests = false, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false, brotliQuality, add = false } = {}) {
-  const kind = classifyEntries('bundleCommand', { cwd, entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
+export async function bundleCommand({ cwd = process.cwd(), env = process.env, entries, mappingFile, manifests = false, output, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, cargo = false, cargoFeatures = [], cargoNoDefaultFeatures = false, cargoAllFeatures = false, cargoTarget = null, cargoManifests = false, brotliQuality, add = false } = {}) {
+  const kind = classifyEntries('bundleCommand', { cwd, entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, cargoTarget, cargoManifests })
 
   const target = output ?? DEFAULT_BUNDLE_FILE
   // --add has nothing to merge into on stdout (write-only).
@@ -1245,7 +1325,7 @@ export async function bundleCommand({ cwd = process.cwd(), env = process.env, en
     ;({ bundle, stateBuilt } = built)
     if (lockfile) lockData = built.lockfile().serialize()
   } else {
-    bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
+    bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, cargoTarget, cargoManifests })
   }
 
   // State-built bundles keep the State root's repo (no cwd fallback: their paths are relative to that root).

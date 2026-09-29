@@ -1,20 +1,24 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join, parse } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   createCargoContext,
+  evalCfg,
   findCargoLock,
   parseCargoLock,
   parseCargoManifest,
   parseFeatureList,
+  parseRustcCfg,
   resolutionFromMetadata,
+  rustcTargetCfgs,
   satisfiesCargoReq,
 } from '../stasis/src/loaders/cargo.js'
 import { buildRustBundle } from '../stasis/src/cmd/bundle.js'
+import { buildRustTree } from '../stasis/src/loaders/rust.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 const featuresFixture = join(fixtures, 'features')
@@ -33,9 +37,10 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
     '[build-dependencies]', 'cc = "1"',
     "[target.'cfg(unix)'.dependencies]", 'nix = "0.29"',
     '[features]', 'default = ["std"]', 'std = []', 'full = [', '  "std",', '  "dep:opt",', '  "sub/two",', '  "opt?/extra",', ']',
-    '[patch.crates-io]', 'plain = { path = "patches/plain" }',
+    '[patch.crates-io]', 'plain = { path = "patches/plain" }', 'dotted.path = "patches/dotted"',
+    '[patch.crates-io.subbed]', 'path = "patches/subbed"',
   ].join('\n'))
-  t.assert.deepEqual(m.package, { name: 'app', version: '0.1.0', versionFromWorkspace: false, edition: '2021' })
+  t.assert.deepEqual(m.package, { name: 'app', version: '0.1.0', versionFromWorkspace: false, edition: '2021', editionFromWorkspace: false, build: null })
   t.assert.equal(m.resolver, '2')
   t.assert.deepEqual([...m.features], [['default', ['std']], ['std', []], ['full', ['std', 'dep:opt', 'sub/two', 'opt?/extra']]])
   const dep = (k) => {
@@ -51,10 +56,20 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
   t.assert.deepEqual(dep('opt'), { version: '1', kinds: { normal: { optional: true, defaultFeatures: false, features: ['a'] } } })
   t.assert.deepEqual(dep('sub'), { version: '2', kinds: { normal: { optional: false, defaultFeatures: null, features: ['one', 'two'] } } })
   t.assert.deepEqual(Object.keys(dep('cc').kinds), ['build'])
-  t.assert.deepEqual(Object.keys(dep('nix').kinds), ['normal'])
+  // A target-specific table is a request of its own, beside the plain one.
+  t.assert.deepEqual(Object.keys(dep('nix').kinds), ['normal@cfg(unix)'])
   // the key is the `use` spelling, the name the manifest's (an optional dep's implicit feature name)
   t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').kinds.get('normal').optional], ['pm_crate', 'pm-crate', true])
-  t.assert.deepEqual([...m.patches], [['plain', 'patches/plain']])
+  // `[patch.<source>]` entries in every spelling: inline table, dotted key, sub-table.
+  t.assert.deepEqual([...m.patches], [['plain', 'patches/plain'], ['dotted', 'patches/dotted'], ['subbed', 'patches/subbed']])
+})
+
+test('parseCargoManifest reads a workspace-inherited edition', (t) => {
+  const m = parseCargoManifest(['[workspace]', '[workspace.package]', 'edition = "2021"', '[package]', 'name = "app"', 'version = "0.1.0"', 'edition.workspace = true'].join('\n'))
+  t.assert.equal(m.package.edition, null)
+  t.assert.equal(m.package.editionFromWorkspace, true)
+  t.assert.equal(m.workspacePackage.edition, '2021')
+  t.assert.equal(parseCargoManifest('[package]\nname = "app"\nedition = { workspace = true }\n').package.editionFromWorkspace, true)
 })
 
 test('parseCargoManifest splits dotted dependency keys and survives multi-line strings', (t) => {
@@ -88,8 +103,8 @@ test('parseCargoManifest reads a pair by the table it lands in, whichever way th
     '[patch.crates-io.plain]', 'path = "patches/plain"',
     '[workspace.package]', 'version = "0.9.0"', // a [workspace.*] table alone makes this a workspace root
   ].join('\n'))
-  t.assert.deepEqual(m.package, { name: 'app', version: null, versionFromWorkspace: true, edition: null })
-  t.assert.deepEqual([m.deps.get('winapi').version, [...m.deps.get('winapi').kinds.keys()]], ['0.3', ['dev']])
+  t.assert.deepEqual(m.package, { name: 'app', version: null, versionFromWorkspace: true, edition: null, editionFromWorkspace: false, build: null })
+  t.assert.deepEqual([m.deps.get('winapi').version, [...m.deps.get('winapi').kinds.keys()]], ['0.3', ['dev@cfg(windows)']])
   t.assert.deepEqual([...m.patches], [['plain', 'patches/plain']])
   t.assert.deepEqual([m.isWorkspace, m.workspacePackage.version], [true, '0.9.0'])
 })
@@ -120,14 +135,24 @@ test('parseFeatureList splits cargo\'s repeatable, comma- or space-separated fea
   t.assert.deepEqual(parseFeatureList([]), [])
 })
 
-test('findCargoLock finds the lock in the bundle root or an ancestor (a member dir\'s is its workspace\'s)', (t) => {
+test('findCargoLock finds the lock beside the workspace root (a member dir\'s is its workspace\'s), never one further up', (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'stasis-lock-'))
   try {
-    mkdirSync(join(tmp, 'crates', 'app'), { recursive: true })
-    t.assert.equal(findCargoLock(join(tmp, 'crates', 'app')), null)
-    writeFileSync(join(tmp, 'Cargo.lock'), 'version = 3\n')
-    t.assert.equal(findCargoLock(join(tmp, 'crates', 'app')), join(tmp, 'Cargo.lock'))
-    t.assert.equal(findCargoLock(tmp), join(tmp, 'Cargo.lock'))
+    mkdirSync(join(tmp, 'ws', 'crates', 'app'), { recursive: true })
+    writeFileSync(join(tmp, 'Cargo.lock'), 'version = 3\n') // some other project's, above the workspace
+    writeFileSync(join(tmp, 'ws', 'Cargo.toml'), '[workspace]\nmembers = ["crates/app"]\n')
+    writeFileSync(join(tmp, 'ws', 'crates', 'app', 'Cargo.toml'), '[package]\nname = "app"\nversion = "0.1.0"\n')
+    t.assert.equal(findCargoLock(join(tmp, 'ws', 'crates', 'app')), null)
+    t.assert.equal(findCargoLock(join(tmp, 'ws')), null)
+    writeFileSync(join(tmp, 'ws', 'Cargo.lock'), 'version = 3\n')
+    t.assert.equal(findCargoLock(join(tmp, 'ws', 'crates', 'app')), join(tmp, 'ws', 'Cargo.lock'))
+    t.assert.equal(findCargoLock(join(tmp, 'ws')), join(tmp, 'ws', 'Cargo.lock'))
+    // A package outside any workspace: its own lock, and nothing above it.
+    mkdirSync(join(tmp, 'solo'))
+    writeFileSync(join(tmp, 'solo', 'Cargo.toml'), '[package]\nname = "solo"\nversion = "0.1.0"\n')
+    t.assert.equal(findCargoLock(join(tmp, 'solo')), null)
+    writeFileSync(join(tmp, 'solo', 'Cargo.lock'), 'version = 3\n')
+    t.assert.equal(findCargoLock(join(tmp, 'solo')), join(tmp, 'solo', 'Cargo.lock'))
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
@@ -159,6 +184,13 @@ test('satisfiesCargoReq implements Cargo requirement semantics', (t) => {
   t.assert.equal(satisfiesCargoReq('0.0.4', '0.0.3'), false)
   t.assert.equal(satisfiesCargoReq('0.5.0', '^0'), true)
   t.assert.equal(satisfiesCargoReq('1.0.0', '^0'), false)
+  // a wildcard with an operator keeps the operator: the `*` only omits the component
+  t.assert.equal(satisfiesCargoReq('3.0.0', '>=1.*'), true)
+  t.assert.equal(satisfiesCargoReq('1.5.0', '>1.*'), false)
+  t.assert.equal(satisfiesCargoReq('2.0.0', '>1.*'), true)
+  t.assert.equal(satisfiesCargoReq('1.2.9', '=1.2.*'), true)
+  t.assert.equal(satisfiesCargoReq('1.3.0', '=1.2.*'), false)
+  t.assert.equal(satisfiesCargoReq('2.0.0', '1.*'), false)
   // tilde, wildcard, exact, comparisons, several comparators
   t.assert.equal(satisfiesCargoReq('1.2.9', '~1.2.3'), true)
   t.assert.equal(satisfiesCargoReq('1.3.0', '~1.2.3'), false)
@@ -232,6 +264,127 @@ test('createCargoContext falls back to the requirement when there is no Cargo.lo
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
+})
+
+// A throwaway project: `files` maps project-relative paths to their text.
+const writeProject = (files) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-cargo-'))
+  for (const [rel, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(tmp, rel)), { recursive: true })
+    writeFileSync(join(tmp, rel), text)
+  }
+  return tmp
+}
+const withProject = (files, fn) => {
+  const tmp = writeProject(files)
+  try {
+    return fn(tmp)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+}
+const captureWarningsAsync = async (fn) => {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    return { result: await fn(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+const withProjectAsync = async (files, fn) => {
+  const tmp = writeProject(files)
+  try {
+    return await fn(tmp)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+test('createCargoContext applies a bare --cargo-features name to every root package that has it', (t) => {
+  withProject({
+    'Cargo.toml': '[workspace]\nmembers = ["a", "b"]\n',
+    'a/Cargo.toml': '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n[features]\nserde = []\n',
+    'a/src/lib.rs': '',
+    'b/Cargo.toml': '[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n[features]\nserde = []\n',
+    'b/src/lib.rs': '',
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['a/src/lib.rs', 'b/src/lib.rs'], features: ['serde'] })
+    t.assert.deepEqual(enabledOf(cargo), { a: ['serde'], b: ['serde'] })
+  })
+})
+
+test('createCargoContext keeps a target-specific dependency table apart from the plain one', (t) => {
+  withProject({
+    'Cargo.toml': ['[package]', 'name = "app"', 'version = "0.1.0"', 'edition = "2021"',
+      '[dependencies]', 'dep = "1"',
+      "[target.'cfg(unix)'.dependencies]", 'dep = { version = "1", default-features = false, optional = true }',
+      "[target.'cfg(windows)'.dependencies]", 'win = "1"'].join('\n'),
+    'src/main.rs': '',
+    'vendor/dep/Cargo.toml': '[package]\nname = "dep"\nversion = "1.0.0"\n[features]\ndefault = ["std"]\nstd = []\n',
+    'vendor/dep/src/lib.rs': '',
+    'vendor/win/Cargo.toml': '[package]\nname = "win"\nversion = "1.0.0"\n[features]\ndefault = ["api"]\napi = []\n',
+    'vendor/win/src/lib.rs': '',
+  }, (tmp) => {
+    // The plain `dep = "1"` keeps its defaults and stays in the graph; the unix table's optional,
+    // default-less request is a second one. A target-only dependency counts (target cfgs are unknown).
+    const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    t.assert.deepEqual(enabledOf(cargo), { '.': [], 'vendor/dep': ['default', 'std'], 'vendor/win': ['api', 'default'] })
+  })
+})
+
+test('createCargoContext picks the feature resolver from a workspace-inherited edition', (t) => {
+  const files = (edition) => ({
+    'Cargo.toml': ['[workspace]', '[workspace.package]', `edition = "${edition}"`, '[package]', 'name = "app"', 'version = "0.1.0"', 'edition.workspace = true',
+      '[dev-dependencies]', 'devdep = "1"'].join('\n'),
+    'src/main.rs': '',
+    'vendor/devdep/Cargo.toml': '[package]\nname = "devdep"\nversion = "1.0.0"\n',
+    'vendor/devdep/src/lib.rs': '',
+  })
+  // edition 2021 → resolver 2: the root's dev-dependencies stay out of a normal build
+  withProject(files('2021'), (tmp) => t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': [] }))
+  // edition 2018 → resolver 1: they join
+  withProject(files('2018'), (tmp) => t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': [], 'vendor/devdep': [] }))
+})
+
+test('createCargoContext applies a weak `dep?/feat` once the dependency is active, whichever table activates it', (t) => {
+  const files = (deps) => ({
+    'Cargo.toml': ['[package]', 'name = "app"', 'version = "0.1.0"', 'edition = "2021"',
+      '[features]', 'default = ["std"]', 'std = ["dep?/std"]', 'with-dep = ["dep:dep"]', ...deps].join('\n'),
+    'src/main.rs': '',
+    'vendor/dep/Cargo.toml': '[package]\nname = "dep"\nversion = "1.0.0"\n[features]\nstd = []\n',
+    'vendor/dep/src/lib.rs': '',
+  })
+  // optional and inactive: the weak feature asks nothing
+  withProject(files(['[dependencies]', 'dep = { version = "1", optional = true }']), (tmp) => {
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': ['default', 'std'] })
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'], features: ['with-dep'] })), { '.': ['default', 'std', 'with-dep'], 'vendor/dep': ['std'] })
+  })
+  // required without default features: active from the start
+  withProject(files(['[dependencies]', 'dep = { version = "1", default-features = false }']), (tmp) => {
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': ['default', 'std'], 'vendor/dep': ['std'] })
+  })
+  // required only on a target: the target table counts
+  withProject(files(["[target.'cfg(unix)'.dependencies]", 'dep = { version = "1", default-features = false }']), (tmp) => {
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': ['default', 'std'], 'vendor/dep': ['std'] })
+  })
+})
+
+test('createCargoContext applies a weak `dep?/feat` from --cargo-features once `default` has activated the dependency', (t) => {
+  withProject({
+    'Cargo.toml': ['[package]', 'name = "app"', 'version = "0.1.0"', 'edition = "2021"',
+      '[features]', 'default = ["with-dep"]', 'with-dep = ["dep:dep"]',
+      '[dependencies]', 'dep = { version = "1", optional = true }'].join('\n'),
+    'src/main.rs': '',
+    'vendor/dep/Cargo.toml': '[package]\nname = "dep"\nversion = "1.0.0"\n[features]\nstd = []\n',
+    'vendor/dep/src/lib.rs': '',
+  }, (tmp) => {
+    // `dep` is activated by `default` inside the fixed-point loop; the flag has to wait for it.
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'], features: ['dep?/std'] })), { '.': ['default', 'with-dep'], 'vendor/dep': ['std'] })
+    // and asks nothing while the dependency stays inactive
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'], features: ['dep?/std'], noDefaultFeatures: true })), { '.': [] })
+  })
 })
 
 test('createCargoContext honours the root feature flags: --features (incl. pkg/feat), --no-default-features, --all-features', (t) => {
@@ -355,7 +508,412 @@ test('createCargoContext({ cargo: true }) fails loudly when cargo cannot run', {
   t.assert.throws(() => createCargoContext(featuresFixture, { entries: ['src/main.rs'], cargo: true }), /cargo metadata could not run/u)
 })
 
+test('parseCargoManifest reads [package] build', (t) => {
+  t.assert.equal(parseCargoManifest('[package]\nname = "a"\nversion = "0.1.0"\nbuild = "build/main.rs"\n').package.build, 'build/main.rs')
+  t.assert.equal(parseCargoManifest('[package]\nname = "a"\nversion = "0.1.0"\nbuild = false\n').package.build, false)
+  t.assert.equal(parseCargoManifest('[package]\nname = "a"\nversion = "0.1.0"\n').package.build, null)
+})
+
+test('createCargoContext names each package\'s manifests, build script, and the root\'s lockfile and cargo config', (t) => {
+  withProject({
+    'Cargo.toml': '[workspace]\nmembers = ["crates/app", "crates/nobuild"]\n',
+    'Cargo.lock': 'version = 3\n',
+    '.cargo/config.toml': '[build]\ntarget-dir = "out"\n',
+    'crates/app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'crates/app/build.rs': 'fn main() {}\n',
+    'crates/app/src/main.rs': '',
+    'crates/nobuild/Cargo.toml': '[package]\nname = "nobuild"\nversion = "0.1.0"\nedition = "2021"\nbuild = false\n',
+    'crates/nobuild/build.rs': 'fn main() {}\n',
+    'crates/nobuild/src/lib.rs': '',
+    'vendor/dep/Cargo.toml': '[package]\nname = "dep"\nversion = "1.0.0"\nbuild = "scripts/build.rs"\n',
+    'vendor/dep/scripts/build.rs': 'fn main() {}\n',
+    'vendor/dep/src/lib.rs': '',
+    'vendor/plain/Cargo.toml': '[package]\nname = "plain"\nversion = "1.0.0"\n',
+    'vendor/plain/src/lib.rs': '',
+    'loose.rs': '',
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['crates/app/src/main.rs'] })
+    const paths = (file) => cargo.buildFilesFor(file).map((f) => `${f.kind}:${f.path}`)
+    t.assert.deepEqual(paths('crates/app/src/main.rs'), ['manifest:crates/app/Cargo.toml', 'manifest:Cargo.toml', 'lock:Cargo.lock', 'config:.cargo/config.toml'])
+    t.assert.deepEqual(paths('vendor/dep/src/lib.rs'), ['manifest:vendor/dep/Cargo.toml', 'manifest:Cargo.toml', 'lock:Cargo.lock', 'config:.cargo/config.toml']) // the root workspace is above it too
+    t.assert.deepEqual(paths('loose.rs'), []) // no [package] claims it: the root manifest is a bare [workspace]
+    t.assert.equal(cargo.buildScriptOf('crates/app/src/main.rs'), 'crates/app/build.rs')
+    t.assert.equal(cargo.buildScriptOf('crates/nobuild/src/lib.rs'), null) // `build = false`
+    t.assert.equal(cargo.buildScriptOf('vendor/dep/src/lib.rs'), 'vendor/dep/scripts/build.rs')
+    t.assert.equal(cargo.buildScriptOf('vendor/plain/src/lib.rs'), null) // no build.rs on disk
+    t.assert.equal(cargo.buildScriptOf('loose.rs'), null)
+    t.assert.equal(cargo.isVendored('vendor/dep/src/lib.rs'), true)
+    t.assert.equal(cargo.isVendored('crates/app/src/main.rs'), false)
+    // A member bundled on its own: the workspace's lockfile lies above the bundle root.
+    const member = createCargoContext(join(tmp, 'crates/app'), { entries: ['src/main.rs'] })
+    t.assert.deepEqual(member.buildFilesFor('src/main.rs'), [{ path: 'Cargo.toml', kind: 'manifest' }])
+  })
+  // A workspace nested below the bundle root: its lockfile and config, not the root's (absent).
+  withProject({
+    'rust/Cargo.toml': '[workspace]\nmembers = ["app"]\n',
+    'rust/Cargo.lock': 'version = 3\n',
+    'rust/.cargo/config': '[build]\n', // the extensionless file, which cargo prefers when both exist
+    'rust/.cargo/config.toml': '[build]\n',
+    'rust/app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n',
+    'rust/app/src/main.rs': '',
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['rust/app/src/main.rs'] })
+    t.assert.deepEqual(cargo.buildFilesFor('rust/app/src/main.rs').map((f) => f.path), ['rust/app/Cargo.toml', 'rust/Cargo.toml', 'rust/Cargo.lock', 'rust/.cargo/config'])
+  })
+})
+
+test('buildRustBundle --cargo-manifests carries the manifests, lockfile and cargo config as written, or refuses them', async (t) => {
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = { git = "https://x-access-token:TOKEN@github.com/o/foo.git", branch = "main" }\n',
+    'Cargo.lock': 'version = 3\n\n[[package]]\nname = "foo"\nversion = "1.0.0"\nsource = "git+https://x-access-token:TOKEN@github.com/o/foo.git?branch=main&access_token=TOKEN#0123abcd"\n',
+    '.cargo/config.toml': '# vendoring\n[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n[registries.private]\ntoken = "t0k3n"\n[target.x86_64-unknown-linux-gnu]\nrunner = "qemu-x86_64"\n',
+    'src/main.rs': 'fn main() {}\n',
+  }
+  await withProjectAsync(files, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/main.rs'], cargoManifests: true })
+    // Byte for byte, whatever they hold: stasis doesn't edit what it carries.
+    for (const p of ['Cargo.toml', 'Cargo.lock', '.cargo/config.toml']) t.assert.equal(bundle.sources.get(p), files[p], p)
+    // A file that isn't UTF-8 text can't be carried as written: refused, not altered.
+    writeFileSync(join(tmp, 'Cargo.lock'), Buffer.concat([Buffer.from('version = 3\n# '), Buffer.from([0xff, 0xfe]), Buffer.from('\n')]))
+    await t.assert.rejects(() => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'], cargoManifests: true }), { message: 'Rust manifest is not valid UTF-8: Cargo.lock' })
+  })
+})
+
+test('buildRustBundle holds a vendored crate\'s includes, #[path]s and build script to its own package', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nevil = "1"\n',
+    '.git/config': '[remote "origin"]\n\turl = https://user:token@example.com/repo.git\n',
+    '.env': 'SECRET=1\n',
+    'secret.rs': 'pub const KEY: &str = "k";\n',
+    'LICENSE': 'MIT\n',
+    'src/main.rs': 'use evil::f;\nconst L: &str = include_str!("../LICENSE");\n',
+    'vendor/evil/Cargo.toml': '[package]\nname = "evil"\nversion = "1.0.0"\nbuild = "../../.env"\n',
+    'vendor/evil/src/lib.rs': [
+      'pub fn f() {}',
+      'const A: &str = include_str!("../../../.git/config");',
+      'const B: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env"));',
+      '#[cfg(steal)]', // gated on a cfg the loader can't decide: tolerated when nothing is found
+      '#[path = "../../../secret.rs"]',
+      'mod stolen;',
+      'const OK: &str = include_str!("../README.md");',
+      'mod fine;',
+    ].join('\n'),
+    'vendor/evil/README.md': 'evil\n',
+    'vendor/evil/src/fine.rs': '',
+  }, async (tmp) => {
+    const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'], cargoManifests: true }))
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+      'Cargo.toml', 'LICENSE', 'src/main.rs', // the project's own include may reach anywhere in the root
+      'vendor/evil/Cargo.toml', 'vendor/evil/README.md', 'vendor/evil/src/fine.rs', 'vendor/evil/src/lib.rs',
+    ])
+    t.assert.ok(warnings.some((w) => w.includes('Refusing include outside its package: ../../../.git/config from vendor/evil/src/lib.rs')), warnings.join('\n'))
+    t.assert.ok(warnings.some((w) => w.includes('Refusing include outside its package: ../../.env from vendor/evil/src/lib.rs')), warnings.join('\n'))
+    t.assert.ok(warnings.some((w) => w.includes('Refusing build script outside its package: ../../.env in vendor/evil')), warnings.join('\n'))
+    // Without the gate, a `#[path]` outside the package is a missing module: fatal for the bundle.
+    writeFileSync(join(tmp, 'vendor/evil/src/lib.rs'), '#[path = "../../../secret.rs"]\nmod stolen;\n')
+    await t.assert.rejects(
+      () => captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'], cargoManifests: true })),
+      /Unresolved module: mod stolen from vendor\/evil\/src\/lib\.rs/u,
+    )
+  })
+})
+
+test('buildRustBundle holds a vendored crate to its package through symlinks, an inline module\'s #[path] and its [lib] path', { skip: process.platform === 'win32' ? 'symlinks' : false }, async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nevil = "1"\nevil2 = "1"\n',
+    '.env': 'SECRET=1\n',
+    'private_mod.rs': 'pub const KEY: u8 = 1;\n',
+    'outside_dir/mod.rs': 'pub const OUT: u8 = 2;\n',
+    'src/main.rs': 'use evil::f;\nuse evil2::g;\n',
+    'vendor/evil/Cargo.toml': '[package]\nname = "evil"\nversion = "1.0.0"\n',
+    'vendor/evil/src/lib.rs': [
+      'pub fn f() {}',
+      '#[cfg(steal)] #[path = "../../.."] mod m { mod private_mod; }', // an inline module's #[path] climbing out: refused (gated: tolerated)
+      '#[cfg(steal)] mod linked_file;', // a symlink to a project file
+      '#[cfg(steal)] mod linked_dir;', // a symlink to a project directory
+      '#[cfg(steal)] const E: &str = include_str!("env_link");', // a symlink to the project's .env
+    ].join('\n'),
+    'vendor/evil2/Cargo.toml': '[package]\nname = "evil2"\nversion = "1.0.0"\n[lib]\npath = "../../private_mod.rs"\n',
+  }, async (tmp) => {
+    symlinkSync(join(tmp, 'private_mod.rs'), join(tmp, 'vendor/evil/src/linked_file.rs'))
+    symlinkSync(join(tmp, 'outside_dir'), join(tmp, 'vendor/evil/src/linked_dir'))
+    symlinkSync(join(tmp, '.env'), join(tmp, 'vendor/evil/src/env_link'))
+    const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'], cargoManifests: true }))
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['Cargo.toml', 'src/main.rs', 'vendor/evil/Cargo.toml', 'vendor/evil/src/lib.rs'])
+    for (const expected of [
+      'Refusing file outside its package: vendor/evil/src/linked_file.rs (a link out of vendor/evil)',
+      'Refusing file outside its package: vendor/evil/src/linked_dir/mod.rs (a link out of vendor/evil)',
+      'Refusing file outside its package: vendor/evil/src/env_link (a link out of vendor/evil)',
+      'Refusing lib path outside its package: ../../private_mod.rs in vendor/evil2',
+    ]) t.assert.ok(warnings.some((w) => w.includes(expected)), `${expected}\n${warnings.join('\n')}`)
+    t.assert.ok(!warnings.some((w) => w.includes('private_mod.rs') && w.includes('Refusing file')), warnings.join('\n')) // the inline #[path] never names it: no file to refuse
+    // Ungated, every refused module is missing: fatal.
+    writeFileSync(join(tmp, 'vendor/evil/src/lib.rs'), 'pub fn f() {}\n#[path = "../../.."] mod m { mod private_mod; }\nmod linked_file;\nmod linked_dir;\n')
+    await t.assert.rejects(
+      () => captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'], cargoManifests: true })),
+      /Unresolved module: mod m::private_mod from vendor\/evil\/src\/lib\.rs[\s\S]*mod linked_file[\s\S]*mod linked_dir/u,
+    )
+  })
+})
+
+test('buildRustBundle scans a file named by both `mod` and `include_str!` as Rust', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': 'const SRC: &str = include_str!("shown.rs");\nmod shown;\nmod util;\n',
+    'src/shown.rs': 'use crate::util::helper;\npub fn f() { helper() }\n',
+    'src/util.rs': 'pub fn helper() {}\n',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'] })
+    t.assert.equal(bundle.formats.get('src/shown.rs'), 'rust') // a module first, its text second
+    t.assert.deepEqual(Object.fromEntries(bundle.imports.get('rust').get('src/shown.rs')), { 'crate::util::helper': 'src/util.rs' })
+    t.assert.deepEqual(Object.fromEntries(bundle.imports.get('rust').get('src/lib.rs')), { 'include_str shown.rs': 'src/shown.rs', 'mod shown': 'src/shown.rs', 'mod util': 'src/util.rs' })
+    // Named the other way round, too.
+    writeFileSync(join(tmp, 'src/lib.rs'), 'mod util;\nmod shown;\nconst SRC: &str = include_str!("shown.rs");\n')
+    const swapped = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'] })
+    t.assert.equal(swapped.formats.get('src/shown.rs'), 'rust')
+  })
+})
+
+test('buildRustBundle --cargo-manifests compiles build scripts for the host, not --cargo-target', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': [
+      '[package]', 'name = "app"', 'version = "0.1.0"', 'edition = "2021"', 'build = "build.rs"',
+      "[target.'cfg(windows)'.dependencies]", 'win = "1"',
+      "[target.'cfg(windows)'.build-dependencies]", 'winbuild = "1"',
+    ].join('\n'),
+    'build.rs': '#[cfg(windows)]\nmod registry;\nfn main() { winbuild::probe(); }\n',
+    'registry.rs': '',
+    'src/lib.rs': '#[cfg(windows)]\nmod win;\n#[cfg(windows)]\nfn f() { win::g(); }\n',
+    'src/win.rs': 'pub fn g() {}\n',
+    'vendor/win/Cargo.toml': '[package]\nname = "win"\nversion = "1.0.0"\n',
+    'vendor/win/src/lib.rs': '',
+    'vendor/winbuild/Cargo.toml': '[package]\nname = "winbuild"\nversion = "1.0.0"\n',
+    'vendor/winbuild/src/lib.rs': 'pub fn probe() {}\n',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargoManifests: true, cargoTarget: LINUX })
+    // The library drops its Windows module; the build script keeps its own (the host may be Windows),
+    // and its Windows-only build-dependency counts.
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['Cargo.toml', 'build.rs', 'registry.rs', 'src/lib.rs', 'vendor/winbuild/Cargo.toml', 'vendor/winbuild/src/lib.rs'])
+    const edges = bundle.imports.get('rust')
+    t.assert.deepEqual(Object.fromEntries(edges.get('build.rs')), { 'mod registry': 'registry.rs', 'use winbuild': 'vendor/winbuild/src/lib.rs' })
+    t.assert.deepEqual(Object.fromEntries(edges.get('src/lib.rs')), {})
+  })
+})
+
+test('buildRustBundle --cargo-manifests carries manifests, the lockfile and cargo config, and walks build scripts as crate roots', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[workspace]\nmembers = ["app"]\n',
+    'Cargo.lock': 'version = 3\n',
+    '.cargo/config.toml': '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\ndep = "1"\n[build-dependencies]\ncc = "1"\n',
+    'app/build.rs': 'mod gen;\nfn main() { cc::Build::new(); gen::run(); }\n',
+    'app/gen.rs': 'pub fn run() {}\n',
+    'app/src/main.rs': 'fn main() { dep::f(); }\n',
+    'vendor/dep/Cargo.toml': '[package]\nname = "dep"\nversion = "1.0.0"\n[build-dependencies]\nautocfg = "1"\n',
+    'vendor/dep/build.rs': 'fn main() { autocfg::new(); }\n',
+    'vendor/dep/src/lib.rs': 'pub fn f() {}\n',
+    'vendor/cc/Cargo.toml': '[package]\nname = "cc"\nversion = "1.0.0"\n',
+    'vendor/cc/src/lib.rs': 'pub struct Build;\n',
+    'vendor/autocfg/Cargo.toml': '[package]\nname = "autocfg"\nversion = "1.0.0"\n',
+    'vendor/autocfg/src/lib.rs': 'pub fn new() {}\n',
+    'vendor/unused/Cargo.toml': '[package]\nname = "unused"\nversion = "1.0.0"\n',
+    'vendor/unused/src/lib.rs': '',
+  }, async (tmp) => {
+    const plain = await buildRustBundle({ cwd: tmp, entries: ['app/src/main.rs'] })
+    t.assert.deepEqual([...plain.sources.keys()].toSorted(), ['app/src/main.rs', 'vendor/dep/src/lib.rs'])
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['app/src/main.rs'], cargoManifests: true })
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
+      '.cargo/config.toml', 'Cargo.lock', 'Cargo.toml',
+      'app/Cargo.toml', 'app/build.rs', 'app/gen.rs', 'app/src/main.rs',
+      'vendor/autocfg/Cargo.toml', 'vendor/autocfg/src/lib.rs', // dep's build-dependency, through dep's build script
+      'vendor/cc/Cargo.toml', 'vendor/cc/src/lib.rs', // app's build-dependency, through app's build script
+      'vendor/dep/Cargo.toml', 'vendor/dep/build.rs', 'vendor/dep/src/lib.rs',
+    ])
+    t.assert.equal(bundle.formats.get('app/Cargo.toml'), 'resource')
+    t.assert.equal(bundle.formats.get('Cargo.lock'), 'resource')
+    t.assert.equal(bundle.formats.get('.cargo/config.toml'), 'resource')
+    t.assert.equal(bundle.formats.get('app/build.rs'), 'rust')
+    t.assert.equal(bundle.entries.has('app/build.rs'), false) // a crate root of the walk, not an entry of the bundle
+    const edges = bundle.imports.get('rust')
+    t.assert.deepEqual(Object.fromEntries(edges.get('app/build.rs')), { 'mod gen': 'app/gen.rs', 'gen::run': 'app/gen.rs', 'use cc': 'vendor/cc/src/lib.rs' })
+    t.assert.deepEqual(Object.fromEntries(edges.get('vendor/dep/build.rs')), { 'use autocfg': 'vendor/autocfg/src/lib.rs' })
+    // Buckets: each manifest sits with its package; the root-level files in the workspace bucket.
+    t.assert.deepEqual(Object.keys(bundle.modules.get('vendor/dep').files).toSorted(), ['Cargo.toml', 'build.rs', 'src/lib.rs'])
+    t.assert.equal(bundle.modules.get('vendor/dep').ecosystem, 'cargo')
+    t.assert.deepEqual(Object.keys(bundle.modules.get('app').files).toSorted(), ['Cargo.toml', 'build.rs', 'gen.rs', 'src/main.rs'])
+    t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['.cargo/config.toml', 'Cargo.lock', 'Cargo.toml'])
+  })
+})
+
+test('parseRustcCfg reads rustc --print cfg output as a set of leaves', (t) => {
+  t.assert.deepEqual([...parseRustcCfg('debug_assertions\npanic="unwind"\ntarget_os="linux"\n\nunix\n')], ['debug_assertions', 'panic="unwind"', 'target_os="linux"', 'unix'])
+})
+
+// A Linux target as rustc would describe it, for tests that must not depend on rustc.
+const LINUX = { triple: 'x86_64-unknown-linux-gnu', cfgs: new Set(['unix', 'target_os="linux"', 'target_family="unix"', 'target_arch="x86_64"', 'target_env="gnu"', 'target_pointer_width="64"']) }
+
+test('createCargoContext decides target-specific dependency tables when the target is known', (t) => {
+  const files = {
+    'Cargo.toml': ['[package]', 'name = "app"', 'version = "0.1.0"', 'edition = "2021"',
+      "[target.'cfg(windows)'.dependencies]", 'win = "1"',
+      "[target.'cfg(unix)'.dependencies]", 'nix = "1"',
+      '[target.x86_64-unknown-linux-gnu.dependencies]', 'gnu = "1"',
+      '[target.aarch64-apple-darwin.dependencies]', 'mac = "1"',
+      "[target.'cfg(loom)'.dependencies]", 'loom = "1"'].join('\n'),
+    'src/main.rs': '',
+  }
+  for (const name of ['win', 'nix', 'gnu', 'mac', 'loom']) {
+    files[`vendor/${name}/Cargo.toml`] = `[package]\nname = "${name}"\nversion = "1.0.0"\n[features]\ndefault = ["std"]\nstd = []\n`
+    files[`vendor/${name}/src/lib.rs`] = ''
+  }
+  withProject(files, (tmp) => {
+    // Without a target every table counts.
+    t.assert.deepEqual(Object.keys(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] }))).toSorted(), ['.', 'vendor/gnu', 'vendor/loom', 'vendor/mac', 'vendor/nix', 'vendor/win'])
+    const linux = createCargoContext(tmp, { entries: ['src/main.rs'], target: LINUX })
+    t.assert.equal(linux.targetTriple, 'x86_64-unknown-linux-gnu')
+    t.assert.ok(linux.targetCfgs.has('unix'))
+    // `cfg(loom)` is a custom cfg the loader can't decide: kept.
+    t.assert.deepEqual(Object.keys(enabledOf(linux)).toSorted(), ['.', 'vendor/gnu', 'vendor/loom', 'vendor/nix'])
+    const plain = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    t.assert.equal(plain.targetTriple, null)
+    t.assert.equal(plain.targetCfgs, null)
+  })
+})
+
+test('buildRustBundle with a target leaves out the other targets\' modules and path variants', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': '#[cfg_attr(unix, path = "sys/unix.rs")]\n#[cfg_attr(windows, path = "sys/windows.rs")]\nmod sys;\n#[cfg(windows)]\nmod win;\n#[cfg(not(windows))]\nmod other;\n',
+    'src/sys/unix.rs': '',
+    'src/sys/windows.rs': '',
+    'src/win.rs': '',
+    'src/other.rs': '',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargoTarget: LINUX })
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/lib.rs', 'src/other.rs', 'src/sys/unix.rs'])
+    const lib = bundle.imports.get('rust').get('src/lib.rs')
+    t.assert.equal(lib.get('mod sys'), 'src/sys/unix.rs') // one file: no cfg-keyed map
+    t.assert.equal(lib.get('mod other'), 'src/other.rs')
+    const all = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'] })
+    t.assert.deepEqual([...all.sources.keys()].toSorted(), ['src/lib.rs', 'src/other.rs', 'src/sys/unix.rs', 'src/sys/windows.rs', 'src/win.rs'])
+  })
+})
+
+test('rustcTargetCfgs runs $RUSTC when set: a target only another toolchain knows', { skip: process.platform === 'win32' ? 'POSIX shell script' : false }, (t) => {
+  // Stands in for Solana's platform-tools rustc, which knows `sbf-solana-solana` where a rustup one does not.
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-rustc-'))
+  const fake = join(tmp, 'rustc')
+  writeFileSync(fake, [
+    '#!/bin/sh',
+    `printf '%s\\n%s\\n' "$PWD" "$RUSTUP_AUTO_INSTALL" > "${tmp}/ran"`,
+    'case "$*" in',
+    '  "-vV") printf "rustc 1.79.0-dev\\nhost: sbf-solana-solana\\n" ;;',
+    '  "--print cfg --target sbf-solana-solana") printf \'target_arch="sbf"\\ntarget_os="solana"\\ntarget_family="solana"\\ntarget_pointer_width="64"\\ntarget_endian="little"\\n\' ;;',
+    '  *) echo "unknown target" >&2; exit 1 ;;',
+    'esac',
+  ].join('\n'), { mode: 0o755 })
+  const previous = process.env.RUSTC
+  process.env.RUSTC = fake
+  try {
+    const sbf = rustcTargetCfgs('sbf-solana-solana')
+    t.assert.equal(sbf.triple, 'sbf-solana-solana')
+    t.assert.deepEqual([...sbf.cfgs], ['target_arch="sbf"', 'target_os="solana"', 'target_family="solana"', 'target_pointer_width="64"', 'target_endian="little"'])
+    t.assert.equal(rustcTargetCfgs('host').triple, 'sbf-solana-solana')
+    t.assert.throws(() => rustcTargetCfgs('x86_64-unknown-linux-gnu'), /rustc --print cfg --target x86_64-unknown-linux-gnu failed \(exit 1\):\nunknown target/u)
+    // `#[cfg(not(target_os = "solana"))]` is dead under it.
+    t.assert.equal(evalCfg('not(target_os = "solana")', { target: sbf.cfgs }), false)
+    // rustc ran from the user's home directory (never the project being bundled, whose
+    // `rust-toolchain` file could name any binary, nor a world-writable temp dir), with rustup's
+    // auto-install off.
+    t.assert.deepEqual(readFileSync(join(tmp, 'ran'), 'utf8').trim().split('\n'), [homedir(), '0'])
+    mkdirSync(join(tmp, 'project', 'home'), { recursive: true })
+    mkdirSync(join(tmp, 'elsewhere'))
+    rustcTargetCfgs('sbf-solana-solana', join(tmp, 'project'))
+    t.assert.equal(readFileSync(join(tmp, 'ran'), 'utf8').split('\n')[0], homedir())
+    // A home directory that is the bundle root, or inside it, would let the project's toolchain
+    // file choose: the filesystem root then.
+    const home = process.env.HOME
+    process.env.HOME = join(tmp, 'project', 'home')
+    try {
+      rustcTargetCfgs('sbf-solana-solana', join(tmp, 'project'))
+      t.assert.equal(readFileSync(join(tmp, 'ran'), 'utf8').split('\n')[0], parse(process.cwd()).root)
+      rustcTargetCfgs('sbf-solana-solana', join(tmp, 'project', 'home'))
+      t.assert.equal(readFileSync(join(tmp, 'ran'), 'utf8').split('\n')[0], parse(process.cwd()).root)
+      rustcTargetCfgs('sbf-solana-solana', join(tmp, 'elsewhere'))
+      t.assert.equal(readFileSync(join(tmp, 'ran'), 'utf8').split('\n')[0], join(tmp, 'project', 'home'))
+      // Through a link, either way round: real paths decide.
+      symlinkSync(join(tmp, 'project', 'home'), join(tmp, 'home-link'))
+      symlinkSync(join(tmp, 'project'), join(tmp, 'project-link'))
+      process.env.HOME = join(tmp, 'home-link')
+      rustcTargetCfgs('sbf-solana-solana', join(tmp, 'project'))
+      t.assert.equal(readFileSync(join(tmp, 'ran'), 'utf8').split('\n')[0], parse(process.cwd()).root)
+      process.env.HOME = join(tmp, 'project', 'home')
+      rustcTargetCfgs('sbf-solana-solana', join(tmp, 'project-link'))
+      t.assert.equal(readFileSync(join(tmp, 'ran'), 'utf8').split('\n')[0], parse(process.cwd()).root)
+    } finally {
+      if (home === undefined) delete process.env.HOME
+      else process.env.HOME = home
+    }
+  } finally {
+    if (previous === undefined) delete process.env.RUSTC
+    else process.env.RUSTC = previous
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+const hasRustc = spawnSync('rustc', ['--version'], { stdio: 'ignore' }).status === 0
+
+test('rustcTargetCfgs asks rustc for a target\'s cfg set, and for the host triple', { skip: hasRustc ? false : 'rustc not on PATH' }, (t) => {
+  const host = rustcTargetCfgs('host')
+  t.assert.match(host.triple, /^\w+-/u)
+  t.assert.ok([...host.cfgs].some((c) => c.startsWith('target_os=')))
+  t.assert.ok(host.cfgs.has('unix') || host.cfgs.has('windows'))
+  // Any target rustc knows, without its standard library installed.
+  const wasm = rustcTargetCfgs('wasm32-unknown-unknown')
+  t.assert.equal(wasm.triple, 'wasm32-unknown-unknown')
+  t.assert.ok(wasm.cfgs.has('target_arch="wasm32"'))
+  t.assert.ok(!wasm.cfgs.has('unix') && !wasm.cfgs.has('windows'))
+  t.assert.deepEqual(createCargoContext(featuresFixture, { entries: ['src/main.rs'], target: 'wasm32-unknown-unknown' }).targetCfgs, wasm.cfgs)
+  t.assert.throws(() => rustcTargetCfgs('no-such-target'), /rustc --print cfg --target no-such-target failed/u)
+})
+
+test('createCargoContext finds vendored crates in the directory .cargo/config.toml names', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\ndep = "1"\n',
+    '.cargo/config.toml': '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "third_party/crates"\n',
+    'src/main.rs': '',
+    'third_party/crates/dep/Cargo.toml': '[package]\nname = "dep"\nversion = "1.0.0"\n',
+    'third_party/crates/dep/src/lib.rs': '',
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    t.assert.equal(cargo.vendorDir, 'third_party/crates')
+    t.assert.equal(cargo.resolveCrate('dep', 'src/main.rs'), 'third_party/crates/dep/src/lib.rs')
+    t.assert.deepEqual(enabledOf(cargo), { '.': [], 'third_party/crates/dep': [] })
+  })
+  t.assert.equal(createCargoContext(featuresFixture, { entries: ['src/main.rs'] }).vendorDir, 'vendor')
+  // however the table is spelled out
+  const manifest = '[package]\nname = "app"\nversion = "0.1.0"\n'
+  withProject({ 'Cargo.toml': manifest, '.cargo/config': '[source]\nvendored-sources = { directory = "deps/" }\n' }, (tmp) => {
+    t.assert.equal(createCargoContext(tmp).vendorDir, 'deps')
+  })
+  // A cargo config, Cargo.toml or Cargo.lock that exists but isn't TOML stops the build, naming it.
+  withProject({ 'Cargo.toml': manifest, '.cargo/config.toml': '[source.vendored-sources]\ndirectory = third_party\n' }, (tmp) => {
+    t.assert.throws(() => createCargoContext(tmp), { name: 'TomlError', message: '.cargo/config.toml: expected a value, found "third_party" at line 2' })
+  })
+  withProject({ 'Cargo.toml': '[package]\nname = "app"\nname = "again"\n', 'src/main.rs': '' }, (tmp) => {
+    t.assert.throws(() => createCargoContext(tmp, { entries: ['src/main.rs'] }).packageInfo('src/main.rs'), { name: 'TomlError', message: 'Cargo.toml: duplicate key "name" at line 3' })
+  })
+})
+
 // --- bundling ---
+
+test('buildRustBundle carries include!d source and include_str!/include_bytes! assets as resources', async (t) => {
+  const bundle = await buildRustBundle({ cwd: join(fixtures, 'includes'), entries: ['src/lib.rs'] })
+  t.assert.deepEqual(sorted(bundle.sources.keys()), ['README.md', 'data/blob.bin', 'data/table.txt', 'src/gated.rs', 'src/generated/consts.rs', 'src/lib.rs', 'src/macros.rs'])
+  t.assert.deepEqual([bundle.formats.get('src/generated/consts.rs'), bundle.formats.get('data/table.txt'), bundle.formats.get('data/blob.bin')], ['rust', 'resource', 'resource:base64'])
+  t.assert.equal(bundle.sources.get('data/blob.bin'), Buffer.from([0, 0xff, 0xfe, 1]).toString('base64'))
+  t.assert.deepEqual(Object.keys(bundle.modules.get('.').files).toSorted(), ['README.md', 'data/blob.bin', 'data/table.txt', 'src/gated.rs', 'src/generated/consts.rs', 'src/lib.rs', 'src/macros.rs'])
+})
 
 test('buildRustBundle leaves feature-gated code that is off out of the bundle, per crate and per version', async (t) => {
   const bundle = await buildRustBundle({ cwd: featuresFixture, entries: ['src/main.rs'] })
@@ -421,4 +979,66 @@ test('buildRustBundle treats a feature that is on as firm: a missing gated modul
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
+})
+
+test('buildRustBundle loads a crate root the tree pass asks for: a crate whose name the file also binds as a value', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlog = "0.4"\n',
+    'src/main.rs': 'mod util;\nuse crate::util::log;\nfn main() { log(); log::info!("x"); }\n',
+    'src/util.rs': 'pub fn log() {}\n',
+    'vendor/log/Cargo.toml': '[package]\nname = "log"\nversion = "0.4.0"\n',
+    'vendor/log/src/lib.rs': 'pub mod macros;\n',
+    'vendor/log/src/macros.rs': '',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] })
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/main.rs', 'src/util.rs', 'vendor/log/src/lib.rs', 'vendor/log/src/macros.rs'])
+    t.assert.deepEqual(Object.fromEntries(bundle.imports.get('rust').get('src/main.rs')), { 'mod util': 'src/util.rs', 'crate::util::log': 'src/util.rs', 'use log': 'vendor/log/src/lib.rs' })
+  })
+})
+
+test('buildRustBundle reads a package-defined quote! body as macro input while walking, whichever file defines it first', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': '#[macro_use]\nmod m;\nmod user;\n',
+    'src/m.rs': '#[macro_use]\nmod inner;\n', // the definition is a wave deeper than user.rs: met after user.rs was scanned
+    'src/m/inner.rs': 'macro_rules! quote { ($($t:tt)*) => {} }\n',
+    'src/user.rs': 'quote! { mod hidden; }\n',
+    'src/user/hidden.rs': 'pub fn h() {}\n',
+    'vendor/other/Cargo.toml': '[package]\nname = "other"\nversion = "1.0.0"\n',
+    'vendor/other/src/lib.rs': 'fn g() { quote! { mod nothere; } }\n', // another package: a template, skipped
+  }, async (tmp) => {
+    const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/lib.rs', 'vendor/other/src/lib.rs'] }))
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/lib.rs', 'src/m.rs', 'src/m/inner.rs', 'src/user.rs', 'src/user/hidden.rs', 'vendor/other/src/lib.rs'])
+    t.assert.deepEqual(Object.fromEntries(bundle.imports.get('rust').get('src/user.rs')), { 'mod hidden': 'src/user/hidden.rs', 'quote!': 'src/m/inner.rs' })
+    t.assert.deepEqual(warnings, [])
+  })
+})
+
+test('buildRustTree with a target holds every file to the target\'s cfgs: mio\'s Waker is the linux one, not the first written', (t) => {
+  // mio's sys/unix/mod.rs declares the selector (with its own `Waker` for the poll backend)
+  // before the waker module; a Linux build has the eventfd waker.
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': 'mod sys;\nmod waker;\n',
+    'src/sys/mod.rs': '#[cfg(unix)]\ncfg_os_poll! {\n    mod unix;\n    pub use self::unix::*;\n}\n',
+    'src/sys/unix/mod.rs': 'cfg_os_poll! {\n    #[cfg_attr(any(mio_unsupported_force_poll_poll, target_os = "aix", target_os = "solaris"), path = "selector/poll.rs")]\n    #[cfg_attr(all(not(mio_unsupported_force_poll_poll), any(target_os = "android", target_os = "linux")), path = "selector/epoll.rs")]\n    mod selector;\n    pub(crate) use self::selector::*;\n    #[cfg_attr(any(mio_unsupported_force_waker_pipe, target_os = "aix", target_os = "solaris"), path = "waker/pipe.rs")]\n    #[cfg_attr(all(not(mio_unsupported_force_waker_pipe), any(target_os = "android", target_os = "linux")), path = "waker/eventfd.rs")]\n    mod waker;\n    pub(crate) use self::waker::Waker;\n}\n',
+    'src/sys/unix/selector/poll.rs': 'pub struct Selector;\npub struct Waker;\n',
+    'src/sys/unix/selector/epoll.rs': 'pub struct Selector;\n',
+    'src/sys/unix/waker/pipe.rs': 'pub struct Waker;\n',
+    'src/sys/unix/waker/eventfd.rs': 'pub struct Waker;\n',
+    'src/waker.rs': 'use crate::sys;\nfn f() { sys::Waker::new(); sys::Selector::new(); }\n',
+  }
+  withProject(files, (tmp) => {
+    const entries = ['src/lib.rs']
+    const sources = new Map(Object.entries(files).filter(([f]) => f.endsWith('.rs')))
+    const plain = buildRustTree(sources, { roots: entries, baseDir: tmp, cargo: createCargoContext(tmp, { entries }) })
+    // Without a target nothing rules either waker file out (`any(mio_unsupported_force_waker_pipe,
+    // aix, solaris)` may hold on aix): the first variant declared. With a Linux target the aix and
+    // solaris alternatives are out, the custom cfg is presumably off, and the eventfd branch's
+    // `any(android, linux)` holds: that one.
+    t.assert.equal(Object.fromEntries(plain.resolutions.get('src/waker.rs'))['sys::Waker::new'], 'src/sys/unix/waker/pipe.rs')
+    const linux = buildRustTree(sources, { roots: entries, baseDir: tmp, cargo: createCargoContext(tmp, { entries, target: LINUX }) })
+    t.assert.equal(Object.fromEntries(linux.resolutions.get('src/waker.rs'))['sys::Waker::new'], 'src/sys/unix/waker/eventfd.rs')
+    t.assert.equal(Object.fromEntries(linux.resolutions.get('src/waker.rs'))['sys::Selector::new'], 'src/sys/unix/selector/epoll.rs')
+  })
 })

@@ -3947,10 +3947,60 @@ test('CLI: bundle rejects the --cargo-* feature flags for a non-Rust bundle, and
   t.assert.match(runCli(['bundle', '--cargo-features=x', 'main.sh'], { cwd }).stderr, /--cargo-features is only valid for Rust bundles/u)
   t.assert.match(runCli(['bundle', '--cargo-no-default-features', 'main.sh'], { cwd }).stderr, /--cargo-no-default-features is only valid for Rust bundles/u)
   t.assert.match(runCli(['bundle', '--cargo-all-features', 'main.sh'], { cwd }).stderr, /--cargo-all-features is only valid for Rust bundles/u)
+  t.assert.match(runCli(['bundle', '--cargo-target=host', 'main.sh'], { cwd }).stderr, /--cargo-target is only valid for Rust bundles/u)
+  t.assert.match(runCli(['bundle', '--cargo-manifests', 'main.sh'], { cwd }).stderr, /--cargo-manifests is only valid for Rust bundles/u)
   const empty = runCli(['bundle', '--cargo-features=,', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
   t.assert.equal(empty.status, 1)
   t.assert.match(empty.stderr, /--cargo-features must list at least one feature/u)
+  const target = runCli(['bundle', '--cargo-target=x86_64 linux', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
+  t.assert.equal(target.status, 1)
+  t.assert.match(target.stderr, /--cargo-target must be a target triple or "host"/u)
 })
+
+test('buildBundle rejects --cargo-target and --cargo-manifests for a non-Rust bundle', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'], cargoTarget: 'host' }),
+    /--cargo-target is only valid for Rust bundles/u,
+  )
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'], cargoManifests: true }),
+    /--cargo-manifests is only valid for Rust bundles/u,
+  )
+})
+
+test('CLI: bundle --cargo-manifests adds the package manifest, lockfile and build script to a Rust bundle', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const cwd = join(rustFixtures, 'includes')
+  const plain = runCli(['bundle', '-o', outPath, 'src/lib.rs'], { cwd })
+  t.assert.equal(plain.status, 0, plain.stderr)
+  t.assert.match(plain.stderr, /Bundled 7 files in 1 package/u)
+  const withManifests = runCli(['bundle', '--cargo-manifests', '-o', outPath, 'src/lib.rs'], { cwd })
+  t.assert.equal(withManifests.status, 0, withManifests.stderr)
+  t.assert.match(withManifests.stderr, /Bundled 11 files in 1 package/u)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...parsed.sources.keys()].toSorted(), [
+    'Cargo.lock', 'Cargo.toml', 'README.md', 'build.rs', 'build/helper.rs', 'data/blob.bin', 'data/table.txt',
+    'src/gated.rs', 'src/generated/consts.rs', 'src/lib.rs', 'src/macros.rs',
+  ])
+  t.assert.equal(parsed.formats.get('Cargo.toml'), 'resource')
+  t.assert.equal(parsed.formats.get('build.rs'), 'rust')
+  t.assert.equal(parsed.imports.get('rust').get('build.rs').get('mod helper'), 'build/helper.rs')
+  t.assert.deepEqual([...parsed.entries], ['src/lib.rs'])
+}))
+
+const hasRustc = spawnSync('rustc', ['--version'], { stdio: 'ignore' }).status === 0
+
+test('CLI: bundle --cargo-target keeps only the named target\'s #[cfg_attr(…, path)] variant', { skip: hasRustc ? false : 'rustc not on PATH' }, withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '--cargo-target=x86_64-unknown-linux-gnu', '-o', outPath, 'src/lib.rs'], { cwd: join(rustFixtures, 'path-attr') })
+  t.assert.equal(r.status, 0, r.stderr)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.ok(parsed.sources.has('src/sys/unix.rs'))
+  // Neither the windows variant nor the default `src/sys.rs`: the unix `#[path]` applies outright.
+  t.assert.ok(!parsed.sources.has('src/sys/windows.rs'))
+  t.assert.ok(!parsed.sources.has('src/sys.rs'))
+  t.assert.equal(parsed.imports.get('rust').get('src/lib.rs').get('mod sys'), 'src/sys/unix.rs')
+}))
 
 test('CLI: EXODUS_STASIS_DEBUG=1 prints the resolved Rust features per package', (t) => {
   const r = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features'), env: { ...cleanEnv, EXODUS_STASIS_DEBUG: '1' } })
