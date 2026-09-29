@@ -2143,11 +2143,10 @@ test('scanRustItems reads the cfg a gate macro\'s definition wraps items in; bui
   // No features known: either, each under its gate's cfg; `rt` off: `cfg_not_rt!`'s is what the
   // build compiles, and it is taken though written second.
   t.assert.deepEqual(edges(buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs'))['crate::X'], { 'feature = "rt"': 'src/a.rs', 'not(feature = "rt")': 'src/b.rs' })
-  const features = new Set()
-  const cargo = { packageInfo: () => ({ dir: '.' }), isTestTarget: () => false, isVendored: () => false, featuresFor: () => features, maybeFeaturesFor: () => null, platformOf: () => null, cfgsSetFor: () => null, resolveCrate: () => null, isLibRoot: () => false, unitOfCrate: (_, u) => u }
-  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'], cargo }).resolutions.get('src/user.rs'))['crate::X'], 'src/b.rs')
-  features.add('rt')
-  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'], cargo }).resolutions.get('src/user.rs'))['crate::X'], 'src/a.rs')
+  // A context's features are settled once resolved (builds are interned per context): one each.
+  const cargoWith = (features) => ({ packageInfo: () => ({ dir: '.' }), isTestTarget: () => false, isVendored: () => false, featuresFor: () => features, maybeFeaturesFor: () => null, platformOf: () => null, cfgsSetFor: () => null, resolveCrate: () => null, isLibRoot: () => false, unitOfCrate: (_, u) => u })
+  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'], cargo: cargoWith(new Set()) }).resolutions.get('src/user.rs'))['crate::X'], 'src/b.rs')
+  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'], cargo: cargoWith(new Set(['rt'])) }).resolutions.get('src/user.rs'))['crate::X'], 'src/a.rs')
 })
 
 test('buildRustTree takes `cfg_x!` and `cfg_not_x!` for each other\'s negation only when their definitions say so', (t) => {

@@ -1410,11 +1410,19 @@ const compatible = (asker, set) => {
 // code the build doesn't compile either, means what it would mean where it compiles. For an
 // asker whose own leaves can't hold (`deadHere`) the build says nothing.
 const EVALUABLE_CFG_KEYS = new Set([...TARGET_CFG_KEYS, 'feature', 'test', 'doc', 'doctest'])
+const leafFalseMemo = new WeakMap() // build → leaf → verdict (builds are interned per settled context, see buildOf)
 const leafFalse = (l, build) => {
   if (l.alts !== undefined) return l.alts.every((alt) => alt.some((m) => leafFalse(m, build)))
   if (!EVALUABLE_CFG_KEYS.has(l.key)) return false
+  const memo = leafFalseMemo.get(build) ?? leafFalseMemo.set(build, new Map()).get(build)
   const pred = l.value === null ? l.key : `${l.key} = "${l.value}"`
-  return evalCfg(l.neg ? `not(${pred})` : pred, build) === false
+  const text = l.neg ? `not(${pred})` : pred
+  let verdict = memo.get(text)
+  if (verdict === undefined) {
+    verdict = evalCfg(text, build) === false
+    memo.set(text, verdict)
+  }
+  return verdict
 }
 const deadUnder = (leaves, build) => build !== undefined && leaves.some((l) => leafFalse(l, build))
 const deadFor = (asker, set) => {
@@ -1705,7 +1713,13 @@ function withAlternatives(found, asker) {
   for (const { answer, leaves } of found) {
     if (answer.file === undefined || seen.has(answer.file)) continue
     seen.add(answer.file)
-    const base = cfgKey(cfgTextOf(leaves.leaves.filter((l) => asker === undefined || !asker.keys.has(leafKey(l)))))
+    // Kept per asker set (the text leaves out what the asker holds itself).
+    let text = asker?.texts.get(leaves.key)
+    if (text === undefined) {
+      text = cfgTextOf(leaves.leaves.filter((l) => asker === undefined || !asker.keys.has(leafKey(l))))
+      asker?.texts.set(leaves.key, text)
+    }
+    const base = cfgKey(text)
     let key = base
     for (let k = 2; alternatives.has(key); k++) key = `${base}#${k}`
     alternatives.set(key, answer.file)
@@ -2325,7 +2339,15 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   // package that skipped a body of that name are scanned again with the name dropped from the set
   // (the package: the Cargo context's; without one, a vendored crate's `vendor/<dir>`, else the
   // bundle's).
-  const packageOf = (path) => (ctx ? ctx.packageInfo(path)?.dir ?? '.' : path.startsWith(`${VENDOR_DIR}/`) ? path.split('/', 2).join('/') : '.')
+  const packages = new Map() // path → its package, asked for every import and item (gatesOf)
+  const packageOf = (path) => {
+    let dir = packages.get(path)
+    if (dir === undefined) {
+      dir = ctx ? ctx.packageInfo(path)?.dir ?? '.' : path.startsWith(`${VENDOR_DIR}/`) ? path.split('/', 2).join('/') : '.'
+      packages.set(path, dir)
+    }
+    return dir
+  }
   const ownTemplates = new Map() // package → the template names it defines
   for (const [path, items] of scanned) {
     for (const m of items.macros) if (TEMPLATE_MACROS.has(m.name)) (ownTemplates.get(packageOf(path)) ?? ownTemplates.set(packageOf(path), new Set()).get(packageOf(path))).add(m.name)
@@ -2502,7 +2524,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
     const build = buildOf(path, ctx, units)
     const settable = ctx?.cfgsSetFor(path) ?? null
     const sharedKey = `${set.key}\0${idOf(build)}\0${settable === null ? '' : idOf(settable)}`
-    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), build, deadHere: deadUnder(set.leaves, build), custom: customFor(settable) }).get(sharedKey)
+    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), texts: new Map(), build, deadHere: deadUnder(set.leaves, build), custom: customFor(settable) }).get(sharedKey)
     f.asker = { file: path, set, ...shared }
   }
   // Per crate root, each module's child modules by name (every module's parent is in its tree).
