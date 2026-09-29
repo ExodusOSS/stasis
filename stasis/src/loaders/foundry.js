@@ -817,35 +817,3 @@ export function foundryProject(baseDir, { env = process.env } = {}) {
   const envUsed = [...(env.FOUNDRY_PROFILE ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []), ...(envName === null ? [] : [envName])]
   return { remappings, libs: config.libs, files: relFiles, envUsed }
 }
-
-// --- Carrying configs (`--manifests`) -------------------------------------------------------
-
-// What in a foundry.toml holds credentials rather than build settings: the RPC endpoint and
-// Etherscan tables (provider URLs embed API keys), wherever they sit, and keys named like one.
-const SECRET_TABLES = new Set(['rpc_endpoints', 'etherscan'])
-const SECRET_KEY_RE = /^(?:eth_rpc_url|eth_rpc_jwt|eth_rpc_headers|fork_url)$|(?:^|_)(?:api_key|key|secret|token|password|passphrase|mnemonic|private_key|jwt)$/u
-
-// `scheme://user:password@host` or `scheme://token@host` -> `scheme://host`, anywhere in a text.
-export const scrubUrlCredentials = (text) => text.replaceAll(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@"'<>]+@/giu, '$1')
-
-// A foundry.toml without its credentials: a SECRET_TABLES table goes whole (every line up to the
-// next header), a pair under one or keyed like a secret goes line for line, and URLs lose their
-// user info. Everything else is kept verbatim. Throws a TomlError naming `file` on text that
-// isn't TOML: what can't be read can't be redacted.
-export function redactFoundryToml(text, file = null) {
-  const lines = text.split('\n')
-  const entries = tomlEntries(text, { file })
-  const drop = new Set()
-  const isSecretTable = (segs) => segs.some((seg) => SECRET_TABLES.has(seg))
-  entries.forEach((e, idx) => {
-    const segs = e.path.map(snakeCase)
-    if (e.header) {
-      if (!isSecretTable(segs)) return
-      const next = entries.slice(idx + 1).find((x) => x.header)
-      for (let i = e.first; i < (next ? next.first : lines.length); i++) drop.add(i)
-    } else if (isSecretTable(segs) || SECRET_KEY_RE.test(segs.at(-1))) {
-      for (let i = e.first; i <= e.last; i++) drop.add(i)
-    }
-  })
-  return scrubUrlCredentials(lines.filter((_, i) => !drop.has(i)).join('\n'))
-}

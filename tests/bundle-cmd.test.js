@@ -490,8 +490,8 @@ test('buildSolidityBundle refuses a remapping target outside the project root', 
   ))
 }))
 
-test('buildSolidityBundle with manifests leaves credentials and a dependency\'s outside `extends` behind', withTmp(async (t, tmp) => {
-  writeProject(tmp, {
+test('buildSolidityBundle with manifests carries configs as written, never `.env`, hardhat.config.* or a dependency\'s outside `extends`', withTmp(async (t, tmp) => {
+  const files = {
     'foundry.toml': [
       '[profile.default]',
       'src = "src"',
@@ -514,14 +514,16 @@ test('buildSolidityBundle with manifests leaves credentials and a dependency\'s 
     'src/A.sol': 'import "dep/D.sol";\n',
     'lib/dep/src/D.sol': 'contract D {}\n',
     'lib/dep/foundry.toml': '[profile.default]\nextends = "../../.env"\n',
-  })
+  }
+  writeProject(tmp, files)
   const { result: bundle, lines } = await captureStderr(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} }))
-  // The submodule's own foundry.toml is carried; the `.env` it names is neither read as config nor carried.
+  // The configs are carried byte for byte, whatever they hold; stasis doesn't edit them.
   const carried = [...bundle.sources].filter(([p]) => !p.endsWith('.sol'))
   t.assert.deepEqual(carried.map(([p]) => p).toSorted(), ['.gitmodules', 'foundry.toml', 'lib/dep/foundry.toml'])
-  for (const [, text] of carried) t.assert.doesNotMatch(text, /KEY\d/u)
-  t.assert.equal(bundle.sources.get('foundry.toml'), '[profile.default]\nsrc = "src"\n\n[fmt]\nline_length = 100\n')
-  t.assert.match(bundle.sources.get('.gitmodules'), /url = https:\/\/github\.com\/o\/dep\.git/u)
+  for (const [p, text] of carried) t.assert.equal(text, files[p], p)
+  // `.env` and hardhat.config.* are never carried, and the submodule's `extends` reaching the
+  // project's `.env` is neither read as config nor carried.
+  for (const [, text] of bundle.sources) t.assert.doesNotMatch(text, /KEY[67]/u)
   t.assert.ok(lines.some((l) => l.includes("Skipping a dependency's config") && l.includes('outside the dependency')))
 }))
 

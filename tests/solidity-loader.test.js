@@ -17,7 +17,7 @@ import {
   readRemappingsFile,
   resolveSolImport,
 } from '../stasis/src/loaders/solidity.js'
-import { findRemappingsWithContext, foundryProject, foundryTomlRemappings, redactFoundryToml, scrubUrlCredentials } from '../stasis/src/loaders/foundry.js'
+import { findRemappingsWithContext, foundryProject, foundryTomlRemappings } from '../stasis/src/loaders/foundry.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'solidity-bundle')
 
@@ -607,30 +607,7 @@ test('foundry.toml profiles: legacy [<name>] tables, case-insensitive names, quo
   t.assert.deepEqual(foundryTomlRemappings('remappings = ["@top/=lib/top/"]\n').map((r) => r.name), ['@top/'])
 })
 
-test('redactFoundryToml drops RPC/Etherscan tables and secret-named keys, keeping the rest verbatim', (t) => {
-  const toml = [
-    '# build',
-    '[profile.default]',
-    'src = "src"',
-    'eth_rpc_url = "https://eth.example/v2/K1"',
-    'remappings = [',
-    '  "a/=b/", # comment',
-    ']',
-    'etherscan = { mainnet = { key = "K2" } }',
-    '[profile.default.rpc_endpoints]',
-    'sepolia = "https://x/K3"',
-    '[rpc_endpoints]',
-    '"weird name" = "https://x/K4"',
-    '[etherscan]',
-    'mainnet = { key = "K5" }',
-    '[fmt]',
-    'repo = "https://user:K6@host/r"',
-    '',
-  ].join('\n')
-  t.assert.equal(redactFoundryToml(toml), '# build\n[profile.default]\nsrc = "src"\nremappings = [\n  "a/=b/", # comment\n]\n[fmt]\nrepo = "https://host/r"\n')
-  t.assert.equal(scrubUrlCredentials('https://t@github.com/o/r git@github.com:o/r https://h/p@v1'), 'https://github.com/o/r git@github.com:o/r https://h/p@v1')
-  // what can't be read as TOML can't be redacted: the file and line are named
-  t.assert.throws(() => redactFoundryToml('[rpc_endpoints]\nmainnet = "https://k@h" junk\n', 'foundry.toml'), { name: 'TomlError', message: 'foundry.toml:2: unexpected text after the value' })
+test('foundryTomlRemappings names the line of a foundry.toml that isn\'t TOML', (t) => {
   t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["a/=b/"\n'), { name: 'TomlError', message: 'line 2: unterminated array' })
 })
 
