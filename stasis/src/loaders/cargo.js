@@ -1,6 +1,6 @@
-// Cargo manifests for the Rust loader: a Cargo.toml / Cargo.lock reader (the TOML subset Cargo
-// uses), per-bundle package lookup, dependency resolution among in-tree crates (the package's own
-// lib, workspace `path` deps, `cargo vendor`ed registry crates) and feature resolution done the
+// Cargo manifests for the Rust loader: a Cargo.toml / Cargo.lock reader (over the TOML reader in
+// toml.js), per-bundle package lookup, dependency resolution among in-tree crates (the package's
+// own lib, workspace `path` deps, `cargo vendor`ed registry crates) and feature resolution done the
 // way `cargo build` does it, so `#[cfg(feature = "…")]` can be decided per crate.
 
 import { spawnSync } from 'node:child_process'
@@ -8,6 +8,8 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { dirname, isAbsolute, join, posix, relative } from 'node:path'
 
 import { toPosix } from '@exodus/stasis-core/util'
+
+import { tomlEntries } from './toml.js'
 
 // `cargo vendor` copies registry crates in-tree under this dir.
 export const VENDOR_DIR = 'vendor'
@@ -31,43 +33,7 @@ export function readFileOrNull(file) {
   }
 }
 
-// --- Text helpers (shared with the Rust scanner) --------------------------------------
-
-// Index of the bracket closing the one opened at `open`, or the last index when unbalanced.
-export function matchClose(text, open) {
-  const close = { '[': ']', '(': ')', '{': '}' }[text[open]]
-  let depth = 0
-  for (let i = open; i < text.length; i++) {
-    if (text[i] === text[open]) depth++
-    else if (text[i] === close && --depth === 0) return i
-  }
-  return text.length - 1
-}
-
-// Split on commas outside brackets/braces/parentheses/strings.
-export function splitTopLevel(text) {
-  const parts = []
-  let depth = 0
-  let start = 0
-  let inStr = false
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (inStr) {
-      if (ch === '\\') i++
-      else if (ch === '"') inStr = false
-      continue
-    }
-    if (ch === '"') inStr = true
-    else if (ch === '(' || ch === '[' || ch === '{') depth++
-    else if (ch === ')' || ch === ']' || ch === '}') depth--
-    else if (ch === ',' && depth === 0) {
-      parts.push(text.slice(start, i))
-      start = i + 1
-    }
-  }
-  parts.push(text.slice(start))
-  return parts
-}
+// --- Paths ---------------------------------------------------------------------------
 
 // Project-relative `sub` under `dir`, normalized; null when it escapes the bundle root.
 export function normalizeRel(dir, sub) {
@@ -77,147 +43,8 @@ export function normalizeRel(dir, sub) {
   return rel
 }
 
-// --- TOML subset ----------------------------------------------------------------------
-
-// `[table]` / `[[array-table]]` header → its name; `key = value` → key (quotes kept) and raw value.
-const TABLE_HEADER_RE = /^\[\[?\s*([^\]]+?)\s*\]\]?/u
-const KEY_VALUE_RE = /^([\w."'-]+)\s*=\s*([\s\S]+)$/u
-
-// One physical line: `code` is the line without its `# comment`, `depth` its net bracket depth,
-// both judged outside quoted strings (a `#`, `[` or `{` inside one is text).
-function scanTomlLine(line) {
-  let depth = 0
-  let quote = null
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (quote) {
-      if (ch === '\\' && quote === '"') i++
-      else if (ch === quote) quote = null
-    } else if (ch === '"' || ch === "'") quote = ch
-    else if (ch === '[' || ch === '{') depth++
-    else if (ch === ']' || ch === '}') depth--
-    else if (ch === '#') return { code: line.slice(0, i), depth }
-  }
-  return { code: line, depth }
-}
-
-// Physical lines → logical lines: a `key = """` / `key = '''` multi-line string takes the lines
-// up to its closing delimiter verbatim (a `[x]` inside a description is text, not a table), and a
-// `key = [` / `key = {` whose brackets don't close on the line takes the following lines up to
-// the close (multi-line arrays are how long `features` lists and `members` are written).
-// Comments are dropped from the non-string lines. Each comes with the span of physical lines
-// (`first`..`last`, 0-based) it took.
-function* logicalLineSpans(text) {
-  const raw = text.split('\n')
-  for (let i = 0; i < raw.length; i++) {
-    const first = i
-    let { code: line, depth } = scanTomlLine(raw[i])
-    const kv = KEY_VALUE_RE.exec(line.trim())
-    if (kv) {
-      const ml = /^("""|''')/u.exec(kv[2])
-      if (ml && kv[2].indexOf(ml[1], 3) === -1) {
-        line = raw[i]
-        while (i + 1 < raw.length) {
-          line += `\n${raw[++i]}`
-          if (raw[i].includes(ml[1])) break
-        }
-      } else {
-        while (depth > 0 && i + 1 < raw.length) {
-          const next = scanTomlLine(raw[++i])
-          line += `\n${next.code}`
-          depth += next.depth
-        }
-      }
-    }
-    yield { line, first, last: i }
-  }
-}
-
-const logicalLines = (text) => [...logicalLineSpans(text)].map((l) => l.line)
-
-// A dotted TOML key or table name -> its segments, quotes dropped (a quoted segment keeps its dots:
-// `profile."ci.fast"` is ['profile', 'ci.fast']).
-function splitTomlKey(key) {
-  const out = []
-  let cur = ''
-  let quote = null
-  for (const ch of key) {
-    if (quote) {
-      if (ch === quote) quote = null
-      else cur += ch
-    } else if (ch === '"' || ch === "'") {
-      quote = ch
-    } else if (ch === '.') {
-      out.push(cur.trim())
-      cur = ''
-    } else {
-      cur += ch
-    }
-  }
-  out.push(cur.trim())
-  return out
-}
-
-// Every `[header]` and `key = value` of a TOML text, in order, for readers of other TOML configs
-// (foundry.toml): a header as `{ path, header: true }` (the table's segments), a pair as
-// `{ path, header: false, value }` (the enclosing table's segments then the key's), each with the
-// physical lines (`first`..`last`) it spans.
-export function* tomlEntries(text) {
-  let table = []
-  for (const { line: raw, first, last } of logicalLineSpans(text)) {
-    const line = raw.trim()
-    const header = TABLE_HEADER_RE.exec(line)
-    if (header) {
-      table = splitTomlKey(header[1])
-      yield { path: table, header: true, first, last }
-      continue
-    }
-    const kv = KEY_VALUE_RE.exec(line)
-    if (kv) yield { path: [...table, ...splitTomlKey(kv[1])], header: false, value: parseTomlValue(kv[2]), first, last }
-  }
-}
-
-const TOML_ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' }
-
-// One TOML value: quoted string, bool, array (as an array), or a single-line inline table (as a
-// plain object); anything else is returned raw.
-export function parseTomlValue(raw) {
-  const text = raw.trim()
-  if (text.startsWith('"""') || text.startsWith("'''")) {
-    const delim = text.slice(0, 3)
-    const end = text.indexOf(delim, 3)
-    return (end === -1 ? text.slice(3) : text.slice(3, end)).replace(/^\n/u, '')
-  }
-  if (text.startsWith('"')) {
-    const m = /^"((?:[^"\\]|\\.)*)"/u.exec(text)
-    if (!m) return text
-    return m[1].replaceAll(/\\(u[\dA-Fa-f]{4}|U[\dA-Fa-f]{8}|.)/gu, (_, e) => (e.length > 1 ? String.fromCodePoint(Number.parseInt(e.slice(1), 16)) : TOML_ESCAPES[e] ?? e))
-  }
-  if (text.startsWith("'")) {
-    const m = /^'([^']*)'/u.exec(text)
-    return m ? m[1] : text
-  }
-  if (text.startsWith('{')) {
-    const end = matchClose(text, 0)
-    const table = {}
-    for (const part of splitTopLevel(text.slice(1, end))) {
-      const kv = KEY_VALUE_RE.exec(part.trim())
-      if (kv) table[kv[1].replaceAll(/["']/gu, '')] = parseTomlValue(kv[2])
-    }
-    return table
-  }
-  if (text.startsWith('[')) {
-    const end = matchClose(text, 0)
-    return splitTopLevel(text.slice(1, end)).map((p) => p.trim()).filter(Boolean).map(parseTomlValue)
-  }
-  if (text === 'true') return true
-  if (text === 'false') return false
-  return text
-}
-
 // --- Cargo.toml -----------------------------------------------------------------------
 
-const DEP_TABLE_RE = /^(?:target\..+\.)?(dependencies|dev-dependencies|build-dependencies)(?:\.(.+))?$/u
 const DEP_KINDS = { dependencies: 'normal', 'dev-dependencies': 'dev', 'build-dependencies': 'build' }
 // Entries of a `[features]` list beyond a plain feature name: `dep:key` and `key/feat` / `key?/feat`.
 const DEP_IMPLICATION_RE = /^dep:(.+)$/u
@@ -245,7 +72,10 @@ export function isTestTargetPath(pkgDir, fileRel) {
 // (kind, `path`/`version`/`package`/`workspace`, `optional`, `default-features`, `features`),
 // `[features]`, `[patch.*]` path overrides and the workspace tables members inherit from.
 // Dependency keys are normalized to the `use` spelling (`-` → `_`); feature names keep theirs.
-export function parseCargoManifest(text) {
+// Each pair is read by the table path it lands at, so `[dependencies.foo] features = […]`,
+// `[dependencies] foo.features = […]` and `foo = { features = […] }` are one thing. Throws a
+// TomlError naming `file` on text that isn't TOML.
+export function parseCargoManifest(text, file = null) {
   const manifest = {
     package: null, // { name, version, versionFromWorkspace, edition }
     resolver: null, // "1" | "2" | "3" from [workspace] or [package]
@@ -288,49 +118,44 @@ export function parseCargoManifest(text) {
     if (defaults === true || defaults === false) request.defaultFeatures = defaults
     if (Array.isArray(table.features)) request.features = [...new Set([...request.features, ...table.features.filter((f) => typeof f === 'string')])]
   }
-  let table = ''
-  for (const raw of logicalLines(text)) {
-    const line = raw.trim()
-    const header = TABLE_HEADER_RE.exec(line)
-    if (header) {
-      table = header[1].trim()
-      if (table === 'workspace') manifest.isWorkspace = true
-      continue
-    }
-    const kv = KEY_VALUE_RE.exec(line)
-    if (!kv) continue
-    const key = kv[1].replaceAll(/["']/gu, '')
-    const value = parseTomlValue(kv[2])
-    if (table === 'package') {
+  for (const { path, header, value } of tomlEntries(text, { file })) {
+    // A `[workspace]` table, however it is spelled out, makes this a workspace root.
+    if (path[0] === 'workspace') manifest.isWorkspace = true
+    if (header) continue
+    const [head, key, sub, extra] = path
+    if (head === 'package') {
       manifest.package ??= { name: null, version: null, versionFromWorkspace: false, edition: null }
-      if (key === 'name' && typeof value === 'string') manifest.package.name = value
-      else if (key === 'version' && typeof value === 'string') manifest.package.version = value
-      else if ((key === 'version' && value?.workspace === true) || (key === 'version.workspace' && value === true)) manifest.package.versionFromWorkspace = true
-      else if (key === 'edition' && typeof value === 'string') manifest.package.edition = value
-      else if (key === 'resolver' && typeof value === 'string') manifest.resolver = value
-    } else if (table === 'workspace') {
-      if (key === 'resolver' && typeof value === 'string') manifest.resolver = value
-    } else if (table === 'lib') {
+      if (path.length === 2) {
+        if (key === 'name' && typeof value === 'string') manifest.package.name = value
+        else if (key === 'version' && typeof value === 'string') manifest.package.version = value
+        else if (key === 'version' && value?.workspace === true) manifest.package.versionFromWorkspace = true
+        else if (key === 'edition' && typeof value === 'string') manifest.package.edition = value
+        else if (key === 'resolver' && typeof value === 'string') manifest.resolver = value
+      } else if (path.length === 3 && key === 'version' && sub === 'workspace' && value === true) manifest.package.versionFromWorkspace = true
+    } else if (head === 'lib' && path.length === 2) {
       if (key === 'name' && typeof value === 'string') manifest.lib.name = value
       else if (key === 'path' && typeof value === 'string') manifest.lib.path = value
-    } else if (table === 'workspace.package') {
-      if (key === 'version' && typeof value === 'string') manifest.workspacePackage.version = value
-    } else if (table === 'features') {
+    } else if (head === 'features' && path.length === 2) {
       if (Array.isArray(value)) manifest.features.set(key, value.filter((v) => typeof v === 'string'))
-    } else if (table.startsWith('patch.')) {
-      if (typeof value?.path === 'string') manifest.patches.set(normName(key), value.path)
+    } else if (head === 'patch') {
+      // `[patch.<registry>] crate = { path = "…" }` or `[patch.<registry>.crate] path = "…"`
+      const patch = path.length === 3 ? value?.path : (path.length === 4 && extra === 'path' ? value : undefined)
+      if (typeof patch === 'string') manifest.patches.set(normName(sub), patch)
+    } else if (head === 'workspace' && path.length === 2 && key === 'resolver' && typeof value === 'string') {
+      manifest.resolver = value
+    } else if (head === 'workspace' && path.length === 3 && key === 'package' && sub === 'version' && typeof value === 'string') {
+      manifest.workspacePackage.version = value
     } else {
-      const ws = table.startsWith('workspace.')
-      const m = DEP_TABLE_RE.exec(ws ? table.slice('workspace.'.length) : table)
-      if (!m) continue
-      const map = ws ? manifest.workspaceDeps : manifest.deps
-      // `[dependencies.foo]` sub-table: each line is one field of `foo`; a dotted `foo.features = […]`
-      // line is one field too; else each line is one dep.
-      const dot = m[2] ? -1 : key.indexOf('.')
-      const depName = m[2] ?? (dot === -1 ? key : key.slice(0, dot))
-      const field = m[2] ? key : (dot === -1 ? null : key.slice(dot + 1))
-      const dep = depOf(map, depName, { flat: ws })
-      setDepFields(dep, field === null ? value : { [field]: value }, ws ? null : DEP_KINDS[m[1]])
+      // `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, under `target.<cfg>` or
+      // `workspace`: then the dep's name, then possibly one field of it.
+      const ws = head === 'workspace'
+      const segs = ws ? path.slice(1) : path
+      const kindAt = segs[0] === 'target' ? 2 : 0
+      const kind = DEP_KINDS[segs[kindAt]]
+      const [depName, field, more] = segs.slice(kindAt + 1)
+      if (kind === undefined || depName === undefined || more !== undefined) continue
+      const dep = depOf(ws ? manifest.workspaceDeps : manifest.deps, depName, { flat: ws })
+      setDepFields(dep, field === undefined ? value : { [field]: value }, ws ? null : kind)
     }
   }
   if (manifest.package && !manifest.package.name) manifest.package = null
@@ -341,8 +166,9 @@ export function parseCargoManifest(text) {
 
 // `Cargo.lock` → `{ byId: Map<"name version", { name, version, deps: [{ name, version }] }>,
 // byName: Map<name, [...] > }`, or null for no text. The lock is what says which of several
-// vendored versions of a crate a given package depends on.
-export function parseCargoLock(text) {
+// vendored versions of a crate a given package depends on. Throws a TomlError naming `file` on
+// text that isn't TOML.
+export function parseCargoLock(text, file = null) {
   if (text === null) return null
   const packages = []
   let cur = null // the [[package]] being read; null inside any other table
@@ -351,20 +177,17 @@ export function parseCargoLock(text) {
     const [name, version] = s.split(' ')
     return { name: normName(name), version: version ?? null }
   }
-  for (const raw of logicalLines(text)) {
-    const line = raw.trim()
-    const header = TABLE_HEADER_RE.exec(line)
+  for (const { path, header, value } of tomlEntries(text, { file })) {
     if (header) {
-      cur = header[1].trim() === 'package' ? { name: null, version: null, deps: [] } : null
+      cur = path.length === 1 && path[0] === 'package' ? { name: null, version: null, deps: [] } : null
       if (cur) packages.push(cur)
       continue
     }
-    const kv = cur === null ? null : KEY_VALUE_RE.exec(line)
-    if (!kv) continue
-    const value = parseTomlValue(kv[2])
-    if (kv[1] === 'name' && typeof value === 'string') cur.name = normName(value)
-    else if (kv[1] === 'version' && typeof value === 'string') cur.version = value
-    else if (kv[1] === 'dependencies' && Array.isArray(value)) {
+    if (cur === null || path.length !== 2) continue
+    const key = path[1]
+    if (key === 'name' && typeof value === 'string') cur.name = normName(value)
+    else if (key === 'version' && typeof value === 'string') cur.version = value
+    else if (key === 'dependencies' && Array.isArray(value)) {
       for (const s of value) if (typeof s === 'string') cur.deps.push(dep(s))
     }
   }
@@ -545,8 +368,9 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   const manifests = new Map()
   const readManifest = (dir) => {
     if (!manifests.has(dir)) {
-      const text = readFileOrNull(join(baseDir, dir, 'Cargo.toml'))
-      manifests.set(dir, text === null ? null : { dir, ...parseCargoManifest(text) })
+      const file = posix.join(dir, 'Cargo.toml')
+      const text = readFileOrNull(join(baseDir, file))
+      manifests.set(dir, text === null ? null : { dir, ...parseCargoManifest(text, file) })
     }
     return manifests.get(dir)
   }
@@ -625,7 +449,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   }
   let lock
   const lockfile = () => {
-    if (lock === undefined) lock = parseCargoLock(readFileOrNull(join(baseDir, 'Cargo.lock')))
+    if (lock === undefined) lock = parseCargoLock(readFileOrNull(join(baseDir, 'Cargo.lock')), 'Cargo.lock')
     return lock
   }
   // `--cargo`: the graph and features as cargo resolved them, with registry packages it read from

@@ -616,7 +616,7 @@ test('redactFoundryToml drops RPC/Etherscan tables and secret-named keys, keepin
     'remappings = [',
     '  "a/=b/", # comment',
     ']',
-    'rpc_endpoints = { mainnet = "https://x/K2" }',
+    'etherscan = { mainnet = { key = "K2" } }',
     '[profile.default.rpc_endpoints]',
     'sepolia = "https://x/K3"',
     '[rpc_endpoints]',
@@ -629,6 +629,9 @@ test('redactFoundryToml drops RPC/Etherscan tables and secret-named keys, keepin
   ].join('\n')
   t.assert.equal(redactFoundryToml(toml), '# build\n[profile.default]\nsrc = "src"\nremappings = [\n  "a/=b/", # comment\n]\n[fmt]\nrepo = "https://host/r"\n')
   t.assert.equal(scrubUrlCredentials('https://t@github.com/o/r git@github.com:o/r https://h/p@v1'), 'https://github.com/o/r git@github.com:o/r https://h/p@v1')
+  // what can't be read as TOML can't be redacted: the file and line are named
+  t.assert.throws(() => redactFoundryToml('[rpc_endpoints]\nmainnet = "https://k@h" junk\n', 'foundry.toml'), { name: 'TomlError', message: 'foundry.toml:2: unexpected text after the value' })
+  t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["a/=b/"\n'), { name: 'TomlError', message: 'line 2: unterminated array' })
 })
 
 test('resolveSolImport refuses a non-.sol target, one outside the root, and a dependency reaching the project', withProject({

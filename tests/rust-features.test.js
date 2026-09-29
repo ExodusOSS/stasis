@@ -11,7 +11,6 @@ import {
   parseCargoLock,
   parseCargoManifest,
   parseFeatureList,
-  parseTomlValue,
   resolutionFromMetadata,
   satisfiesCargoReq,
 } from '../stasis/src/loaders/cargo.js'
@@ -23,16 +22,7 @@ const featuresFixture = join(fixtures, 'features')
 const sorted = (iter) => [...iter].toSorted()
 const enabledOf = (cargo) => Object.fromEntries([...cargo.resolvedFeatures()].map(([dir, set]) => [dir, sorted(set)]).toSorted())
 
-// --- TOML subset ---
-
-test('parseTomlValue reads arrays, inline tables, strings and bools', (t) => {
-  t.assert.deepEqual(parseTomlValue('["a", "b-c", \'d\']'), ['a', 'b-c', 'd'])
-  t.assert.deepEqual(parseTomlValue('{ version = "1", features = ["x", "y"], optional = true, default-features = false }'), {
-    version: '1', features: ['x', 'y'], optional: true, 'default-features': false,
-  })
-  t.assert.equal(parseTomlValue('"a\\"b"'), 'a"b')
-  t.assert.deepEqual(parseTomlValue('[]'), [])
-})
+// --- Cargo.toml / Cargo.lock ---
 
 test('parseCargoManifest reads multi-line arrays, feature tables, dependency kinds and patches', (t) => {
   const m = parseCargoManifest([
@@ -78,6 +68,51 @@ test('parseCargoManifest splits dotted dependency keys and survives multi-line s
   t.assert.deepEqual(m.deps.get('util').kinds.get('normal').features, ['extra'])
   t.assert.equal(m.deps.get('serde').version, '1')
   t.assert.deepEqual(m.deps.get('serde').kinds.get('normal').features, ['derive'])
+})
+
+test('parseCargoManifest reads a pair by the table it lands in, whichever way that is spelled', (t) => {
+  // `[dependencies.foo] features = […]`, `[dependencies] foo.features = […]` and `foo = { features = […] }` are one thing
+  const spellings = [
+    '[dependencies.foo]\nversion = "1"\nfeatures = ["x"]\n',
+    '[dependencies]\nfoo.version = "1"\nfoo.features = ["x"]\n',
+    '[dependencies]\nfoo = { version = "1", features = ["x"] }\n',
+  ]
+  for (const text of spellings) {
+    const dep = parseCargoManifest(text).deps.get('foo')
+    t.assert.deepEqual([dep.version, dep.kinds.get('normal').features], ['1', ['x']], text)
+  }
+  const m = parseCargoManifest([
+    '[package]', 'name = "app"', 'version = { workspace = true }',
+    '[package.metadata.docs.rs]', 'all-features = true', // a deeper table under [package] is not a package field
+    "[target.'cfg(windows)'.dev-dependencies.winapi]", 'version = "0.3"',
+    '[patch.crates-io.plain]', 'path = "patches/plain"',
+    '[workspace.package]', 'version = "0.9.0"', // a [workspace.*] table alone makes this a workspace root
+  ].join('\n'))
+  t.assert.deepEqual(m.package, { name: 'app', version: null, versionFromWorkspace: true, edition: null })
+  t.assert.deepEqual([m.deps.get('winapi').version, [...m.deps.get('winapi').kinds.keys()]], ['0.3', ['dev']])
+  t.assert.deepEqual([...m.patches], [['plain', 'patches/plain']])
+  t.assert.deepEqual([m.isWorkspace, m.workspacePackage.version], [true, '0.9.0'])
+})
+
+test('parseCargoManifest and parseCargoLock refuse text that is not TOML, naming the file and line', (t) => {
+  t.assert.throws(() => parseCargoManifest('[package]\nname = "app"\nversion = 0.1.0\n', 'crates/app/Cargo.toml'), {
+    name: 'TomlError', message: 'crates/app/Cargo.toml:3: invalid value "0.1.0"',
+  })
+  t.assert.throws(() => parseCargoManifest('[dependencies]\nserde = { version = "1", version = "2" }\n'), { message: 'line 2: duplicate key "dependencies.serde.version"' })
+  t.assert.throws(() => parseCargoLock('version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["a" "b"]\n', 'Cargo.lock'), {
+    name: 'TomlError', message: 'Cargo.lock:6: expected a comma or "]" after the array item',
+  })
+  // through the context, with the manifest's project-relative path
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-toml-'))
+  try {
+    mkdirSync(join(tmp, 'crates', 'app', 'src'), { recursive: true })
+    writeFileSync(join(tmp, 'Cargo.toml'), '[workspace]\nmembers = ["crates/app"]\n')
+    writeFileSync(join(tmp, 'crates', 'app', 'Cargo.toml'), '[package]\nname = "app"\nversion = "0.1.0\n')
+    writeFileSync(join(tmp, 'crates', 'app', 'src', 'main.rs'), 'fn main() {}\n')
+    t.assert.throws(() => createCargoContext(tmp).packageInfo('crates/app/src/main.rs'), { name: 'TomlError', message: 'crates/app/Cargo.toml:3: unterminated string' })
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('parseFeatureList splits cargo\'s repeatable, comma- or space-separated feature flags', (t) => {

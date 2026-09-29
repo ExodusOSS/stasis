@@ -13,7 +13,8 @@ import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 
 import { assertRealPathWithinBase } from '@exodus/stasis-core/util'
-import { VENDOR_DIR, createCargoContext, isFile, isTestTargetPath, matchClose, normName, normalizeRel, splitTopLevel } from './cargo.js'
+import { VENDOR_DIR, createCargoContext, isFile, isTestTargetPath, normName, normalizeRel } from './cargo.js'
+import { matchClose, splitTopLevel } from './toml.js'
 
 // Leads of the expression-position paths anchored on the module tree rather than on a name.
 const PATH_KEYWORDS = new Set(['crate', 'self', 'super'])
