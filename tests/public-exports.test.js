@@ -328,6 +328,34 @@ test('Bundle.parse rejects a v0 flat source path that escapes the project root',
   t.assert.throws(() => Bundle.parse(v0('/etc/passwd')))
 })
 
+test('Bundle.parse and Lockfile.parse reject a file key that joins into an absolute path', (t) => {
+  // The bucket dir and the file name each stay inside the root, but an empty dir joins with any
+  // name into an absolute flat key ('' + 'etc/passwd' -> '/etc/passwd'), so the joined key is
+  // checked too.
+  const bundle = (dir) => JSON.stringify({
+    version: 1,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { [dir]: { name: 'x', version: '1.0.0', files: { 'etc/passwd': 'x' } } },
+    formats: {},
+    imports: {},
+  })
+  const lockfile = (dir) => JSON.stringify({
+    version: 0,
+    config: { scope: 'full' },
+    entries: [],
+    sources: { [dir]: { name: 'x', version: '1.0.0', files: { 'etc/passwd': 'sha512-x' } } },
+    modules: {},
+    formats: {},
+    imports: {},
+  })
+  t.assert.throws(() => Bundle.parse(bundle('')), /escapes the root: \/etc\/passwd/)
+  t.assert.throws(() => Lockfile.parse(lockfile('')), /escapes the root: \/etc\/passwd/)
+  // The root bucket is spelled '.', which joins to plain relative keys.
+  t.assert.deepStrictEqual([...Bundle.parse(bundle('.')).sources.keys()], ['etc/passwd'])
+  t.assert.deepStrictEqual(Object.keys(Lockfile.parse(lockfile('.')).modules.get('.').files), ['etc/passwd'])
+})
+
 test('Bundle.parse keeps accepting a directory listing keyed at a module root (rel === \'\')', (t) => {
   // `stasis run --fs` keys a readdir of a package root at rel '' inside its own
   // bucket (moduleFileKey collapses that to the dir itself, see fs.test.js).

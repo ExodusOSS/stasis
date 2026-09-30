@@ -70,8 +70,10 @@ export class Lockfile {
       for (const name of Object.keys(files)) {
         assert(!posixPathEscapes(name))
         const key = moduleFileKey(dir, name)
+        // The joined key must stay inside the root too, not only its dir and name: an empty dir makes
+        // `name` absolute. Messages built only on failure: this loop visits every attested file.
+        if (posixPathEscapes(key)) assert(false, `lockfile path escapes the root: ${key}`)
         if (flatKeys.has(key)) {
-          // Message built only on failure: this loop visits every attested file.
           assert(false, `duplicate file key '${key}' across lockfile buckets -- module bucketing ` +
             `changed between writes (a workspace package without a version now owns its own ` +
             `bucket); regenerate the lockfile (lock=replace)`)

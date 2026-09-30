@@ -172,8 +172,10 @@ export class Bundle {
     for (const [dir, { files }] of modules) {
       for (const rel of Object.keys(files)) {
         const key = moduleFileKey(dir, rel)
+        // The joined key must stay inside the root too, not only its dir and rel: an empty dir makes
+        // `rel` absolute. Messages built only on failure: this loop visits every bundled file.
+        if (posixPathEscapes(key)) assert(false, `bundle path escapes the root: ${key}`)
         if (flatKeys.has(key)) {
-          // Message built only on failure: this loop visits every bundled file.
           assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
             `changed between writes (a workspace package without a version now owns its own ` +
             `bucket); regenerate the artifact (bundle=replace)`)
