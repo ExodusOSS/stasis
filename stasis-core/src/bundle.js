@@ -5,6 +5,7 @@ import {
   fileSetToObject,
   fromEntries,
   hasNodeModulesSegment,
+  isCanonicalDir,
   isPlainObject,
   mergeFormatMaps,
   mergeImportMaps,
@@ -170,12 +171,12 @@ export class Bundle {
     // Flat keys must be unique across buckets: two different bucket splits can flatten to one path, and the `sources` getter would serve either payload.
     const flatKeys = new Set()
     for (const [dir, { files }] of modules) {
+      // An empty dir would make keys absolute; aliases like 'src/.' would dodge the duplicate check.
+      assert(isCanonicalDir(dir), `bundle bucket dir '${dir}' is not canonical`)
       for (const rel of Object.keys(files)) {
         const key = moduleFileKey(dir, rel)
-        // The joined key must stay inside the root too, not only its dir and rel: an empty dir makes
-        // `rel` absolute. Messages built only on failure: this loop visits every bundled file.
-        if (posixPathEscapes(key)) assert(false, `bundle path escapes the root: ${key}`)
         if (flatKeys.has(key)) {
+          // Message built only on failure: this loop visits every bundled file.
           assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
             `changed between writes (a workspace package without a version now owns its own ` +
             `bucket); regenerate the artifact (bundle=replace)`)
@@ -227,6 +228,7 @@ export class Bundle {
     const sourceEntries = []
     for (const [dir, { name, version, ecosystem, files }] of this.modules) {
       if (Object.keys(files).length === 0) continue
+      assert(isCanonicalDir(dir), `bundle bucket dir '${dir}' is not canonical`)
       const inNodeModules = hasNodeModulesSegment(dir)
       if (inNodeModules) assert(name && version && files)
       const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))

@@ -328,15 +328,13 @@ test('Bundle.parse rejects a v0 flat source path that escapes the project root',
   t.assert.throws(() => Bundle.parse(v0('/etc/passwd')))
 })
 
-test('Bundle.parse and Lockfile.parse reject a file key that joins into an absolute path', (t) => {
-  // The bucket dir and the file name each stay inside the root, but an empty dir joins with any
-  // name into an absolute flat key ('' + 'etc/passwd' -> '/etc/passwd'), so the joined key is
-  // checked too.
-  const bundle = (dir) => JSON.stringify({
+test('Bundle.parse and Lockfile.parse reject a non-canonical bucket dir', (t) => {
+  // '' makes every key absolute; the rest are aliases of another spelling of the dir.
+  const bundle = (dir, files = { 'etc/passwd': 'x' }) => JSON.stringify({
     version: 1,
     config: { scope: 'full' },
     entries: [],
-    sources: { [dir]: { name: 'x', version: '1.0.0', files: { 'etc/passwd': 'x' } } },
+    sources: { [dir]: { name: 'x', version: '1.0.0', files } },
     formats: {},
     imports: {},
   })
@@ -349,11 +347,32 @@ test('Bundle.parse and Lockfile.parse reject a file key that joins into an absol
     formats: {},
     imports: {},
   })
-  t.assert.throws(() => Bundle.parse(bundle('')), /escapes the root: \/etc\/passwd/)
-  t.assert.throws(() => Lockfile.parse(lockfile('')), /escapes the root: \/etc\/passwd/)
-  // The root bucket is spelled '.', which joins to plain relative keys.
+  for (const dir of ['', 'src/', 'src/.', './src', 'src//lib', 'a/../src']) {
+    t.assert.throws(() => Bundle.parse(bundle(dir)), /is not canonical/, JSON.stringify(dir))
+    t.assert.throws(() => Lockfile.parse(lockfile(dir)), /is not canonical/, JSON.stringify(dir))
+  }
+  // Also when the only file is a root listing, whose key would be '' itself.
+  t.assert.throws(() => Bundle.parse(bundle('', { '': '[]' })), /is not canonical/)
+  t.assert.throws(() => Bundle.parse(JSON.stringify({
+    version: 1,
+    config: { scope: 'node_modules' },
+    modules: { 'node_modules/w/.': { name: 'w', version: '1.0.0', files: { 'i.js': 'x' } } },
+    formats: {},
+    imports: {},
+  })), /is not canonical/)
   t.assert.deepStrictEqual([...Bundle.parse(bundle('.')).sources.keys()], ['etc/passwd'])
+  t.assert.deepStrictEqual([...Bundle.parse(bundle('src')).sources.keys()], ['src/etc/passwd'])
   t.assert.deepStrictEqual(Object.keys(Lockfile.parse(lockfile('.')).modules.get('.').files), ['etc/passwd'])
+})
+
+test('Bundle and Lockfile refuse to merge or serialize a non-canonical bucket dir', (t) => {
+  // So stasis never writes an artifact its own parse rejects.
+  const bad = () => new Map([['', { name: 'x', version: '1.0.0', files: { 'etc/passwd': 'x' } }]])
+  t.assert.throws(() => new Bundle({ modules: bad() }).merge(new Bundle()), /is not canonical/)
+  t.assert.throws(() => new Bundle({ modules: bad() }).serialize(), /is not canonical/)
+  const full = { config: { scope: 'full' } }
+  t.assert.throws(() => new Lockfile({ ...full, modules: bad() }).merge(new Lockfile(full)), /is not canonical/)
+  t.assert.throws(() => new Lockfile({ ...full, modules: bad() }).serialize(), /is not canonical/)
 })
 
 test('Bundle.parse keeps accepting a directory listing keyed at a module root (rel === \'\')', (t) => {

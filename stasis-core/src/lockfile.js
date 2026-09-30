@@ -1,4 +1,4 @@
-import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKey, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './artifact-util.js'
+import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isCanonicalDir, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKey, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './artifact-util.js'
 
 const VERSION = 0
 
@@ -65,15 +65,14 @@ export class Lockfile {
     // to one path, and hashes/attestation lookups key on the flat path.
     const flatKeys = new Set()
     for (const [dir, { files }] of modules) {
-      assert(!posixPathEscapes(dir))
+      // An empty dir would make keys absolute; aliases like 'src/.' would dodge the duplicate check.
+      assert(isCanonicalDir(dir), `lockfile bucket dir '${dir}' is not canonical`)
       assert(files)
       for (const name of Object.keys(files)) {
         assert(!posixPathEscapes(name))
         const key = moduleFileKey(dir, name)
-        // The joined key must stay inside the root too, not only its dir and name: an empty dir makes
-        // `name` absolute. Messages built only on failure: this loop visits every attested file.
-        if (posixPathEscapes(key)) assert(false, `lockfile path escapes the root: ${key}`)
         if (flatKeys.has(key)) {
+          // Message built only on failure: this loop visits every attested file.
           assert(false, `duplicate file key '${key}' across lockfile buckets -- module bucketing ` +
             `changed between writes (a workspace package without a version now owns its own ` +
             `bucket); regenerate the lockfile (lock=replace)`)
@@ -138,6 +137,7 @@ export class Lockfile {
     const modules = []
     const sources = []
     for (const [dir, { name, version, ecosystem, files }] of this.modules) {
+      assert(isCanonicalDir(dir), `lockfile bucket dir '${dir}' is not canonical`)
       const inNodeModules = hasNodeModulesSegment(dir)
       if (inNodeModules) assert(name && version && files)
       const type = inNodeModules ? modules : sources

@@ -261,11 +261,15 @@ export function mergeExecutableSets(a, b, bModules, scope) {
   return out
 }
 
+// '.' or a relative path without empty, '.' or '..' segments: one spelling per bucket.
+export const isCanonicalDir = (dir) => dir === '.' || dir.split('/').every((s) => s !== '' && s !== '.' && s !== '..')
+
 // Result `files` objects are null-prototype, so a `__proto__` file name is a plain own key.
 export function mergeModuleMaps(a, b, label) {
   const out = new Map()
   const absorb = (modules) => {
     for (const [dir, info] of modules) {
+      assert(isCanonicalDir(dir), `${label}: bucket dir '${dir}' is not canonical`)
       const existing = out.get(dir)
       if (existing === undefined) {
         out.set(dir, {
