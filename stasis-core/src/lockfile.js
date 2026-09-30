@@ -1,6 +1,10 @@
-import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, hasNodeModulesSegment, isCanonicalDir, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, moduleFileKey, moduleFileKeys, parseExecutable, posixPathEscapes, sortPaths } from './artifact-util.js'
+import { KNOWN_FORMATS, assert, serializeExecutable, fileMapToObject, fileSetToObject, fromEntries, flatFileKeys, hasNodeModulesSegment, isPlainObject, mergeExecutableSets, mergeFormatMaps, mergeImportMaps, mergeModuleMaps, parseExecutable, posixPathEscapes, sortPaths } from './artifact-util.js'
 
 const VERSION = 0
+
+const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across lockfile buckets -- module bucketing ` +
+  `changed between writes (a workspace package without a version now owns its own ` +
+  `bucket); regenerate the lockfile (lock=replace)`)
 
 const normalize = ({ name, version, ecosystem, files }) => {
   assert(ecosystem === undefined || typeof ecosystem === 'string')
@@ -63,23 +67,11 @@ export class Lockfile {
 
     // Flat keys must be unique across buckets (mirrors Bundle.parse): two bucket splits can flatten
     // to one path, and hashes/attestation lookups key on the flat path.
-    const flatKeys = new Set()
     for (const [dir, { files }] of modules) {
-      // An empty dir would make keys absolute; aliases like 'src/.' would dodge the duplicate check.
-      assert(isCanonicalDir(dir), `lockfile bucket dir '${dir}' is not canonical`)
+      assert(!posixPathEscapes(dir))
       assert(files)
-      for (const name of Object.keys(files)) {
-        assert(!posixPathEscapes(name))
-        const key = moduleFileKey(dir, name)
-        if (flatKeys.has(key)) {
-          // Message built only on failure: this loop visits every attested file.
-          assert(false, `duplicate file key '${key}' across lockfile buckets -- module bucketing ` +
-            `changed between writes (a workspace package without a version now owns its own ` +
-            `bucket); regenerate the lockfile (lock=replace)`)
-        }
-        flatKeys.add(key)
-      }
     }
+    const flatKeys = flatFileKeys(modules, 'lockfile', duplicateKey)
 
     assert(isPlainObject(json.imports))
     const imports = new Map()
@@ -124,20 +116,21 @@ export class Lockfile {
       formats.set(key, format)
     }
 
-    // Every executable must be a file this lockfile attests; the key index is built only when the (usually absent) key is present.
+    // Every executable must be a file this lockfile attests.
     const executable = json.executable === undefined
       ? new Set()
-      : parseExecutable(json.executable, { what: 'lockfile', files: moduleFileKeys(modules), formats, scope: json.config.scope })
+      : parseExecutable(json.executable, { what: 'lockfile', files: flatKeys, formats, scope: json.config.scope })
 
     return new Lockfile({ config: json.config, entries, modules, imports, formats, executable })
   }
 
   serialize() {
+    // Never write an artifact that parse would reject.
+    flatFileKeys(this.modules, 'lockfile', duplicateKey)
     const entries = fileSetToObject(this.entries)
     const modules = []
     const sources = []
     for (const [dir, { name, version, ecosystem, files }] of this.modules) {
-      assert(isCanonicalDir(dir), `lockfile bucket dir '${dir}' is not canonical`)
       const inNodeModules = hasNodeModulesSegment(dir)
       if (inNodeModules) assert(name && version && files)
       const type = inNodeModules ? modules : sources

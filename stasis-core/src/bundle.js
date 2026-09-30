@@ -4,8 +4,8 @@ import {
   fileMapToObject,
   fileSetToObject,
   fromEntries,
+  flatFileKeys,
   hasNodeModulesSegment,
-  isCanonicalDir,
   isPlainObject,
   mergeFormatMaps,
   mergeImportMaps,
@@ -29,6 +29,10 @@ const normalize = ({ name, version, ecosystem, files }) => {
   // identity comparisons and JSON round-trips can't split on it.
   return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
 }
+
+const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
+  `changed between writes (a workspace package without a version now owns its own ` +
+  `bucket); regenerate the artifact (bundle=replace)`)
 
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
@@ -153,10 +157,6 @@ export class Bundle {
         assert(json.entries === undefined)
         assert(json.sources === undefined)
       }
-      for (const [, { files }] of modules) {
-        // posixPathEscapes (not a '..' prefix): also catches mid-path escapes and absolute paths.
-        for (const rel of Object.keys(files)) assert(!posixPathEscapes(rel))
-      }
     } else {
       assert(json.sources)
       for (const [path, content] of Object.entries(json.sources)) {
@@ -169,21 +169,7 @@ export class Bundle {
     }
 
     // Flat keys must be unique across buckets: two different bucket splits can flatten to one path, and the `sources` getter would serve either payload.
-    const flatKeys = new Set()
-    for (const [dir, { files }] of modules) {
-      // An empty dir would make keys absolute; aliases like 'src/.' would dodge the duplicate check.
-      assert(isCanonicalDir(dir), `bundle bucket dir '${dir}' is not canonical`)
-      for (const rel of Object.keys(files)) {
-        const key = moduleFileKey(dir, rel)
-        if (flatKeys.has(key)) {
-          // Message built only on failure: this loop visits every bundled file.
-          assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
-            `changed between writes (a workspace package without a version now owns its own ` +
-            `bucket); regenerate the artifact (bundle=replace)`)
-        }
-        flatKeys.add(key)
-      }
-    }
+    const flatKeys = flatFileKeys(modules, 'bundle', duplicateKey)
 
     // Reject paths escaping the root here (incl. mid-path `a/../../x`): getImport resolves against the root at load.
     const imports = objectToMaps(json.imports)
@@ -228,7 +214,6 @@ export class Bundle {
     const sourceEntries = []
     for (const [dir, { name, version, ecosystem, files }] of this.modules) {
       if (Object.keys(files).length === 0) continue
-      assert(isCanonicalDir(dir), `bundle bucket dir '${dir}' is not canonical`)
       const inNodeModules = hasNodeModulesSegment(dir)
       if (inNodeModules) assert(name && version && files)
       const sorted = fromEntries(Object.entries(files).toSorted((a, b) => sortPaths(a[0], b[0])))
@@ -241,6 +226,8 @@ export class Bundle {
   }
 
   serialize() {
+    // Never write an artifact that parse would reject.
+    flatFileKeys(this.modules, 'bundle', duplicateKey)
     const entries = fileSetToObject(this.entries)
     const { modules, sources } = this.#groupedFromModules()
     const formats = fileMapToObject(this.formats)

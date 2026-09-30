@@ -261,15 +261,31 @@ export function mergeExecutableSets(a, b, bModules, scope) {
   return out
 }
 
-// '.' or a relative path without empty, '.' or '..' segments: one spelling per bucket.
-export const isCanonicalDir = (dir) => dir === '.' || dir.split('/').every((s) => s !== '' && s !== '.' && s !== '..')
+// An empty, '.' or '..' path segment.
+const NON_CANONICAL_SEGMENT = /(?:^|\/)\.{0,2}(?:\/|$)/u
+
+// Maps each file's flat key to its bucket; rejects non-canonical keys, reports duplicates to onDuplicate.
+export function flatFileKeys(modules, what, onDuplicate) {
+  const owners = new Map()
+  for (const [dir, { files }] of modules) {
+    if (typeof dir !== 'string') assert(false, `${what}: bucket dir ${String(dir)} is not a string`)
+    for (const rel of Object.keys(files)) {
+      const key = moduleFileKey(dir, rel)
+      // Messages built only on failure: this loop visits every file.
+      if (key !== '.' && NON_CANONICAL_SEGMENT.test(key)) assert(false, `${what}: non-canonical file key ${JSON.stringify(key)}`)
+      const owner = owners.get(key)
+      if (owner !== undefined) onDuplicate(key, owner, dir)
+      owners.set(key, dir)
+    }
+  }
+  return owners
+}
 
 // Result `files` objects are null-prototype, so a `__proto__` file name is a plain own key.
 export function mergeModuleMaps(a, b, label) {
   const out = new Map()
   const absorb = (modules) => {
     for (const [dir, info] of modules) {
-      assert(isCanonicalDir(dir), `${label}: bucket dir '${dir}' is not canonical`)
       const existing = out.get(dir)
       if (existing === undefined) {
         out.set(dir, {
@@ -306,21 +322,10 @@ export function mergeModuleMaps(a, b, label) {
   // releases (a versionless workspace package used to fall through to a parent bucket and now owns
   // its own), and per-dir absorption cannot see that: without this check the merge would WRITE an
   // artifact that then fails its own next parse on the duplicate-file-key guard.
-  const owners = new Map()
-  for (const [dir, { files }] of out) {
-    for (const rel of Object.keys(files)) {
-      const key = moduleFileKey(dir, rel)
-      const owner = owners.get(key)
-      if (owner !== undefined) {
-        // Message built only on failure: this loop visits every merged file.
-        assert(false,
-          `${label}: file '${key}' is bucketed under both '${owner}' and '${dir}' -- module bucketing ` +
-          `changed between the artifacts (a workspace package without a version now owns its own ` +
-          `bucket); regenerate the artifact (bundle=replace / lock=replace)`)
-      }
-      owners.set(key, dir)
-    }
-  }
+  flatFileKeys(out, label, (key, owner, dir) => assert(false,
+    `${label}: file '${key}' is bucketed under both '${owner}' and '${dir}' -- module bucketing ` +
+    `changed between the artifacts (a workspace package without a version now owns its own ` +
+    `bucket); regenerate the artifact (bundle=replace / lock=replace)`))
   return out
 }
 
