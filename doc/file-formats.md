@@ -515,12 +515,23 @@ stay as cfg-keyed candidates. Each root gets its own module
 tree, so a lib and its bin bundled together don't collide on `crate::`. A
 `tests/*.rs` or `benches/*.rs` entry is compiled the way `cargo test` does:
 `cfg(test)` holds, its `#[test]` fns and `#[cfg(test)]` modules are live, and
-the package's dev-dependencies take part in the feature resolution. A `use`/`extern crate` naming a crate found in-tree pulls
+the package's dev-dependencies take part in the feature resolution; an
+`examples/*.rs` entry links the dev-dependencies too, without `cfg(test)`. A `use`/`extern crate` naming a crate found in-tree pulls
 that crate's root in: the package's own lib target (`use my_app::…` from
 `main.rs`), a Cargo `path` dependency (incl. `workspace = true` ones and
 `package = …` renames, honouring `[lib] path`), or a `cargo vendor`ed crate under
-`vendor/` (or the `directory` of the source the project's cargo config replaces
-crates.io with, through any chain of `replace-with`s, whatever its name). A
+`vendor/` (or the `directory` of the source the cargo config replaces crates.io
+with, through any chain of `replace-with`s, whatever its name -- the config
+nearest the entries', so a nested workspace's own, relative to the directory
+holding its `.cargo`). Which of a package's dependency tables a name means is the
+asking code's, as cargo links them: a build script's, and its modules' -- a file
+it shares with the lib through `#[path]` too -- the `[build-dependencies]`, a
+test, bench or example's the `[dependencies]` and `[dev-dependencies]`, other
+code's the `[dependencies]`; and of those only the tables of the platforms the
+code is compiled for (`[target.'cfg(windows)'.dependencies] foo = "2"` is no
+crate of a Linux build). Tables that may each apply -- a `cfg(windows)` and a
+`cfg(unix)` one without a target, or a shared file's two -- are each followed,
+and the edge is a cfg-keyed map of their crates. A
 `path` or `[patch]` dependency outside the bundle root is not in-tree, and never
 bound to a vendored crate of its name instead: the loader says so, and so it
 does of a `path` naming a directory with no `Cargo.toml` holding a `[package]`.
@@ -528,8 +539,9 @@ Registry dependencies live in `~/.cargo/registry`, outside the bundle
 root, so they're never read: vendor them first (`cargo vendor`). Whenever a
 bundle references crates it lacks -- none in-tree, or one whose root the walk
 refused (a symlink leading out of the bundle root) -- `stasis bundle` lists
-them, `vendor/` dir or not; with no `vendor/` dir it also suggests `cargo
-vendor`.
+them, `vendor/` dir or not, a dependency the package declares whether a `use`
+or only an expression (`serde_json::to_string(…)`) names it; with no `vendor/`
+dir it also suggests `cargo vendor`.
 
 A path edge (`crate::a::b::Item`, `super::x`, a relative `child::y`) resolves
 module by module along the crate's tree, inline `mod x { … }` blocks included
@@ -579,11 +591,11 @@ set it: a name its build script prints as `cargo:rustc-cfg=…`, or that a
 rustflags `--cfg` sets (the cargo config's `build`/`target.<…>` `rustflags`,
 `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`), is neither
 presumed off nor on, and a build script that formats a name or uses `autocfg`
-makes every custom cfg of its package so. A child module the build rules out
-gives way to whatever else its module has of the name; one under a custom cfg
-only to an import or item of its name in the same module (serde's docsrs-only
-`mod de` beside the `pub use serde_core::de` of every other build) -- what a
-glob brings in never shadows a module that is there. With `--cargo-target`, every file compiled
+makes every custom cfg of its package so. A child module the build rules out,
+or one under a custom cfg it presumably lacks, gives way to whatever else its
+module has of the name, as such a candidate does to any other: serde's
+docsrs-only `mod de` to the `pub use serde_core::de` of every other build, a
+`#[cfg(loom)] mod imp` to the `imp` a `use other::*` brings in. With `--cargo-target`, every file compiled
 for the target is under the target's cfgs too, so a `windows` candidate is
 out for every file and a `target_os = "linux"` file takes the `any(android,
 linux)` branch over the `any(aix, solaris)` one (mio's `sys::Waker` is the
@@ -710,10 +722,15 @@ test code reaches for. Two kinds of cfg are decided:
     manifests, a vendored copy whose checksum isn't the lockfile's, a feature
     asked of a package that hasn't it: each stops the build. A host the loader
     doesn't know (a target that isn't `host`) is resolved both ways: what the
-    host's target-specific tables turn on is on *maybe*.
+    host's target-specific tables turn on is on *maybe*. A vendored copy the
+    lockfile doesn't list needs no `.cargo-checksum.json`: cargo never reads it.
   - **The replay**, otherwise -- no lockfile, no target, a locked package not
-    vendored: the roots start from their `default` feature (a proc-macro crate
-    is resolved for the host, where cargo builds it), features imply features
+    vendored or without its checksums, an entry outside the workspace -- and
+    `stasis bundle` says so and why (`[stasis] Rust features from a replay of
+    the manifests, not cargo's resolver: no --cargo-target`): the roots start
+    from their `default` feature (a proc-macro crate is resolved for the host,
+    where cargo builds it, and for the target too, where cargo activates a
+    member it is asked to build), features imply features
     (`std = ["alloc", "dep:serde", "serde?/std"]`; `serde/derive` turns on the
     package's feature `serde` too, written or the one an optional dependency
     gets), enable optional dependencies and request dependency features, and
@@ -737,8 +754,7 @@ test code reaches for. Two kinds of cfg are decided:
     `rand = "0.7"` under `[dependencies]` beside `rand = "0.8"` under
     `[build-dependencies]` (or a `[dev-dependencies] fake = { package = "rand",
     version = "0.8" }`) is two crates, and a file is followed into the one its
-    target uses -- the build script into the build-dependency, a test target
-    into the normal or dev one, anything else into the normal one. The vendored
+    code uses (see above). The vendored
     copy a dependency resolves to is from where the dependency says: a git
     dependency's (or one a git `[patch]` replaces) a git checkout's -- a copy
     whose `.cargo-checksum.json` has no package checksum -- any other's a
@@ -752,15 +768,22 @@ test code reaches for. Two kinds of cfg are decided:
     takes that one. A `[patch]` -- in the root manifest, or in the cargo config
     of a directory from the package's up to the bundle root (nearest first,
     ahead of the manifest's, its `path` relative to the directory holding
-    `.cargo`) -- replaces a crate only where its version fits the dependent's
-    requirement, as cargo applies it; one that doesn't is reported and not used.
+    `.cargo`) -- replaces a crate of its table's source only (`[patch.crates-io]`
+    crates.io's, `[patch."https://github.com/…"]` that repository's), and only
+    where its version fits the dependent's requirement, as cargo applies it; one
+    that doesn't is reported and not used.
     When the locked version isn't vendored, or no vendored version fits, or
     several do and no lock says which, the loader warns and doesn't follow the
     dependency rather than guess: cargo would build none of them from what the
     bundle holds.
 
   A package the resolved build doesn't pull in has unknown features, and its
-  gated code is kept.
+  gated code is kept. A member bundled from its own directory, its workspace's
+  root above the bundle root, takes what it inherits (`edition.workspace = true`,
+  `dep = { workspace = true }`) and the resolver from that root, as cargo does:
+  the loader reads that manifest for those -- never bundling it, nor reading the
+  lockfile beside it -- when its `members` take the package and its `exclude`
+  doesn't.
 
 - With `--cargo-target=<triple|host>`, **target cfgs** are decided too: the
   loader asks `rustc --print cfg --target <triple>` (`host`: the running
@@ -799,7 +822,8 @@ test code reaches for. Two kinds of cfg are decided:
   --filter-platform`.
 
 `all(…)`/`any(…)`/`not(…)` compose, and `true` and `false` are what they say (a
-raw `r#name` is the name); a predicate that reduces to true (`not(test)`,
+raw `r#name` is the name; `r#true` and `r#false` are names, custom cfgs like any
+other); a predicate that reduces to true (`not(test)`,
 an enabled feature) is as firm as no cfg, so a missing module behind it is fatal.
 A leaf's value is taken as written, spacing outside its quotes aside: `my = "a
 b"` and `my = "ab"` (or `"a  b"`) are different values.
@@ -827,7 +851,7 @@ everything cargo would ever compile for the workspace, tests included, and can
 enable features (and so bundle modules) that a plain `cargo build` of the entries'
 packages leaves off; the loader's own resolution describes that build. Set
 `EXODUS_STASIS_DEBUG=1` to have `stasis bundle` print the resolved features per
-package, in either mode.
+package and context (target, host), and which resolution they come from.
 
 `stasis bundle --cargo-manifests` also carries what describes each bundled
 package's build, the way `--package-json` carries npm manifests. For a package
@@ -839,7 +863,9 @@ reads when run there (`.cargo/config` before `.cargo/config.toml`), those that
 lie inside the bundle root (a workspace's may sit above). For a vendored crate:
 its `Cargo.toml` and the `.cargo-checksum.json` cargo checks its files against
 -- the lock and config it was published with play no part in a build that
-depends on it. All are `resource` files in their package's bucket, or the
+depends on it. A vendored file the bundle reads is checked against that list
+in any case: one changed since `cargo vendor` stops the bundle, as cargo refuses
+to build it. All are `resource` files in their package's bucket, or the
 workspace bucket for the root-level ones. They are carried as written, as `--package-json` carries `package.json`:
 stasis doesn't edit them, so whatever they hold -- a `[registries]` token or
 `[http]` proxy in the cargo config, the credentials in a `git = …` URL or a
@@ -895,7 +921,8 @@ resolves relative to each file that invokes the macro, as rustc expands it --
 through the macros whose bodies invoke it, the outermost call (the edge is
 that file's, at the invocation); so are the bare macro calls a body makes
 made and resolved where it is invoked -- the body's own, even past a
-`macro_rules!` it defines inside. `<name>!` marks a `macro_rules!`
+`macro_rules!` it defines inside, whose own includes are its, resolved where it
+is invoked in turn. `<name>!` marks a `macro_rules!`
 invoked by bare name and defined in another file the invocation can see -- in
 textual scope, as rustc has it: the files above it in the module tree, each up
 to the `mod` that mounts the next (a macro defined after `mod early;` is not
@@ -912,7 +939,11 @@ declares at the invocation in each file hosting it (see above: serde's
 `#[macro_use] mod macros;`, so `de` sees `forward_to_deserialize_any!`), and, in the crate
 root's file, whose items they are, the `#[macro_export]`ed ones -- or by path,
 through the module's imports (`use crate::combinator::dispatch;`, a `use
-super::*` from the root); a `macro_rules!` in a sibling file is out of scope
+super::*` from the root), into another crate too (`use dep::mac;` or an alias
+of it, a prelude's `pub use dep::mac;` behind a glob, the macro in the file
+defining it); a crate root's `#[macro_use] extern crate dep;` brings dep's
+exported macros to every module; `dep::mac!(…)` has an edge to that file
+beside the crate's. A `macro_rules!` in a sibling file is out of scope
 otherwise. A file whose inner
 `#![cfg(…)]` can never hold is carried but compiled empty, so nothing in it is
 followed (a `#![cfg]` inside a macro invocation's body gates nothing). A `mod`

@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, parse, posix } from 'node:path'
@@ -17,7 +18,7 @@ import {
   rustcTargetCfgs,
 } from '../stasis/src/loaders/cargo.js'
 import { buildRustBundle } from '../stasis/src/cmd/bundle.js'
-import { buildRustTree, collectRustFilesFromDisk } from '../stasis/src/loaders/rust.js'
+import { buildRustTree, collectRustBundle, collectRustFilesFromDisk } from '../stasis/src/loaders/rust.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 const featuresFixture = join(fixtures, 'features')
@@ -74,6 +75,8 @@ const captureWarningsSync = (fn) => {
     console.warn = original
   }
 }
+// Warnings, less the notice that the features come from a replay of the manifests (see the test of it).
+const besidesReplay = (warnings) => warnings.filter((w) => !w.startsWith('[stasis] Rust features from a replay of the manifests'))
 const vendoredPackage = (name, version) => ({
   [`vendor/${name}-${version}/Cargo.toml`]: `[package]\nname = "${name}"\nversion = "${version}"\n`,
   [`vendor/${name}-${version}/src/lib.rs`]: '',
@@ -98,7 +101,7 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
   // cargo's feature map: as written, and a feature for the optional dependency no `dep:` names
   t.assert.deepEqual([...m.features], [['default', ['std']], ['std', []], ['full', ['std', 'dep:opt', 'sub/two', 'opt?/extra']], ['pm-crate', ['dep:pm-crate']]])
   const dep = (k) => Object.fromEntries([...m.deps.get(k).kinds].toSorted())
-  const ask = (pkg, version, more) => ({ kind: 'normal', target: null, version, path: null, source: 'registry', package: pkg, renamed: false, inherited: false, optional: false, defaultFeatures: true, features: [], ...more })
+  const ask = (pkg, version, more) => ({ kind: 'normal', target: null, version, path: null, source: 'registry', origin: null, package: pkg, renamed: false, inherited: false, optional: false, defaultFeatures: true, features: [], ...more })
   // Each dependency table is its own request, for the crate it names: a dev-dependency's features
   // stay out of the normal one.
   t.assert.deepEqual(dep('plain'), { dev: ask('plain', '1', { kind: 'dev', features: ['dev-only'] }), normal: ask('plain', '1') })
@@ -1205,7 +1208,7 @@ test('buildRustBundle reads a package-defined quote! body as macro input while w
     const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/lib.rs', 'vendor/other/src/lib.rs'] }))
     t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/lib.rs', 'src/m.rs', 'src/m/inner.rs', 'src/user.rs', 'src/user/hidden.rs', 'vendor/other/src/lib.rs'])
     t.assert.deepEqual(Object.fromEntries(bundle.imports.get('rust').get('src/user.rs')), { 'mod hidden': 'src/user/hidden.rs', 'quote!': 'src/m/inner.rs' })
-    t.assert.deepEqual(warnings, [])
+    t.assert.deepEqual(besidesReplay(warnings), [])
   })
 })
 
@@ -1268,7 +1271,7 @@ test('buildRustBundle declares a template\'s mod in each module of its package i
     t.assert.equal(imports.get('src/lib.rs').get('gm1::X'), 'src/a/gm1.rs')
     t.assert.equal(imports.get('src/lib.rs').get('mod solo'), 'src/solo.rs')
     t.assert.equal(imports.get('src/b.rs').get('app::a::gm1::X'), 'src/a/gm1.rs')
-    t.assert.deepEqual(warnings, [])
+    t.assert.deepEqual(besidesReplay(warnings), [])
     const cargo = createCargoContext(tmp, { entries })
     const sources = await collectRustFilesFromDisk(tmp, entries, { cargo })
     t.assert.deepEqual(sorted(buildRustTree(sources, { roots: entries, baseDir: tmp, cargo }).unresolvedCrates), [])
@@ -1356,7 +1359,7 @@ test('buildRustBundle ends when a crate root it wants is refused, and reports ev
     symlinkSync(join('..', '..', '..', 'secret.rs'), join(tmp, 'vendor', 'linked', 'src', 'lib.rs'))
     const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }))
     t.assert.deepEqual([...bundle.sources.keys()], ['src/main.rs'])
-    t.assert.deepEqual([...new Set(warnings)], [
+    t.assert.deepEqual([...new Set(besidesReplay(warnings))], [
       '[loader.cargo] app 0.1.0\'s dependency far is a path outside the bundle root: ../far',
       '[loader.rust] Refusing file outside its package: vendor/linked/src/lib.rs (a link out of vendor/linked)',
       '[stasis] 3 crates referenced but not in the bundle: far, linked (vendor/linked/src/lib.rs), missing',
@@ -1440,7 +1443,11 @@ test('createCargoContext resolves through cargo\'s graph: each table\'s source, 
     t.assert.equal(ctx.resolveCrate('itoa', 'src/lib.rs'), 'vendor/itoa/src/lib.rs')
     t.assert.equal(ctx.resolveCrate('itoa04', 'src/lib.rs'), 'vendor/itoa-0.4.8/src/lib.rs')
     t.assert.equal(ctx.resolveCrate('itoa_git', 'src/lib.rs'), 'vendor/itoa-1.0.0/src/lib.rs')
-    t.assert.equal(ctx.resolveCrate('cfg_if', 'src/lib.rs'), 'patched/cfg-if/src/lib.rs') // [patch.crates-io], a path
+    // `[target.'cfg(windows)'.dependencies] cfg-if`: no crate of a Linux build; a Windows one's is
+    // the [patch.crates-io] path
+    t.assert.equal(ctx.resolveCrate('cfg_if', 'src/lib.rs'), null)
+    const windows = createCargoContext(tmp, { entries: ['src/lib.rs'], features: ['fmt,git'], target: { triple: 'x86_64-pc-windows-msvc', cfgs: parseRustcCfg(recorded.cfg['x86_64-pc-windows-msvc'].join('\n')) } })
+    t.assert.equal(windows.resolveCrate('cfg_if', 'src/lib.rs'), 'patched/cfg-if/src/lib.rs')
     t.assert.equal(ctx.resolveCrate('macros', 'src/lib.rs'), 'crates/macros/src/lib.rs')
     // the proc-macro and what it depends on are built for the host, with the host's features
     t.assert.deepEqual(sorted(ctx.featuresFor('crates/macros/src/lib.rs', HOST_UNIT)), [])
@@ -1541,7 +1548,8 @@ test('createCargoContext resolves a proc-macro entry for the host, where cargo b
   }, (tmp) => {
     const cargo = createCargoContext(tmp, { entries: ['src/lib.rs'] })
     t.assert.deepEqual(enabledOf(cargo, 'host'), { '.': ['default', 'printing'], 'vendor/quote': ['std'] })
-    t.assert.deepEqual(enabledOf(cargo, 'target'), {})
+    // cargo activates a proc-macro member it is asked to build in the target's context too
+    t.assert.deepEqual(enabledOf(cargo, 'target'), { '.': ['default', 'printing'], 'vendor/quote': ['std'] })
     t.assert.deepEqual(sorted(cargo.featuresFor('src/lib.rs', HOST_UNIT)), ['default', 'printing'])
   })
 })
@@ -1584,5 +1592,250 @@ test('buildRustBundle scans a proc-macro entry as the host build, with the featu
   }, async (tmp) => {
     const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'] })
     t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/lib.rs', 'src/printing.rs'])
+  })
+})
+
+// --- tenth review: platform tables, build-script crates, proc-macro roots, out-of-root workspaces ---
+
+// The crate-root edges of a bundle collected from `tmp`: file -> `use` spec -> target (a cfg-keyed
+// map as [key, file] pairs), and the files carried.
+const crateEdges = async (tmp, entries, opts = {}) => {
+  const cargo = createCargoContext(tmp, { entries, ...opts })
+  const { sources, tree } = await collectRustBundle(tmp, entries, { cargo, buildScripts: true })
+  const edges = {}
+  for (const [file, specs] of tree.resolutions) {
+    for (const [spec, target] of specs) if (spec.startsWith('use ')) (edges[file] ??= {})[spec] = target instanceof Map ? [...target] : target
+  }
+  return { edges, files: [...sources.keys()].toSorted(), tree }
+}
+
+const platformTables = {
+  'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[target.\'cfg(windows)\'.dependencies]\nfoo = "2"\n[target.\'cfg(unix)\'.dependencies]\nfoo = "1"\n[target.\'cfg(windows)\'.build-dependencies]\nbar = "2"\n[target.\'cfg(unix)\'.build-dependencies]\nbar = "1"\n',
+  'src/main.rs': 'use foo::f;\nfn main() { f() }\n',
+  'build.rs': 'use bar::b;\nfn main() { b() }\n',
+}
+const platformLock = `version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = [\n "bar 1.0.0",\n "bar 2.0.0",\n "foo 1.0.0",\n "foo 2.0.0",\n]\n${[['bar', '1.0.0', 'c'], ['bar', '2.0.0', 'd'], ['foo', '1.0.0', 'a'], ['foo', '2.0.0', 'b']].map(([n, v, c]) => `\n[[package]]\nname = "${n}"\nversion = "${v}"\nsource = "${REGISTRY}"\nchecksum = "${sha(c)}"\n`).join('')}`
+
+test('createCargoContext links only the dependency tables of the platforms the code is built for, and keeps each one that may be', async (t) => {
+  const vendored = {
+    ...vendoredCopy('foo', '[package]\nname = "foo"\nversion = "1.0.0"\n', sha('a')), ...vendoredCopy('foo-2.0.0', '[package]\nname = "foo"\nversion = "2.0.0"\n', sha('b')),
+    ...vendoredCopy('bar', '[package]\nname = "bar"\nversion = "1.0.0"\n', sha('c')), ...vendoredCopy('bar-2.0.0', '[package]\nname = "bar"\nversion = "2.0.0"\n', sha('d')),
+  }
+  // cargo's resolver (the lockfile, the target and the host known): the unix tables on Linux,
+  // whichever table comes first
+  await Promise.all([platformTables['Cargo.toml'], platformTables['Cargo.toml'].replace(/(\[target.'cfg\(windows\)'.dependencies\]\nfoo = "2"\n)(\[target.'cfg\(unix\)'.dependencies\]\nfoo = "1"\n)/u, '$2$1')].map((toml) =>
+    withProjectAsync({ ...platformTables, 'Cargo.toml': toml, 'Cargo.lock': platformLock, ...vendored }, async (tmp) => {
+      const { edges, files } = await crateEdges(tmp, ['src/main.rs'], { target: LINUX, host: LINUX })
+      t.assert.deepEqual(edges, { 'src/main.rs': { 'use foo': 'vendor/foo/src/lib.rs' }, 'build.rs': { 'use bar': 'vendor/bar/src/lib.rs' } })
+      t.assert.deepEqual(files.filter((f) => f.startsWith('vendor/')), ['vendor/bar/src/lib.rs', 'vendor/foo/src/lib.rs'])
+    })))
+  await withProjectAsync({ ...platformTables, ...vendored }, async (tmp) => {
+    // the replay, the same
+    const known = await crateEdges(tmp, ['src/main.rs'], { target: LINUX, host: LINUX })
+    t.assert.deepEqual(known.edges, { 'src/main.rs': { 'use foo': 'vendor/foo/src/lib.rs' }, 'build.rs': { 'use bar': 'vendor/bar/src/lib.rs' } })
+    // no target: either table may apply, so either version is carried, keyed by its platform
+    const any = await crateEdges(tmp, ['src/main.rs'])
+    t.assert.deepEqual(any.edges, {
+      'src/main.rs': { 'use foo': [['windows', 'vendor/foo-2.0.0/src/lib.rs'], ['unix', 'vendor/foo/src/lib.rs']] },
+      'build.rs': { 'use bar': [['windows', 'vendor/bar-2.0.0/src/lib.rs'], ['unix', 'vendor/bar/src/lib.rs']] },
+    })
+    // the target known, the host not: the build script's tables still both maybe
+    const cross = await crateEdges(tmp, ['src/main.rs'], { target: LINUX })
+    t.assert.deepEqual(cross.edges['src/main.rs'], { 'use foo': 'vendor/foo/src/lib.rs' })
+    t.assert.deepEqual(cross.edges['build.rs'], { 'use bar': [['windows', 'vendor/bar-2.0.0/src/lib.rs'], ['unix', 'vendor/bar/src/lib.rs']] })
+  })
+})
+
+test('createCargoContext resolves a build script\'s modules, and a file it shares with the lib, from the [build-dependencies]', async (t) => {
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n[build-dependencies]\nfoo = "2"\n',
+    'build.rs': 'mod probe;\n#[path = "shared.rs"]\nmod shared;\nfn main() { probe::run(); }\n',
+    'probe.rs': 'use foo::v2;\npub fn run() { v2() }\n',
+    'shared.rs': 'use foo as f;\n',
+    'src/lib.rs': '#[path = "../shared.rs"]\npub mod shared;\npub fn lib_uses() { foo::v1() }\n',
+    ...vendoredPackage('foo', '1.0.0'), ...vendoredPackage('foo', '2.0.0'),
+  }
+  await withProjectAsync(files, async (tmp) => {
+    const { edges, files: carried } = await crateEdges(tmp, ['src/lib.rs'], { target: LINUX, host: LINUX })
+    t.assert.equal(edges['probe.rs']['use foo'], 'vendor/foo-2.0.0/src/lib.rs')
+    t.assert.equal(edges['src/lib.rs']['use foo'], 'vendor/foo-1.0.0/src/lib.rs')
+    // compiled into both crates: both versions, the build script's keyed as its
+    t.assert.deepEqual(edges['shared.rs']['use foo'], [['*', 'vendor/foo-1.0.0/src/lib.rs'], ['build-script *', 'vendor/foo-2.0.0/src/lib.rs']])
+    t.assert.ok(carried.includes('vendor/foo-1.0.0/src/lib.rs') && carried.includes('vendor/foo-2.0.0/src/lib.rs'))
+  })
+})
+
+test('createCargoContext resolves a proc-macro entry beside another in both contexts, as cargo activates it', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[workspace]\nmembers = ["app", "pm", "shared"]\nresolver = "2"\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nshared = { path = "../shared" }\n',
+    'app/src/lib.rs': 'pub use shared::f;\n',
+    'pm/Cargo.toml': '[package]\nname = "pm"\nversion = "0.1.0"\nedition = "2021"\n[lib]\nproc-macro = true\n[dependencies]\nshared = { path = "../shared", features = ["h"] }\n',
+    'pm/src/lib.rs': 'pub use shared::f;\n',
+    'shared/Cargo.toml': '[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2021"\n[features]\nh = []\n',
+    'shared/src/lib.rs': '#[cfg(not(feature = "h"))]\nmod noth;\npub fn f() {}\n',
+    'shared/src/noth.rs': 'compile_error!("cargo build -p app -p pm never compiles this");\n',
+  }, async (tmp) => {
+    const { files } = await crateEdges(tmp, ['app/src/lib.rs', 'pm/src/lib.rs'])
+    t.assert.ok(!files.includes('shared/src/noth.rs'))
+    const cargo = createCargoContext(tmp, { entries: ['app/src/lib.rs', 'pm/src/lib.rs'] })
+    t.assert.deepEqual([sorted(cargo.featuresFor('shared/src/lib.rs')), sorted(cargo.featuresFor('shared/src/lib.rs', HOST_UNIT))], [['h'], ['h']])
+  })
+})
+
+test('buildRustTree reports a declared dependency that isn\'t in the bundle, used in expressions only', async (t) => {
+  await Promise.all(['fn main() { let _ = serde_json::to_string(&1); }\n', 'fn main() { let _ = serde_json::json!({}); }\n', 'use serde_json::to_string;\nfn main() {}\n'].map((main) =>
+    withProjectAsync({
+      'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nserde_json = "1"\n',
+      'src/main.rs': main,
+      ...vendoredPackage('other', '1.0.0'),
+    }, async (tmp) => {
+      const { tree } = await crateEdges(tmp, ['src/main.rs'])
+      t.assert.deepEqual([...tree.unresolvedCrates], ['serde_json'], main)
+    })))
+})
+
+test('createCargoContext reads the workspace a member bundled from its own directory inherits from, above the bundle root', async (t) => {
+  await withProjectAsync({
+    'ws/Cargo.toml': '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n[workspace.package]\nversion = "0.3.0"\nedition = "2015"\n[workspace.dependencies]\ndep = { path = "crates/app/dep" }\n',
+    'ws/crates/app/Cargo.toml': '[package]\nname = "app"\nversion.workspace = true\nedition.workspace = true\n[features]\ndefault = ["fast"]\nfast = []\n[dependencies]\ndep = { workspace = true }\n[dev-dependencies]\ndep = { workspace = true, features = ["extra"] }\n',
+    'ws/crates/app/src/lib.rs': '#[cfg(feature = "fast")]\nmod fast;\npub use dep::x;\n',
+    'ws/crates/app/src/fast.rs': '',
+    'ws/crates/app/dep/Cargo.toml': '[package]\nname = "dep"\nversion = "0.1.0"\n[features]\nextra = []\n',
+    'ws/crates/app/dep/src/lib.rs': '#[cfg(feature = "extra")]\nmod extra;\n#[cfg(not(feature = "extra"))]\nmod plain;\npub fn x() {}\n',
+    'ws/crates/app/dep/src/extra.rs': '', 'ws/crates/app/dep/src/plain.rs': '',
+  }, async (tmp) => {
+    const root = join(tmp, 'ws', 'crates', 'app')
+    const { files } = await crateEdges(root, ['src/lib.rs'])
+    // the inherited edition and the workspace's dependency read; its resolver 2 keeps the
+    // dev-dependency's feature out of the build, which resolver 1 of the member's edition wouldn't
+    t.assert.deepEqual(files, ['dep/src/lib.rs', 'dep/src/plain.rs', 'src/fast.rs', 'src/lib.rs'])
+    t.assert.equal(createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs').version, '0.3.0')
+    // a [workspace] above that doesn't take the package is none of its
+    writeFileSync(join(tmp, 'ws', 'Cargo.toml'), '[workspace]\nmembers = ["other"]\n[workspace.package]\nversion = "0.3.0"\nedition = "2015"\n')
+    t.assert.throws(() => createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs'), { name: 'LockfileError', message: /no workspace root is given/u })
+  })
+})
+
+test('createCargoContext says why the features come from a replay, and a vendored copy the lockfile doesn\'t list needs no checksums', (t) => {
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'Cargo.lock': `version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["foo"]\n\n[[package]]\nname = "foo"\nversion = "1.0.0"\nsource = "${REGISTRY}"\nchecksum = "${sha('a')}"\n`,
+    'src/main.rs': '',
+    ...vendoredCopy('foo', '[package]\nname = "foo"\nversion = "1.0.0"\n', sha('a')),
+    ...vendoredPackage('junk', '0.1.0'), // no .cargo-checksum.json, and nothing locks it
+  }
+  withProject(files, (tmp) => {
+    t.assert.deepEqual(createCargoContext(tmp, { entries: ['src/main.rs'], target: LINUX }).resolution(), { mode: 'cargo', why: null })
+    t.assert.deepEqual(createCargoContext(tmp, { entries: ['src/main.rs'] }).resolution(), { mode: 'replay', why: 'no --cargo-target' })
+    rmSync(join(tmp, 'vendor/foo/.cargo-checksum.json'))
+    t.assert.deepEqual(createCargoContext(tmp, { entries: ['src/main.rs'], target: LINUX }).resolution(), { mode: 'replay', why: 'the vendored copy of foo 1.0.0 has no .cargo-checksum.json' })
+    rmSync(join(tmp, 'vendor/foo'), { recursive: true })
+    t.assert.deepEqual(createCargoContext(tmp, { entries: ['src/main.rs'], target: LINUX }).resolution(), { mode: 'replay', why: 'foo 1.0.0 is locked but not vendored' })
+    rmSync(join(tmp, 'Cargo.lock'))
+    t.assert.deepEqual(createCargoContext(tmp, { entries: ['src/main.rs'], target: LINUX }).resolution(), { mode: 'replay', why: 'no Cargo.lock' })
+  })
+})
+
+test('createCargoContext applies a [patch] to the dependencies of its source only: a git URL\'s not to crates.io\'s', (t) => {
+  const base = {
+    'src/lib.rs': '',
+    ...vendoredPackage('foo', '1.0.0'),
+    'patched/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'patched/foo/src/lib.rs': '',
+  }
+  const manifest = '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n'
+  for (const [where, files] of [
+    ['manifest', { 'Cargo.toml': `${manifest}[patch."https://github.com/example/foo"]\nfoo = { path = "patched/foo" }\n` }],
+    ['config', { 'Cargo.toml': manifest, '.cargo/config.toml': '[patch."https://github.com/example/foo"]\nfoo = { path = "patched/foo" }\n' }],
+    ['crates-io', { 'Cargo.toml': `${manifest}[patch.crates-io]\nfoo = { path = "patched/foo" }\n` }],
+  ]) {
+    withProject({ ...base, ...files }, (tmp) => {
+      t.assert.equal(createCargoContext(tmp, { entries: ['src/lib.rs'] }).resolveCrate('foo', 'src/lib.rs'), where === 'crates-io' ? 'patched/foo/src/lib.rs' : 'vendor/foo-1.0.0/src/lib.rs', where)
+    })
+  }
+})
+
+test('buildRustBundle refuses a vendored file that isn\'t the one its .cargo-checksum.json lists, as cargo does', async (t) => {
+  const lib = 'pub fn f() {}\n'
+  const listed = createHash('sha256').update(lib).digest('hex')
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'src/main.rs': 'fn main() { foo::f() }\n',
+    'vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n',
+    'vendor/foo/.cargo-checksum.json': JSON.stringify({ files: { 'src/lib.rs': listed }, package: sha('a') }),
+    'vendor/foo/src/lib.rs': lib,
+  }
+  await withProjectAsync(files, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] })
+    t.assert.ok(bundle.sources.has('vendor/foo/src/lib.rs'))
+    writeFileSync(join(tmp, 'vendor/foo/src/lib.rs'), 'mod injected;\npub fn f() {}\n')
+    await t.assert.rejects(buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }), { message: new RegExp(`^vendor/foo/src/lib\\.rs isn't the file vendor/foo/\\.cargo-checksum\\.json lists \\(sha256 [0-9a-f]{64}, listed ${listed}\\)`, 'u') })
+  })
+})
+
+test('buildRustTree takes `r#false` for a custom cfg, not the literal `false`', async (t) => {
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': '#[cfg(r#false)]\nmod imp;\nmod other;\nuse crate::other::*;\npub fn f() { imp::g() }\n',
+    'src/imp.rs': 'pub fn g() {}\n', 'src/other.rs': 'pub mod imp;\n', 'src/other/imp.rs': 'pub fn g() {}\n',
+  }
+  t.assert.equal(evalCfg('r#false', {}), null)
+  t.assert.equal(evalCfg('false', {}), false)
+  const imp = async (more) => withProjectAsync({ ...files, ...more }, async (tmp) => (await crateEdges(tmp, ['src/lib.rs'])).tree.resolutions.get('src/lib.rs').get('imp::g'))
+  // presumed off, as any custom cfg: the glob's `imp`; set by the rustflags: the module
+  t.assert.equal(await imp({}), 'src/other/imp.rs')
+  t.assert.equal(await imp({ '.cargo/config.toml': '[build]\nrustflags = ["--cfg", "r#false"]\n' }), 'src/imp.rs')
+})
+
+test('createCargoContext takes a nested workspace\'s vendored crates from the directory its own cargo config names', async (t) => {
+  await withProjectAsync({
+    'sub/Cargo.toml': '[workspace]\nmembers = ["app"]\n',
+    'sub/app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'sub/app/src/lib.rs': 'pub use foo::f;\n',
+    'sub/.cargo/config.toml': '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n',
+    'sub/vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.1"\n', 'sub/vendor/foo/src/lib.rs': '',
+    'vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'vendor/foo/src/lib.rs': '', // the outer project's
+  }, async (tmp) => {
+    const { files } = await crateEdges(tmp, ['sub/app/src/lib.rs'])
+    t.assert.deepEqual(files, ['sub/app/src/lib.rs', 'sub/vendor/foo/src/lib.rs'])
+  })
+})
+
+test('createCargoContext resolves an example with the dev-dependencies', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\ndep = { path = "dep" }\n[dev-dependencies]\ndep = { path = "dep", features = ["extra"] }\n',
+    'src/lib.rs': '',
+    'examples/demo.rs': 'fn main() { dep::f() }\n',
+    'dep/Cargo.toml': '[package]\nname = "dep"\nversion = "0.1.0"\n[features]\nextra = []\n',
+    'dep/src/lib.rs': '#[cfg(feature = "extra")]\nmod extra;\npub fn f() {}\n', 'dep/src/extra.rs': '',
+  }, async (tmp) => {
+    t.assert.ok((await crateEdges(tmp, ['examples/demo.rs'])).files.includes('dep/src/extra.rs'))
+  })
+})
+
+test('createCargoContext resolves no dependency for a name no crate has, and so warns of none', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dev-dependencies]\nbar = "3"\n[target.\'cfg(windows)\'.dependencies]\nqux = "9"\n',
+    'src/lib.rs': 'pub fn f() -> u8 { let _ = str::from_utf8(b""); undeclared::x(); u8::MAX }\n',
+    ...vendoredPackage('bar', '1.0.0'), ...vendoredPackage('qux', '1.0.0'),
+  }, async (tmp) => {
+    // a dev-dependency and another platform's are no dependencies of this build; `u8::MAX`,
+    // `str::from_utf8` and `undeclared::x` name no crate
+    const { warnings } = await captureWarningsAsync(() => crateEdges(tmp, ['src/lib.rs'], { target: LINUX }))
+    t.assert.deepEqual(besidesReplay(warnings), [])
+  })
+})
+
+test('collectRustBundle warns once of a crate root it refuses, however often the tree asks for it', { skip: process.platform === 'win32' ? 'symlinks' : false }, async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'src/lib.rs': 'pub use foo::f;\nfn g() { foo::f() }\n',
+    'secret.rs': 'pub fn f() {}\n',
+    'vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n',
+  }, async (tmp) => {
+    mkdirSync(join(tmp, 'vendor/foo/src'))
+    symlinkSync('../../../secret.rs', join(tmp, 'vendor/foo/src/lib.rs'))
+    const { warnings } = await captureWarningsAsync(() => crateEdges(tmp, ['src/lib.rs']))
+    t.assert.deepEqual(warnings.filter((w) => w.includes('Refusing file outside its package')), ['[loader.rust] Refusing file outside its package: vendor/foo/src/lib.rs (a link out of vendor/foo)'])
   })
 })

@@ -470,6 +470,7 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
       if (sources.has(rel)) continue
       const buf = readFileWithinBase(baseDir, realBase, rel, boundaryOf(rel, cargoCtx))
       if (buf === null) continue
+      cargoCtx.checkVendoredFile(rel, buf)
       if (!isUtf8(buf)) throw new Error(`Rust manifest is not valid UTF-8: ${rel}`)
       sources.set(rel, buf.toString('utf8'))
       formats.set(rel, 'resource')
@@ -488,15 +489,24 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     throw new Error(`Rust bundle has unresolved modules:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  // EXODUS_STASIS_DEBUG=1: show the feature resolution the cfg decisions came from, per package, so
-  // the manifest replay and `cargo metadata` (which unifies dev/build deps like resolver 1) can be compared.
+  // Where the features the cfg decisions rest on come from: cargo's resolver, or -- something it
+  // takes missing -- a replay of the manifests, said so (a project without Cargo has neither).
+  const resolution = cargoCtx.resolution()
+  if (resolution.mode === 'replay' && normalized.some((e) => cargoCtx.packageInfo(e) !== null)) {
+    console.warn(`[stasis] Rust features from a replay of the manifests, not cargo's resolver: ${resolution.why}`)
+  }
+  // EXODUS_STASIS_DEBUG=1: show the feature resolution the cfg decisions came from, per package and
+  // context, so the replay, cargo's resolver and `cargo metadata` (which unifies dev/build deps
+  // like resolver 1) can be compared.
   if (process.env.EXODUS_STASIS_DEBUG === '1' || process.env.EXODUS_STASIS_DEBUG === 'true') {
-    const resolved = [...cargoCtx.resolvedFeatures()].toSorted(([a], [b]) => (a < b ? -1 : 1))
-    const mode = cargo ? 'cargo metadata' : 'Cargo.toml + Cargo.lock'
-    console.warn(`[stasis] Rust features (${mode}), ${resolved.length} package${resolved.length === 1 ? '' : 's'}:`)
-    for (const [dir, set] of resolved) {
-      const pkg = cargoCtx.packageInfo(moduleFileKey(dir, 'Cargo.toml'))
-      console.warn(`[stasis]   ${pkg?.name ?? '?'}@${pkg?.version ?? '?'} (${dir}): ${[...set].toSorted().join(', ') || '(none)'}`)
+    const mode = { cargo: "cargo's resolver", metadata: 'cargo metadata', replay: 'manifest replay' }[resolution.mode]
+    for (const context of ['target', 'host']) {
+      const resolved = [...cargoCtx.resolvedFeatures(context)].toSorted(([a], [b]) => (a < b ? -1 : 1))
+      console.warn(`[stasis] Rust features (${mode}, ${context}), ${resolved.length} package${resolved.length === 1 ? '' : 's'}:`)
+      for (const [dir, set] of resolved) {
+        const pkg = cargoCtx.packageInfo(moduleFileKey(dir, 'Cargo.toml'))
+        console.warn(`[stasis]   ${pkg?.name ?? '?'}@${pkg?.version ?? '?'} (${dir}): ${[...set].toSorted().join(', ') || '(none)'}`)
+      }
     }
   }
 

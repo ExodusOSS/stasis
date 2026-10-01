@@ -920,7 +920,7 @@ test('buildModuleTrees maps module paths to files per crate root, and files back
   t.assert.equal(tree.get('crate'), 'src/main.rs')
   t.assert.equal(tree.get('crate::foo'), 'src/foo.rs')
   t.assert.equal(tree.get('crate::foo::bar'), 'src/foo/bar.rs')
-  t.assert.deepEqual(files.get('src/foo/bar.rs'), { root: 'src/main.rs', modulePath: 'crate::foo::bar', leaves: [], parent: 'src/foo.rs' })
+  t.assert.deepEqual(files.get('src/foo/bar.rs'), { root: 'src/main.rs', modulePath: 'crate::foo::bar', leaves: [], parent: 'src/foo.rs', roots: new Set(['src/main.rs']) })
 })
 
 test('buildModuleTrees keeps a lib and a bin apart (no shared `crate` key) whatever the entry order', (t) => {
@@ -2281,7 +2281,7 @@ test('buildRustTree keeps a template\'s calls and includes with the template whe
   t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'outer!': 'src/lib.rs', 'include_str data.txt': 'src/data.txt', 'helper!': 'src/lib.rs' })
 })
 
-test('buildRustTree lets a local module under a custom cfg stand against a glob, giving way only to the module\'s own binding', (t) => {
+test('buildRustTree lets a local module under a custom cfg give way to a glob or a binding of the module, as a doubtful candidate does', (t) => {
   const base = [
     ['src/lib.rs', 'mod other;\n#[cfg(docsrs)]\nmod util;\nuse other::*;\nfn f() { util::g(); }\n'],
     ['src/other.rs', 'pub mod util;\n'],
@@ -2289,7 +2289,9 @@ test('buildRustTree lets a local module under a custom cfg stand against a glob,
     ['src/util.rs', 'pub fn g() {}\n'],
   ]
   const r = (sources) => edges(buildRustTree(new Map(sources), { roots: ['src/lib.rs'] }).resolutions.get('src/lib.rs'))['util::g']
-  t.assert.equal(r(base), 'src/util.rs') // a glob never shadows a module that is there
+  // a default build has no `mod util`: the glob's `util` is the name (rustc builds it with the glob's)
+  t.assert.equal(r(base), 'src/other/util.rs')
+  t.assert.equal(r(base.filter(([f]) => f !== 'src/other.rs' && f !== 'src/other/util.rs').concat([['src/other.rs', '']])), 'src/util.rs') // nothing else of the name: the module
   // serde: the docsrs-only module beside the `pub use` of every other build.
   t.assert.equal(r([...base, ['src/lib.rs', 'mod other;\n#[cfg(docsrs)]\nmod util;\n#[cfg(not(docsrs))]\nuse other::util;\nfn f() { util::g(); }\n']]), 'src/other/util.rs')
 })
@@ -2315,4 +2317,53 @@ test('evalCfg and buildRustTree keep cfg values that differ only in spaces apart
     const { resolutions } = buildRustTree(new Map([['src/lib.rs', `#[cfg(${cfg})]\nmod x;\n`], ['src/x.rs', '']]), { roots: ['src/lib.rs'] })
     t.assert.deepEqual(edges(resolutions.get('src/lib.rs')), { 'mod x': 'src/x.rs' })
   }
+})
+
+// --- tenth review: macros of other crates, nested templates ---
+
+test('buildRustTree gives a macro of another crate an edge, through an import, an alias, a path and #[macro_use] extern crate', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'mod a;\nmod b;\nmod c;\nmod prelude;\nuse prelude::*;\nfn f() { pm!(); }\n'],
+    ['src/a.rs', 'use dep::mac;\nfn f() { mac!(); }\n'],
+    ['src/b.rs', 'use dep::other as o;\nfn f() { o!(); }\n'],
+    ['src/c.rs', 'fn f() { dep::other!(); }\n'],
+    ['src/prelude.rs', 'pub use dep::mac as pm;\n'],
+    ['tool/main.rs', '#[macro_use]\nextern crate dep;\nfn main() { other!(); }\n'],
+    ['vendor/dep/src/lib.rs', '#[macro_use]\nmod macros;\n#[macro_export]\nmacro_rules! mac { () => {} }\n'],
+    ['vendor/dep/src/macros.rs', '#[macro_export]\nmacro_rules! other { () => {} }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs', 'tool/main.rs'] })
+  t.assert.equal(resolutions.get('src/a.rs').get('mac!'), 'vendor/dep/src/lib.rs')
+  t.assert.equal(resolutions.get('src/b.rs').get('o!'), 'vendor/dep/src/macros.rs') // the macro the alias names, in the file defining it
+  t.assert.equal(resolutions.get('src/c.rs').get('dep::other!'), 'vendor/dep/src/macros.rs')
+  t.assert.equal(resolutions.get('src/lib.rs').get('pm!'), 'vendor/dep/src/lib.rs') // through the prelude glob
+  t.assert.equal(resolutions.get('tool/main.rs').get('other!'), 'vendor/dep/src/macros.rs')
+})
+
+test('buildRustTree resolves an include in a nested macro_rules! where that macro is invoked, not where the outer one is', (t) => {
+  const nested = 'macro_rules! outer { () => { macro_rules! inner { () => { include_str!("data.txt") } } } }\n'
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod macros;\nouter!();\npub mod sub;\n'],
+    ['src/macros.rs', nested],
+    ['src/sub/mod.rs', 'pub mod user;\n'],
+    ['src/sub/user.rs', 'pub fn f() -> &\'static str { inner!() }\n'],
+    ['src/sub/data.txt', 'sub'],
+    ['src/data.txt', 'a decoy rustc never reads'],
+  ])
+  const items = scanRustItems(nested)
+  t.assert.deepEqual(items.macros.map((m) => [m.name, m.includes.map((i) => i.path)]), [['outer', []], ['inner', ['data.txt']]])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.equal(resolutions.get('src/sub/user.rs').get('include_str data.txt'), 'src/sub/data.txt')
+  t.assert.equal(resolutions.get('src/lib.rs').get('include_str data.txt'), undefined)
+})
+
+test('buildRustTree resolves through a dense cycle of cfg-gated globs in time: each module globbing every other', (t) => {
+  // every path through the cycle a distinct `any(…)` of cfgs: kept to the ones that tell anything apart
+  const N = 6
+  const sources = new Map([['src/lib.rs', `${Array.from({ length: N }, (_, k) => `pub mod m${k};\n`).join('')}${Array.from({ length: N * N }, (_, i) => `pub use crate::m${Math.floor(i / N)}::item${i % N} as u${i};\n`).join('')}`]])
+  for (let k = 0; k < N; k++) sources.set(`src/m${k}.rs`, `${Array.from({ length: N }, (_, j) => (j === k ? '' : `#[cfg(feature = "f${k}_${j}")]\npub use crate::m${j}::*;\n`)).join('')}pub fn item${k}() {}\n`)
+  const started = performance.now()
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.ok(performance.now() - started < 10_000, `${Math.round(performance.now() - started)} ms`)
+  t.assert.equal(resolutions.get('src/lib.rs').get('crate::m0::item0'), 'src/m0.rs')
 })

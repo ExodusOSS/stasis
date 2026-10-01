@@ -45,7 +45,7 @@ function usage(prefix = '') {
  (Rust: each crate's Cargo features are resolved from Cargo.toml/Cargo.lock like "cargo build" of the
   entries' packages, so #[cfg(feature = ...)] code that is off stays out -- by cargo's own resolver
   when there is a Cargo.lock (version 3 or 4; an older one stops the build), --cargo-target and every
-  locked package in-tree, by replaying the manifests otherwise; --cargo takes the resolution
+  locked package in-tree, by replaying the manifests otherwise (said, with why); --cargo takes the resolution
   from "cargo metadata" instead -- it runs cargo, so only on a project you trust; the --cargo-*
   feature flags are cargo's --features / --no-default-features / --all-features for those packages;
   --cargo-target asks rustc for the target's cfgs so #[cfg(unix)]-style code for other targets stays

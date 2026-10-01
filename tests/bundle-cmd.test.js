@@ -3917,7 +3917,7 @@ test('buildRustBundle resolves a mod declared inside inline modules under their 
 
 test('buildRustBundle leaves test/doc-only modules and the dev-deps they reach out of the bundle', async (t) => {
   const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'cfg-test'), entries: ['src/lib.rs'] }))
-  t.assert.deepEqual(warnings, [])
+  t.assert.deepEqual(warnings, ["[stasis] Rust features from a replay of the manifests, not cargo's resolver: no --cargo-target"])
   // Not bundled: src/tests/mod.rs, src/prop/strategies.rs, src/doc_only.rs, src/sys/mock.rs, src/maybe.rs (its feature
   // is off), vendor/proptest, vendor/quickcheck, serde's test helpers.
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
@@ -4005,14 +4005,15 @@ test('CLI: bundle --cargo-target keeps only the named target\'s #[cfg_attr(…, 
 test('CLI: EXODUS_STASIS_DEBUG=1 prints the resolved Rust features per package', (t) => {
   const r = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features'), env: { ...cleanEnv, EXODUS_STASIS_DEBUG: '1' } })
   t.assert.equal(r.status, 0, r.stderr)
-  t.assert.match(r.stderr, /^\[stasis\] Rust features \(Cargo\.toml \+ Cargo\.lock\), 6 packages:$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] Rust features \(manifest replay, target\), 6 packages:$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] Rust features \(manifest replay, host\), 0 packages:$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}app@0\.1\.0 \(\.\): default, fast$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}lib-a@0\.2\.0 \(crates\/lib-a\): default, extra, extra-dep, std$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}extra-dep@1\.0\.0 \(vendor\/extra-dep\): \(none\)$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}winnowish@0\.6\.1 \(vendor\/winnowish\): default, std$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}winnowish@0\.5\.0 \(vendor\/winnowish-0\.5\.0\): default, std$/mu)
   const quiet = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
-  t.assert.doesNotMatch(quiet.stderr, /Rust features/u)
+  t.assert.doesNotMatch(quiet.stderr, /Rust features \(/u)
 })
 
 test('CLI: bundle --cargo-features enables a root feature (repeatable, comma-separated)', withTmp((t, tmp) => {
