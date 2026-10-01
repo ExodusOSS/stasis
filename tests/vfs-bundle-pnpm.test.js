@@ -63,12 +63,17 @@ test('pnpm: reads every project pnpm finds and every one the lockfile has, and t
   // lockfile is not up to date.
   t.assert.equal((await load({ vfs: project({ ...files, 'new/package.json': { name: 'new', version: '1.0.0' } }) })).stats.projects, 3)
   await t.assert.rejects(load({ vfs: project({ ...files, 'new/package.json': { name: 'new', version: '1.0.0', dependencies: { pkg: 'workspace:*' } } }) }), /manifests\["new"\]: the lockfile is not up to date with this package\.json/u)
-  const { 'pkg/package.json': _, ...withoutPkg } = files
+  const { 'pkg/package.json': _pkg, ...withoutPkg } = files
   await t.assert.rejects(load({ vfs: project(withoutPkg) }), /importers\["pkg"\]: the package\.json of this project is not given/u)
   await t.assert.rejects(load({ vfs: project({ ...files, '.npmrc': 'node-linker=hoisted\n' }) }), /\.npmrc:1: node-linker: "hoisted" is not supported/u)
   // cwd may be in any project pnpm finds, or below a package.json that is only a `type` marker.
   t.assert.equal((await load({ vfs: project({ ...files, 'new/package.json': { name: 'new', version: '1.0.0' } }), cwd: '/new' })).stats.projects, 3)
   t.assert.equal((await load({ vfs: project({ ...files, 'src/package.json': { type: 'module' } }), cwd: '/src' })).stats.projects, 2)
+  // A workspace is installed from its root, whatever pnpm-lock.yaml is nearer.
+  const stray = await load({ vfs: project({ ...files, 'pkg/pnpm-lock.yaml': lockfile('.') }), cwd: '/pkg' })
+  t.assert.deepEqual([stray.root, stray.stats.projects], ['/', 2])
+  const { 'pnpm-lock.yaml': _, ...unlocked } = files
+  await t.assert.rejects(load({ vfs: project({ ...unlocked, 'pkg/pnpm-lock.yaml': lockfile('.') }), cwd: '/pkg' }), (err) => err.message === 'no pnpm-lock.yaml found in /, where /pkg is installed from')
   // A project pnpm finds through a link would have its node_modules laid out where the link leads.
   const linked = project(files)
   write(linked, { 'elsewhere/new/package.json': { name: 'new', version: '1.0.0' } })
@@ -94,10 +99,10 @@ test('pnpm: refuses what is no lockfile for the project, naming the file', async
   const deeper = await load({ vfs: project({ 'p/package.json': { name: 'p', version: '1.0.0' }, 'p/pnpm-lock.yaml': lockfile('.') }), cwd: '/p' })
   t.assert.equal(deeper.root, '/p', 'the lockfile need not be at the root of the Vfs')
   t.assert.equal(deeper.host.stat('/p/node_modules/.pnpm').isDirectory(), true)
-  await t.assert.rejects(load({ vfs: project({ 'package.json': { name: 'p', version: '1.0.0' }, 'pnpm-lock.yaml': "lockfileVersion: '6.0'\n" }) }), (err) => err.message.startsWith('/pnpm-lock.yaml: lockfileVersion: unsupported version') && err.cause?.name === 'LockfileError')
+  await t.assert.rejects(load({ vfs: project({ 'package.json': { name: 'p', version: '1.0.0' }, 'pnpm-lock.yaml': "lockfileVersion: '6.0'\n" }) }), (err) => err.message.startsWith('pnpm-lock.yaml: lockfileVersion: unsupported version') && err.cause?.name === 'LockfileError')
   // pnpm 11's env document, with nothing installed yet.
   const env = ['---', "lockfileVersion: '9.0'", 'importers:', '  .:', '    configDependencies: {}', '---', ''].join('\n')
-  await t.assert.rejects(load({ vfs: project({ 'package.json': { name: 'p', version: '1.0.0' }, 'pnpm-lock.yaml': env }) }), (err) => err.message === "/pnpm-lock.yaml holds pnpm's env document alone and no lockfile for the project; run `pnpm install` first")
+  await t.assert.rejects(load({ vfs: project({ 'package.json': { name: 'p', version: '1.0.0' }, 'pnpm-lock.yaml': env }) }), /^DeptreeError: pnpm-lock\.yaml: it holds the env document pnpm 11 writes alone/u)
   // The project cwd is in has to be one the lockfile installs.
   const nested = project({ 'package.json': { name: 'outer', version: '1.0.0' }, 'pnpm-lock.yaml': lockfile('.'), 'nested/package.json': { name: 'nested', version: '1.0.0' }, 'nested/src/a.js': '' })
   await t.assert.rejects(load({ vfs: nested, cwd: '/nested/src' }), (err) => err.message === "/pnpm-lock.yaml does not install /nested: it is none of the lockfile's projects")
@@ -121,8 +126,11 @@ test('buildVfsBundle checks its entries first, reads no EXODUS_STASIS_* setting 
     'package.json': { name: 'p', version: '1.0.0', dependencies: { ms: '2.1.3' } },
     'pnpm-lock.yaml': ["lockfileVersion: '9.0'", '', 'settings:', '  autoInstallPeers: true', '  excludeLinksFromLockfile: false', '', 'importers:', '', '  .:', '    dependencies:', '      ms:', '        specifier: 2.1.3', '        version: 2.1.3', '', 'packages:', '', '  ms@2.1.3:', `    resolution: {integrity: ${bogus}}`, '', 'snapshots:', '', '  ms@2.1.3: {}', ''].join('\n'),
   }
-  // Refused before the tree, whose tarball would not match, is laid out.
+  // Refused before the tree, whose tarball would not match, is laid out; for a project under a
+  // node_modules directory too.
   await t.assert.rejects(build({ vfs: project(files), entries: ['src/typo.js'] }), /^Error: entry not found: \/src\/typo\.js/u)
+  const vendored = project(Object.fromEntries(Object.entries(files).map(([rel, text]) => [`vendor/node_modules/app/${rel}`, text])))
+  await t.assert.rejects(build({ vfs: vendored, cwd: '/vendor/node_modules/app', entries: ['src/typo.js'] }), /^Error: entry not found: \/vendor\/node_modules\/app\/src\/typo\.js/u)
   await t.assert.rejects(build({ vfs: project({ ...files, 'src/a.js': '' }), entries: ['src/a.js'], repo: { github: 'ExodusOSS/stasis', commit: 'abc' } }), /invalid bundle repo\.commit: "abc"/u)
 
   // A bundleFile the project's stasis.config.json names is no write target of a build, which writes
@@ -156,6 +164,35 @@ test('buildVfsBundle builds from a cwd named through a link, and for a project u
   t.assert.equal(host.stat('/vendor/node_modules/app/src/a.js').isFile(), true)
   t.assert.equal(host.stat('/vendor/node_modules/other/index.js'), null, 'what else that node_modules holds is above the root')
   t.assert.deepEqual(host.readdir('/vendor/node_modules').map((d) => d.name), ['app'])
+})
+
+test('buildVfsBundle refuses, and never hangs on, a file with no package.json naming a package up to the root of the Vfs', { timeout: 30_000 }, async (t) => {
+  const vfs = project({ 'package.json': { type: 'commonjs' }, 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': 'module.exports = 1\n' })
+  await t.assert.rejects(build({ vfs, entries: ['src/a.js'] }), /No package\.json with a name found for/u)
+})
+
+test('buildVfsBundle reads every package.json past a byte order mark, as Node does', async (t) => {
+  const bom = (value) => `\uFEFF${JSON.stringify(value)}\n`
+  const pinned = project({ 'package.json': bom({ name: 'p', version: '1.0.0', packageManager: 'pnpm@11.28.2' }), 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': 'module.exports = 1\n' })
+  t.assert.equal((await load({ vfs: pinned })).packageManagerVersion, '11.28.2', 'the pin')
+  const marked = project({ 'package.json': { name: 'p', version: '1.0.0' }, 'pnpm-lock.yaml': lockfile('.'), 'src/package.json': bom({ type: 'module' }), 'src/a.js': 'export default 1\n' })
+  t.assert.deepEqual([...(await build({ vfs: marked, entries: ['src/a.js'] })).bundle.formats], [['src/a.js', 'module']], 'a `type` marker')
+  const workspace = project({
+    'package.json': { name: 'p', version: '1.0.0', dependencies: { w: 'workspace:*' } },
+    'pnpm-workspace.yaml': 'packages:\n  - w\n',
+    'pnpm-lock.yaml': ["lockfileVersion: '9.0'", '', 'settings:', '  autoInstallPeers: true', '  excludeLinksFromLockfile: false', '', 'importers:', '', '  .:', '    dependencies:', '      w:', '        specifier: workspace:*', '        version: link:w', '', '  w: {}', ''].join('\n'),
+    'w/package.json': bom({ name: 'w', version: '1.0.0', main: 'i.js' }),
+    'w/i.js': 'module.exports = 2\n',
+    'src/a.js': "require('w')\n",
+  })
+  t.assert.deepEqual([...(await build({ vfs: workspace, entries: ['src/a.js'] })).bundle.sources.keys()], ['src/a.js', 'w/i.js'], 'a package State buckets')
+})
+
+test('buildVfsBundle walks up past a `type` marker to a package.json, refusing one that is no JSON object', async (t) => {
+  const files = { 'package.json': { name: 'p', version: '1.0.0' }, 'pnpm-lock.yaml': lockfile('.'), 'src/sub/package.json': { type: 'module' }, 'src/sub/a.js': 'export default 1\n' }
+  await t.assert.rejects(build({ vfs: project({ ...files, 'src/package.json': 'null\n' }), entries: ['src/sub/a.js'] }), (err) => err.code === 'ERR_INVALID_PACKAGE_CONFIG' && err.message.includes('/src/package.json'))
+  const built = await build({ vfs: project({ ...files, 'src/package.json/x': '' }), entries: ['src/sub/a.js'] })
+  t.assert.deepEqual([...built.bundle.modules].map(([dir, { name }]) => [dir, name]), [['.', 'p']], 'a directory named package.json is passed over')
 })
 
 test('buildVfsBundle puts `repo` on the Bundle, never on its lockfile, over what it detects', async (t) => {

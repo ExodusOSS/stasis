@@ -68,6 +68,11 @@ function writeTree(d) {
   w('node_modules/arrpkg/package.json', '[]'); w('node_modules/arrpkg/index.js')
   w('node_modules/nullpkg/package.json', 'null'); w('node_modules/nullpkg/index.js')
   w('node_modules/pkg/lib/$&.js')
+  // Node reads a package.json past a byte order mark, takes an empty `main` for none, and refuses an
+  // encoded separator anywhere in what `exports` resolves to.
+  w('node_modules/bom/package.json', `\uFEFF${JSON.stringify({ name: 'bom', main: 'm.js' })}`); w('node_modules/bom/m.js')
+  w('node_modules/empty/package.json', { name: 'empty', main: '' }); w('node_modules/empty/index.js'); w('node_modules/empty.js')
+  w('node_modules/encq/package.json', { name: 'encq', exports: { './x': './x.js?y%2F' } }); w('node_modules/encq/x.js')
 }
 
 const CONDITIONS = {
@@ -76,7 +81,7 @@ const CONDITIONS = {
   browser: new Set(['browser', 'require']),
 }
 
-const ROOT_SPECS = ['./a', './a.ts', './dir', './dir2', './m.mjs', './m', './file', './both', './sub', './link/z', './link', './real/z.js', '.', '..', './dir/', './dir/.', './missing', './emptydir', '/etc/passwd', 'pkg', 'pkg/lib/q', 'pkg/lib/q.js', 'pkg/missing', 'e', 'e/sub/q', 'e/x', 'e/lib/q.js', 'e/sub/missing', 'e/deep/a.js', 'e/deep/a', 'e/trail/q.js', 'arr', 'bm', 'bm2', 'nest', 'nest/d.js', '@s/p', '@s/p/index', '@s/p/index.js', '@s', '@s/', 'noname', 'bad', 'esc', 'esc2', 'pat/a.js', 'pat/feat/x', 'pat/feat/private/y', 'pat/n/k', 'pat/b.js', 'pat', 'sugar', 'sugar/s.js', 'sugarc', 'mixed', 'numkey', 'selfref', 'selfref/util', 'selfref/deep/x.js', 'imp', 'typeless', 'mainidx', 'dotmain', 'exptrail/a.js', 'space pkg', 'pct', 'hash', 'idxnode', 'idxjson', 'self', 'self/feat', 'self/missing', '#a', '#dep/index', '#dep/q', '#miss', '#zzz', '#cond', '#builtin', '#bare', '#fs', '#fsc', '#dep/$&', '#dep/$`', 'expfalse', 'exptrue', 'expnum', 'arrpkg', 'nullpkg', '#arr', '#', '#/x', 'fs', 'node:fs', 'nonexistent', '.foo', './', '', 'e/sub/../q', 'pkg/./lib/q', 'pkg/lib/../lib/q', './node_modules/pkg', 'x']
+const ROOT_SPECS = ['./a', './a.ts', './dir', './dir2', './m.mjs', './m', './file', './both', './sub', './link/z', './link', './real/z.js', '.', '..', './dir/', './dir/.', './missing', './emptydir', '/etc/passwd', 'pkg', 'pkg/lib/q', 'pkg/lib/q.js', 'pkg/missing', 'e', 'e/sub/q', 'e/x', 'e/lib/q.js', 'e/sub/missing', 'e/deep/a.js', 'e/deep/a', 'e/trail/q.js', 'arr', 'bm', 'bm2', 'nest', 'nest/d.js', '@s/p', '@s/p/index', '@s/p/index.js', '@s', '@s/', 'noname', 'bad', 'esc', 'esc2', 'pat/a.js', 'pat/feat/x', 'pat/feat/private/y', 'pat/n/k', 'pat/b.js', 'pat', 'sugar', 'sugar/s.js', 'sugarc', 'mixed', 'numkey', 'selfref', 'selfref/util', 'selfref/deep/x.js', 'imp', 'typeless', 'mainidx', 'dotmain', 'exptrail/a.js', 'space pkg', 'pct', 'hash', 'idxnode', 'idxjson', 'self', 'self/feat', 'self/missing', '#a', '#dep/index', '#dep/q', '#miss', '#zzz', '#cond', '#builtin', '#bare', '#fs', '#fsc', '#dep/$&', '#dep/$`', 'expfalse', 'exptrue', 'expnum', 'arrpkg', 'nullpkg', '#arr', '#', '#/x', 'fs', 'node:fs', 'nonexistent', '.foo', './', '', 'e/sub/../q', 'pkg/./lib/q', 'pkg/lib/../lib/q', './node_modules/pkg', 'x', 'bom', 'empty', 'empty/', 'encq/x']
 
 test('createNodeResolver(diskHost) agrees with require.resolve on every case, hits and error codes alike', withTmp((t, d) => {
   writeTree(d)

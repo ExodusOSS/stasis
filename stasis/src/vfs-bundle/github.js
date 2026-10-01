@@ -6,7 +6,7 @@ import { ArchiveError, unpack } from '@preventive/archive/tar.js'
 import { createClient } from '@preventive/upstream/github.js'
 import { vfsFromEntries } from '@preventive/vfs'
 import { buildVfsBundle } from '../cmd/bundle.js'
-import { checkPackageManager, lockfileOf, lockfileRoot } from './tree.js'
+import { installedAlone, lockfileOf, lockfileRoot, packageManagerOf } from './tree.js'
 
 // As upstream's tree verification bounds a tarball's unpacked size.
 const MAX_TAR_BYTES = 2 ** 30
@@ -42,15 +42,27 @@ function refersAbove(entries, lockfile) {
     : TSCONFIG.test(entry.name) && [...text(entry).matchAll(/"(\.\.?\/[^"]*)"/gu)].some(([, path]) => resolvesOutside(entry.name, path))))
 }
 
-// The entries of `directory` alone, when it holds the lockfile and stands alone; else null.
-async function subtreeEntries(client, { github, sha, directory, lockfile, where }) {
+// The directories above `directory`, the repo's root (undefined) last.
+function ancestorsOf(directory) {
+  const out = []
+  for (let dir = posix.dirname(directory); dir !== '.'; dir = posix.dirname(dir)) out.push(dir)
+  return [...out, undefined]
+}
+
+// The entries of `directory` alone, when it holds the lockfile, is installed from itself and stands
+// alone; else null.
+async function subtreeEntries(client, { github, sha, directory, packageManager, where }) {
+  const list = async (path) => (await client.listRepoDir({ repo: github, sha, path })).map((entry) => entry.path)
   let listing
   try {
     listing = await client.listRepoDir({ repo: github, sha, path: directory })
   } catch {
     return null // no plain directory in git (a symlink, or under one): the whole repo resolves it
   }
+  const lockfile = lockfileOf(packageManager)
   if (!listing.some((entry) => entry.path === lockfile && entry.type === 'blob')) return null
+  // Installed from a root above it (a workspace's), it is built from there.
+  if (!(await installedAlone(packageManager, listing.map((entry) => entry.path), () => Promise.all(ancestorsOf(directory).map(list))))) return null
   const tree = await client.getRepoTreeId({ repo: github, sha, path: directory })
   let entries
   try {
@@ -68,7 +80,7 @@ async function subtreeEntries(client, { github, sha, directory, lockfile, where 
 // come from GitHub, or from the cache setCacheDir names, held to the git tree id either way
 // (@preventive/upstream), and are unpacked into a Vfs that buildVfsBundle reads alone.
 export async function buildGitHubBundle({ github, sha, directory, client, packageManager, ...options } = {}) {
-  checkPackageManager('buildGitHubBundle', packageManager)
+  packageManagerOf('buildGitHubBundle', packageManager)
   if (github === undefined || sha === undefined) throw new Error('buildGitHubBundle: github and sha are required')
   // Checked as the Bundle checks them, before anything is fetched.
   for (const [key, value] of Object.entries({ github, commit: sha, directory: directory || undefined })) {
@@ -76,7 +88,7 @@ export async function buildGitHubBundle({ github, sha, directory, client, packag
   }
   client ??= createClient({ token: null })
   const where = `buildGitHubBundle: ${github}@${sha}`
-  const subtree = directory ? await subtreeEntries(client, { github, sha, directory, lockfile: lockfileOf(packageManager), where }) : null
+  const subtree = directory ? await subtreeEntries(client, { github, sha, directory, packageManager, where }) : null
   const entries = subtree ?? await treeEntries(await client.getRepoTarball({ repo: github, sha }), where)
   const link = subtree ? undefined : escapingLink(entries)
   if (link) throw new Error(`${where}: symlink ${JSON.stringify(link.name)} points outside the repo`)

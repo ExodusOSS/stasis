@@ -6,11 +6,15 @@ import { posixPathEscapes } from './artifact-util.js'
 import { diskHost } from './host.js'
 import { assertRealPathWithinBase, hasNodeModulesSegment, toPosix } from './util.js'
 
+// Text as Node reads a package.json: UTF-8, past a byte order mark.
+const utf8 = new TextDecoder()
+export const packageJSONText = (bytes) => utf8.decode(bytes)
+
 export function packageType(file, host = diskHost) {
   const pkg = host.findPackageJSON(file)
   if (!pkg) return null
   try {
-    const type = JSON.parse(host.readFile(pkg).toString('utf8')).type
+    const type = JSON.parse(packageJSONText(host.readFile(pkg))).type
     return type === 'module' || type === 'commonjs' ? type : null
   } catch {
     return null
@@ -27,7 +31,7 @@ export function findPackageMetadata(baseDir, fileRelPath, host = diskHost) {
     const pkgPath = join(baseDir, dir, 'package.json')
     if (host.stat(pkgPath)?.isFile()) {
       try {
-        const pkg = JSON.parse(host.readFile(pkgPath).toString('utf8'))
+        const pkg = JSON.parse(packageJSONText(host.readFile(pkgPath)))
         if (pkg.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
           // `?? undefined` folds a literal `"version": null` into the one absent-version spelling.
           return { pkgDir: dir, name: pkg.name, version: pkg.version ?? undefined }
@@ -65,7 +69,7 @@ export function readModuleManifest({ baseDir, realBase, rel, host = diskHost } =
 // Never throws: a missing/unreadable/malformed file yields null.
 export function readJson(file, host = diskHost) {
   try {
-    return JSON.parse(host.readFile(file).toString('utf8'))
+    return JSON.parse(packageJSONText(host.readFile(file)))
   } catch {
     return null
   }
@@ -90,8 +94,8 @@ export function gitOriginUrl(text) {
   return text.slice(start, end === -1 ? undefined : end).trim() || null
 }
 
-// Reads go through `host` (never the --fs-patched fs), so detection is never captured.
-const readText = (host, file) => {
+// The text of `file`, or null. Read through `host` (never the --fs-patched fs), it is never captured.
+export const readText = (host, file) => {
   try {
     return host.readFile(file).toString('utf8')
   } catch {

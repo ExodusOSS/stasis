@@ -40,7 +40,22 @@ test('buildGitHubBundle downloads a directory alone when its lockfile is there',
   const { bundle } = await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
   t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js'], 'built from the subtree alone')
   t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, directory: 'apps/p', commit: SHA })
-  t.assert.deepEqual(client.calls.map(([method]) => method), ['listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball'])
+  t.assert.deepEqual(client.calls.map(([method, , , path]) => (method === 'listRepoDir' ? `${method} ${path}` : method)), ['listRepoDir apps/p', 'listRepoDir apps', 'listRepoDir undefined', 'getRepoTreeId', 'getRepoTreeTarball'])
+})
+
+test('buildGitHubBundle builds a workspace member from the workspace, whatever lockfile it holds', async (t) => {
+  const client = fakeClient({
+    'package.json': json({ name: 'root', version: '1.0.0', private: true }),
+    'pnpm-workspace.yaml': 'packages:\n  - packages/*\n',
+    'pnpm-lock.yaml': lockfile('.', 'packages/p'),
+    'packages/p/package.json': json({ name: 'p', version: '1.0.0' }),
+    'packages/p/pnpm-lock.yaml': lockfile('.'),
+    'packages/p/src/a.js': 'module.exports = 1\n',
+  })
+  const { bundle } = await build({ client, directory: 'packages/p', entries: ['src/a.js'] })
+  t.assert.deepEqual([...bundle.sources.keys()], ['packages/p/src/a.js'])
+  t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, root: true, commit: SHA })
+  t.assert.deepEqual(client.calls.map(([method]) => method), ['listRepoDir', 'listRepoDir', 'listRepoDir', 'getRepoTarball'])
 })
 
 test('buildGitHubBundle downloads the whole repo for a lockfile above the directory', async (t) => {
@@ -93,14 +108,14 @@ test('buildGitHubBundle falls back to the whole repo when the subtree does not s
   await Promise.all(Object.entries(cases).map(async ([what, extra]) => {
     const client = fakeClient(appWithLockfile(extra))
     const { bundle } = await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
-    t.assert.deepEqual(methods(client), ['listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball', 'getRepoTarball'], what)
+    t.assert.deepEqual(methods(client), ['listRepoDir', 'listRepoDir', 'listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball', 'getRepoTarball'], what)
     t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js', 'src/b.js'], what)
     t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, directory: 'apps/p', commit: SHA }, what)
   }))
   // A tsconfig path within the subtree keeps it alone.
   const client = fakeClient(appWithLockfile({ 'apps/p/tsconfig.json': json({ extends: './tsconfig.base.json', include: ['./src'] }) }))
   await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
-  t.assert.deepEqual(methods(client), ['listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball'])
+  t.assert.deepEqual(methods(client), ['listRepoDir', 'listRepoDir', 'listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball'])
 })
 
 test('buildGitHubBundle resolves a directory that is a symlink in the repo through the whole repo', async (t) => {
@@ -227,5 +242,5 @@ test('buildGitHubBundle reads nothing from disk: the repo, its tree and every fi
   t.assert.deepEqual(built.typescript.repo, { github: GITHUB, root: true, commit: SHA })
   t.assert.deepEqual(built.mainFields.sources.toSorted(), ['packages/app/node_modules/p/index.js', 'packages/app/node_modules/p/package.json', 'packages/app/package.json', 'packages/app/src/main.js'], 'the tree is read in place')
   t.assert.deepEqual(built.mainFields.repo, { github: GITHUB, root: true, commit: SHA })
-  for (const entry of otherLanguages) t.assert.match(refused[entry] ?? '', /only JS bundles are built from a lockfile/u, entry)
+  for (const entry of otherLanguages) t.assert.match(refused[entry] ?? '', /only JS bundles are built with pnpm$/u, entry)
 })

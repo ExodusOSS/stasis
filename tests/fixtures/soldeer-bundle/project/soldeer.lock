@@ -1,0 +1,8 @@
+version = 2
+
+[[dependencies]]
+name = "stasis-sol-lib"
+version = "1.0.0"
+url = "http://127.0.0.1:47811/zips/stasis-sol-lib-1.0.0.zip"
+checksum = "c06720301b86dfe178df92231f8db079c4f1e6faad90fd94c66b2d8407d4dabf"
+integrity = "174c404fa5fbc6ca41d8a710ef3ed8ce07372eef3c4217703977604f9a49f4a1"

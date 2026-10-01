@@ -2,6 +2,8 @@ import Module, { isBuiltin } from 'node:module'
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { packageJSONText } from '@exodus/stasis-core/bundle-util'
+
 // Node's CommonJS resolution (`createRequire(parent).resolve(spec, { conditions })`) over a
 // `host` (@exodus/stasis-core/host), mirroring lib/internal/modules/cjs/loader.js and
 // esm/resolve.js step for step, errors with Node's `code`s included. Global folders (NODE_PATH,
@@ -91,7 +93,7 @@ export function createNodeResolver(host) {
     if (!host.stat(pjsonPath)?.isFile()) return { exists: false }
     let data
     try {
-      data = JSON.parse(host.readFile(pjsonPath).toString('utf8'))
+      data = JSON.parse(packageJSONText(host.readFile(pjsonPath)))
     } catch (cause) {
       return codedError('ERR_INVALID_PACKAGE_CONFIG', `Invalid package config ${pjsonPath}: ${cause.message}`)
     }
@@ -135,7 +137,7 @@ export function createNodeResolver(host) {
   const tryPackage = (requestPath, exts, originalPath) => {
     const pkg = readPackage(join(requestPath, 'package.json'))
     const index = () => tryExtensions(resolve(requestPath, 'index'), exts)
-    if (!pkg.exists || pkg.main === undefined) return index()
+    if (!pkg.exists || !pkg.main) return index()
     const filename = resolve(requestPath, pkg.main)
     const actual = tryFile(filename) || tryExtensions(filename, exts) || tryExtensions(resolve(filename, 'index'), exts) || index()
     if (actual) return actual
@@ -319,8 +321,8 @@ export function createNodeResolver(host) {
       throw e
     }
     if (resolved.protocol === 'node:') throw codedError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file')
-    if (encodedSepRegEx.test(resolved.pathname)) {
-      throw codedError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module "${resolved.pathname}" must not include encoded "/" or "\\" characters imported from ${parentPath}`)
+    if (encodedSepRegEx.test(resolved.href)) {
+      throw codedError('ERR_INVALID_MODULE_SPECIFIER', `Invalid module "${resolved.href}" must not include encoded "/" or "\\" characters imported from ${parentPath}`)
     }
     const filename = fileURLToPath(resolved)
     const actual = tryFile(filename)
