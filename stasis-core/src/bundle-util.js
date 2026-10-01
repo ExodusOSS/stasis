@@ -71,20 +71,16 @@ export function readJson(file, host = diskHost) {
   }
 }
 
-// `owner/name` of a GitHub repository reference as package.json `repository` spells it: a git URL
-// (https, ssh, scp-like `git@github.com:`, optional `git+` prefix and `.git` suffix), or the npm
-// shorthands `github:owner/name` / bare `owner/name`. Credentials are never part of the result.
-// Null for anything else (other hosts, gist:/gitlab:/bitbucket: shorthands).
+// `owner/name` from a package.json `repository` (GitHub URL or shorthand), else null.
 export function parseGithubRepository(url) {
   if (typeof url !== 'string') return null
   const match = /^(?:github:|(?:git\+)?(?:(?:https?|ssh|git):\/\/(?:[^@/]+@)?github\.com(?::\d+)?\/|(?:[^@/:]+@)?github\.com:))?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/iu.exec(url.trim())
-  // Held to the bundle format's GitHub `owner/name` rules, so a detected value always serializes.
+  // Must also pass the bundle format's `github` check.
   const github = match && `${match[1]}/${match[2]}`
   return github && isValidRepoField('github', github) ? github : null
 }
 
-// Best-effort: the `origin` remote url from `.git/config` text, matched only in the exact shape git
-// writes it (`[remote "origin"]` followed by a tab-indented `url = ` line). No git config parsing.
+// Best-effort `origin` url: literal match of git's own `.git/config` layout, no parsing.
 const GIT_ORIGIN_URL = '[remote "origin"]\n\turl = '
 export function gitOriginUrl(text) {
   const at = text?.indexOf(GIT_ORIGIN_URL) ?? -1
@@ -94,8 +90,7 @@ export function gitOriginUrl(text) {
   return text.slice(start, end === -1 ? undefined : end).trim() || null
 }
 
-// Detection reads go through `host`, the disk's never the --fs-patched fs: State detects while
-// writing a bundle, and these reads must not be captured into (or served from) it.
+// Reads go through `host` (never the --fs-patched fs), so detection is never captured.
 const readText = (host, file) => {
   try {
     return host.readFile(file).toString('utf8')
@@ -104,9 +99,7 @@ const readText = (host, file) => {
   }
 }
 
-// The package dir a GitHub `homepage` like `https://github.com/o/n/tree/<branch>/<dir>#readme`
-// points at, when it names the `github` repo (case-insensitive); else undefined. The branch is taken
-// as one path segment.
+// Dir of a `https://github.com/<github>/tree/<branch>/<dir>` homepage (one-segment branch).
 export function githubHomepageDirectory(homepage, github) {
   if (typeof homepage !== 'string') return undefined
   const match = /^https?:\/\/(?:www\.)?github\.com\/([^/]+\/[^/]+)\/tree\/[^/#?]+\/([^#?]+)/iu.exec(homepage.trim())
@@ -118,17 +111,14 @@ export function githubHomepageDirectory(homepage, github) {
   }
 }
 
-// `base` (a repo-relative dir) joined with the POSIX `rel` below it, normalized ('' is the repo
-// root); undefined when the bundle format would reject it (escaping the repo).
-const joinRepoPath = (base, rel) => {
-  const joined = posix.join(typeof base === 'string' ? toPosix(base) : '', rel)
-  const directory = joined === '.' ? '' : joined.replace(/^\/+|\/+$/gu, '')
-  return isValidRepoField('directory', directory) ? directory : undefined
+// `base` joined with `rel` as `{ root: true }`, `{ directory }`, or `{}` if not a valid `directory`.
+const repoLocation = (base, rel) => {
+  const directory = posix.join(typeof base === 'string' ? toPosix(base) : '', rel).replace(/^\/+|\/+$/gu, '')
+  if (directory === '' || directory === '.') return { root: true } // `./`, `a/../`, trailing slashes
+  return isValidRepoField('directory', directory) ? { directory } : {}
 }
 
-// The git dirs of the work tree whose `.git` is `dotGit`: `{ gitDir, commonDir }`. A linked worktree
-// or submodule has a `.git` FILE (`gitdir: <path>`) naming its per-worktree dir, whose `commondir`
-// (when present) names the dir holding `config`, `refs/` and `packed-refs`.
+// Git and common dirs, following a worktree/submodule `.git` file.
 function gitDirs(dotGit, host) {
   const pointer = readText(host, dotGit) // null for a `.git` directory (EISDIR)
   const gitDir = pointer?.startsWith('gitdir: ') ? resolve(dirname(dotGit), pointer.slice('gitdir: '.length).trim()) : dotGit
@@ -136,8 +126,7 @@ function gitDirs(dotGit, host) {
   return { gitDir, commonDir: common ? resolve(gitDir, common) : gitDir }
 }
 
-// Best-effort: the commit HEAD points at -- a detached sha, else the branch's loose ref, else its
-// `packed-refs` line. Undefined unless it is a full git sha.
+// HEAD's commit: detached sha, loose ref, or packed-refs; undefined unless a valid sha.
 function gitHeadCommit({ gitDir, commonDir }, host) {
   const head = readText(host, join(gitDir, 'HEAD'))?.trim()
   if (!head) return undefined
@@ -151,16 +140,7 @@ function gitHeadCommit({ gitDir, commonDir }, host) {
   return isValidRepoField('commit', commit) ? commit : undefined
 }
 
-// Informational repo identity for a bundle rooted at `dir`, `{ github, directory?, commit? }` with
-// `directory` being `dir`'s path within the repo ('' at its root). One walk up from `dir` to the
-// nearest work tree root (a dir holding `.git`, a dir or a worktree/submodule `gitdir:` file), which decides:
-// 1. git: `github` from that root's `.git/config` origin remote, `directory` from `dir`'s path below
-//    it, `commit` from HEAD (git never runs; only `.git` files are read);
-// 2. else the nearest package.json on the way up declaring a `repository`: `github` from its
-//    URL/shorthand, `directory` from `repository.directory` (else a GitHub tree `homepage` of that
-//    repo) plus `dir`'s path below it (no commit).
-//    The first `repository` found is authoritative, even a non-GitHub one.
-// Every value is held to the bundle format's validation. Undefined when neither names a GitHub repo.
+// Bundle `repo` for `dir`: git origin/HEAD at the work tree root, else nearest package.json `repository`.
 export function detectRepo(dir, host = diskHost) {
   const start = resolve(dir)
   let pkg = null // null: no package.json `repository` seen yet; undefined: one seen, not GitHub
@@ -171,16 +151,16 @@ export function detectRepo(dir, host = diskHost) {
       const url = typeof repository === 'string' ? repository : repository?.url
       if (typeof url === 'string') {
         const github = parseGithubRepository(url)
-        // `repository.directory` is often unset; a GitHub tree `homepage` commonly carries it instead.
+        // Often unset; fall back to a GitHub tree `homepage`.
         const base = typeof repository.directory === 'string' ? repository.directory : githubHomepageDirectory(homepage, github ?? '')
-        pkg = github ? stripUndefined({ github, directory: joinRepoPath(base, rel) }) : undefined
+        pkg = github ? { github, ...repoLocation(base, rel) } : undefined
       }
     }
     const dotGit = join(cursor, '.git')
     if (host.stat(dotGit) !== null) {
       const dirs = gitDirs(dotGit, host)
       const github = parseGithubRepository(gitOriginUrl(readText(host, join(dirs.commonDir, 'config'))))
-      if (github) return stripUndefined({ github, directory: joinRepoPath('', rel), commit: gitHeadCommit(dirs, host) })
+      if (github) return stripUndefined({ github, ...repoLocation('', rel), commit: gitHeadCommit(dirs, host) })
       return pkg ?? undefined
     }
     if (dirname(cursor) === cursor) return pkg ?? undefined

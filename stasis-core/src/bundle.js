@@ -72,20 +72,30 @@ const mergeReason = (a, b) => {
   return fromEntries([...merged.keys()].toSorted().map((c) => [c, fileSetToObject(merged.get(c))]))
 }
 
-// GitHub `owner/name`: owner 1-39 alphanumerics or single inner hyphens; name 1-100 of [\w.-], not '.'/'..'.
-const GITHUB_REPO = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\/(?!\.\.?$)[\w.-]{1,100}$/u
-// Full lowercase git object id: SHA-1 or SHA-256.
+// GitHub `owner/name` (owner 1-39, name 1-100 chars).
+const GITHUB_REPO = /^(?=[A-Za-z0-9-]{1,39}\/)[A-Za-z0-9](?:-?[A-Za-z0-9])*\/(?!\.\.?$)[\w.-]{1,100}$/u
+// Non-empty normalized repo-relative path of URL-safe segments (the repo root is `root: true`).
+const REPO_DIRECTORY = /^(?!\.\.?(?:\/|$))[\w.~@+-]+(?:\/(?!\.\.?(?:\/|$))[\w.~@+-]+)*$/u
+// Full lowercase SHA-1 or SHA-256.
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
 const REPO_FIELDS = {
   github: (v) => typeof v === 'string' && GITHUB_REPO.test(v),
-  directory: (v) => typeof v === 'string' && !posixPathEscapes(v),
+  directory: (v) => typeof v === 'string' && v.length <= 1024 && REPO_DIRECTORY.test(v),
+  root: (v) => v === true,
   commit: (v) => typeof v === 'string' && GIT_SHA.test(v),
 }
 
-// Whether `value` is valid for the `repo` block's `key` (for producers that want to drop, not throw).
+// Validate one `repo` field without throwing.
 export const isValidRepoField = (key, value) => Object.hasOwn(REPO_FIELDS, key) && REPO_FIELDS[key](value)
 
-// Validate the informational `repo` block; each field is optional. Returned in canonical key order.
+// `repo` of a bundle plus one added to it: only agreeing fields survive, and none if `github` differs.
+export const mergeRepo = (a, b) => {
+  if (a?.github === undefined || a.github.toLowerCase() !== b?.github?.toLowerCase()) return undefined // GitHub names are case-insensitive
+  const kept = Object.keys(REPO_FIELDS).filter((key) => a[key] !== undefined && (key === 'github' || a[key] === b[key]))
+  return fromEntries(kept.map((key) => [key, a[key]]))
+}
+
+// Validate `repo` (all fields optional); canonical key order, undefined if empty.
 const normalizeRepo = (repo) => {
   if (repo === undefined) return undefined
   assert(isPlainObject(repo), 'bundle repo must be an object')
@@ -93,7 +103,9 @@ const normalizeRepo = (repo) => {
     assert(Object.hasOwn(REPO_FIELDS, key), `unknown bundle repo key '${key}'`)
     assert(value === undefined || REPO_FIELDS[key](value), `invalid bundle repo.${key}: ${JSON.stringify(value)}`)
   }
-  return fromEntries(Object.keys(REPO_FIELDS).filter((key) => repo[key] !== undefined).map((key) => [key, repo[key]]))
+  assert(repo.directory === undefined || repo.root === undefined, 'bundle repo has both directory and root')
+  const keys = Object.keys(REPO_FIELDS).filter((key) => repo[key] !== undefined)
+  return keys.length === 0 ? undefined : fromEntries(keys.map((key) => [key, repo[key]]))
 }
 
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
@@ -110,8 +122,14 @@ export class Bundle {
   executable
   // Informational only, NOT attested -- never consulted for verification.
   reason
-  // Informational only, NOT attested, never in a lockfile: `{ github?, directory?, commit? }`.
-  repo
+  // Informational, not attested, never in a lockfile; validated on every assignment.
+  #repo
+  get repo() {
+    return this.#repo
+  }
+  set repo(repo) {
+    this.#repo = normalizeRepo(repo)
+  }
 
   constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, repo, version = VERSION } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
@@ -337,7 +355,7 @@ export class Bundle {
       // `other` (the incoming, newer build) wins for the files it carries -- see mergeExecutableSets.
       executable: mergeExecutableSets(this.executable, other.executable, other.modules, this.config.scope),
       reason: mergeReason(this.reason, other.reason),
-      repo: other.repo ?? this.repo,
+      repo: mergeRepo(this.repo, other.repo),
     })
   }
 }
