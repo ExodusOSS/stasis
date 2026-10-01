@@ -1194,9 +1194,11 @@ export async function bundleCommand({ cwd = process.cwd(), env = process.env, en
   }
 
   // Informational origin (never in the lockfile). State-built bundles already carry the repo of the
-  // State root their paths are relative to; other builders are rooted at cwd. detectRepo's result
-  // is pre-validated, so it is assigned directly.
-  bundle.repo ??= detectRepo(cwd)
+  // State root their paths are relative to (even when none was detected there: a cwd fallback would
+  // record a directory the State-root-relative paths are not below); other builders are rooted at
+  // cwd. detectRepo's result is pre-validated, so it is assigned directly.
+  const stateBuilt = kind === 'js' && !metro && mainFields === undefined
+  if (!stateBuilt) bundle.repo ??= detectRepo(cwd)
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.
   const outAbs = target === '-' ? undefined : resolve(cwd, target)

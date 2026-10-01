@@ -137,24 +137,34 @@ const joinRepoPath = (base, rel) => {
   return isValidRepoField('directory', directory) ? directory : undefined
 }
 
-// Best-effort: the commit HEAD points at in a plain `.git` dir -- a detached sha, else the branch's
-// loose ref, else its `packed-refs` line. Undefined unless it is a full git sha.
-function gitHeadCommit(gitDir) {
+// The git dirs of the work tree whose `.git` is `dotGit`: `{ gitDir, commonDir }`. A linked worktree
+// or submodule has a `.git` FILE (`gitdir: <path>`) naming its per-worktree dir, whose `commondir`
+// (when present) names the dir holding `config`, `refs/` and `packed-refs`.
+function gitDirs(dotGit) {
+  const pointer = readText(dotGit) // null for a `.git` directory (EISDIR)
+  const gitDir = pointer?.startsWith('gitdir: ') ? resolve(dirname(dotGit), pointer.slice('gitdir: '.length).trim()) : dotGit
+  const common = readText(join(gitDir, 'commondir'))?.trim()
+  return { gitDir, commonDir: common ? resolve(gitDir, common) : gitDir }
+}
+
+// Best-effort: the commit HEAD points at -- a detached sha, else the branch's loose ref, else its
+// `packed-refs` line. Undefined unless it is a full git sha.
+function gitHeadCommit({ gitDir, commonDir }) {
   const head = readText(join(gitDir, 'HEAD'))?.trim()
   if (!head) return undefined
   let commit = head
   if (head.startsWith('ref: ')) {
     const ref = head.slice('ref: '.length)
     if (!ref.startsWith('refs/') || posixPathEscapes(ref)) return undefined
-    commit = readText(join(gitDir, ref))?.trim() ??
-      readText(join(gitDir, 'packed-refs'))?.split('\n').find((line) => line.endsWith(` ${ref}`))?.split(' ')[0]
+    commit = readText(join(commonDir, ref))?.trim() ??
+      readText(join(commonDir, 'packed-refs'))?.split('\n').find((line) => line.endsWith(` ${ref}`))?.split(' ')[0]
   }
   return isValidRepoField('commit', commit) ? commit : undefined
 }
 
 // Informational repo identity for a bundle rooted at `dir`, `{ github, directory?, commit? }` with
 // `directory` being `dir`'s path within the repo ('' at its root). One walk up from `dir` to the
-// nearest work tree root (a dir holding `.git`), which decides:
+// nearest work tree root (a dir holding `.git`, a dir or a worktree/submodule `gitdir:` file), which decides:
 // 1. git: `github` from that root's `.git/config` origin remote, `directory` from `dir`'s path below
 //    it, `commit` from HEAD (git never runs; only `.git` files are read);
 // 2. else the nearest package.json on the way up declaring a `repository`: `github` from its
@@ -177,10 +187,11 @@ export function detectRepo(dir) {
         pkg = github ? stripUndefined({ github, directory: joinRepoPath(base, rel) }) : undefined
       }
     }
-    const gitDir = join(cursor, '.git')
-    if (realExistsSync(gitDir)) {
-      const github = parseGithubRepository(gitOriginUrl(readText(join(gitDir, 'config'))))
-      if (github) return stripUndefined({ github, directory: joinRepoPath('', rel), commit: gitHeadCommit(gitDir) })
+    const dotGit = join(cursor, '.git')
+    if (realExistsSync(dotGit)) {
+      const dirs = gitDirs(dotGit)
+      const github = parseGithubRepository(gitOriginUrl(readText(join(dirs.commonDir, 'config'))))
+      if (github) return stripUndefined({ github, directory: joinRepoPath('', rel), commit: gitHeadCommit(dirs) })
       return pkg ?? undefined
     }
     if (dirname(cursor) === cursor) return pkg ?? undefined
