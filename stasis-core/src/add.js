@@ -6,7 +6,7 @@ import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 import { Bundle } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { brotliOptions } from './brotli.js'
-import { findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
+import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson } from './bundle-util.js'
 import { canonicalizePath, sha512integrity } from './state-util.js'
 import { assertRealPathWithinBase, classifyFormat, hasNodeModulesSegment, isAutoExcludedDir, isAutoExcludedFile, isBinaryPlist, isBrotliQuality, isExecutableMode, moduleFileKey, parseResourcesOption, pathExt, sortPaths, splitNodeModulesPath, toPosix } from './util.js'
 
@@ -53,7 +53,7 @@ function readAddConfig(baseDir) {
 }
 
 // Assemble a Bundle bucketed per package.json. `add` records NO entries -- its files are attested, not entry points -- so nothing in an add bundle is runnable via `--bundle=load`.
-function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
+function assembleBundle(baseDir, files, workspaceName, workspaceVersion, repo) {
   const modules = new Map()
   const formats = new Map()
   const executable = new Set()
@@ -99,6 +99,7 @@ function assembleBundle(baseDir, files, workspaceName, workspaceVersion) {
     formats,
     imports: new Map(),
     executable,
+    repo,
   }).withReason('add')
 }
 
@@ -295,9 +296,10 @@ export function addCommand({ cwd = process.cwd(), entries, logLabel = 'stasis-co
   // ADD step: every target's merge is computed first, then the writes run -- see prepareBundleFile.
   const summary = []
   const writes = []
+  const repo = detectRepo(baseDir)
   const planTarget = (target, entriesForTarget, kind) => {
     if (entriesForTarget.size === 0) return
-    const { write, counts } = prepareBundleFile(baseDir, target, assembleBundle(baseDir, entriesForTarget, workspaceName, workspaceVersion), brotliQuality)
+    const { write, counts } = prepareBundleFile(baseDir, target, assembleBundle(baseDir, entriesForTarget, workspaceName, workspaceVersion, repo), brotliQuality)
     writes.push(write)
     summary.push(`+${counts.added} ${kind} (${counts.total} total) -> ${counts.path}`)
   }

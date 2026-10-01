@@ -13,7 +13,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
+import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   SOLIDITY_PACKAGE_MANIFESTS,
@@ -1192,6 +1192,13 @@ export async function bundleCommand({ cwd = process.cwd(), env = process.env, en
   } else {
     bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   }
+
+  // Informational origin (never in the lockfile). State-built bundles already carry the repo of the
+  // State root their paths are relative to (even when none was detected there: a cwd fallback would
+  // record a directory the State-root-relative paths are not below); other builders are rooted at
+  // cwd. detectRepo's result is pre-validated, so it is assigned directly.
+  const stateBuilt = kind === 'js' && !metro && mainFields === undefined
+  if (!stateBuilt) bundle.repo ??= detectRepo(cwd)
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.
   const outAbs = target === '-' ? undefined : resolve(cwd, target)
