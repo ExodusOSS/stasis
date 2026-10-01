@@ -56,6 +56,16 @@ function usage(prefix = '') {
    not with --metro-resolver;
   --resources carries reached assets (e.g. --resources=png,svg) as resources instead of failing to bundle them;
   --package-json auto-includes each bundled module's package.json, even ones the scan never reached)
+ stasis github-bundle --github=owner/name --sha=commit [--directory=path] --package-manager=(pnpm|yarn1|soldeer) [--package-manager-version=version] [--lockfile=path/to/stasis.lock.json] [--output=(path|-)] [stasis bundle's options for the entries] path/in/repo/to/(file.(js|ts)|file.sol|dir) ...
+ (bundles a GitHub repo at a commit as "stasis bundle" bundles a clone of it once installed: the
+  tree is fetched (with GITHUB_TOKEN where set) and held to its git tree id, and the dependencies
+  are laid out in memory from the lockfile alone, as "pnpm install --frozen-lockfile
+  --ignore-scripts" (pnpm 10, 11 or 12), "yarn install --frozen-lockfile --ignore-scripts"
+  (yarn 1.22) or "soldeer install" (0.12, for .sol entries) would: nothing is installed, no
+  package script runs, and every tarball and zip is held to the lockfile, all cached where
+  "stasis audit" caches; at --package-manager-version, else at the root package.json's
+  packageManager pin, else pnpm 10.33.4, yarn 1.22.22 or Soldeer 0.12.0. The entries are paths in
+  --directory, or in the repo; not with --metro-resolver, --cargo* or --add)
  stasis add path/to/(file|dir) ...
  (adds the listed files to the project's bundle(s) with no dependency resolution;
   a directory expands to its files. Requires a stasis.config.json (all fields optional).)
@@ -408,6 +418,75 @@ if (command === '-v' || command === '--version') {
     cargoAllFeatures,
     brotliQuality,
     add,
+  })
+} else if (command === 'github-bundle') {
+  const values = parseLeadingOptions(argv, {
+    github: { type: 'string' },
+    sha: { type: 'string' },
+    directory: { type: 'string' },
+    'package-manager': { type: 'string' },
+    'package-manager-version': { type: 'string' },
+    mapping: { type: 'string' },
+    manifests: { type: 'boolean' },
+    output: { type: 'string', short: 'o' },
+    scope: { type: 'string' },
+    lockfile: { type: 'string' },
+    conditions: { type: 'string' },
+    mainFields: { type: 'string' },
+    metro: { type: 'boolean' },
+    platforms: { type: 'string', multiple: true },
+    jsx: { type: 'boolean' },
+    flow: { type: 'boolean' },
+    typescript: { type: 'boolean' },
+    tsconfig: { type: 'string' },
+    resources: { type: 'string' },
+    'package-json': { type: 'boolean' },
+    'brotli-quality': { type: 'string' },
+  }, {
+    valueFlags: ['--github', '--sha', '--directory', '--package-manager', '--package-manager-version', '--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--tsconfig', '--resources', '--brotli-quality', '-o'],
+    onError: usage,
+  })
+  if (values.github === undefined) usage('Error: github-bundle requires --github=owner/name, the repo to bundle')
+  if (values.sha === undefined) usage('Error: github-bundle requires --sha, the commit to bundle')
+  if (values['package-manager'] === undefined) usage('Error: github-bundle requires --package-manager=(pnpm|yarn1|soldeer)')
+  if (argv.length === 0) usage('Nothing to bundle: no entry file given')
+  // Whether each option applies to the entries is buildGitHubBundle's to say.
+  const list = (value) => [value ?? []].flat().flatMap((v) => v.split(',')).map((s) => s.trim()).filter(Boolean)
+  let brotliQuality
+  if (values['brotli-quality'] !== undefined) {
+    try {
+      brotliQuality = parseBrotliQuality('--brotli-quality', values['brotli-quality'])
+    } catch (cause) {
+      usage(`Error: ${cause.message}`)
+    }
+  }
+  // Tarballs, zips and GitHub trees are cached where `stasis audit` caches.
+  const { setCacheDir } = await import('../src/vfs-bundle.js')
+  setCacheDir(userCacheDir())
+  const { githubBundleCommand } = await import('../src/cmd/github-bundle.js')
+  await githubBundleCommand({
+    github: values.github,
+    sha: values.sha,
+    directory: values.directory,
+    packageManager: values['package-manager'],
+    packageManagerVersion: values['package-manager-version'],
+    entries: argv,
+    mappingFile: values.mapping,
+    manifests: Boolean(values.manifests),
+    output: values.output,
+    lockfile: values.lockfile,
+    scope: values.scope,
+    conditions: list(values.conditions),
+    mainFields: values.mainFields === undefined ? undefined : list(values.mainFields),
+    metro: Boolean(values.metro),
+    platforms: list(values.platforms),
+    jsx: Boolean(values.jsx),
+    flow: Boolean(values.flow),
+    typescript: Boolean(values.typescript),
+    tsconfig: values.tsconfig,
+    resources: list(values.resources),
+    packageJSON: Boolean(values['package-json']),
+    brotliQuality,
   })
 } else if (command === 'add') {
   // add packs the listed files (no resolver), taking split targets + resource allowlist from
