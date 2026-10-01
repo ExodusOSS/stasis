@@ -83,8 +83,8 @@
   "dependencies": {
     "@exodus/stasis-core": "1.0.0-beta.4",
     "@exodus/stasis-plugins": "1.0.0-beta.4",
-    "@preventive/deptree": "1.0.0-alpha.3",
-    "@preventive/lockfile": "1.0.0-alpha.3",
+    "@preventive/deptree": "1.0.0-alpha.4",
+    "@preventive/lockfile": "1.0.0-alpha.4",
     "@preventive/upstream": "1.0.0-alpha.2",
     "@preventive/vfs": "1.0.0-beta.2",
     "oxc-parser": "^0.94.0"
