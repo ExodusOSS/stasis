@@ -8,8 +8,10 @@ import { checkPackageManager, loadTree, vfsHost } from './vfs-bundle/tree.js'
 // 'yarn1', yarn 1.22), over the project held in a Vfs, which is only read. The tree is laid out by
 // @preventive/deptree into a Vfs of its own, and nothing is read from disk or written there but
 // the tarballs, fetched from registry.npmjs.org and cached only where setCacheDir says.
+// buildGitHubBundle builds one from a GitHub repo at a commit, its tree fetched from GitHub.
 
 export { buildVfsBundle } from './cmd/bundle.js'
+export { buildGitHubBundle } from './vfs-bundle/github.js'
 export { setCacheDir } from '@preventive/upstream/npm.js'
 export { Vfs }
 
