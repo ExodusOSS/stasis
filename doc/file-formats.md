@@ -245,20 +245,15 @@ source). Bundles are always written as `version: 1`.
 
 ### Contents-free bundles
 
-A contents-free `Bundle` (`hasContents === false`) is what a streaming reader
-builds, with `Bundle.fromJSON(value, { contents: false })` below. It keeps every
-other field. Each bucket's `files` still lists its paths (`Object.keys`,
-`Object.hasOwn`), but reading a file's contents throws, as do `sources`,
-`serialize()` and `merge()`. That is enough for metadata-only consumers such as
-the `@exodus/stasis/sbom` API, but not for `diff` or `extract`, which read file
-bytes.
-
-`Bundle.fromJSON(value)` is `Bundle.parse` on an already-parsed value, and
-`Bundle.fileKeyAt(path)` names the file whose contents sit at a key path in the
-bundle JSON. Together they let a streaming reader take files out as they arrive
-and still validate the bundle as `Bundle.parse` does:
-`Bundle.fromJSON(value, { contents: false })` accepts a symbol placeholder for
-each file it took out and builds a contents-free `Bundle`.
+`Bundle.fromJSON(value)` is `Bundle.parse` on an already-parsed value. A
+streaming reader takes each file's contents out as they arrive
+(`Bundle.fileKeyAt(path)` names the file at a key path in the bundle JSON),
+leaves a symbol in its place, and calls
+`Bundle.fromJSON(value, { contents: false })`. That validates the bundle as
+`Bundle.parse` does and rejects any file still holding contents. The result keeps every field and each bucket's file list
+(`Object.keys`, `Object.hasOwn`), but reading a file's contents throws, and so
+do `sources`, `serialize()` and `merge()`. That is enough for metadata-only
+consumers such as the `@exodus/stasis/sbom` API.
 
 ### Source-language bundles (Solidity / PHP / Bash / Rust)
 

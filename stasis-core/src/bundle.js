@@ -13,7 +13,6 @@ import {
   mergeExecutableSets,
   mergeModuleMaps,
   moduleFileKey,
-  moduleFileKeys,
   objectToMaps,
   parseExecutable,
   serializeExecutable,
@@ -25,8 +24,12 @@ import {
 const VERSION = 1
 const LEGACY_VERSION = 0
 
-// A file's contents, or in a contents-free parse a symbol placeholder; anything else could hide nested values.
-const isFileValue = (value, contents) => typeof value === 'string' || (!contents && typeof value === 'symbol')
+const normalize = ({ name, version, ecosystem, files }) => {
+  assert(ecosystem === undefined || typeof ecosystem === 'string')
+  // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
+  // identity comparisons and JSON round-trips can't split on it.
+  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
+}
 
 const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
   `changed between writes (a workspace package without a version now owns its own ` +
@@ -36,7 +39,7 @@ const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across 
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path === '.' ? '' : path, name: null }
 
-// The file layout, in one place: the bucket split and flat key of the file at JSON key path `path`, or undefined; throws if non-canonical.
+// The bucket split and flat key of the file at bundle-JSON key path `path`, or undefined; throws if non-canonical.
 const filePosition = (path) => {
   const [top, dir, files, rel] = path
   if (typeof dir !== 'string') return undefined
@@ -52,17 +55,18 @@ const filePosition = (path) => {
   return undefined
 }
 
-const normalize = (top, dir, { name, version, ecosystem, files }, contents) => {
-  assert(ecosystem === undefined || typeof ecosystem === 'string')
-  assert(isPlainObject(files))
-  const entries = Object.entries(files)
-  for (const [rel, value] of entries) {
-    const { key } = filePosition([top, dir, 'files', rel])
-    if (!isFileValue(value, contents)) assert(false, `bundle: file '${key}' has non-string contents`)
+function contentsLocked() {
+  throw new Error('bundle: file contents are not retained by this contents-free Bundle')
+}
+
+// Each file stays an own enumerable key, but reading its contents throws; each value must be a placeholder.
+const lockModule = (dir, { files, ...info }) => {
+  const locked = Object.create(null)
+  for (const [rel, value] of Object.entries(files)) {
+    if (typeof value !== 'symbol') assert(false, `bundle: file '${moduleFileKey(dir, rel)}' is not a placeholder`)
+    Object.defineProperty(locked, rel, { get: contentsLocked, enumerable: true })
   }
-  // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
-  // identity comparisons and JSON round-trips can't split on it.
-  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(entries) }
+  return { ...info, files: Object.freeze(locked) }
 }
 
 // Union of the informational `reason` maps in canonical form: consumers sorted, each file list
@@ -84,20 +88,6 @@ const mergeReason = (a, b) => {
   return fromEntries([...merged.keys()].toSorted().map((c) => [c, fileSetToObject(merged.get(c))]))
 }
 
-// Informational and unvalidated: copied as is (each list shallowly), never sorted, so a malformed one can't fail a parse.
-const copyReason = (reason) => Object.fromEntries(Object.entries(reason).map(([consumer, files]) => [consumer, Array.isArray(files) ? [...files] : files]))
-
-function contentsLocked() {
-  throw new Error('bundle: file contents are not retained by this contents-free Bundle')
-}
-
-// Each rel stays an own enumerable key, but reading its contents throws.
-const lockModule = ({ files, ...info }) => {
-  const locked = Object.create(null)
-  for (const rel of Object.keys(files)) Object.defineProperty(locked, rel, { get: contentsLocked, enumerable: true })
-  return { ...info, files: Object.freeze(locked) }
-}
-
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
 export class Bundle {
   static VERSION = VERSION
@@ -112,32 +102,22 @@ export class Bundle {
   executable
   // Informational only, NOT attested -- never consulted for verification.
   reason
-  #contents
 
-  // `contents: false` keeps every field and file list, but locks out file contents.
-  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION, contents = true } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
     assert(['node_modules', 'full'].includes(config.scope))
-    assert(typeof contents === 'boolean')
     this.version = version
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
-    if (!contents) this.modules = new Map([...this.modules].map(([dir, info]) => [dir, lockModule(info)]))
     this.formats = formats ?? new Map()
     this.imports = imports ?? new Map()
     this.executable = executable ?? new Set()
     this.reason = reason
-    this.#contents = contents
-  }
-
-  get hasContents() {
-    return this.#contents
   }
 
   // Flat project-relative view of the raw stored file contents (resources stay base64).
   get sources() {
-    if (!this.#contents) contentsLocked()
     const m = new Map()
     for (const [dir, { files }] of this.modules) {
       for (const [rel, content] of Object.entries(files)) {
@@ -170,7 +150,7 @@ export class Bundle {
     return filePosition(path)?.key
   }
 
-  // parse() on an already-parsed value; `contents: false` builds a contents-free Bundle, allowing symbol placeholders.
+  // parse() on an already-parsed value; `contents: false` takes a symbol placeholder per file and locks contents out.
   static fromJSON(json, { contents = true } = {}) {
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
@@ -194,22 +174,22 @@ export class Bundle {
     if (json.version === VERSION) {
       const full = json.config.scope === 'full'
       if (json.modules !== undefined) {
-        assert(isPlainObject(json.modules))
+        assert(typeof json.modules === 'object' && json.modules !== null)
         for (const [dir, info] of Object.entries(json.modules)) {
           assert(hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
           assert(info?.name && info.version && info.files)
-          modules.set(dir, normalize('modules', dir, info, contents))
+          modules.set(dir, normalize(info))
         }
       }
       if (full) {
-        assert(isPlainObject(json.sources))
+        assert(json.sources && typeof json.sources === 'object')
         for (const [dir, info] of Object.entries(json.sources)) {
           assert(!hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
           // A workspace bucket may omit version (a private/unpublished package.json can lack one).
           assert(info?.name && info.files)
-          modules.set(dir, normalize('sources', dir, info, contents))
+          modules.set(dir, normalize(info))
         }
         // Empty entries are valid (`stasis add` attests files without making them entry points); state.assertEntry fails closed on an empty set.
         assert(json.entries === undefined || Array.isArray(json.entries))
@@ -219,13 +199,10 @@ export class Bundle {
         assert(json.sources === undefined)
       }
     } else {
-      assert(isPlainObject(json.sources))
-      // v0 never had `modules`; ignoring them would leave files fileKeyAt locates but parse drops.
-      assert(json.modules === undefined)
+      assert(json.sources)
       for (const [path, content] of Object.entries(json.sources)) {
         // A canonical key can't escape the root, so this covers the path and its bucket split.
-        const { dir, rel, name, key } = filePosition(['sources', path])
-        if (!isFileValue(content, contents)) assert(false, `bundle: file '${key}' has non-string contents`)
+        const { dir, rel, name } = filePosition(['sources', path])
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         const { files } = modules.get(dir)
         assert(!Object.hasOwn(files, rel), `bundle: duplicate file key '.' (v0 '' and '.')`)
@@ -259,9 +236,11 @@ export class Bundle {
       }
     }
 
+    if (!contents) for (const [dir, info] of modules) modules.set(dir, lockModule(dir, info))
+
     return new Bundle({
       version: json.version,
-      config: { scope: json.config.scope },
+      config: json.config,
       entries,
       modules,
       formats,
@@ -270,8 +249,7 @@ export class Bundle {
       executable: json.version === VERSION
         ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
-      reason: isPlainObject(json.reason) ? copyReason(json.reason) : undefined,
-      contents,
+      reason: isPlainObject(json.reason) ? json.reason : undefined,
     })
   }
 
@@ -292,7 +270,6 @@ export class Bundle {
   }
 
   serialize() {
-    if (!this.#contents) contentsLocked()
     // Never write an artifact that parse would reject.
     flatFileKeys(this.modules, 'bundle', duplicateKey)
     const entries = fileSetToObject(this.entries)
@@ -313,15 +290,21 @@ export class Bundle {
 
   // Stamp `consumer` onto every carried file in the informational `reason` map.
   withReason(consumer) {
-    // Keys only, so it works on a contents-free Bundle too.
-    return new Bundle({ ...this, contents: this.#contents, reason: mergeReason(this.reason, { [consumer]: [...moduleFileKeys(this.modules)] }) })
+    const files = [...this.sources.keys()]
+    return new Bundle({
+      version: this.version,
+      config: this.config,
+      entries: this.entries,
+      modules: this.modules,
+      formats: this.formats,
+      imports: this.imports,
+      executable: this.executable,
+      reason: mergeReason(this.reason, { [consumer]: files }),
+    })
   }
 
   // Strict union of two Bundles (returns a NEW one): any genuine conflict throws -- a bundle is an attestation.
   merge(other) {
-    // Merging compares file bytes, so both sides need them.
-    if (!this.#contents) contentsLocked()
-    if (other.hasContents === false) throw new Error('bundle merge: the other Bundle is contents-free')
     assert(this.config.scope === other.config.scope,
       `bundle merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
     return new Bundle({

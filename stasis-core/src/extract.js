@@ -79,6 +79,7 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
       // Skip a `directory` capture: it's a listing at the dir's own path, not a file to write (its children recreate the dir).
       if (bundle.formats.get(key) === 'directory') continue
       const file = dir === '.' ? rel : `${dir}/${rel}`
+      if (typeof content !== 'string') throw new Error(`extract: bundle file content is not a string: ${file}`)
       const abs = resolve(outDir, file)
       const relToOut = relative(outDir, abs)
       // The `..` test is `../`-aware, NOT a bare startsWith('..') -- that would reject a legit `..foo` filename.
