@@ -250,10 +250,10 @@ if (command === '-v' || command === '--version') {
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
   // A directory entry stands for the .sol files under it (Solidity only); an extensionless path
   // that doesn't exist is a missing one (skipped with a warning).
-  const { directoryEntryError, isDirEntry } = await import('../src/cmd/bundle.js')
+  const { directoryEntryError, isSolidityEntry } = await import('../src/cmd/bundle.js')
   const dirError = directoryEntryError(argv)
   if (dirError !== null) usage(`Error: ${dirError}`)
-  const allSol = argv.every((f) => f.endsWith('.sol') || isDirEntry(resolve(f)))
+  const allSol = argv.every((f) => isSolidityEntry(f))
   const allPhp = argv.every((f) => f.endsWith('.php'))
   const allJs = argv.every((f) => /\.(?:js|cjs|mjs|ts|cts|mts)$/u.test(f))
   const allBash = argv.every((f) => /\.(?:sh|bash)$/u.test(f))

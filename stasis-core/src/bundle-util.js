@@ -78,22 +78,22 @@ export function readPackageJson(baseDir, rel, { strict = false, check, host = di
   const stat = host.stat(file)
   if (stat === null || stat.isDirectory()) return null
   check?.(rel)
-  // A FIFO, a socket or a device (or a link to one) is never read: it could stall the bundle.
-  if (!stat.isFile()) {
-    if (!strict) return null
-    throw new Error(`${rel}: not a regular file`)
-  }
-  let text
   try {
-    text = host.readFile(file).toString('utf8')
+    // A FIFO, a socket or a device (or a link to one) is never read: it could stall the bundle.
+    if (!stat.isFile()) throw new Error(`${rel}: not a regular file`)
+    return parseJson(host.readFile(file).toString('utf8').replace(/^\uFEFF/u, ''), rel)
   } catch (err) {
-    if (!strict) return null
-    throw err
+    if (strict) throw err
+    return null
   }
+}
+
+// JSON.parse, throwing where the text breaks (the parser's line and column) but never the parser's
+// message, which quotes the text.
+function parseJson(text, rel) {
   try {
-    return JSON.parse(text.replace(/^\uFEFF/u, ''))
+    return JSON.parse(text)
   } catch (err) {
-    if (!strict) return null
     const at = /\(line \d+ column \d+\)/u.exec(err.message)?.[0]
     // eslint-disable-next-line preserve-caught-error -- the parser's error quotes the file
     throw new Error(`${rel} is not valid JSON${at ? ` ${at}` : ''}`)

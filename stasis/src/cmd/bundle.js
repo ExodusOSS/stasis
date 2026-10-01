@@ -24,7 +24,6 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
-import { readGitmodules } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -87,22 +86,22 @@ function githubSlug(url) {
   return m ? `${m[1]}/${m[2]}` : null
 }
 
-// `.gitmodules` (readGitmodules) -> Map<submodulePath, { name, branch }>, github.com submodules
-// only.
-function parseGithubSubmodules(baseDir) {
+// The github.com ones of `submodules` (readGitmodules), as Map<submodulePath, { name, branch }>.
+function githubSubmodules(submodules) {
   const byPath = new Map()
-  for (const { path, url, branch } of readGitmodules(baseDir)) {
-    const name = url === undefined ? null : githubSlug(url)
+  for (const { path, url, branch } of submodules) {
+    const name = url && githubSlug(url)
     if (name) byPath.set(path, { name, branch })
   }
   return byPath
 }
 
 // Classify a Solidity file's dep bucket: Soldeer (`dependencies/<name>-<version>/`) or a
-// github submodule (`lib/`, via `.gitmodules`), else null to defer to the node_modules/
-// workspace logic. `check` vets a package.json path before it is read (ownership.assert).
-function makeSolidityClassifier(baseDir, check) {
-  const submodules = parseGithubSubmodules(baseDir)
+// github submodule (`lib/`, via the `.gitmodules` `ownership` read), else null to defer to the
+// node_modules/workspace logic. `ownership.assert` vets a package.json path before it is read.
+function makeSolidityClassifier(baseDir, ownership) {
+  const submodules = githubSubmodules(ownership.submodules)
+  const check = ownership.assert
   const versions = new Map() // a submodule's package.json version, read once
   return (path) => {
     if (path.startsWith('dependencies/')) {
@@ -276,6 +275,9 @@ function solidityManifests(baseDir, sources, configFiles, { classifyDep, package
 // doesn't exist (a project without `script/` still bundles with `src test script`).
 export const isDirEntry = (abs, host = diskHost) => isDir(abs, host) || (extname(abs) === '' && host.stat(abs) === null)
 
+// Whether `entry` (resolved against `cwd`) is a Solidity bundle's: a .sol file or a directory entry.
+export const isSolidityEntry = (entry, cwd = process.cwd(), host = diskHost) => entry.endsWith('.sol') || isDirEntry(resolve(cwd, entry), host)
+
 // What's wrong with `entries`' directory entries (resolved against `cwd`), or null: a directory
 // entry stands for the .sol files under it, so it goes with Solidity entries only; and entries
 // that are all missing extensionless paths are a mistyped file, not a project without those dirs.
@@ -306,7 +308,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
   for (const e of normalized) {
-    if (!e.endsWith('.sol') && !isDirEntry(join(baseDir, e), host)) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
+    if (!isSolidityEntry(e, baseDir)) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
   }
   const expanded = expandSolidityEntries(baseDir, normalized, host)
 
@@ -328,7 +330,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  const classifyDep = makeSolidityClassifier(baseDir, ownership.assert)
+  const classifyDep = makeSolidityClassifier(baseDir, ownership)
   const packageOf = packageLookup(baseDir, { strict: true, check: ownership.assert })
   const bundled = new Map(sources)
   const formats = new Map()
@@ -939,13 +941,14 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   }
 
   // --package-json: fold each bundled module's package.json into `sources` (and its integrity into
-  // the companion lockfile) even when the scan never reached it. Buckets are the same ones
-  // assembleCodeBundle derives (findPackageMetadata -> pkgDir, else the '.' workspace bucket);
-  // packageLookup memoizes it per directory so a package's many files don't each re-walk to the
-  // same manifest. readModuleManifest applies the read/validate rules shared with the State path
-  // (containment, UTF-8-aborts); no identity check here -- these buckets are all fresh from disk.
+  // the companion lockfile) even when the scan never reached it. Buckets are the ones
+  // assembleCodeBundle derives, from the same `packageOf` (findPackageMetadata -> pkgDir, else the
+  // '.' workspace bucket; packageLookup memoizes it per directory so a package's many files don't
+  // each re-walk to the same manifest). readModuleManifest applies the read/validate rules shared
+  // with the State path (containment, UTF-8-aborts); no identity check here -- these buckets are
+  // all fresh from disk.
+  const packageOf = packageLookup(baseDir, { host })
   if (packageJSON) {
-    const packageOf = packageLookup(baseDir, { host })
     const pkgDirs = new Set()
     for (const abs of reached) {
       const rel = toRel(abs)
@@ -990,6 +993,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     workspaceVersion: rootPkg.version ?? '0.0.0',
     conditionKey: '*',
     host,
+    packageOf,
   })
 
   // The companion lockfile mirrors the bundle, swapping file content for its integrity.
@@ -1021,7 +1025,7 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   const dirError = directoryEntryError(entries, cwd, host)
   if (dirError !== null) throw new Error(`${name}: ${dirError}`)
   let kind
-  if (entries.every((e) => e.endsWith('.sol') || isDirEntry(resolve(cwd, e), host))) kind = 'sol'
+  if (entries.every((e) => isSolidityEntry(e, cwd, host))) kind = 'sol'
   else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
   else if (entries.every((e) => JS_EXTS.has(extname(e)))) kind = 'js'
   else if (entries.every((e) => BASH_EXTS.has(extname(e)))) kind = 'bash'
