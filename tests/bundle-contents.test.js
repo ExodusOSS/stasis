@@ -195,5 +195,11 @@ test('Bundle.fileKeyAt finds every file in the bundle JSON, keyed as sources key
   // A non-canonical key throws, as fromJSON does.
   t.assert.throws(() => Bundle.fileKeyAt(['sources', '.', 'files', '.']), /non-canonical file key "\."/)
   t.assert.throws(() => Bundle.fileKeyAt(['sources', 'src', 'files', '../x.js']), /non-canonical file key/)
-  t.assert.throws(() => Bundle.fileKeyAt(['sources', 'a/node_modules/x/../../../b']), /non-canonical file key/)
+  // fromJSON keys files through the same check, so it fails with the same error.
+  for (const path of ['a/node_modules/x/../../../b', '../x', '/etc/passwd']) {
+    let expected
+    t.assert.throws(() => Bundle.fileKeyAt(['sources', path]), (error) => (expected = error) !== undefined)
+    t.assert.match(expected.message, /non-canonical file key/)
+    t.assert.throws(() => Bundle.fromJSON(v0Of({ sources: { [path]: 'x' } })), { message: expected.message }, path)
+  }
 })

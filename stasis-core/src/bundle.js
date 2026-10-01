@@ -28,16 +28,6 @@ const LEGACY_VERSION = 0
 // A file's contents, or in a contents-free parse a symbol placeholder; anything else could hide nested values.
 const isFileValue = (value, contents) => typeof value === 'string' || (!contents && typeof value === 'symbol')
 
-const normalize = (dir, { name, version, ecosystem, files }, contents) => {
-  assert(ecosystem === undefined || typeof ecosystem === 'string')
-  assert(isPlainObject(files))
-  const entries = Object.entries(files)
-  for (const [rel, value] of entries) if (!isFileValue(value, contents)) assert(false, `bundle: file '${moduleFileKey(dir, rel)}' has non-string contents`)
-  // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
-  // identity comparisons and JSON round-trips can't split on it.
-  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(entries) }
-}
-
 const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
   `changed between writes (a workspace package without a version now owns its own ` +
   `bucket); regenerate the artifact (bundle=replace)`)
@@ -45,6 +35,35 @@ const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across 
 // A v0 path's bucket split; '' and '.' both spell the root listing (rel '').
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path === '.' ? '' : path, name: null }
+
+// The file layout, in one place: the bucket split and flat key of the file at JSON key path `path`, or undefined; throws if non-canonical.
+const filePosition = (path) => {
+  const [top, dir, files, rel] = path
+  if (typeof dir !== 'string') return undefined
+  // v0 `sources.<path>`
+  if (path.length === 2 && top === 'sources') {
+    const split = inferModuleDir(dir)
+    return { ...split, key: canonicalFileKey(split.dir, split.rel, 'bundle') }
+  }
+  // v1 `sources|modules.<dir>.files.<rel>`
+  if (path.length === 4 && (top === 'sources' || top === 'modules') && files === 'files' && typeof rel === 'string') {
+    return { dir, rel, key: canonicalFileKey(dir, rel, 'bundle') }
+  }
+  return undefined
+}
+
+const normalize = (top, dir, { name, version, ecosystem, files }, contents) => {
+  assert(ecosystem === undefined || typeof ecosystem === 'string')
+  assert(isPlainObject(files))
+  const entries = Object.entries(files)
+  for (const [rel, value] of entries) {
+    const { key } = filePosition([top, dir, 'files', rel])
+    if (!isFileValue(value, contents)) assert(false, `bundle: file '${key}' has non-string contents`)
+  }
+  // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
+  // identity comparisons and JSON round-trips can't split on it.
+  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(entries) }
+}
 
 // Union of the informational `reason` maps in canonical form: consumers sorted, each file list
 // deduped and path-sorted. Canonical even when only one side is given, so a fresh withReason()
@@ -162,16 +181,7 @@ export class Bundle {
 
   // The `sources` key of the file whose contents sit at JSON key path `path`, else undefined; throws if non-canonical.
   static fileKeyAt(path) {
-    const [top, dir, files, rel] = path
-    if (typeof dir !== 'string') return undefined
-    if (path.length === 2 && top === 'sources') {
-      const v0 = inferModuleDir(dir)
-      return canonicalFileKey(v0.dir, v0.rel, 'bundle')
-    }
-    if (path.length === 4 && (top === 'sources' || top === 'modules') && files === 'files' && typeof rel === 'string') {
-      return canonicalFileKey(dir, rel, 'bundle')
-    }
-    return undefined
+    return filePosition(path)?.key
   }
 
   // parse() on an already-parsed value; `contents: false` builds a contents-free Bundle, allowing symbol placeholders.
@@ -203,7 +213,7 @@ export class Bundle {
           assert(hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
           assert(info?.name && info.version && info.files)
-          modules.set(dir, normalize(dir, info, contents))
+          modules.set(dir, normalize('modules', dir, info, contents))
         }
       }
       if (full) {
@@ -213,7 +223,7 @@ export class Bundle {
           assert(!posixPathEscapes(dir))
           // A workspace bucket may omit version (a private/unpublished package.json can lack one).
           assert(info?.name && info.files)
-          modules.set(dir, normalize(dir, info, contents))
+          modules.set(dir, normalize('sources', dir, info, contents))
         }
         // Empty entries are valid (`stasis add` attests files without making them entry points); state.assertEntry fails closed on an empty set.
         assert(json.entries === undefined || Array.isArray(json.entries))
@@ -227,10 +237,9 @@ export class Bundle {
       // v0 never had `modules`; ignoring them would leave files fileKeyAt locates but parse drops.
       assert(json.modules === undefined)
       for (const [path, content] of Object.entries(json.sources)) {
-        assert(!posixPathEscapes(path))
-        if (!isFileValue(content, contents)) assert(false, `bundle: file '${path}' has non-string contents`)
-        const { dir, rel, name } = inferModuleDir(path)
-        assert(!posixPathEscapes(dir) && !posixPathEscapes(rel))
+        // A canonical key can't escape the root, so this covers the path and its bucket split.
+        const { dir, rel, name, key } = filePosition(['sources', path])
+        if (!isFileValue(content, contents)) assert(false, `bundle: file '${key}' has non-string contents`)
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         const { files } = modules.get(dir)
         assert(!Object.hasOwn(files, rel), `bundle: duplicate file key '.' (v0 '' and '.')`)
