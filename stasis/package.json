@@ -59,6 +59,7 @@
     "src/sbom.js",
     "src/scan.js",
     "src/vfs-bundle.js",
+    "src/vfs-bundle/github.js",
     "src/vfs-bundle/tree.js",
     "src/webpack.js",
     "src/why.js"

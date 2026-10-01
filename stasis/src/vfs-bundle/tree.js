@@ -141,6 +141,9 @@ export async function loadTree(options) {
   return { ...tree, host: vfsHost(tree.vfs, { root: tree.root, outside: options.project, projects: tree.projects }) }
 }
 
+// The lockfile `packageManager` installs from, e.g. 'pnpm-lock.yaml'.
+export const lockfileOf = (packageManager) => PACKAGE_MANAGERS[packageManager].lockfile
+
 export function checkPackageManager(name, packageManager) {
   if (!Object.hasOwn(PACKAGE_MANAGERS, packageManager)) throw new TypeError(`${name}: packageManager must be one of ${Object.keys(PACKAGE_MANAGERS).map((n) => `'${n}'`).join(', ')}`)
 }

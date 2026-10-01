@@ -26,20 +26,16 @@ const tarballOf = (files, dir = '') => {
 
 const fakeClient = (files) => {
   const calls = []
-  const dirOf = (path) => `tree:${path ?? ''}`
   return {
     calls,
     async listRepoDir({ repo, sha, path }) {
       calls.push(['listRepoDir', repo, sha, path])
-      const prefix = path ? `${path}/` : ''
-      const names = new Set(Object.keys(files).filter((f) => f.startsWith(prefix)).map((f) => f.slice(prefix.length)))
-      return [...names].map((name) => (name.includes('/')
-        ? { path: name.split('/')[0], mode: '040000', type: 'tree', sha: 'b'.repeat(40) }
-        : { path: name, mode: '100644', type: 'blob', sha: 'c'.repeat(40) }))
+      const names = Object.keys(files).filter((f) => f.startsWith(`${path}/`)).map((f) => f.slice(path.length + 1))
+      return names.map((name) => (name.includes('/') ? { path: name.split('/')[0], type: 'tree' } : { path: name, type: 'blob' }))
     },
     async getRepoTreeId({ repo, sha, path }) {
       calls.push(['getRepoTreeId', repo, sha, path])
-      return dirOf(path)
+      return `tree:${path}`
     },
     async getRepoTreeTarball({ repo, tree }) {
       calls.push(['getRepoTreeTarball', repo, tree])
@@ -71,7 +67,7 @@ test('buildGitHubBundle downloads a directory alone when its lockfile is there',
     'apps/p/src/a.js': 'module.exports = 1\n',
   })
   const { bundle } = await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
-  t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js'])
+  t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js'], 'built from the subtree alone')
   t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, directory: 'apps/p', commit: SHA })
   t.assert.deepEqual(client.calls.map(([method]) => method), ['listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball'])
 })
