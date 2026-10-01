@@ -14,12 +14,15 @@ const lockfile = (...importers) => ["lockfileVersion: '9.0'", '', 'settings:', '
 const json = (value) => `${JSON.stringify(value)}\n`
 const encoder = new TextEncoder()
 
-// A gzipped tarball of `files` under `dir`, as GitHub's: one top directory named for the tree.
+// A gzipped tarball of `files` under `dir`, as GitHub's: one top directory named for the tree. A
+// `{ symlink }` value is a link to that target.
 const tarballOf = (files, dir = '') => {
   const prefix = dir ? `${dir}/` : ''
   const entries = [{ name: 'tree-id/', type: 'directory' }]
-  for (const [path, text] of Object.entries(files)) {
-    if (path.startsWith(prefix)) entries.push({ name: `tree-id/${path.slice(prefix.length)}`, data: encoder.encode(text) })
+  for (const [path, value] of Object.entries(files)) {
+    if (!path.startsWith(prefix)) continue
+    const name = `tree-id/${path.slice(prefix.length)}`
+    entries.push(typeof value === 'string' ? { name, data: encoder.encode(value) } : { name, type: 'symlink', linkname: value.symlink })
   }
   return compress(pack(entries), 'gzip')
 }
@@ -31,6 +34,8 @@ const fakeClient = (files) => {
     async listRepoDir({ repo, sha, path }) {
       calls.push(['listRepoDir', repo, sha, path])
       const names = Object.keys(files).filter((f) => f.startsWith(`${path}/`)).map((f) => f.slice(path.length + 1))
+      // As upstream refuses a path that is no directory in git (a symlink, or under one).
+      if (names.length === 0) throw new Error(`listRepoDir: ${repo}@${sha} has no directory at ${path}`)
       return names.map((name) => (name.includes('/') ? { path: name.split('/')[0], type: 'tree' } : { path: name, type: 'blob' }))
     },
     async getRepoTreeId({ repo, sha, path }) {
@@ -82,7 +87,7 @@ test('buildGitHubBundle downloads the whole repo for a lockfile above the direct
   })
   const { bundle } = await build({ client, directory: 'packages/p', entries: ['src/a.js'] })
   t.assert.deepEqual([...bundle.sources.keys()], ['packages/p/src/a.js'])
-  t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, directory: 'packages/p', commit: SHA })
+  t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, root: true, commit: SHA }, 'where the lockfile is, which the paths are relative to')
   t.assert.deepEqual(client.calls.map(([method]) => method), ['listRepoDir', 'getRepoTarball'])
 })
 
@@ -100,4 +105,47 @@ test('buildGitHubBundle checks its arguments before anything is fetched', async 
 test('buildGitHubBundle refuses a tarball entry no tree holds', async (t) => {
   const client = { getRepoTarball: async () => compress(pack([{ name: 'tree-id/', type: 'directory' }, { name: 'tree-id/fifo', type: 'fifo' }]), 'gzip') }
   await t.assert.rejects(build({ client, entries: ['a.js'] }), /unexpected fifo "fifo" in the tarball/u)
+})
+
+// A workspace whose package `apps/p` has a lockfile of its own, plus `extra` files.
+const appWithLockfile = (extra = {}) => ({
+  'apps/p/package.json': json({ name: 'p', version: '1.0.0' }),
+  'apps/p/pnpm-lock.yaml': lockfile('.'),
+  'apps/p/src/a.js': "module.exports = require('./b.js')\n",
+  'apps/p/src/b.js': 'module.exports = 1\n',
+  ...extra,
+})
+const methods = (client) => client.calls.map(([method]) => method)
+
+test('buildGitHubBundle falls back to the whole repo when the subtree does not stand alone', async (t) => {
+  const cases = {
+    'a symlink one level out of it': { 'apps/p/src/up.js': { symlink: '../../shared.js' }, 'apps/shared.js': '' },
+    'a symlink further out of it': { 'apps/p/src/up.js': { symlink: '../../../shared.js' }, 'shared.js': '' },
+    'its lockfile linking above it': { 'apps/p/pnpm-lock.yaml': `${lockfile('.')}# link:../shared\n` },
+    'a tsconfig extending above it': { 'apps/p/tsconfig.json': json({ extends: '../../tsconfig.base.json' }), 'tsconfig.base.json': json({}) },
+  }
+  for (const [what, extra] of Object.entries(cases)) {
+    const client = fakeClient(appWithLockfile(extra))
+    const { bundle } = await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
+    t.assert.deepEqual(methods(client), ['listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball', 'getRepoTarball'], what)
+    t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js', 'src/b.js'], what)
+    t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, directory: 'apps/p', commit: SHA }, what)
+  }
+  // A tsconfig path within the subtree keeps it alone.
+  const client = fakeClient(appWithLockfile({ 'apps/p/tsconfig.json': json({ extends: './tsconfig.base.json', include: ['./src'] }) }))
+  await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
+  t.assert.deepEqual(methods(client), ['listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball'])
+})
+
+test('buildGitHubBundle resolves a directory that is a symlink in the repo through the whole repo', async (t) => {
+  const client = fakeClient({ ...appWithLockfile(), 'pkg': { symlink: 'apps/p' } })
+  const { bundle } = await build({ client, directory: 'pkg', entries: ['src/a.js'] })
+  t.assert.deepEqual(methods(client), ['listRepoDir', 'getRepoTarball'])
+  t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js', 'src/b.js'])
+  t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, directory: 'apps/p', commit: SHA }, 'the real directory, not the symlink')
+})
+
+test('buildGitHubBundle refuses a symlink out of the repo rather than resolving it inside', async (t) => {
+  const files = { 'package.json': json({ name: 'p', version: '1.0.0' }), 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': '', 'up.js': { symlink: '../outside.js' } }
+  await t.assert.rejects(build({ client: fakeClient(files), entries: ['src/a.js'] }), /symlink "up\.js" points outside the repo/u)
 })
