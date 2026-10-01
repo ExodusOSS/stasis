@@ -729,11 +729,7 @@ test('resolveModDecl lists cfg_attr variants under their predicate plus the defa
     { cfg: 'windows', file: 'src/sys/windows.rs', explicit: true },
     { cfg: null, file: 'src/sys.rs', explicit: false },
   ])
-  // Given the build (`test`, `features`), a variant whose predicate can't hold is dropped here too.
-  const withMock = { ...decl, paths: [...decl.paths, { path: 'sys/mock.rs', cfg: 'test' }] }
-  t.assert.deepEqual(resolveModDecl(withMock, 'src/lib.rs', { knownSources: known, test: false }).map((x) => x.file), ['src/sys/unix.rs', 'src/sys/windows.rs', 'src/sys.rs'])
-  t.assert.deepEqual(resolveModDecl(withMock, 'src/lib.rs', { knownSources: known, test: true }).map((x) => x.file), ['src/sys/unix.rs', 'src/sys/windows.rs', 'src/sys/mock.rs', 'src/sys.rs'])
-  // Without one, the scanner is trusted to have dropped them for the build it scanned under.
+  // A variant whose predicate can't hold is the scanner's to drop, for the build it scans under.
   const src = '#[cfg_attr(unix, path = "sys/unix.rs")]\n#[cfg_attr(test, path = "sys/mock.rs")]\nmod sys;\n'
   t.assert.deepEqual(scanRustItems(src).mods[0].paths, [{ path: 'sys/unix.rs', cfg: 'unix' }])
   // rustc applies the first variant whose predicate holds. One that holds in the scanned build ends

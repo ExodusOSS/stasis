@@ -26,8 +26,8 @@ import {
 } from '../loaders/solidity.js'
 import { decodeUtf8 } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
-import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
-import { TARGET_UNIT, createCargoContext } from '../loaders/cargo.js'
+import { boundaryOf, collectRustBundle, withinRealDir } from '../loaders/rust.js'
+import { createCargoContext } from '../loaders/cargo.js'
 import {
   bucketizePhpSources,
   buildPhpTree,
@@ -132,28 +132,21 @@ function makeRustClassifier(cargo) {
   return (path) => {
     const pkg = cargo.packageInfo(path)
     if (!pkg) return null
-    const vendored = pkg.dir.startsWith(`${cargo.vendorDir}/`)
-    return { bucketDir: pkg.dir, name: pkg.name, version: pkg.version, ecosystem: vendored ? 'cargo' : undefined }
+    return { bucketDir: pkg.dir, name: pkg.name, version: pkg.version, ecosystem: cargo.isVendored(path) ? 'cargo' : undefined }
   }
 }
 
 // A file's key inside its bucket: the inverse of moduleFileKey.
 const fileInBucket = (bucketDir, path) => (bucketDir === '.' ? path : path.slice(bucketDir.length + 1))
 
-// A file of the bundle root, its bytes, by project-relative path, or null when it isn't a regular
-// file there (a manifest the context saw may have gone since; a FIFO would hang a read) or, with
-// `within` a directory, doesn't really lie in it (a vendored crate's manifest linked to a project
-// file).
-function readFileWithinBase(baseDir, rel, within = '.') {
+// A file of the bundle root (`realBase` its real path), its bytes, by project-relative path, or
+// null when it isn't a regular file there (a manifest the context saw may have gone since; a FIFO
+// would hang a read) or, with `within` a directory, doesn't really lie in it (a vendored crate's
+// manifest linked to a project file).
+function readFileWithinBase(baseDir, realBase, rel, within = '.') {
   try {
-    assertRealPathWithinBase(realpathSync(baseDir), baseDir, rel)
-    if (within !== '.') {
-      const real = relative(realpathSync(join(baseDir, within)), realpathSync(join(baseDir, rel))).split(/[\\/]/u).join('/')
-      if (real.startsWith('..') || isAbsolute(real)) {
-        console.warn(`[loader.cargo] Refusing file outside its package: ${rel} (a link out of ${within})`)
-        return null
-      }
-    }
+    assertRealPathWithinBase(realBase, baseDir, rel)
+    if (!withinRealDir(baseDir, rel, within, { who: 'loader.cargo' })) return null
     if (!statSync(join(baseDir, rel)).isFile()) return null
     return readFileSync(join(baseDir, rel))
   } catch (err) {
@@ -463,65 +456,19 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     allFeatures: cargoAllFeatures,
     target: cargoTarget,
   })
-  // `include_str!` / `include_bytes!` assets ride along as resources: the walk records their format.
-  const formats = new Map()
-  const sources = new Map()
-  // The crate roots: the entries, then -- with `cargoManifests` -- the build script of every
-  // package the walk reaches, each a crate root of its own, until no package is new. Each file is
-  // compiled as the units `units` records (cargo.js unitKey): a build script for the host, with
-  // its package's features, and so what it reaches; a proc-macro crate and what it depends on for
-  // the host too.
-  const roots = [...normalized]
-  const units = new Map()
-  // Record `file` as compiled as each of `more` too; whether that is news.
-  const addUnits = (file, more) => {
-    const have = units.get(file) ?? units.set(file, new Set()).get(file)
-    if (more.isSubsetOf(have)) return false
-    for (const u of more) have.add(u)
-    return true
-  }
-  const walk = async (wave) => {
-    await collectRustFilesFromDisk(baseDir, wave, { cargo: cargoCtx, formats, sources, units })
-    if (!cargoManifests) return
-    const scripts = new Set()
-    for (const path of sources.keys()) {
-      const script = formats.has(path) ? null : cargoCtx.buildScriptOf(path)
-      if (script === null) continue
-      const as = new Set([...(units.get(path) ?? [TARGET_UNIT])].map((u) => cargoCtx.buildScriptUnit(u)))
-      if (addUnits(script, as)) scripts.add(script)
-    }
-    if (scripts.size === 0) return
-    for (const s of scripts) if (!roots.includes(s)) roots.push(s)
-    await walk([...scripts])
-  }
-  await walk(normalized)
-  // The tree pass may name in-tree crate roots the walk left out (a crate whose name a file also
-  // binds as a value, `use crate::util::log;` beside `log::info!`), or walked as fewer units than
-  // it is named as: buildRustTree's wantedRoots. Load them and build again, until none is new. A
-  // root the walk was asked for and didn't load -- refused (a link out of its package) or gone --
-  // is not asked for again: the walk has said why.
-  const tried = new Set()
-  const complete = async () => {
-    const built = buildRustTree(sources, { roots, baseDir, cargo: cargoCtx, formats, units })
-    const wanted = built.wantedRoots.filter((r) => addUnits(r, built.wantedUnits.get(r)) || (!sources.has(r) && !tried.has(r)))
-    if (wanted.length === 0) return built
-    for (const r of wanted) {
-      tried.add(r)
-      if (!roots.includes(r)) roots.push(r)
-    }
-    await walk(wanted)
-    return complete()
-  }
-  const tree = await complete()
+  // `include_str!` / `include_bytes!` assets ride along as resources: the walk records their
+  // format. With `cargoManifests`, each package's build script is walked too (collectRustBundle).
+  const { sources, formats, tree } = await collectRustBundle(baseDir, normalized, { cargo: cargoCtx, buildScripts: cargoManifests })
   if (cargoManifests) {
     // Each bundled package's manifests, and its workspace's lockfile and cargo config, carried as
     // written: whatever they hold (a registry token, a `git` URL's credentials) is in the bundle
     // too, as with --package-json. A file that isn't UTF-8 text is refused, not altered.
     const files = new Set()
     for (const path of sources.keys()) for (const f of cargoCtx.buildFilesFor(path)) files.add(f.path)
+    const realBase = realpathSync(baseDir)
     for (const rel of files) {
       if (sources.has(rel)) continue
-      const buf = readFileWithinBase(baseDir, rel, cargoCtx.isVendored(rel) ? cargoCtx.packageInfo(rel).dir : '.')
+      const buf = readFileWithinBase(baseDir, realBase, rel, boundaryOf(rel, cargoCtx))
       if (buf === null) continue
       if (!isUtf8(buf)) throw new Error(`Rust manifest is not valid UTF-8: ${rel}`)
       sources.set(rel, buf.toString('utf8'))
@@ -1160,12 +1107,8 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   // --cargo runs `cargo metadata` for the Rust feature/dependency resolution and the --cargo-*
   // flags steer that resolution; nothing else reads Cargo.
   if (kind !== 'rust') {
-    if (cargo) throw new Error(`${name}: --cargo is only valid for Rust bundles`)
-    if (Array.isArray(cargoFeatures) && cargoFeatures.length > 0) throw new Error(`${name}: --cargo-features is only valid for Rust bundles`)
-    if (cargoNoDefaultFeatures) throw new Error(`${name}: --cargo-no-default-features is only valid for Rust bundles`)
-    if (cargoAllFeatures) throw new Error(`${name}: --cargo-all-features is only valid for Rust bundles`)
-    if (cargoTarget) throw new Error(`${name}: --cargo-target is only valid for Rust bundles`)
-    if (cargoManifests) throw new Error(`${name}: --cargo-manifests is only valid for Rust bundles`)
+    const given = { cargo, 'cargo-features': Array.isArray(cargoFeatures) && cargoFeatures.length > 0, 'cargo-no-default-features': cargoNoDefaultFeatures, 'cargo-all-features': cargoAllFeatures, 'cargo-target': cargoTarget, 'cargo-manifests': cargoManifests }
+    for (const [flag, on] of Object.entries(given)) if (on) throw new Error(`${name}: --${flag} is only valid for Rust bundles`)
   }
   if (scope !== undefined && kind !== 'js') {
     throw new Error(`${name}: --scope is only valid for JS bundles`)

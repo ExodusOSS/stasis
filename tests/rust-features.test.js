@@ -98,15 +98,16 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
   // cargo's feature map: as written, and a feature for the optional dependency no `dep:` names
   t.assert.deepEqual([...m.features], [['default', ['std']], ['std', []], ['full', ['std', 'dep:opt', 'sub/two', 'opt?/extra']], ['pm-crate', ['dep:pm-crate']]])
   const dep = (k) => Object.fromEntries([...m.deps.get(k).kinds].toSorted())
-  const ask = (pkg, version, more) => ({ version, path: null, source: 'registry', package: pkg, renamed: false, inherited: false, optional: false, defaultFeatures: true, features: [], ...more })
+  const ask = (pkg, version, more) => ({ kind: 'normal', target: null, version, path: null, source: 'registry', package: pkg, renamed: false, inherited: false, optional: false, defaultFeatures: true, features: [], ...more })
   // Each dependency table is its own request, for the crate it names: a dev-dependency's features
   // stay out of the normal one.
-  t.assert.deepEqual(dep('plain'), { dev: ask('plain', '1', { features: ['dev-only'] }), normal: ask('plain', '1') })
+  t.assert.deepEqual(dep('plain'), { dev: ask('plain', '1', { kind: 'dev', features: ['dev-only'] }), normal: ask('plain', '1') })
   t.assert.deepEqual(dep('opt'), { normal: ask('opt', '1', { optional: true, defaultFeatures: false, features: ['a'] }) })
   t.assert.deepEqual(dep('sub'), { normal: ask('sub', '2', { features: ['one', 'two'] }) })
   t.assert.deepEqual(Object.keys(dep('cc')), ['build'])
   // A target-specific table is a request of its own, beside the plain one.
   t.assert.deepEqual(Object.keys(dep('nix')), ['normal@cfg(unix)'])
+  t.assert.deepEqual([dep('nix')['normal@cfg(unix)'].kind, dep('nix')['normal@cfg(unix)'].target], ['normal', 'cfg(unix)'])
   // the key is the `use` spelling, the name the manifest's (an optional dep's implicit feature name)
   t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').kinds.get('normal').optional], ['pm_crate', 'pm-crate', true])
   // `[patch.<source>]` entries in every spelling: inline table, dotted key, sub-table.

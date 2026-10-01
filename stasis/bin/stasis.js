@@ -308,11 +308,8 @@ if (command === '-v' || command === '--version') {
   // Cargo.toml, Cargo.lock and .cargo/config.toml too (the Rust counterpart of --package-json).
   const cargoManifests = Boolean(values['cargo-manifests'])
   if (!allRust) {
-    if (cargoFeatures.length > 0) usage('Error: --cargo-features is only valid for Rust bundles')
-    if (cargoNoDefaultFeatures) usage('Error: --cargo-no-default-features is only valid for Rust bundles')
-    if (cargoAllFeatures) usage('Error: --cargo-all-features is only valid for Rust bundles')
-    if (cargoTarget !== null) usage('Error: --cargo-target is only valid for Rust bundles')
-    if (cargoManifests) usage('Error: --cargo-manifests is only valid for Rust bundles')
+    const given = { 'cargo-features': cargoFeatures.length > 0, 'cargo-no-default-features': cargoNoDefaultFeatures, 'cargo-all-features': cargoAllFeatures, 'cargo-target': cargoTarget !== null, 'cargo-manifests': cargoManifests }
+    for (const [flag, on] of Object.entries(given)) if (on) usage(`Error: --${flag} is only valid for Rust bundles`)
   }
   if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
   if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
