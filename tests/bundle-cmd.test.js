@@ -1015,6 +1015,29 @@ test('buildSolidityBundle keeps a submodule whose .gitmodules path doesn\'t read
   }
 }))
 
+test('buildSolidityBundle refuses a .gitmodules git refuses, so no submodule section is read past', withTmp(async (t, tmp) => {
+  // deps/x is outside forge's libs: only its .gitmodules section makes it a dependency. A header git
+  // doesn't read would lose that section, deps/x then the project's own, its link to .env trusted.
+  writeProject(tmp, { 'foundry.toml': '[profile.default]\nremappings = ["x/=deps/x/src/"]\n', '.env': 'PRIVATE_KEY=0xabc\n', 'src/A.sol': 'import "x/Evil.sol";\n' })
+  mkdirSync(join(tmp, 'deps/x/src'), { recursive: true })
+  symlinkSync('../../../.env', join(tmp, 'deps/x/src/Evil.sol'))
+  const x = '\n\tpath = deps/x\n\turl = https://github.com/e/x\n'
+  for (const [gitmodules, what, line] of [
+    [`[submodule.deps/x]${x}`, "a character git doesn't take in a section name", 1],
+    [`[submodule "deps/x"${x}`, 'a subsection with no "]" right after it', 1],
+    [`[submodule deps/x]${x}`, 'a section name and then no quoted subsection', 1],
+    [`[submodule "y"]\n\tpath = lib/y\n\turl = https://github.com/o/y\n[submodule deps/x]${x}`, 'a section name and then no quoted subsection', 4],
+  ]) {
+    writeFileSync(join(tmp, '.gitmodules'), gitmodules)
+    // eslint-disable-next-line no-await-in-loop -- each run rewrites .gitmodules
+    await t.assert.rejects(
+      () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
+      { message: `.gitmodules: ${what} at line ${line}; git refuses such a file` },
+      gitmodules,
+    )
+  }
+}))
+
 test('buildSolidityBundle refuses a .sol file that isn\'t UTF-8, rather than bundle it with U+FFFD in it', withTmp(async (t, tmp) => {
   // \xe9 alone is Latin-1's é: solc refuses it, and the bundle must hold the file's own text.
   writeProject(tmp, { 'src/A.sol': 'import "./B.sol";\ncontract A {}\n' })

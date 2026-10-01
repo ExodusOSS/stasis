@@ -103,7 +103,8 @@ export function readUtf8OrNull(file, label) {
 // (`checkUrls: false`): relative to the superproject's remote, a path or none, as it only names a
 // GitHub submodule's bucket. A file the library refuses -- something git reads two ways, or that it
 // doesn't check (`update = none`, `active`, a `[core]` section) -- never fails the bundle: it's
-// warned about and read submodule by submodule (gitmodulesLeniently).
+// warned about and read submodule by submodule (gitmodulesLeniently). One git itself refuses is an
+// error: read past what git can't, a submodule's section would be lost, and its directory with it.
 export function readGitmodules(baseDir) {
   const text = readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules')
   if (text === null) return []
@@ -122,44 +123,28 @@ export function readGitmodules(baseDir) {
 const SUBMODULE_KEYS = new Set(['path', 'url', 'branch'])
 const DROPPABLE = ['branch', 'url']
 
-// `.gitmodules` text the library refused as a whole, read a submodule section at a time (`[submodule
-// "name"]`, or `[submodule.name]` with the name lowercased, as git reads it): its first `path`,
-// `url` and `branch` (the first, as git's submodule commands read it; the sections of one name
-// merged), each submodule then read by the library alone. One that still doesn't read loses its
-// branch, then its url; one whose path doesn't read fails closed: its directory, when the path
-// names one inside the repository (`./lib/x`, `lib/x/`), is still a dependency, just unnamed, and
-// else the submodule is skipped. `notes` say what was dropped.
+// `.gitmodules` text the library refused as a whole, read as git reads it (readGitConfig) a
+// submodule at a time: a key of `submodule.<name>.<key>`, from `[submodule "name"]` or
+// `[submodule.name]`, its first `path`, `url` and `branch` (the first, as git's submodule commands
+// read it; the sections of one name merged), each submodule then read by the library alone. One that
+// still doesn't read loses its branch, then its url; one whose path doesn't read fails closed: its
+// directory, when the path names one inside the repository (`./lib/x`, `lib/x/`), is still a
+// dependency, just unnamed, and else the submodule is skipped. `notes` say what was dropped.
 function gitmodulesLeniently(text) {
-  const sections = new Map() // the name, as written in the header -> Map<key, its lines>
+  const sections = new Map() // a submodule's name -> Map<key, its entry>
   const notes = []
-  let keys = null // the current section's, when it's a submodule's
-  let lines = null // the kept key's lines, while it runs on (a line ending in `\`)
-  let continued = false
-  for (let line of text.split(/\r?\n/u)) {
-    const runsOn = continued
-    continued = /(?:^|[^\\])(?:\\\\)*\\$/u.test(line)
-    if (runsOn) {
-      lines?.push(line)
-      continue
-    }
-    lines = null
-    const header = /^\s*\[\s*([\w.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/u.exec(line)
-    if (header) {
-      const section = header[1].toLowerCase()
-      let name = section === 'submodule' ? header[2] : undefined
-      if (name === undefined && section.startsWith('submodule.')) {
-        name = section.slice('submodule.'.length)
-        notes.push(`[${header[1]}], a section git reads as [submodule "${name}"]; reading it as that`)
-      }
-      keys = name === undefined ? null : (sections.get(name) ?? sections.set(name, new Map()).get(name))
-      line = line.slice(header[0].length) // a key may follow on the line
-    }
-    const key = keys && /^\s*([A-Za-z][\w-]*)\s*(?:=|$)/u.exec(line)?.[1].toLowerCase()
-    if (SUBMODULE_KEYS.has(key) && !keys.has(key)) keys.set(key, (lines = [line]))
+  for (const { section, subsection, header, keys } of readGitConfig(text)) {
+    const variable = subsection === undefined ? section : `${section}.${subsection}`
+    if (!variable?.startsWith('submodule.')) continue
+    const name = variable.slice('submodule.'.length)
+    if (section !== 'submodule') notes.push(`${header}, a section git reads as [submodule "${name}"]; reading it as that`)
+    const kept = sections.get(name) ?? sections.set(name, new Map()).get(name)
+    for (const entry of keys) if (SUBMODULE_KEYS.has(entry.key) && !kept.has(entry.key)) kept.set(entry.key, entry)
   }
   const submodules = []
   for (const [name, kept] of sections) {
-    const read = () => Object.values(parseGitmodules([`[submodule "${name}"]`, ...[...kept.values()].flat(), ''].join('\n'), { checkUrls: false }))
+    const header = `[submodule "${name.replaceAll(/["\\]/gu, '\\$&')}"]`
+    const read = () => Object.values(parseGitmodules([header, ...[...kept.values()].map((entry) => entry.text), ''].join('\n'), { checkUrls: false }))
     let first = null
     const dropped = []
     for (;;) {
@@ -176,7 +161,7 @@ function gitmodulesLeniently(text) {
           dropped.push(next)
           continue
         }
-        const path = kept.has('path') ? normalSubmodulePath(kept.get('path')) : null
+        const path = normalSubmodulePath(kept.get('path')?.value)
         if (path === null) {
           notes.push(`${first.message}; skipping the submodule`)
         } else {
@@ -190,42 +175,153 @@ function gitmodulesLeniently(text) {
   return { submodules, notes }
 }
 
-// A `path = ...` key's lines -> the directory it names, normalized, when that lies inside the
-// repository (else null): `./lib/x` and `lib/x/` are lib/x.
-function normalSubmodulePath(lines) {
-  const raw = lines.map((l, i) => (i < lines.length - 1 ? l.slice(0, -1) : l)).join('') // a `\` runs on
-  const eq = raw.indexOf('=')
-  if (eq === -1) return null
-  const path = posix.normalize(gitConfigValue(raw.slice(eq + 1))).replace(/\/+$/u, '')
+// A `path`'s value -> the directory it names, normalized, when that lies inside the repository (else
+// null): `./lib/x` and `lib/x/` are lib/x.
+function normalSubmodulePath(value) {
+  if (typeof value !== 'string') return null
+  const path = posix.normalize(value).replace(/\/+$/u, '')
   return path !== '' && path !== '.' && inRoot(path) ? path : null
 }
 
-const GIT_ESCAPES = { n: '\n', t: '\t', b: '\b' }
+// git's ctype, ASCII alone: only these are space, and a key is letters, digits and `-`, starting with
+// a letter.
+const GIT_SPACE = new Set([' ', '\t', '\n', '\r'])
+const isGitAlpha = (char) => /^[A-Za-z]$/u.test(char)
+const isGitKeyChar = (char) => /^[\dA-Za-z-]$/u.test(char)
+const GIT_ESCAPES = { __proto__: null, t: '\t', b: '\b', n: '\n', '\\': '\\', '"': '"' }
 
-// A git-config value as git reads it: `"` quotes (dropped), `\` escapes, a `#`/`;` comment outside
-// quotes, and whitespace trimmed at both ends outside quotes.
-function gitConfigValue(raw) {
-  let out = ''
-  let held = '' // unquoted whitespace, kept only if more value follows
-  let quoted = false
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i]
-    if (ch === '\\') {
-      const next = raw[++i] ?? ''
-      out += held + (GIT_ESCAPES[next] ?? next)
-      held = ''
-    } else if (ch === '"') {
-      quoted = !quoted
-    } else if (!quoted && (ch === '#' || ch === ';')) {
-      break
-    } else if (!quoted && (ch === ' ' || ch === '\t')) {
-      if (out !== '') held += ch
-    } else {
-      out += held + ch
-      held = ''
+// `.gitmodules` text as git's config.c reads a config file, to the character, refusing what git
+// refuses ("bad config line") and nothing more: its sections in order, each `{ section, subsection,
+// header, keys }` -- the name lowercased, the subsection with a backslash's character for it, the
+// header as written -- and each key `{ key, value, text }`: its name lowercased, its value (null for
+// a key alone) and its text, from the key to the end of its value. Keys before any header are in a
+// first section with no name.
+function readGitConfig(text) {
+  const src = text.startsWith('\uFEFF') ? text.slice(1) : text // a byte-order mark git skips
+  let pos = 0
+  let last = 0 // where the character last read starts
+  let line = 1
+  let at = 1 // its line
+  let eof = false
+  // git's get_next_char: CRLF is a line end, a lone CR is space, and the end of the file a line end,
+  // read again at every call after.
+  const next = () => {
+    last = pos
+    at = line
+    if (pos >= src.length) {
+      eof = true
+      return '\n'
+    }
+    let char = src[pos++]
+    if (char === '\r' && src[pos] === '\n') char = src[pos++]
+    if (char === '\n') line++
+    return char
+  }
+  const refuse = (what) => new Error(`.gitmodules: ${what} at line ${at}; git refuses such a file`)
+
+  // git's get_base_var and get_extended_base_var: `[name]` or `[name "subsection"]`.
+  const readHeader = () => {
+    let section = ''
+    for (;;) {
+      const char = next()
+      if (eof) throw refuse('a section header with no closing "]"')
+      if (char === ']') break
+      if (GIT_SPACE.has(char)) return { section, subsection: readSubsection(char) }
+      if (!isGitKeyChar(char) && char !== '.') throw refuse("a character git doesn't take in a section name")
+      section += char.toLowerCase()
+    }
+    if (section === '') throw refuse('a section with no name')
+    return { section, subsection: undefined }
+  }
+  const readSubsection = (first) => {
+    let char = first
+    do {
+      if (char === '\n') throw refuse('a section header that runs past its line')
+      char = next()
+    } while (GIT_SPACE.has(char))
+    if (char !== '"') throw refuse('a section name and then no quoted subsection')
+    let subsection = ''
+    for (char = next(); char !== '"'; char = next()) {
+      if (char === '\\') char = next()
+      if (char === '\n') throw refuse('a subsection with no closing quote')
+      subsection += char
+    }
+    if (next() !== ']') throw refuse('a subsection with no "]" right after it')
+    return subsection
+  }
+  // git's parse_value: quotes, escapes, a `\` that runs the value on, a comment outside quotes, and
+  // space outside quotes trimmed at both ends.
+  const readValue = () => {
+    let value = ''
+    let quoted = false
+    let comment = false
+    let trim = -1 // where the space at the end begins, outside quotes
+    for (;;) {
+      let char = next()
+      if (char === '\n') {
+        if (quoted) throw refuse('a value with no closing quote')
+        return trim === -1 ? value : value.slice(0, trim)
+      }
+      if (comment) continue
+      if (GIT_SPACE.has(char) && !quoted) {
+        if (value !== '') {
+          if (trim === -1) trim = value.length
+          value += char
+        }
+        continue
+      }
+      if (!quoted && (char === '#' || char === ';')) {
+        comment = true
+        continue
+      }
+      trim = -1
+      if (char === '\\') {
+        char = next()
+        if (char === '\n') continue
+        if (!(char in GIT_ESCAPES)) throw refuse("an escape git doesn't read")
+        value += GIT_ESCAPES[char]
+      } else if (char === '"') {
+        quoted = !quoted
+      } else {
+        value += char
+      }
     }
   }
-  return out
+  // git's get_value: a key, and `=` and its value or nothing.
+  const readKey = (first, start) => {
+    let key = first.toLowerCase()
+    let char = next()
+    for (; isGitKeyChar(char); char = next()) key += char.toLowerCase() // the end reads as a line end
+    while (char === ' ' || char === '\t') char = next()
+    let value = null
+    if (char !== '\n') {
+      if (char !== '=') throw refuse('a key and then neither "=" nor the end of its line')
+      value = readValue()
+    }
+    return { key, value, text: src.slice(start, last) }
+  }
+
+  const sections = [{ section: undefined, subsection: undefined, header: undefined, keys: [] }]
+  let comment = false
+  for (;;) {
+    const char = next()
+    const start = last
+    if (char === '\n') {
+      if (eof) return sections
+      comment = false
+    } else if (comment || GIT_SPACE.has(char)) {
+      continue
+    } else if (char === '#' || char === ';') {
+      comment = true
+    } else if (char === '[') {
+      const { section, subsection } = readHeader()
+      sections.push({ section, subsection, header: src.slice(start, pos), keys: [] })
+    } else if (isGitAlpha(char)) {
+      sections.at(-1).keys.push(readKey(char, start))
+    } else {
+      throw refuse('text where git reads a key, a section or a comment')
+    }
+  }
 }
 
 // --- Ownership --------------------------------------------------------------------------------

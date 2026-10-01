@@ -801,6 +801,40 @@ test('readGitmodules reads what the library refuses submodule by submodule, warn
   }
 }))
 
+test('readGitmodules refuses a .gitmodules git refuses, rather than read past what git can\'t', withProject({}, (t, dir) => {
+  const x = '\n\tpath = lib/x\n'
+  for (const [text, what, line] of [
+    // A header git doesn't read: past it, a submodule's keys would be lost, or taken for another's.
+    [`[submodule.lib/x]${x}`, "a character git doesn't take in a section name", 1],
+    [`[submodule "x"${x}`, 'a subsection with no "]" right after it', 1],
+    [`[submodule "x" ]${x}`, 'a subsection with no "]" right after it', 1],
+    [`[submodule x]${x}`, 'a section name and then no quoted subsection', 1],
+    [`[submodule "y"]\n\tpath = lib/y\n\tupdate = none\n[submodule x]${x}`, 'a section name and then no quoted subsection', 4],
+    [`[submodule\n"x"]${x}`, 'a section header that runs past its line', 1],
+    [`[submodule "x${x}`, 'a subsection with no closing quote', 1],
+    ['[]\n\tpath = lib/x\n', 'a section with no name', 1],
+    ['[submodule', 'a section header with no closing "]"', 1],
+    // A key, value or line git doesn't read.
+    ['[submodule "x"]\n\tpath # lib/x\n', 'a key and then neither "=" nor the end of its line', 2],
+    ['[submodule "x"]\n\tpath = "lib/x\n\turl = https://github.com/o/x\n', 'a value with no closing quote', 2],
+    ['[submodule "x"]\n\tpath = lib\\x\n', "an escape git doesn't read", 2],
+    ['[submodule "x"]\n\t./path = lib/x\n', 'text where git reads a key, a section or a comment', 2],
+  ]) {
+    writeFileSync(join(dir, '.gitmodules'), text)
+    t.assert.throws(() => readGitmodules(dir), { message: `.gitmodules: ${what} at line ${line}; git refuses such a file` }, text)
+  }
+  // What git reads, oddly, the library refuses and stasis reads as git does: sections of one name
+  // however it's escaped, merged, and a comment's `\` running nothing on.
+  writeFileSync(join(dir, '.gitmodules'), '[submodule "a\\x"]\n\tpath = lib/x # a comment \\\n[submodule "ax"]\n\turl = https://github.com/o/x\n\tupdate = none\n')
+  const warn = console.warn
+  console.warn = () => {}
+  try {
+    t.assert.deepEqual(readGitmodules(dir), [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }])
+  } finally {
+    console.warn = warn
+  }
+}))
+
 test('a remappings.txt taken as written (solc) may map a prefix to nothing', (t) => {
   const remappings = parseRemappings('x/=\nctx:y/=\n')
   t.assert.deepEqual(remappings, [{ context: null, prefix: 'x/', target: '' }, { context: 'ctx', prefix: 'y/', target: '' }])

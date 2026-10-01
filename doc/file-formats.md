@@ -424,7 +424,11 @@ warned about and read a submodule at a time (`[submodule.x]` as git reads it,
 with a warning a branch or url that doesn't read. One whose path doesn't fails
 closed: a path naming a directory inside the repository, such as `./lib/x` or
 `lib/x/`, still makes it a dependency, unnamed, and only one outside it is
-skipped) and every `node_modules` package; a file
+skipped. A `.gitmodules` git itself refuses — a "bad config line", such as a
+header `[submodule x]`, `[submodule.lib/x]` or `[submodule "x"` with no `]`, or
+a value with no closing quote — is an error, as it is to git: read past, a
+submodule's section would be lost, and its directory taken for the project's
+own) and every `node_modules` package; a file
 is a dependency's when its real path lies in one, however the path got there
 (`src/vendor -> ../lib/dep/src` holds the dependency's code). An import from a
 dependency must land on a dependency's file too: it may import its own files and
