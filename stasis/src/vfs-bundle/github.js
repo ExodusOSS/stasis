@@ -64,7 +64,9 @@ async function subtreeEntries(client, { github, sha, directory, lockfile, where 
 
 // A GitHub repo at a full commit, as buildVfsBundle builds it. A `directory` holding the lockfile is
 // downloaded alone if it stands alone, else the whole repo is. `repo` names the commit and where the
-// lockfile is, which the bundle's paths are relative to.
+// lockfile is, which the bundle's paths are relative to. Nothing is read from disk: the tree's bytes
+// come from GitHub, or from the cache setCacheDir names, held to the git tree id either way
+// (@preventive/upstream), and are unpacked into a Vfs that buildVfsBundle reads alone.
 export async function buildGitHubBundle({ github, sha, directory, client, packageManager, ...options } = {}) {
   checkPackageManager('buildGitHubBundle', packageManager)
   if (github === undefined || sha === undefined) throw new Error('buildGitHubBundle: github and sha are required')

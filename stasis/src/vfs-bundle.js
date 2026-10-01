@@ -7,8 +7,10 @@ import { checkPackageManager, loadTree, vfsHost } from './vfs-bundle/tree.js'
 // node_modules its package manager would install (`packageManager`: 'pnpm', pnpm 10 or 11, or
 // 'yarn1', yarn 1.22), over the project held in a Vfs, which is only read. The tree is laid out by
 // @preventive/deptree into a Vfs of its own, and nothing is read from disk or written there but
-// the tarballs, fetched from registry.npmjs.org and cached only where setCacheDir says.
-// buildGitHubBundle builds one from a GitHub repo at a commit, its tree fetched from GitHub.
+// the tarballs: fetched from registry.npmjs.org, or read from npm's cache or ~/.audit's where one
+// holds them, every copy held to the lockfile's integrity before it is used; cached only where
+// setCacheDir says. buildGitHubBundle builds one from a GitHub repo at a commit, its tree fetched
+// from GitHub and held to its git tree id, cached there the same way.
 
 export { buildVfsBundle } from './cmd/bundle.js'
 export { buildGitHubBundle } from './vfs-bundle/github.js'
