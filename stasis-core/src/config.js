@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 
+import { diskHost } from './host.js'
 import { canonicalizePath } from './state-util.js'
 import { extSetsEqual, isBrotliQuality, parseBrotliQuality, parseResourcesOption } from './util.js'
 
@@ -61,6 +62,7 @@ export function assertOptionsMatchConfig(config, options) {
 
 export class Config {
   #env
+  #host
   #explicit
   #scope
   #lock
@@ -78,24 +80,25 @@ export class Config {
 
   // Env and options must agree when both are set; #explicit is kept so a later loadConfig can't override them.
   constructor(options = {}) {
-    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, packageJSON, fs, brotliQuality, ...rest } = options
+    const { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, packageJSON, fs, brotliQuality, env = process.env, host = diskHost, ...rest } = options
     assert.equal(Object.keys(rest).length, 0, `Unknown Config options: ${Object.keys(rest).join(', ')}`)
+    this.#host = host
     this.#explicit = { scope, lock, lockFile, bundle, bundleFile, resourcesBundleFile, debug, resources, childProcess, packageJSON, fs, brotliQuality }
 
     this.#env = {
-      scope: process.env.EXODUS_STASIS_SCOPE || undefined,
-      lock: process.env.EXODUS_STASIS_LOCK || undefined,
-      lockFile: process.env.EXODUS_STASIS_LOCK_FILE || undefined,
-      bundle: process.env.EXODUS_STASIS_BUNDLE || undefined,
-      bundleFile: process.env.EXODUS_STASIS_BUNDLE_FILE || undefined,
-      resourcesBundleFile: process.env.EXODUS_STASIS_RESOURCES_BUNDLE_FILE || undefined,
-      debug: process.env.EXODUS_STASIS_DEBUG || undefined,
-      resources: process.env.EXODUS_STASIS_RESOURCES || undefined,
-      childProcess: process.env.EXODUS_STASIS_CHILD_PROCESS || undefined,
-      packageJSON: process.env.EXODUS_STASIS_PACKAGE_JSON || undefined,
-      shardSignalFlush: process.env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH || undefined,
-      fs: process.env.EXODUS_STASIS_FS || undefined,
-      brotliQuality: process.env.EXODUS_STASIS_BROTLI_QUALITY || undefined,
+      scope: env.EXODUS_STASIS_SCOPE || undefined,
+      lock: env.EXODUS_STASIS_LOCK || undefined,
+      lockFile: env.EXODUS_STASIS_LOCK_FILE || undefined,
+      bundle: env.EXODUS_STASIS_BUNDLE || undefined,
+      bundleFile: env.EXODUS_STASIS_BUNDLE_FILE || undefined,
+      resourcesBundleFile: env.EXODUS_STASIS_RESOURCES_BUNDLE_FILE || undefined,
+      debug: env.EXODUS_STASIS_DEBUG || undefined,
+      resources: env.EXODUS_STASIS_RESOURCES || undefined,
+      childProcess: env.EXODUS_STASIS_CHILD_PROCESS || undefined,
+      packageJSON: env.EXODUS_STASIS_PACKAGE_JSON || undefined,
+      shardSignalFlush: env.EXODUS_STASIS_SHARD_SIGNAL_FLUSH || undefined,
+      fs: env.EXODUS_STASIS_FS || undefined,
+      brotliQuality: env.EXODUS_STASIS_BROTLI_QUALITY || undefined,
     }
 
     try {
@@ -199,7 +202,7 @@ export class Config {
       ['resourcesBundleFile', this.#resourcesBundleFile],
     ]) {
       if (value === undefined) continue
-      const canonical = canonicalizePath(value)
+      const canonical = canonicalizePath(value, this.#host)
       if (claimed.has(canonical)) {
         throw new RangeError(`${label} '${value}' targets the same file as ${claimed.get(canonical)}; each must be a distinct path`)
       }

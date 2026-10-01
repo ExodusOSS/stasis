@@ -76,12 +76,18 @@ importers:
       '@exodus/stasis-plugins':
         specifier: 1.0.0-beta.4
         version: link:../stasis-plugins
+      '@preventive/deptree':
+        specifier: 1.0.0-alpha.3
+        version: 1.0.0-alpha.3
       '@preventive/lockfile':
         specifier: 1.0.0-alpha.3
         version: 1.0.0-alpha.3
       '@preventive/upstream':
         specifier: 1.0.0-alpha.2
         version: 1.0.0-alpha.2
+      '@preventive/vfs':
+        specifier: 1.0.0-beta.2
+        version: 1.0.0-beta.2
       esbuild:
         specifier: '*'
         version: 0.27.3
@@ -657,12 +663,32 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@preventive/archive@1.0.0-beta.3':
+    resolution: {integrity: sha512-2WLNnHNoUCJezrusJrA9QVIJTmo+34KF/6ODd+a8x6Ks5fk/GOWVaWTl8+A4DzOw5dO43Uf5fX1N6ga/gB7TIw==, tarball: https://registry.npmjs.org/@preventive/archive/-/archive-1.0.0-beta.3.tgz}
+    engines: {node: '>=24.14.0'}
+
+  '@preventive/deptree@1.0.0-alpha.3':
+    resolution: {integrity: sha512-G8kzY/psXC9XTJHqUlniJcrq0yo21W96Fx3VVcVin3Ql2v+YeJtUY6vUZ20c1oXQzGOINd9Y2UUu7XHFCgqcGA==, tarball: https://registry.npmjs.org/@preventive/deptree/-/deptree-1.0.0-alpha.3.tgz}
+    engines: {node: '>=24.14.0'}
+
+  '@preventive/diff@1.0.0':
+    resolution: {integrity: sha512-voZPhZLUkbM1R8N4TxZ1LjHYmAoy8/4cohXYq5gL5DXYag3MQ/XehTSGa+871V6ffsNptixV9iURVtqqMHLOHg==, tarball: https://registry.npmjs.org/@preventive/diff/-/diff-1.0.0.tgz}
+    engines: {node: '>=24.14.0'}
+
+  '@preventive/lockfile@1.0.0-alpha.2':
+    resolution: {integrity: sha512-TN211DUcMz3GseLUmvXLEtWU2DE07+4+oYZXgWrFXDCwar6a4r/NSfbMgo7gGWXyF/LwF0WMAL6jRop12oVKPA==, tarball: https://registry.npmjs.org/@preventive/lockfile/-/lockfile-1.0.0-alpha.2.tgz}
+    engines: {node: '>=24.14.0'}
+
   '@preventive/lockfile@1.0.0-alpha.3':
     resolution: {integrity: sha512-yH58AoWLptJ4j9CgXucy5HGNDYQmRbNHAju3JDBOI18MBIgrgdYZr0//Yt3L+orZzwek7Ek7JDBRTwcc2gkZ3A==, tarball: https://registry.npmjs.org/@preventive/lockfile/-/lockfile-1.0.0-alpha.3.tgz}
     engines: {node: '>=24.14.0'}
 
   '@preventive/upstream@1.0.0-alpha.2':
     resolution: {integrity: sha512-IWob+bCWXUhV+y1l2uvSjCiZ8Aziwke28HVoRDJvs6/LVYxyb5Pw6kD5sPigeRqvbQCtTXqEWN58BGImPHHYbQ==, tarball: https://registry.npmjs.org/@preventive/upstream/-/upstream-1.0.0-alpha.2.tgz}
+    engines: {node: '>=24.14.0'}
+
+  '@preventive/vfs@1.0.0-beta.2':
+    resolution: {integrity: sha512-Ijj1B+iZub2mLKtjSTPMMUUp33/X3B4bBVeQN0wVbcSqWBkwS4R6V+2OmV9dnIVZhbdQcWPkRKJQ9t/omsZwsg==, tarball: https://registry.npmjs.org/@preventive/vfs/-/vfs-1.0.0-beta.2.tgz}
     engines: {node: '>=24.14.0'}
 
   '@rollup/rollup-android-arm-eabi@4.62.4':
@@ -2860,6 +2886,30 @@ snapshots:
   '@oxlint/binding-win32-x64-msvc@1.52.0':
     optional: true
 
+  '@preventive/archive@1.0.0-beta.3':
+    dependencies:
+      '@exodus/bytes': 1.16.0
+    transitivePeerDependencies:
+      - '@noble/hashes'
+
+  '@preventive/deptree@1.0.0-alpha.3':
+    dependencies:
+      '@preventive/archive': 1.0.0-beta.3
+      '@preventive/diff': 1.0.0
+      '@preventive/lockfile': 1.0.0-alpha.2
+      '@preventive/upstream': 1.0.0-alpha.2
+      '@preventive/vfs': 1.0.0-beta.2
+    transitivePeerDependencies:
+      - '@noble/hashes'
+
+  '@preventive/diff@1.0.0': {}
+
+  '@preventive/lockfile@1.0.0-alpha.2':
+    dependencies:
+      '@exodus/bytes': 1.16.0
+    transitivePeerDependencies:
+      - '@noble/hashes'
+
   '@preventive/lockfile@1.0.0-alpha.3':
     dependencies:
       '@exodus/bytes': 1.16.0
@@ -2867,6 +2917,8 @@ snapshots:
       - '@noble/hashes'
 
   '@preventive/upstream@1.0.0-alpha.2': {}
+
+  '@preventive/vfs@1.0.0-beta.2': {}
 
   '@rollup/rollup-android-arm-eabi@4.62.4':
     optional: true

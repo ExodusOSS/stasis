@@ -3,7 +3,6 @@ import { isUtf8 } from 'node:buffer'
 import * as fs from 'node:fs'
 import { join, resolve, relative, basename, dirname, extname, isAbsolute } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { findPackageJSON } from 'node:module'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Config } from './config.js'
@@ -14,18 +13,19 @@ import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from '
 import { brotliOptions } from './brotli.js'
 import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, erasedTypeScriptFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isNativeArtifact, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
 import { detectRepo, readModuleManifest } from './bundle-util.js'
+import { diskHost } from './host.js'
 import corePackage from './package.cjs'
 
 // Destructure off the namespace: captures the real fns at eval time, so writes survive --mock's
 // syncBuiltinESMExports() remock of node:fs.
-const { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } = fs
+const { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } = fs
 
 const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
 
-function readPackageJSON(pkgAbsolute) {
-  const buf = readFileSync(pkgAbsolute)
+function readPackageJSON(host, pkgAbsolute) {
+  const buf = host.readFile(pkgAbsolute)
   assert.ok(isUtf8(buf))
   return JSON.parse(buf.toString())
 }
@@ -65,8 +65,11 @@ export class State {
   #parent
 
   #isPreload = false
+  #host
 
-  // Claimed write-target paths (canonicalized -> label), for cross-State collision detection.
+  // Claimed write-target paths (canonicalized -> label), for cross-State collision detection; a
+  // State built with `claim: false`, which never writes (a static build), claims none.
+  #claim
   #claims = new Map()
 
   // WRITE-mode sidecars: lockfile CONTRIBUTORS (#mergedImports/#mergedFormats union theirs in).
@@ -132,7 +135,7 @@ export class State {
   #lastUnifiedBundle = null
   #lastCodeBundle = null
   #lastResourcesBundle = null
-  // { value: detectRepo(this.root) }, filled lazily by #repo.
+  // { value: detectRepo(this.root, this.#host) }, filled lazily by #repo.
   #repoCache
 
   // Options: `preload` (the unique preload State) and `parent` (run as a sidecar sharing the
@@ -140,8 +143,10 @@ export class State {
   // All other keys forward to Config.
   constructor(root, options = {}) {
     // skipDiscovery: caller-populated in-memory State, NO filesystem discovery; read-only modes only.
-    const { preload: isPreload = false, parent: parentState, preloadRoot, skipDiscovery = false, ...configOptions } = options
-    this.config = new Config(configOptions)
+    const { preload: isPreload = false, parent: parentState, preloadRoot, skipDiscovery = false, host = diskHost, env = process.env, claim = true, ...configOptions } = options
+    this.config = new Config({ ...configOptions, env, host })
+    this.#host = host
+    this.#claim = claim
     if (isPreload) assert.ok(!State.preload, 'Only one preload Stasis instance is supported')
     assert.ok(!(isPreload && parentState), 'preload and parent are mutually exclusive')
     this.#isPreload = isPreload
@@ -175,7 +180,7 @@ export class State {
       // frozenBundle MUST go through this branch too -- it has its own attestation snapshot to build.
       if (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) {
         const sourcesPath = this.config.bundleFile
-        const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+        const sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath), undefined, this.#host)
         if (sources && !this.config.replaceBundle) {
           const bundle = Bundle.parse(brotliDecompressSync(sources).toString('utf-8'))
           // v0 bundle has no per-file formats or import map -- serving one via a sidecar widens trust.
@@ -204,7 +209,7 @@ export class State {
 
         if (this.config.resourcesBundleFile) {
           const resourcesPath = this.config.resourcesBundleFile
-          const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
+          const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath), undefined, this.#host)
           if (resourcesData && !this.config.replaceBundle) {
             this.#absorbResourcesBundle(resourcesData, { lockfileLoaded: this.#lockfileLoaded, resourcesPath })
           }
@@ -217,7 +222,7 @@ export class State {
       // join neither registry (--fs neither captures nor serves in frozen-bundle mode).
       if (this.config.writeBundle) parentState.registerSidecar(this)
       else if (this.config.loadBundle) parentState.registerReadSidecar(this)
-      liveStates().add(this)
+      if (this.#claims.size > 0) liveStates().add(this)
       return
     }
 
@@ -229,25 +234,25 @@ export class State {
         assert.equal(typeof preloadRoot, 'string', 'preloadRoot must be a string')
         this.#preloadRoot = preloadRoot
       }
-      liveStates().add(this)
+      if (isPreload) liveStates().add(this)
       return
     }
 
     const potentialRoots = []
     let cursor = root
     while (cursor) {
-      if (existsSync(join(cursor, 'package.json'))) {
+      if (this.#exists(join(cursor, 'package.json'))) {
         potentialRoots.push(cursor)
       } else if (
-        existsSync(join(cursor, FILE_CONFIG)) ||
-        existsSync(join(cursor, FILE_LOCK)) ||
-        existsSync(join(cursor, FILE_CODE))) {
+        this.#exists(join(cursor, FILE_CONFIG)) ||
+        this.#exists(join(cursor, FILE_LOCK)) ||
+        this.#exists(join(cursor, FILE_CODE))) {
         throw new Error('Unexpected stasis config without package.json')
       }
 
-      if (cursor === process.env.PROJECT_CWD) break // e.g. yarn sets this
-      if (existsSync(join(cursor, '.git'))) break
-      if (existsSync(join(cursor, 'pnpm-workspace.yaml'))) break
+      if (cursor === env.PROJECT_CWD) break // e.g. yarn sets this
+      if (this.#exists(join(cursor, '.git'))) break
+      if (this.#exists(join(cursor, 'pnpm-workspace.yaml'))) break
       const parent = dirname(cursor)
       if (!parent || parent === cursor) break
       cursor = parent
@@ -267,10 +272,10 @@ export class State {
     // root. A config-only bundleFile is NOT suppressed (its dir already carries the config signal).
     const explicitBundlePath = this.config.bundleFile
     for (const rootDir of potentialRoots) {
-      const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8')
-      const lockProbe = explicitLockPath ? null : readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8')
+      const config = readFileSyncMaybe(rootDir, FILE_CONFIG, 'utf-8', this.#host)
+      const lockProbe = explicitLockPath ? null : readFileSyncMaybe(rootDir, FILE_LOCK, 'utf-8', this.#host)
       let sourcesPath = this.config.bundleFile || join(rootDir, FILE_CODE)
-      let sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+      let sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath), undefined, this.#host)
       // Root-SELECTION signal: only the DEFAULT <rootDir>/stasis.code.br counts (see
       // explicitBundlePath); an explicit bundleFile is still loaded via `sources`.
       const bundleProbe = explicitBundlePath ? null : sources
@@ -285,12 +290,12 @@ export class State {
           const configuredPath = this.config.bundleFile || join(rootDir, FILE_CODE)
           if (configuredPath !== sourcesPath) {
             sourcesPath = configuredPath
-            sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath))
+            sources = readFileSyncMaybe(dirname(sourcesPath), basename(sourcesPath), undefined, this.#host)
           }
         }
 
         const lock = explicitLockPath
-          ? readFileSyncMaybe(dirname(explicitLockPath), basename(explicitLockPath), 'utf-8')
+          ? readFileSyncMaybe(dirname(explicitLockPath), basename(explicitLockPath), 'utf-8', this.#host)
           : lockProbe
         const lockPath = explicitLockPath || join(rootDir, FILE_LOCK)
 
@@ -306,7 +311,7 @@ export class State {
     // Explicit lockfile but no discovery indicator: the loop never ran, so absorb here against
     // `this.root` (outermost) so the run still has attestation.
     if (!loaded && explicitLockPath) {
-      const lock = readFileSyncMaybe(dirname(explicitLockPath), basename(explicitLockPath), 'utf-8')
+      const lock = readFileSyncMaybe(dirname(explicitLockPath), basename(explicitLockPath), 'utf-8', this.#host)
       lockfileLoaded = this.#absorbLockfile(lock, explicitLockPath)
     }
 
@@ -315,7 +320,7 @@ export class State {
     // pnpm-workspace.yaml), else they commit different roots and fail "outside the project root".
     if (!loaded && (explicitBundlePath || this.config.resourcesBundleFile)) {
       const sources = explicitBundlePath
-        ? readFileSyncMaybe(dirname(explicitBundlePath), basename(explicitBundlePath))
+        ? readFileSyncMaybe(dirname(explicitBundlePath), basename(explicitBundlePath), undefined, this.#host)
         : null
       this.#loadBundleArtifacts(sources, explicitBundlePath, lockfileLoaded)
     }
@@ -340,7 +345,12 @@ export class State {
       this.#preloadRoot = preloadRoot
     }
 
-    liveStates().add(this)
+    // The registry answers for the preload and for write claims; any other State stays out of it.
+    if (isPreload || this.#claims.size > 0) liveStates().add(this)
+  }
+
+  #exists(p) {
+    return this.#host.stat(p) !== null
   }
 
   // Absorb a lockfile's attestation; returns whether it was actually absorbed. Lockfile.parse
@@ -389,7 +399,7 @@ export class State {
     }
     if (this.config.resourcesBundleFile) {
       const resourcesPath = this.config.resourcesBundleFile
-      const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath))
+      const resourcesData = readFileSyncMaybe(dirname(resourcesPath), basename(resourcesPath), undefined, this.#host)
       if (resourcesData && (this.config.writeBundle || this.config.loadBundle || this.config.frozenBundle) && !this.config.replaceBundle) {
         this.#absorbResourcesBundle(resourcesData, { lockfileLoaded, resourcesPath })
       }
@@ -607,8 +617,8 @@ export class State {
   // Refuse a path another live State (ANY copy) already claims; canonicalized so `./x`/`x`/symlinks
   // compare equal.
   #claimWritePath(label, value) {
-    if (!value) return
-    const canonical = canonicalizePath(value)
+    if (!value || !this.#claim) return
+    const canonical = canonicalizePath(value, this.#host)
     for (const other of liveStates()) {
       const owner = other.claimedWritePathLabel(canonical)
       assert.ok(owner === undefined, `${label} '${value}' is already claimed by ${owner} of another live State`)
@@ -679,7 +689,7 @@ export class State {
     if (file.startsWith('..') || !splitNodeModulesPath(file)) return { url, absolute }
     let real
     try {
-      real = realpathSync(absolute)
+      real = this.#host.realpath(absolute)
     } catch {
       return { url, absolute }
     }
@@ -711,7 +721,7 @@ export class State {
     let dir = dirAbsolute
     while (true) {
       const candidate = join(dir, 'package.json')
-      if (existsSync(candidate)) return candidate
+      if (this.#host.stat(candidate) !== null) return candidate
       if (dir === this.root) break // checked the root's package.json; never escape root
       const parent = dirname(dir)
       if (parent === dir) break
@@ -728,11 +738,11 @@ export class State {
     const canonical = this.#canonical(url)
     url = canonical.url
     const absolute = canonical.absolute
-    assert.ok(existsSync(absolute))
+    assert.ok(this.#host.stat(absolute) !== null)
     const file = this.relative(absolute)
 
-    const closestPkgAbsolute = directory ? this.#nearestPackageJsonFor(absolute) : findPackageJSON(url)
-    const closestPkg = readPackageJSON(closestPkgAbsolute)
+    const closestPkgAbsolute = directory ? this.#nearestPackageJsonFor(absolute) : this.#host.findPackageJSON(absolute)
+    const closestPkg = readPackageJSON(this.#host, closestPkgAbsolute)
 
     const closestType = closestPkg.type
     assert.ok(closestType === undefined || closestType === 'module' || closestType === 'commonjs')
@@ -742,7 +752,7 @@ export class State {
     let pkgAbsolute, name, version
     if (nmRoot) {
       pkgAbsolute = resolve(this.root, nmRoot, 'package.json')
-      const rootPkg = pkgAbsolute === closestPkgAbsolute ? closestPkg : readPackageJSON(pkgAbsolute)
+      const rootPkg = pkgAbsolute === closestPkgAbsolute ? closestPkg : readPackageJSON(this.#host, pkgAbsolute)
       ;({ name, version } = rootPkg)
       assert.ok(name, `Missing name in ${this.relative(pkgAbsolute)}`)
       assert.ok(version, `Missing version in ${this.relative(pkgAbsolute)}`)
@@ -769,13 +779,13 @@ export class State {
           break
         }
         assert.ok(Object.keys(json).every((k) => k === 'type'))
-        const next = findPackageJSON('..', pathToFileURL(pkgAbsolute))
+        const next = this.#host.findPackageJSON(dirname(pkgAbsolute))
         assert.ok(
           next && !relative(this.root, next).startsWith('..'),
           `No package.json with a name found for ${file}`
         )
         pkgAbsolute = next
-        json = readPackageJSON(pkgAbsolute)
+        json = readPackageJSON(this.#host, pkgAbsolute)
       }
     }
     const pkg = this.relative(pkgAbsolute)
@@ -870,14 +880,14 @@ export class State {
     if (typeof source === 'string') {
       assert.ok(source.isWellFormed())
     } else {
-      if (source === undefined || source === null) { source = readFileSync(absolute); sourceFromDisk = true }
+      if (source === undefined || source === null) { source = this.#host.readFile(absolute); sourceFromDisk = true }
       assert.ok(Buffer.isBuffer(source))
       if (!asResource) assert.ok(isUtf8(source), `File is not UTF-8: ${file}`)
     }
 
     const buf = typeof source === 'string' ? Buffer.from(source) : source
     // Verify a CALLER-PROVIDED source against disk; tautological when we read it ourselves.
-    if (!sourceFromDisk) assert.deepStrictEqual(readFileSync(absolute), buf)
+    if (!sourceFromDisk) assert.deepStrictEqual(this.#host.readFile(absolute), buf)
 
     if (asResource) {
       const derived = isUtf8(buf) ? 'resource' : 'resource:base64'
@@ -953,7 +963,7 @@ export class State {
   // A record touches only this State; a REFUTATION must reach the whole family, else
   // #mergedExecutable's union resurrects the bit from a sibling's seeded entry.
   #recordExecutable(file, absolute) {
-    const executable = observeExecutable(absolute)
+    const executable = observeExecutable(absolute, this.#host)
     if (executable === true) {
       this.executable.add(file)
       return
@@ -1354,7 +1364,7 @@ export class State {
     return narrowExecutable(this.executable, { modules, formats, scope: this.config.scope })
   }
 
-  get lockData() {
+  get lockfile() {
     const formats = this.#mergedFormats()
     return new Lockfile({
       config: this.config.values,
@@ -1363,7 +1373,11 @@ export class State {
       imports: this.#mergedImports(),
       formats,
       executable: this.#mergedExecutable(formats),
-    }).serialize()
+    })
+  }
+
+  get lockData() {
+    return this.lockfile.serialize()
   }
 
   // Pair each module's recorded file list with content from perFile, dropping modules with none.
@@ -1453,7 +1467,7 @@ export class State {
   // Informational `repo` block for written bundles, detected once and lazily (only bundle-producing
   // paths read it). Not attested, never in the lockfile.
   get #repo() {
-    return (this.#repoCache ??= { value: detectRepo(this.root) }).value
+    return (this.#repoCache ??= { value: detectRepo(this.root, this.#host) }).value
   }
 
   get sourceBundle() {
@@ -1595,12 +1609,12 @@ export class State {
   // reference across sidecars).
   includePackageJson() {
     // Gather first: addFile mutates this.modules, so don't addFile while iterating it.
-    const realRoot = realpathSync(this.root)
+    const realRoot = this.#host.realpath(this.root)
     const toAdd = []
     for (const [dir, module] of this.modules) {
       const rel = moduleFileKey(dir, 'package.json')
       if (this.sources.has(rel) || this.resources.has(rel)) continue // already in this bundle
-      const buf = readModuleManifest({ baseDir: this.root, realBase: realRoot, rel })
+      const buf = readModuleManifest({ baseDir: this.root, realBase: realRoot, rel, host: this.#host })
       if (!buf) continue
       // Only carry a manifest whose on-disk identity still matches the bundled bucket: under
       // bundle=add a dep may have drifted, and addFile -> #locateModule would crash on it.

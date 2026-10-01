@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
@@ -15,6 +15,7 @@ import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { diskHost } from '@exodus/stasis-core/host'
 import {
   SOLIDITY_PACKAGE_MANIFESTS,
   SOLIDITY_ROOT_MANIFESTS,
@@ -166,10 +167,10 @@ const fileInBucket = (bucketDir, path) => (bucketDir === '.' ? path : path.slice
 // Project-relative paths in `sources` whose on-disk file carries a POSIX execute bit -- the
 // `executable` list both artifacts record. The State-driven path derives this in addFile; the
 // static builders never touch a State, so they stat here.
-function executableSources(baseDir, sources) {
+function executableSources(baseDir, sources, host) {
   const executable = new Set()
   for (const path of sources.keys()) {
-    if (isExecutableFile(join(baseDir, path))) executable.add(path)
+    if (isExecutableFile(join(baseDir, path), host)) executable.add(path)
   }
   return executable
 }
@@ -182,7 +183,7 @@ function executableSources(baseDir, sources) {
 // every file; `formats` (Map<path,format>) overrides it per file. `resolutions` values are
 // a flat target string or a Map<platform,target>; both round-trip untouched.
 function assembleCodeBundle({
-  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep,
+  baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep, host,
 }) {
   const modules = new Map()
   const ensureBucket = (dir, name, version, bucketEcosystem) => {
@@ -200,7 +201,7 @@ function assembleCodeBundle({
       ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem).files[fileInBucket(dep.bucketDir, path)] = content
       continue
     }
-    const meta = findPackageMetadata(baseDir, path)
+    const meta = findPackageMetadata(baseDir, path, host)
     const inNodeModules = splitNodeModulesPath(path) !== null
     if (meta) {
       if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
@@ -223,7 +224,7 @@ function assembleCodeBundle({
 
   // Executable bits, straight off disk (a synthetic source with no file there is simply not
   // executable). Shell bundles lean on this most: `stasis extract` puts the +x back on the scripts.
-  const executable = executableSources(baseDir, sources)
+  const executable = executableSources(baseDir, sources, host)
 
   // Attribute files to the `bundle` consumer (static builders skip State's per-file tagging).
   return new Bundle({
@@ -273,7 +274,7 @@ function solidityManifests(baseDir, sources, configFiles, classifyDep) {
 
 // An entry `stasis bundle` takes for a directory: one that is, or an extensionless path that
 // doesn't exist (a project without `script/` still bundles with `src test script`).
-const isDirEntry = (abs) => isDir(abs) || (extname(abs) === '' && !existsSync(abs))
+const isDirEntry = (abs, host = diskHost) => isDir(abs, host) || (extname(abs) === '' && host.stat(abs) === null)
 
 // Build an in-memory Bundle from entry .sol files and directories (a directory stands for the .sol
 // files under it, as forge's src/test/script dirs and Hardhat's contracts dir do; a missing or
@@ -600,7 +601,9 @@ function reportScanIssues({ fatal, tolerated, toleratedParse }, { label = '', ba
 // platform suffixes (see `--mainFields` / buildResolvedJsBundle). `typescript` maps a failed
 // resolution to its on-disk TS source (tsc's rules; see resolve-typescript.js), honouring the
 // `paths` aliases of `tsconfig` (an explicit config path, default the project's tsconfig.json).
-export async function buildJsBundle({ cwd = process.cwd(), entries, scope, conditions = [], jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false } = {}) {
+// Files are read through `host` (@exodus/stasis-core/host), the disk by default; EXODUS_STASIS_*
+// settings from `env`.
+export async function buildJsBundle({ cwd = process.cwd(), env = process.env, entries, scope, conditions = [], jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, host = diskHost } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildJsBundle: at least one entry .js/.cjs/.mjs/.ts/.cts/.mts file is required')
   }
@@ -619,9 +622,9 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
 
   // --typescript honours tsconfig `paths` aliases: an explicit --tsconfig must exist, otherwise
   // the project root's tsconfig.json applies when present (null matcher = no aliases).
-  const typescriptPaths = typescript ? loadTsconfigPaths(discoverTsconfig(baseDir, tsconfig)) : null
+  const typescriptPaths = typescript ? loadTsconfigPaths(discoverTsconfig(baseDir, tsconfig, host), host) : null
 
-  const scanner = scan(absEntries, { conditions: scanConditions, jsx, flow, typescript, typescriptPaths, resources: resourceSet })
+  const scanner = scan(absEntries, { conditions: scanConditions, jsx, flow, typescript, typescriptPaths, resources: resourceSet, host })
 
   // Fail closed where the bundle is guaranteed broken at load; warn on catchable misses (see analyzeScanner).
   reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir })
@@ -629,8 +632,9 @@ export async function buildJsBundle({ cwd = process.cwd(), entries, scope, condi
   // Materialise via a non-preload State: addFile bucketizes + records sources/formats,
   // addImport replays the edge map; serialize emits the runtime loader's v1 layout.
   // bundle:'replace' skips reading any on-disk stasis.code.br (bundle:'add' would leak stale
-  // entries); lock:'ignore' tolerates a pre-existing lockfile without consuming it.
-  const state = new State(baseDir, { bundle: 'replace', lock: 'ignore', ...(scope ? { scope } : {}) })
+  // entries); lock:'ignore' tolerates a pre-existing lockfile without consuming it; and it is never
+  // written, so it claims no write target.
+  const state = new State(baseDir, { bundle: 'replace', lock: 'ignore', ...(scope ? { scope } : {}), host, env, claim: false })
   for (const [url, info] of scanner.files) {
     // A resource carries bytes only: addFile derives resource vs resource:base64 from the content
     // and stores it under `resources` (a resource can't be an entry, so no isEntry).
@@ -690,10 +694,10 @@ const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 
 // Recursively collect files under a native ios/android dir, skipping build output and symlinks
 // (cycle/escape hazard). Absolute paths into `out`.
-function walkNativeDir(dirAbs, out) {
+function walkNativeDir(dirAbs, out, host) {
   let entries
   try {
-    entries = readdirSync(dirAbs, { withFileTypes: true })
+    entries = host.readdir(dirAbs)
   } catch {
     return // absent -- nothing for this platform
   }
@@ -701,7 +705,7 @@ function walkNativeDir(dirAbs, out) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      if (!isSkippedNativeWalkDir(ent.name)) walkNativeDir(full, out)
+      if (!isSkippedNativeWalkDir(ent.name)) walkNativeDir(full, out, host)
     } else if (ent.isFile() && !isNativeArtifact(ent.name)) {
       out.push(full)
     }
@@ -710,10 +714,10 @@ function walkNativeDir(dirAbs, out) {
 
 // Recursively collect podspec-load manifests (isNativeManifest) under `dirAbs`. RN's own
 // podspecs live in scattered subdirs a root-only scan would miss, so recurse fully.
-function collectNativeManifests(dirAbs, out, atRoot = false) {
+function collectNativeManifests(dirAbs, out, host, atRoot = false) {
   let entries
   try {
-    entries = readdirSync(dirAbs, { withFileTypes: true })
+    entries = host.readdir(dirAbs)
   } catch {
     return
   }
@@ -721,7 +725,7 @@ function collectNativeManifests(dirAbs, out, atRoot = false) {
     if (ent.isSymbolicLink()) continue
     const full = join(dirAbs, ent.name)
     if (ent.isDirectory()) {
-      if (!isSkippedNativeWalkDir(ent.name) && !(atRoot && isExcludedNativeDir(ent.name))) collectNativeManifests(full, out)
+      if (!isSkippedNativeWalkDir(ent.name) && !(atRoot && isExcludedNativeDir(ent.name))) collectNativeManifests(full, out, host)
     } else if (ent.isFile() && isNativeManifest(ent.name)) {
       out.push(full)
     }
@@ -731,22 +735,22 @@ function collectNativeManifests(dirAbs, out, atRoot = false) {
 // Native source files a bundled RN dep contributes to the app's native build (podspecs +
 // ios/android sources). Manifests are kept only when the package is actually native (podspec
 // or ios/android dir), else a JS-only dep's package.json would be pulled in. Deduped absolute paths.
-function nativeModuleFiles(pkgAbs) {
+function nativeModuleFiles(pkgAbs, host) {
   const manifests = []
-  collectNativeManifests(pkgAbs, manifests, true)
-  const hasIos = existsSync(join(pkgAbs, 'ios'))
-  const hasAndroid = existsSync(join(pkgAbs, 'android'))
+  collectNativeManifests(pkgAbs, manifests, host, true)
+  const hasIos = host.stat(join(pkgAbs, 'ios')) !== null
+  const hasAndroid = host.stat(join(pkgAbs, 'android')) !== null
   if (!hasIos && !hasAndroid && !manifests.some((f) => isPodspec(f))) return []
   const out = [...manifests]
-  if (hasIos) walkNativeDir(join(pkgAbs, 'ios'), out)
-  if (hasAndroid) walkNativeDir(join(pkgAbs, 'android'), out)
+  if (hasIos) walkNativeDir(join(pkgAbs, 'ios'), out, host)
+  if (hasAndroid) walkNativeDir(join(pkgAbs, 'android'), out, host)
   return [...new Set(out)]
 }
 
 // Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
 // `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
 // have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
-async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false }) {
+async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields, platforms, conditions = [], metro = false, metroResolver = false, jsx = false, flow = false, typescript = false, tsconfig, resources = [], packageJSON = false, host = diskHost }) {
   const baseDir = resolve(cwd)
   const absEntries = entries.map((e) => resolve(baseDir, e))
   const normalized = normalizeEntries(entries, cwd)
@@ -765,7 +769,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // Under --jsx the resolver probes .jsx/.tsx too, matching scan's jsx-widened carryable set.
   const sourceExts = jsx ? SOURCE_EXTS_JSX : SOURCE_EXTS
   // --typescript's tsconfig `paths` matcher, shared by every per-platform resolver below.
-  const typescriptPaths = typescript ? loadTsconfigPaths(discoverTsconfig(baseDir, tsconfig)) : null
+  const typescriptPaths = typescript ? loadTsconfigPaths(discoverTsconfig(baseDir, tsconfig, host), host) : null
   // --resources: extensions/filenames carried as opaque assets instead of failing "can't carry".
   const resourceSet = parseResourcesOption('buildResolvedJsBundle', resources)
 
@@ -799,8 +803,9 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
           // (classifyEntries rejects the combination -- metro-resolver can't substitute).
           typescript,
           typescriptPaths,
+          host,
         })
-    const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx, flow, resources: resourceSet })
+    const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx, flow, resources: resourceSet, host })
     reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir, label: platform ?? 'mainFields' })
 
     const platformKey = platform ?? '*' // '*' is a private placeholder for the single mainFields pass; it never unflattens
@@ -827,13 +832,13 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   // stored as UTF-8 text, so non-UTF-8 bytes would diverge from the hashed bytes -- reject them.
   const sources = new Map()
   const integrities = new Map()
-  const realBase = realpathSync(baseDir)
+  const realBase = host.realpath(baseDir)
   for (const abs of reached) {
     const rel = toRel(abs)
     // Security: the field resolver returns the lexical path, so an in-tree-named symlink
     // escaping the root would slip past toRel's textual check -- realpath and fail closed.
-    assertRealPathWithinBase(realBase, baseDir, rel)
-    const buf = readFileSync(abs)
+    assertRealPathWithinBase(realBase, baseDir, rel, host)
+    const buf = host.readFile(abs)
     if (resourceRels.has(rel)) {
       // A resource carries bytes, not JS source: store UTF-8 verbatim or base64 when binary, and
       // tag the byte-derived format (same shape as the --metro native capture below).
@@ -874,16 +879,16 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       // so walk its whole tree for native source (React/, ReactCommon/, ReactAndroid/, ...) the same
       // way a native dep's ios/android surface is walked; every other dep gets its ios/android + podspecs.
       const isRnCore = pkgDir.slice(pkgDir.lastIndexOf('node_modules/') + 'node_modules/'.length) === 'react-native'
-      const files = isRnCore ? [] : nativeModuleFiles(pkgAbs)
-      if (isRnCore) walkNativeDir(pkgAbs, files)
+      const files = isRnCore ? [] : nativeModuleFiles(pkgAbs, host)
+      if (isRnCore) walkNativeDir(pkgAbs, files, host)
       for (const abs of files) {
         const rel = toRel(abs)
         if (sources.has(rel)) continue
-        assertRealPathWithinBase(realBase, baseDir, rel)
+        assertRealPathWithinBase(realBase, baseDir, rel, host)
         // classifyNativeCapture (shared with the StasisMetro plugin) returns action skip/code/resource with a format tag.
         const byName = classifyNativeCapture(rel)
         if (byName.action === 'skip') continue
-        const buf = readFileSync(abs)
+        const buf = host.readFile(abs)
         // Byte-level rules (prebuilt binaries, binary plists) -- see refineNativeCapture.
         const { action, format } = refineNativeCapture(byName, rel, buf, resourceSet)
         if (action === 'skip') continue
@@ -903,14 +908,14 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
       if (isRnCore) {
         for (const file of RN_CORE_INCLUDE_FILES) {
           const abs = join(pkgAbs, file)
-          if (!existsSync(abs)) continue
+          if (host.stat(abs) === null) continue
           const rel = toRel(abs)
           if (sources.has(rel)) continue
-          assertRealPathWithinBase(realBase, baseDir, rel)
-          const buf = readFileSync(abs)
+          assertRealPathWithinBase(realBase, baseDir, rel, host)
+          const buf = host.readFile(abs)
           if (!isUtf8(buf)) throw new Error(`native source is not valid UTF-8: ${rel}`)
           sources.set(rel, buf.toString('utf8'))
-          formatsByRel.set(rel, packageType(abs) === 'module' ? 'module' : 'commonjs')
+          formatsByRel.set(rel, packageType(abs, host) === 'module' ? 'module' : 'commonjs')
           integrities.set(rel, sha512integrity(buf))
         }
       }
@@ -929,7 +934,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     for (const abs of reached) {
       const rel = toRel(abs)
       const dir = dirname(rel)
-      if (!metaByDir.has(dir)) metaByDir.set(dir, findPackageMetadata(baseDir, rel))
+      if (!metaByDir.has(dir)) metaByDir.set(dir, findPackageMetadata(baseDir, rel, host))
       const meta = metaByDir.get(dir)
       if (meta) pkgDirs.add(meta.pkgDir)
       else if (!splitNodeModulesPath(rel)) pkgDirs.add('.')
@@ -937,7 +942,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     for (const pkgDir of pkgDirs) {
       const rel = moduleFileKey(pkgDir, 'package.json')
       if (sources.has(rel)) continue
-      const buf = readModuleManifest({ baseDir, realBase, rel })
+      const buf = readModuleManifest({ baseDir, realBase, rel, host })
       if (!buf) continue
       sources.set(rel, buf.toString('utf8'))
       formatsByRel.set(rel, 'json')
@@ -960,7 +965,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     resolutions.set(parent, specMap)
   }
 
-  const rootPkg = readJson(join(baseDir, 'package.json')) ?? {}
+  const rootPkg = readJson(join(baseDir, 'package.json'), host) ?? {}
   const bundle = assembleCodeBundle({
     baseDir,
     entries: normalized,
@@ -970,6 +975,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     workspaceName: rootPkg.name ?? 'workspace',
     workspaceVersion: rootPkg.version ?? '0.0.0',
     conditionKey: '*',
+    host,
   })
 
   // The companion lockfile mirrors the bundle, swapping file content for its integrity.
@@ -993,17 +999,17 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 }
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes
-// errors. A directory entry (resolved against `cwd`) stands for the .sol files under it: Solidity only.
-function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures }) {
+// errors. A directory entry (resolved against `cwd`, on `host`) stands for the .sol files under it: Solidity only.
+function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, host = diskHost }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
-  const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e)))
+  const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e), host))
   const files = entries.filter((e) => !dirs.includes(e))
   let kind
   if (files.every((e) => e.endsWith('.sol'))) kind = 'sol'
   else if (dirs.length > 0) {
-    const missing = dirs.find((e) => !existsSync(resolve(cwd, e)))
+    const missing = dirs.find((e) => host.stat(resolve(cwd, e)) === null)
     if (missing !== undefined) throw new Error(`${name}: no such file or directory: ${missing}`)
     throw new Error(`${name}: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirs[0]}`)
   } else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
@@ -1108,6 +1114,46 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
     throw new Error(`${name}: --scope is not supported with --mainFields or --metro`)
   }
   return kind
+}
+
+// A JS bundle from the lockfile of the project held in `vfs` alone (@exodus/stasis/vfs-bundle),
+// `cwd` a path there: buildBundle's JS options, resolved through the node_modules `packageManager`
+// would install, with nothing read from disk but tarballs and no EXODUS_STASIS_* setting read.
+// `repo`, the informational `{ github, directory, commit }`, is the Bundle's, over what is detected
+// in the Vfs as `stasis bundle` detects it on disk.
+// -> { bundle: Bundle, lockfile: Lockfile, stats }
+export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, repo, ...options } = {}) {
+  const { checkPackageManager, loadTree, vfsHost } = await import('../vfs-bundle/tree.js')
+  checkPackageManager('buildVfsBundle', packageManager)
+  // Checked as the Bundle checks it, before anything is fetched.
+  if (repo !== undefined) repo = new Bundle({ repo }).repo
+  const project = vfsHost(vfs)
+  // A real path, as every file the scan reaches is.
+  cwd = project.realpath(posix.resolve('/', cwd))
+  if (classifyEntries('buildVfsBundle', { cwd, ...options, host: project }) !== 'js') throw new Error('buildVfsBundle: only JS bundles are built from a lockfile')
+  // The project's metro-resolver resolves against the node_modules on disk.
+  if (options.metroResolver) throw new Error('buildVfsBundle: metroResolver is not supported')
+  // Checked before any tarball is fetched: an entry out of node_modules is in the project already.
+  for (const entry of options.entries) {
+    const abs = posix.resolve(cwd, entry)
+    if (!abs.split('/').includes('node_modules') && project.stat(abs) === null) throw new Error(`entry not found: ${abs}`)
+  }
+  const { host, stats } = await loadTree({ project, packageManager, cwd, packageManagerVersion })
+  const { metro, mainFields, platforms, scope, ...common } = options
+  let bundle
+  let lockfile
+  if (metro || mainFields !== undefined) {
+    ;({ bundle, lockfile } = await buildResolvedJsBundle({ cwd, ...common, host, mainFields: metro ? METRO_MAIN_FIELDS : mainFields, platforms: metro ? platforms : [null], metro: Boolean(metro) }))
+    // Rooted at cwd, where `stasis bundle` detects its repo; a State detects its own.
+    bundle.repo = detectRepo(cwd, host)
+  } else {
+    const state = await buildJsBundle({ cwd, ...common, scope, host, env: {} })
+    // Stamp the `bundle` consumer (the static build carries none).
+    bundle = state.sourceBundle.withReason('bundle')
+    lockfile = state.lockfile
+  }
+  if (repo !== undefined) bundle.repo = repo
+  return { bundle, lockfile, stats }
 }
 
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
