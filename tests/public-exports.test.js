@@ -344,6 +344,7 @@ test('Bundle.parse and Lockfile.parse reject a non-canonical file key', (t) => {
     ...['src/', 'src/.', './src', 'src//lib', 'a/../src'].map((dir) => ({ [dir]: ['x.js'] })),
     ...['./x.js', 'a/../x.js', 'x//y.js', '/x.js', 'x/'].map((name) => ({ '.': [name] })),
     { '.': ['src/x.js'], src: ['./x.js'] },
+    { '.': ['.'] },
   ]
   for (const spec of rejected) {
     t.assert.throws(() => Bundle.parse(bundle(spec)), /non-canonical file key/, JSON.stringify(spec))
@@ -353,6 +354,10 @@ test('Bundle.parse and Lockfile.parse reject a non-canonical file key', (t) => {
     version: 0, config: { scope: 'full' }, formats: {}, imports: {}, sources: Object.fromEntries(paths.map((path) => [path, 'x'])),
   })
   t.assert.throws(() => Bundle.parse(v0(['src/x.js', './src/x.js'])), /non-canonical file key/)
+  // The root listing keeps its key '.'; v0 spells it '' or '.', never both.
+  t.assert.deepStrictEqual([...Bundle.parse(bundle({ '.': [''] })).sources.keys()], ['.'])
+  for (const path of ['', '.']) t.assert.deepStrictEqual([...Bundle.parse(v0([path])).sources.keys()], ['.'], path)
+  t.assert.throws(() => Bundle.parse(v0(['', '.'])), /duplicate file key '\.'/)
   // Dot-names are ordinary names.
   const names = ['x.js', '..foo', '...', '.pnpm/x', 'node_modules/.bin/x']
   const accepted = { '.': names, src: ['a/b.js'] }

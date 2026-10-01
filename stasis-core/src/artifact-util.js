@@ -264,15 +264,21 @@ export function mergeExecutableSets(a, b, bModules, scope) {
 // An empty, '.' or '..' path segment.
 const NON_CANONICAL_SEGMENT = /(?:^|\/)\.{0,2}(?:\/|$)/u
 
+// The flat key of `rel` in bucket `dir`; throws unless canonical ('.' only as the root listing, rel '').
+export function canonicalFileKey(dir, rel, what) {
+  const key = moduleFileKey(dir, rel)
+  // Message built only on failure: this runs for every file.
+  if ((key !== '.' || rel !== '') && NON_CANONICAL_SEGMENT.test(key)) assert(false, `${what}: non-canonical file key ${JSON.stringify(key)}`)
+  return key
+}
+
 // Maps each file's flat key to its bucket; rejects non-canonical keys, reports duplicates to onDuplicate.
 export function flatFileKeys(modules, what, onDuplicate) {
   const owners = new Map()
   for (const [dir, { files }] of modules) {
     if (typeof dir !== 'string') assert(false, `${what}: bucket dir ${String(dir)} is not a string`)
     for (const rel of Object.keys(files)) {
-      const key = moduleFileKey(dir, rel)
-      // Messages built only on failure: this loop visits every file.
-      if (key !== '.' && NON_CANONICAL_SEGMENT.test(key)) assert(false, `${what}: non-canonical file key ${JSON.stringify(key)}`)
+      const key = canonicalFileKey(dir, rel, what)
       const owner = owners.get(key)
       if (owner !== undefined) onDuplicate(key, owner, dir)
       owners.set(key, dir)

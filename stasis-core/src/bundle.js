@@ -1,6 +1,7 @@
 import {
   KNOWN_FORMATS,
   assert,
+  canonicalFileKey,
   fileMapToObject,
   fileSetToObject,
   fromEntries,
@@ -34,8 +35,23 @@ const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across 
   `changed between writes (a workspace package without a version now owns its own ` +
   `bucket); regenerate the artifact (bundle=replace)`)
 
+// A v0 path's bucket split; '' and '.' both spell the root listing (rel '').
 const inferModuleDir = (path) =>
-  splitNodeModulesPath(path) ?? { dir: '.', rel: path, name: null }
+  splitNodeModulesPath(path) ?? { dir: '.', rel: path === '.' ? '' : path, name: null }
+
+function contentsLocked() {
+  throw new Error('bundle: file contents are not retained by this contents-free Bundle')
+}
+
+// Each file stays an own enumerable key, but reading its contents throws; each value must be a placeholder.
+const lockModule = (dir, { files, ...info }) => {
+  const locked = Object.create(null)
+  for (const [rel, value] of Object.entries(files)) {
+    if (typeof value !== 'symbol') assert(false, `bundle: file '${moduleFileKey(dir, rel)}' is not a placeholder`)
+    Object.defineProperty(locked, rel, { get: contentsLocked, enumerable: true })
+  }
+  return { ...info, files: Object.freeze(locked) }
+}
 
 // Union of the informational `reason` maps in canonical form: consumers sorted, each file list
 // deduped and path-sorted. Canonical even when only one side is given, so a fresh withReason()
@@ -110,7 +126,27 @@ export class Bundle {
   }
 
   static parse(text) {
-    const json = JSON.parse(text)
+    return Bundle.fromJSON(JSON.parse(text))
+  }
+
+  // The `sources` key of the file whose contents sit at JSON key path `path`, else undefined; throws if non-canonical.
+  static fileKeyAt(path) {
+    const [top, dir, files, rel] = path
+    if (typeof dir !== 'string') return undefined
+    // v0 `sources.<path>`
+    if (path.length === 2 && top === 'sources') {
+      const split = inferModuleDir(dir)
+      return canonicalFileKey(split.dir, split.rel, 'bundle')
+    }
+    // v1 `sources|modules.<dir>.files.<rel>`
+    if (path.length === 4 && (top === 'sources' || top === 'modules') && files === 'files' && typeof rel === 'string') {
+      return canonicalFileKey(dir, rel, 'bundle')
+    }
+    return undefined
+  }
+
+  // parse() on an already-parsed value; `contents: false` takes a symbol placeholder per file and locks contents out.
+  static fromJSON(json, { contents = true } = {}) {
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
     assert(isPlainObject(json.formats))
@@ -164,7 +200,9 @@ export class Bundle {
         const { dir, rel, name } = inferModuleDir(path)
         assert(!posixPathEscapes(dir) && !posixPathEscapes(rel))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
-        modules.get(dir).files[rel] = content
+        const { files } = modules.get(dir)
+        assert(!Object.hasOwn(files, rel), `bundle: duplicate file key '.' (v0 '' and '.')`)
+        files[rel] = content
       }
     }
 
@@ -193,6 +231,8 @@ export class Bundle {
         for (const [, target] of specifiers) assertTarget(target)
       }
     }
+
+    if (!contents) for (const [dir, info] of modules) modules.set(dir, lockModule(dir, info))
 
     return new Bundle({
       version: json.version,

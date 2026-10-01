@@ -243,6 +243,18 @@ runtime serving/verifying would widen the trust boundary). Upgrade with
 `stasis run --bundle=replace` (starts fresh) or `stasis bundle` (re-bundles from
 source). Bundles are always written as `version: 1`.
 
+### Contents-free bundles
+
+`Bundle.fromJSON(value)` is `Bundle.parse` on an already-parsed value. A
+streaming reader takes each file's contents out as they arrive
+(`Bundle.fileKeyAt(path)` names the file at a key path in the bundle JSON),
+leaves a symbol in its place, and calls
+`Bundle.fromJSON(value, { contents: false })`. That validates the bundle as
+`Bundle.parse` does and rejects any file still holding contents. The result keeps every field and each bucket's file list
+(`Object.keys`, `Object.hasOwn`), but reading a file's contents throws, and so
+do `sources`, `serialize()` and `merge()`. That is enough for metadata-only
+consumers such as the `@exodus/stasis/sbom` API.
+
 ### Source-language bundles (Solidity / PHP / Bash / Rust)
 
 `stasis bundle` dispatches on the entry file extension (no mixing within one
