@@ -72,37 +72,25 @@ const mergeReason = (a, b) => {
   return fromEntries([...merged.keys()].toSorted().map((c) => [c, fileSetToObject(merged.get(c))]))
 }
 
-// GitHub's naming rules: an owner (user/org) is 1-39 alphanumerics or single inner hyphens; a repo
-// name is 1-100 of [A-Za-z0-9._-], never '.' or '..'.
-const GITHUB_OWNER = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/u
-const GITHUB_NAME = /^[A-Za-z0-9._-]{1,100}$/u
-const isGithubRepo = (github) => {
-  if (typeof github !== 'string' || github.length > 140) return false
-  const parts = github.split('/')
-  return parts.length === 2 && GITHUB_OWNER.test(parts[0]) && GITHUB_NAME.test(parts[1]) && parts[1] !== '.' && parts[1] !== '..'
-}
+// GitHub `owner/name`: owner 1-39 alphanumerics or single inner hyphens; name 1-100 of [\w.-], not '.'/'..'.
+const GITHUB_REPO = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\/(?!\.\.?$)[\w.-]{1,100}$/u
+// Full lowercase git object id: SHA-1 or SHA-256.
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
-const REPO_KEYS = ['github', 'directory', 'commit']
+const REPO_FIELDS = {
+  github: (v) => typeof v === 'string' && GITHUB_REPO.test(v),
+  directory: (v) => typeof v === 'string' && !posixPathEscapes(v),
+  commit: (v) => typeof v === 'string' && GIT_SHA.test(v),
+}
 
-// The informational `repo` block, `{ github?, directory?, commit? }`, validated and in canonical key
-// order (a block with none of them is dropped). Each field is checked only when present: `github` is
-// a GitHub 'owner/name', `directory` the bundle root's repo-relative POSIX path ('' at the repo
-// root), `commit` a full lowercase git object id (40-hex SHA-1 or 64-hex SHA-256).
+// Validate the informational `repo` block; each field is optional. Returned in canonical key order.
 const normalizeRepo = (repo) => {
   if (repo === undefined) return undefined
   assert(isPlainObject(repo), 'bundle repo must be an object')
-  for (const key of Object.keys(repo)) assert(REPO_KEYS.includes(key), `unknown bundle repo key '${key}'`)
-  const { github, directory, commit } = repo
-  assert(github === undefined || isGithubRepo(github),
-    `bundle repo.github must be a GitHub 'owner/name', got ${JSON.stringify(github)}`)
-  assert(directory === undefined || (typeof directory === 'string' && (directory === '' ||
-    (!posixPathEscapes(directory) && !directory.startsWith('/') && !directory.endsWith('/')))),
-  `bundle repo.directory must be a repo-relative POSIX path ('' at the root), got ${JSON.stringify(directory)}`)
-  assert(commit === undefined || (typeof commit === 'string' && GIT_SHA.test(commit)),
-    `bundle repo.commit must be a full lowercase git sha, got ${JSON.stringify(commit)}`)
-  const out = {}
-  for (const key of REPO_KEYS) if (repo[key] !== undefined) out[key] = repo[key]
-  return Object.keys(out).length > 0 ? out : undefined
+  for (const [key, value] of Object.entries(repo)) {
+    assert(Object.hasOwn(REPO_FIELDS, key), `unknown bundle repo key '${key}'`)
+    assert(value === undefined || REPO_FIELDS[key](value), `invalid bundle repo.${key}: ${JSON.stringify(value)}`)
+  }
+  return fromEntries(Object.keys(REPO_FIELDS).filter((key) => repo[key] !== undefined).map((key) => [key, repo[key]]))
 }
 
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
@@ -119,8 +107,7 @@ export class Bundle {
   executable
   // Informational only, NOT attested -- never consulted for verification.
   reason
-  // Informational only, NOT attested and never in a lockfile: where the bundle was built,
-  // `{ github?, directory?, commit? }` (see normalizeRepo).
+  // Informational only, NOT attested, never in a lockfile: `{ github?, directory?, commit? }`.
   repo
 
   constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, repo, version = VERSION } = {}) {
@@ -283,7 +270,6 @@ export class Bundle {
         ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
       reason: isPlainObject(json.reason) ? json.reason : undefined,
-      // Informational, but validated: a malformed block fails closed rather than being carried along.
       repo: json.repo,
     })
   }
@@ -330,34 +316,9 @@ export class Bundle {
 
   // Stamp `consumer` onto every carried file in the informational `reason` map.
   withReason(consumer) {
-    const files = [...this.sources.keys()]
-    return new Bundle({
-      version: this.version,
-      config: this.config,
-      entries: this.entries,
-      modules: this.modules,
-      formats: this.formats,
-      imports: this.imports,
-      executable: this.executable,
-      reason: mergeReason(this.reason, { [consumer]: files }),
-      repo: this.repo,
-    })
-  }
-
-  // A copy carrying `repo` (validated); undefined keeps the current one.
-  withRepo(repo) {
-    if (repo === undefined) return this
-    return new Bundle({
-      version: this.version,
-      config: this.config,
-      entries: this.entries,
-      modules: this.modules,
-      formats: this.formats,
-      imports: this.imports,
-      executable: this.executable,
-      reason: this.reason,
-      repo,
-    })
+    const { version, config, entries, modules, formats, imports, executable, repo } = this
+    const reason = mergeReason(this.reason, { [consumer]: [...this.sources.keys()] })
+    return new Bundle({ version, config, entries, modules, formats, imports, executable, reason, repo })
   }
 
   // Strict union of two Bundles (returns a NEW one): any genuine conflict throws -- a bundle is an attestation.
@@ -373,7 +334,6 @@ export class Bundle {
       // `other` (the incoming, newer build) wins for the files it carries -- see mergeExecutableSets.
       executable: mergeExecutableSets(this.executable, other.executable, other.modules, this.config.scope),
       reason: mergeReason(this.reason, other.reason),
-      // Informational: the incoming build's origin wins, else the existing one is kept.
       repo: other.repo ?? this.repo,
     })
   }

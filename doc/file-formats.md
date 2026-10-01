@@ -239,8 +239,7 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
     or single inner hyphens. The name is 1–100 characters of `[A-Za-z0-9._-]` and
     can't be `.` or `..`.
   - `directory` must be a string: the bundle root's repo-relative POSIX path, or
-    `""` at the repository root. It can't be absolute, escape the repository, or
-    end with `/`.
+    `""` at the repository root. It can't be absolute or escape the repository.
   - `commit` must be a full lowercase git object id (a 40-hex SHA-1 or a 64-hex
     SHA-256).
 

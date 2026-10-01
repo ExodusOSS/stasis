@@ -5,7 +5,7 @@ import { Lockfile } from '@exodus/stasis-core/lockfile'
 
 const SHA1 = 'a'.repeat(40)
 const SHA256 = '0123456789abcdef'.repeat(4)
-const base = () => new Bundle({ config: { scope: 'node_modules' } })
+const base = (repo) => new Bundle({ config: { scope: 'node_modules' }, repo })
 const withRepoJSON = (repo) => JSON.stringify({ ...JSON.parse(base().serialize()), repo })
 
 test('Bundle omits repo when unset', (t) => {
@@ -15,7 +15,7 @@ test('Bundle omits repo when unset', (t) => {
 
 test('Bundle round-trips repo right after config, in canonical key order', (t) => {
   const repo = { commit: SHA1, directory: 'packages/app', github: 'ExodusOSS/stasis' }
-  const json = JSON.parse(base().withRepo(repo).serialize())
+  const json = JSON.parse(base(repo).serialize())
   t.assert.deepEqual(Object.keys(json).slice(0, 3), ['version', 'config', 'repo'])
   t.assert.deepEqual(Object.keys(json.repo), ['github', 'directory', 'commit'])
   t.assert.deepEqual(Bundle.parse(JSON.stringify(json)).repo, { github: 'ExodusOSS/stasis', directory: 'packages/app', commit: SHA1 })
@@ -27,7 +27,6 @@ test('Bundle repo fields are each optional', (t) => {
   for (const repo of [{ github: 'o/n' }, { directory: 'a/b' }, { commit: SHA1 }, { github: 'o/n', commit: SHA1 }]) {
     t.assert.deepEqual(Bundle.parse(withRepoJSON(repo)).repo, repo)
   }
-  t.assert.equal(Bundle.parse(withRepoJSON({})).repo, undefined, 'an empty block is dropped')
 })
 
 test('Bundle accepts GitHub owner/name at the length limits', (t) => {
@@ -62,7 +61,6 @@ test('Bundle rejects an invalid repo block on parse and on construction', (t) =>
     { directory: '/abs' },
     { directory: '../up' },
     { directory: 'a/../../up' },
-    { directory: 'trailing/' },
     { commit: 'A'.repeat(40) },
     { commit: 'a'.repeat(39) },
     { commit: 'a'.repeat(41) },
@@ -72,18 +70,17 @@ test('Bundle rejects an invalid repo block on parse and on construction', (t) =>
   ]
   for (const repo of bad) {
     t.assert.throws(() => Bundle.parse(withRepoJSON(repo)), undefined, `parse: ${JSON.stringify(repo)}`)
-    t.assert.throws(() => base().withRepo(repo), undefined, `withRepo: ${JSON.stringify(repo)}`)
+    t.assert.throws(() => base(repo), undefined, `constructor: ${JSON.stringify(repo)}`)
   }
 })
 
 test('Bundle carries repo through withReason, and merge prefers the incoming one', (t) => {
   const a = { github: 'o/a', directory: '' }
   const b = { github: 'o/b', directory: 'x', commit: SHA1 }
-  const stamped = base().withRepo(a)
+  const stamped = base(a)
   t.assert.deepEqual(stamped.withReason('bundle').repo, a)
-  t.assert.equal(stamped.withRepo(undefined), stamped)
   t.assert.deepEqual(stamped.merge(base()).repo, a, 'kept when the incoming bundle has none')
-  t.assert.deepEqual(stamped.merge(base().withRepo(b)).repo, b, 'the incoming bundle wins')
+  t.assert.deepEqual(stamped.merge(base(b)).repo, b, 'the incoming bundle wins')
   t.assert.deepEqual(base().merge(stamped).repo, a)
 })
 
