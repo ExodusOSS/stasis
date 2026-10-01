@@ -442,7 +442,8 @@ test('extractCommand refuses non-string file content', withTmp((t, tmp) => {
   writeRawBundle(bundlePath, evil)
   t.assert.throws(
     () => extractCommand({ bundleFile: bundlePath, output: join(tmp, 'out') }),
-    /content is not a string: node_modules\/foo\/x\.js/,
+    (error) => /not a valid stasis bundle/.test(error.message) &&
+      /file 'node_modules\/foo\/x\.js' has non-string contents/.test(error.cause?.message),
   )
 }))
 

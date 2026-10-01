@@ -25,11 +25,17 @@ import {
 const VERSION = 1
 const LEGACY_VERSION = 0
 
-const normalize = ({ name, version, ecosystem, files }) => {
+// A file's contents, or in a contents-free parse a symbol placeholder; anything else could hide nested values.
+const isFileValue = (value, contents) => typeof value === 'string' || (!contents && typeof value === 'symbol')
+
+const normalize = (dir, { name, version, ecosystem, files }, contents) => {
   assert(ecosystem === undefined || typeof ecosystem === 'string')
+  assert(isPlainObject(files))
+  const entries = Object.entries(files)
+  for (const [rel, value] of entries) if (!isFileValue(value, contents)) assert(false, `bundle: file '${moduleFileKey(dir, rel)}' has non-string contents`)
   // An absent version has one spelling: null (hand-edited or legacy JSON) folds into undefined so
   // identity comparisons and JSON round-trips can't split on it.
-  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(Object.entries(files)) }
+  return { name, version: version ?? undefined, ...(ecosystem === undefined ? {} : { ecosystem }), files: fromEntries(entries) }
 }
 
 const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across bundle buckets -- module bucketing ` +
@@ -68,6 +74,7 @@ const lockedFiles = new WeakSet()
 
 // Each rel stays an own enumerable key, but reading its contents throws.
 const lockModule = ({ files, ...info }) => {
+  if (lockedFiles.has(files)) return { ...info, files }
   const locked = Object.create(null)
   for (const rel of Object.keys(files)) Object.defineProperty(locked, rel, { get: contentsLocked, enumerable: true })
   lockedFiles.add(Object.freeze(locked))
@@ -99,7 +106,7 @@ export class Bundle {
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
-    contents &&= !this.modules.values().some(({ files }) => lockedFiles.has(files))
+    for (const { files } of this.modules.values()) if (lockedFiles.has(files)) contents = false
     if (!contents) this.modules = new Map([...this.modules].map(([dir, info]) => [dir, lockModule(info)]))
     this.formats = formats ?? new Map()
     this.imports = imports ?? new Map()
@@ -164,8 +171,8 @@ export class Bundle {
     return undefined
   }
 
-  // parse() on an already-parsed value; file values are carried over uninspected.
-  static fromJSON(json) {
+  // parse() on an already-parsed value; `contents: false` builds a contents-free Bundle, allowing symbol placeholders.
+  static fromJSON(json, { contents = true } = {}) {
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
     assert(isPlainObject(json.formats))
@@ -188,22 +195,22 @@ export class Bundle {
     if (json.version === VERSION) {
       const full = json.config.scope === 'full'
       if (json.modules !== undefined) {
-        assert(typeof json.modules === 'object' && json.modules !== null)
+        assert(isPlainObject(json.modules))
         for (const [dir, info] of Object.entries(json.modules)) {
           assert(hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
           assert(info?.name && info.version && info.files)
-          modules.set(dir, normalize(info))
+          modules.set(dir, normalize(dir, info, contents))
         }
       }
       if (full) {
-        assert(json.sources && typeof json.sources === 'object')
+        assert(isPlainObject(json.sources))
         for (const [dir, info] of Object.entries(json.sources)) {
           assert(!hasNodeModulesSegment(dir))
           assert(!posixPathEscapes(dir))
           // A workspace bucket may omit version (a private/unpublished package.json can lack one).
           assert(info?.name && info.files)
-          modules.set(dir, normalize(info))
+          modules.set(dir, normalize(dir, info, contents))
         }
         // Empty entries are valid (`stasis add` attests files without making them entry points); state.assertEntry fails closed on an empty set.
         assert(json.entries === undefined || Array.isArray(json.entries))
@@ -213,9 +220,12 @@ export class Bundle {
         assert(json.sources === undefined)
       }
     } else {
-      assert(json.sources)
+      assert(isPlainObject(json.sources))
+      // v0 never had `modules`; ignoring them would leave files fileKeyAt locates but parse drops.
+      assert(json.modules === undefined)
       for (const [path, content] of Object.entries(json.sources)) {
         assert(!posixPathEscapes(path))
+        if (!isFileValue(content, contents)) assert(false, `bundle: file '${path}' has non-string contents`)
         const { dir, rel, name } = inferModuleDir(path)
         assert(!posixPathEscapes(dir) && !posixPathEscapes(rel))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
@@ -253,7 +263,7 @@ export class Bundle {
 
     return new Bundle({
       version: json.version,
-      config: json.config,
+      config: { scope: json.config.scope },
       entries,
       modules,
       formats,
@@ -262,7 +272,8 @@ export class Bundle {
       executable: json.version === VERSION
         ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
-      reason: isPlainObject(json.reason) ? json.reason : undefined,
+      reason: isPlainObject(json.reason) ? mergeReason(json.reason, undefined) : undefined,
+      contents,
     })
   }
 

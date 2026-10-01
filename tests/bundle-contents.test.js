@@ -83,6 +83,7 @@ test('a contents-free Bundle locks out contents, serialize() and merge()', (t) =
   t.assert.equal(stamped.hasContents, false)
   t.assert.deepStrictEqual(stamped.reason.audit, full.withReason('audit').reason.audit)
   t.assert.equal(bundle.withoutContents().hasContents, false)
+  t.assert.equal(stamped.modules.get('.').files, files, 'locked buckets are reused, not rebuilt')
 
   // The constructor option is the same lock.
   const constructed = new Bundle({ modules: new Map([['.', { name: 'app', files: { 'a.js': 'A' } }]]), contents: false })
@@ -125,10 +126,21 @@ test('Bundle.fromJSON builds what Bundle.parse builds and rejects what it reject
     t.assert.throws(() => Bundle.fromJSON(value), { name: expected.name, message: expected.message })
   }
 
-  // File values are carried over uninspected, so a streaming reader can leave a placeholder.
-  const placeholder = Symbol('streamed')
-  const withPlaceholder = { ...json, sources: { '.': { ...json.sources['.'], files: { ...json.sources['.'].files, 'src/index.js': placeholder } } } }
-  t.assert.equal(Bundle.fromJSON(withPlaceholder).modules.get('.').files['src/index.js'], placeholder)
+  // A file value must be a string, or with `contents: false` a symbol placeholder (a streaming reader's).
+  const withPlaceholder = { ...json, sources: { '.': { ...json.sources['.'], files: { ...json.sources['.'].files, 'src/index.js': Symbol('streamed') } } } }
+  t.assert.throws(() => Bundle.fromJSON(withPlaceholder), /file 'src\/index\.js' has non-string contents/)
+  const contentsFree = Bundle.fromJSON(withPlaceholder, { contents: false })
+  t.assert.equal(contentsFree.hasContents, false)
+  t.assert.deepStrictEqual(Object.keys(contentsFree.modules.get('.').files), Object.keys(json.sources['.'].files))
+  t.assert.throws(() => contentsFree.serialize(), /file contents are not retained/)
+
+  // The Bundle keeps no reference into the value it was built from.
+  const value = JSON.parse(v1)
+  const built = Bundle.fromJSON(value)
+  value.config.scope = 'bogus'
+  value.reason.run.push('src/ios.js')
+  t.assert.deepStrictEqual(built.config, { scope: 'full' })
+  t.assert.deepStrictEqual(built.reason, Bundle.parse(v1).reason)
 })
 
 test('Bundle.fileKeyAt finds every file in the bundle JSON, keyed as sources keys it', (t) => {
@@ -151,6 +163,24 @@ test('Bundle.fileKeyAt finds every file in the bundle JSON, keyed as sources key
       if (file !== undefined) located.set(file, value)
     }
     t.assert.deepStrictEqual(located, Bundle.parse(text).sources)
+  }
+
+  // fromJSON rejects every shape whose files fileKeyAt would place differently.
+  const v1 = (sources) => ({ version: 1, config: { scope: 'full' }, entries: [], sources, formats: {}, imports: {} })
+  const v0Of = (extra) => ({ version: 0, config: { scope: 'full' }, formats: {}, imports: {}, ...extra })
+  const disagreeing = {
+    'v0 modules': v0Of({ sources: { 'node_modules/x/a.js': 'A' }, modules: { 'node_modules/x': { name: 'x', version: '1', files: { 'a.js': 'B' } } } }),
+    'v0 sources array': v0Of({ sources: ['A'] }),
+    'v0 nested contents': v0Of({ sources: { x: { files: { y: 'A' } } } }),
+    'v1 sources array': v1([{ name: 'a', files: { 'x.js': 'X' } }]),
+    'v1 files array': v1({ '.': { name: 'a', files: ['X'] } }),
+    'v1 files string': v1({ '.': { name: 'a', files: 'XY' } }),
+    'v1 nested contents': v1({ '.': { name: 'a', files: { 'x.js': { y: 'X' } } } }),
+    'v1 number contents': v1({ '.': { name: 'a', files: { 'x.js': 42 } } }),
+  }
+  for (const [label, value] of Object.entries(disagreeing)) {
+    t.assert.throws(() => Bundle.fromJSON(value), label)
+    t.assert.throws(() => Bundle.fromJSON(value, { contents: false }), label)
   }
 
   t.assert.equal(Bundle.fileKeyAt(['modules', 'node_modules/x', 'files', 'a.js']), 'node_modules/x/a.js')

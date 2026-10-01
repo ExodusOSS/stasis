@@ -318,7 +318,7 @@ const v0Path = join(dir, 'v0.br')
 writeFileSync(v0Path, brotliCompressSync(JSON.stringify({
   version: 0,
   config: { scope: 'full' },
-  sources: { '.': { name: 'fx', version: '0.0.0', files: { 'a.js': 'export const a = 1\n' } } },
+  sources: { 'a.js': 'export const a = 1\n' },
   formats: {},
   imports: {},
 })))

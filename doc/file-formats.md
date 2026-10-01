@@ -256,7 +256,9 @@ bytes.
 `Bundle.fromJSON(value)` is `Bundle.parse` on an already-parsed value, and
 `Bundle.fileKeyAt(path)` names the file whose contents sit at a key path in the
 bundle JSON. Together they let a streaming reader take files out as they arrive
-and still validate the bundle as `Bundle.parse` does.
+and still validate the bundle as `Bundle.parse` does:
+`Bundle.fromJSON(value, { contents: false })` accepts a symbol placeholder for
+each file it took out and builds a contents-free `Bundle`.
 
 ### Source-language bundles (Solidity / PHP / Bash / Rust)
 
