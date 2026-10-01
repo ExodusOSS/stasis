@@ -957,15 +957,21 @@ test('buildSolidityBundle never reads the process\'s stdin as a config, a depend
   await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: 'remappings.txt: not a regular file' })
 }))
 
-test('buildSolidityBundle fails on a .gitmodules git reads two ways, or with a url that isn\'t a host\'s, naming it', withTmp(async (t, tmp) => {
-  writeProject(tmp, { 'foundry.toml': '[profile.default]\n', 'src/A.sol': 'contract A {}\n' })
-  for (const [text, message] of [
-    ['[submodule "x"]\n\tpath = lib/x\n\tpath = lib/y\n\turl = https://github.com/o/x\n', 'x.path: twice, of which git\'s submodule commands read the first and git config the last, at line 3'],
-    ['[submodule "x"]\n\tpath = lib/x\n\turl = ../x.git\n', 'x.url: "../x.git" is relative to the superproject\'s remote, which only a clone of it knows'],
-  ]) {
-    writeFileSync(join(tmp, '.gitmodules'), text)
+test('buildSolidityBundle fails on a .gitmodules git reads two ways, naming it, and takes a submodule\'s url as written', withTmp(async (t, tmp) => {
+  writeProject(tmp, { 'foundry.toml': '[profile.default]\n', 'src/A.sol': 'import "x/X.sol";\n', 'lib/x/src/X.sol': 'contract X {}\n' })
+  writeFileSync(join(tmp, '.gitmodules'), '[submodule "x"]\n\tpath = lib/x\n\tpath = lib/y\n\turl = https://github.com/o/x\n')
+  await t.assert.rejects(
+    () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
+    { message: ".gitmodules: x.path: twice, of which git's submodule commands read the first and git config the last, at line 3" },
+  )
+  // A url relative to the superproject's remote, or none, still makes lib/x a submodule: a
+  // dependency, but not one with a GitHub name to bucket it by.
+  for (const url of ['\turl = ../x.git\n', '']) {
+    writeFileSync(join(tmp, '.gitmodules'), `[submodule "x"]\n\tpath = lib/x\n${url}`)
     // eslint-disable-next-line no-await-in-loop -- each run rewrites .gitmodules
-    await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: `.gitmodules: ${message}` })
+    const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['lib/x/src/X.sol', 'src/A.sol'])
+    t.assert.equal(bundle.modules.get('lib/x'), undefined)
   }
 }))
 

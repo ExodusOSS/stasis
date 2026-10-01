@@ -79,16 +79,17 @@ export function readUtf8OrNull(file, label) {
 
 // --- .gitmodules ------------------------------------------------------------------------------
 
-// The submodules of the project at `baseDir`, `{ path, url, branch }` (`branch` when set), from its
-// `.gitmodules` as @preventive/lockfile reads it: as git does, refusing what git reads two ways (a
-// key twice, a second section, `[submodule.x]`), a path outside the repository or not in normal
-// form, and a url that isn't a host's (one relative to the superproject's remote, or none). One it
-// refuses throws, naming the file.
+// The submodules of the project at `baseDir`, `{ path, url, branch }` (`url` and `branch` when set),
+// from its `.gitmodules` as @preventive/lockfile reads it: as git does, refusing what git reads two
+// ways (a key twice, a second section, `[submodule.x]`), a path outside the repository or not in
+// normal form, and a url git ignores (starting with `-`) or that isn't one (a space in it). A url is
+// taken as written otherwise, relative to the superproject's remote or a path: it only names a
+// GitHub submodule's bucket. One it refuses throws, naming the file.
 export function readGitmodules(baseDir) {
   const text = readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules')
   if (text === null) return []
   try {
-    return Object.values(parseGitmodules(text))
+    return Object.values(parseGitmodules(text, { checkUrls: false }))
   } catch (err) {
     if (!(err instanceof LockfileError)) throw err
     throw new Error(`.gitmodules: ${err.message}`, { cause: err })

@@ -92,7 +92,7 @@ function githubSlug(url) {
 function parseGithubSubmodules(baseDir) {
   const byPath = new Map()
   for (const { path, url, branch } of readGitmodules(baseDir)) {
-    const name = githubSlug(url)
+    const name = url === undefined ? null : githubSlug(url)
     if (name) byPath.set(path, { name, branch })
   }
   return byPath

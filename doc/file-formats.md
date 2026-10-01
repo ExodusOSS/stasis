@@ -415,8 +415,9 @@ entries of forge's `libs` (an absolute one by its real path; a symlinked
 git submodules (`.gitmodules` read with `@preventive/lockfile`'s reader, as git
 reads it: one git reads two ways — a key twice, a second section,
 `[submodule.x]` — a path outside the repository or not in normal form, or a url
-that isn't a host's, relative to the superproject's or missing, is an error
-naming it) and every `node_modules` package; a file
+git ignores (starting with `-`) is an error naming it; a url relative to the
+superproject's remote, or none, is taken as written, the submodule then having
+no GitHub name to bucket it by) and every `node_modules` package; a file
 is a dependency's when its real path lies in one, however the path got there
 (`src/vendor -> ../lib/dep/src` holds the dependency's code). An import from a
 dependency must land on a dependency's file too: it may import its own files and

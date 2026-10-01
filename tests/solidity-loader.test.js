@@ -746,6 +746,12 @@ test('readGitmodules reads .gitmodules as git does: quotes, escapes, comments, k
     // A key may follow its section header on the line.
     '[submodule "d"] path = vendor/d',
     '\turl = https://github.com/o/d',
+    // A url relative to the superproject's remote, and none: git reads both, and so does stasis.
+    '[submodule "e"]',
+    '\tpath = lib/e',
+    '\turl = ../e.git',
+    '[submodule "f"]',
+    '\tpath = lib/f',
     '',
   ].join('\n'),
 }, (t, dir) => {
@@ -753,11 +759,13 @@ test('readGitmodules reads .gitmodules as git does: quotes, escapes, comments, k
     { path: 'vendor/a', url: 'https://github.com/o/a', branch: 'v1' },
     { path: 'lib/bx', url: 'git@github.com:o/b.git', branch: undefined },
     { path: 'vendor/d', url: 'https://github.com/o/d', branch: undefined },
+    { path: 'lib/e', url: '../e.git', branch: undefined },
+    { path: 'lib/f', url: undefined, branch: undefined },
   ])
   t.assert.deepEqual(readGitmodules(join(dir, 'none')), [])
 }))
 
-test('readGitmodules refuses what git reads two ways, a path out of normal form, and a url that is not a host\'s', withProject({}, (t, dir) => {
+test('readGitmodules refuses what git reads two ways, a path out of normal form, and a url git ignores', withProject({}, (t, dir) => {
   const url = '\turl = https://github.com/o/x\n'
   for (const [text, message] of [
     // git's submodule commands read the first `path`, git config the last.
@@ -766,8 +774,8 @@ test('readGitmodules refuses what git reads two ways, a path out of normal form,
     [`[submodule.x]\n\tpath = lib/x\n${url}`, 'a section of the form [submodule.name], whose name git lowercases, where .gitmodules has [submodule "name"] alone, at line 1'],
     [`[submodule "x"]\n\tpath = ./lib/x\n${url}`, 'x.path: "./lib/x" is not a relative path in normal form'],
     [`[submodule "x"]\n\tpath = ../x\n${url}`, 'x.path: "../x" is outside the repository, where git writes no submodule'],
-    ['[submodule "x"]\n\tpath = lib/x\n\turl = ../x.git\n', 'x.url: "../x.git" is relative to the superproject\'s remote, which only a clone of it knows'],
-    ['[submodule "x"]\n\tpath = lib/x\n', 'x.url: expected a url, without which git cannot clone the submodule'],
+    ['[submodule "x"]\n\tpath = lib/x\n\turl = -oProxy=x\n', 'x.url: "-oProxy=x" starts with "-", which git ignores the url for'],
+    ['[submodule "x"]\n\tpath = lib/x\n\turl = "https://github.com/o/x y"\n', 'x.url: "https://github.com/o/x y" is not a repository URL'],
   ]) {
     writeFileSync(join(dir, '.gitmodules'), text)
     t.assert.throws(() => readGitmodules(dir), { message: `.gitmodules: ${message}` })
