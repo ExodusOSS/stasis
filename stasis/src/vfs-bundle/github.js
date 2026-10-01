@@ -1,6 +1,6 @@
 import { posix } from 'node:path'
 
-import { Bundle, isValidRepoField } from '@exodus/stasis-core/bundle'
+import { isValidRepoField } from '@exodus/stasis-core/bundle'
 import { decompress } from '@preventive/archive/compression.js'
 import { ArchiveError, unpack } from '@preventive/archive/tar.js'
 import { createClient } from '@preventive/upstream/github.js'
@@ -68,8 +68,10 @@ async function subtreeEntries(client, { github, sha, directory, lockfile, where 
 export async function buildGitHubBundle({ github, sha, directory, client, packageManager, ...options } = {}) {
   checkPackageManager('buildGitHubBundle', packageManager)
   if (github === undefined || sha === undefined) throw new Error('buildGitHubBundle: github and sha are required')
-  // Checked before anything is fetched.
-  new Bundle({ repo: { github, commit: sha, ...(directory ? { directory } : { root: true }) } })
+  // Checked as the Bundle checks them, before anything is fetched.
+  for (const [key, value] of Object.entries({ github, commit: sha, directory: directory || undefined })) {
+    if (value !== undefined && !isValidRepoField(key, value)) throw new Error(`buildGitHubBundle: invalid ${key}: ${JSON.stringify(value)}`)
+  }
   client ??= createClient({ token: null })
   const where = `buildGitHubBundle: ${github}@${sha}`
   const subtree = directory ? await subtreeEntries(client, { github, sha, directory, lockfile: lockfileOf(packageManager), where }) : null

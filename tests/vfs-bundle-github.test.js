@@ -93,10 +93,10 @@ test('buildGitHubBundle downloads the whole repo for a lockfile above the direct
 
 test('buildGitHubBundle checks its arguments before anything is fetched', async (t) => {
   const client = fakeClient({})
-  await t.assert.rejects(build({ client, sha: 'abc123', entries: ['a.js'] }), /invalid bundle repo\.commit/u)
-  await t.assert.rejects(build({ client, github: 'not a repo', entries: ['a.js'] }), /invalid bundle repo\.github/u)
-  await t.assert.rejects(build({ client, directory: 'a b', entries: ['a.js'] }), /invalid bundle repo\.directory/u)
-  await t.assert.rejects(build({ client, directory: '../up', entries: ['a.js'] }), /invalid bundle repo\.directory/u)
+  await t.assert.rejects(build({ client, sha: 'abc123', entries: ['a.js'] }), /invalid commit: "abc123"/u)
+  await t.assert.rejects(build({ client, github: 'not a repo', entries: ['a.js'] }), /invalid github: "not a repo"/u)
+  await t.assert.rejects(build({ client, directory: 'a b', entries: ['a.js'] }), /invalid directory: "a b"/u)
+  await t.assert.rejects(build({ client, directory: '../up', entries: ['a.js'] }), /invalid directory: "\.\.\/up"/u)
   await t.assert.rejects(build({ client, github: undefined, entries: ['a.js'] }), /github and sha are required/u)
   await t.assert.rejects(build({ client, packageManager: 'npm', entries: ['a.js'] }), /packageManager must be one of/u)
   t.assert.deepEqual(client.calls, [])
@@ -124,13 +124,13 @@ test('buildGitHubBundle falls back to the whole repo when the subtree does not s
     'its lockfile linking above it': { 'apps/p/pnpm-lock.yaml': `${lockfile('.')}# link:../shared\n` },
     'a tsconfig extending above it': { 'apps/p/tsconfig.json': json({ extends: '../../tsconfig.base.json' }), 'tsconfig.base.json': json({}) },
   }
-  for (const [what, extra] of Object.entries(cases)) {
+  await Promise.all(Object.entries(cases).map(async ([what, extra]) => {
     const client = fakeClient(appWithLockfile(extra))
     const { bundle } = await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
     t.assert.deepEqual(methods(client), ['listRepoDir', 'getRepoTreeId', 'getRepoTreeTarball', 'getRepoTarball'], what)
     t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js', 'src/b.js'], what)
     t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, directory: 'apps/p', commit: SHA }, what)
-  }
+  }))
   // A tsconfig path within the subtree keeps it alone.
   const client = fakeClient(appWithLockfile({ 'apps/p/tsconfig.json': json({ extends: './tsconfig.base.json', include: ['./src'] }) }))
   await build({ client, directory: 'apps/p', entries: ['src/a.js'] })
