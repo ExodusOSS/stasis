@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     strategy:
       fail-fast: false
       matrix:
@@ -43,4 +43,10 @@ jobs:
       # install as a local-dev fallback when node_modules is missing.
       - run: pnpm -C tests/fixtures/popular-npm-modules i --frozen-lockfile
       - run: pnpm -C tests/fixtures/cli-run-import-tsx i --frozen-lockfile
+      # pnpm-bundle and yarn1-bundle are one package set under pnpm's default isolated layout and
+      # yarn 1's hoisted one: the @exodus/stasis/vfs-bundle tests compare the lockfile-built virtual
+      # trees against them.
+      - run: pnpm -C tests/fixtures/pnpm-bundle i --frozen-lockfile
+      - run: npx --yes yarn@1.22.22 install --frozen-lockfile --ignore-scripts --non-interactive
+        working-directory: tests/fixtures/yarn1-bundle
       - run: node --run test

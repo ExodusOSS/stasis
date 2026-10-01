@@ -1,19 +1,16 @@
 import { isUtf8 } from 'node:buffer'
-import { existsSync, readFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
-import { findPackageJSON } from 'node:module'
-import { pathToFileURL } from 'node:url'
 
 import { isValidRepoField } from './bundle.js'
 import { posixPathEscapes } from './artifact-util.js'
-import { realExistsSync, realReadFileSync } from './state-util.js'
+import { diskHost } from './host.js'
 import { assertRealPathWithinBase, hasNodeModulesSegment, toPosix } from './util.js'
 
-export function packageType(file) {
-  const pkg = findPackageJSON(pathToFileURL(file).toString())
+export function packageType(file, host = diskHost) {
+  const pkg = host.findPackageJSON(file)
   if (!pkg) return null
   try {
-    const type = JSON.parse(readFileSync(pkg, 'utf8')).type
+    const type = JSON.parse(host.readFile(pkg).toString('utf8')).type
     return type === 'module' || type === 'commonjs' ? type : null
   } catch {
     return null
@@ -24,13 +21,13 @@ export function packageType(file) {
 // at the root). Inside node_modules both name and version are required; a workspace package
 // outside node_modules may omit version (the name alone claims the bucket, matching
 // State#locateModule). Null if none.
-export function findPackageMetadata(baseDir, fileRelPath) {
+export function findPackageMetadata(baseDir, fileRelPath, host = diskHost) {
   let dir = dirname(fileRelPath)
   while (true) {
     const pkgPath = join(baseDir, dir, 'package.json')
-    if (existsSync(pkgPath)) {
+    if (host.stat(pkgPath)?.isFile()) {
       try {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+        const pkg = JSON.parse(host.readFile(pkgPath).toString('utf8'))
         if (pkg.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
           // `?? undefined` folds a literal `"version": null` into the one absent-version spelling.
           return { pkgDir: dir, name: pkg.name, version: pkg.version ?? undefined }
@@ -55,20 +52,20 @@ export function normalizeEntries(entries, cwd) {
   })
 }
 
-// Bytes of a bundled module's `package.json`, or null to skip when it's absent on disk; non-UTF-8 aborts (never silently skipped).
-export function readModuleManifest({ baseDir, realBase, rel } = {}) {
+// Bytes of a bundled module's `package.json`, or null to skip when it's absent; non-UTF-8 aborts (never silently skipped).
+export function readModuleManifest({ baseDir, realBase, rel, host = diskHost } = {}) {
   const absolute = join(baseDir, rel)
-  if (!existsSync(absolute)) return null
-  assertRealPathWithinBase(realBase, baseDir, rel)
-  const buf = readFileSync(absolute)
+  if (host.stat(absolute) === null) return null
+  assertRealPathWithinBase(realBase, baseDir, rel, host)
+  const buf = host.readFile(absolute)
   if (!isUtf8(buf)) throw new Error(`package.json is not valid UTF-8: ${rel}`)
   return buf
 }
 
 // Never throws: a missing/unreadable/malformed file yields null.
-export function readJson(file) {
+export function readJson(file, host = diskHost) {
   try {
-    return JSON.parse(readFileSync(file, 'utf8'))
+    return JSON.parse(host.readFile(file).toString('utf8'))
   } catch {
     return null
   }
@@ -97,19 +94,11 @@ export function gitOriginUrl(text) {
   return text.slice(start, end === -1 ? undefined : end).trim() || null
 }
 
-// Detection reads go through the real fs (state-util), never the --fs-patched one: State detects
-// while writing a bundle, and these reads must not be captured into (or served from) it.
-const readText = (file) => {
+// Detection reads go through `host`, the disk's never the --fs-patched fs: State detects while
+// writing a bundle, and these reads must not be captured into (or served from) it.
+const readText = (host, file) => {
   try {
-    return realReadFileSync(file, 'utf8')
-  } catch {
-    return null
-  }
-}
-
-const readJsonReal = (file) => {
-  try {
-    return JSON.parse(readText(file))
+    return host.readFile(file).toString('utf8')
   } catch {
     return null
   }
@@ -140,24 +129,24 @@ const joinRepoPath = (base, rel) => {
 // The git dirs of the work tree whose `.git` is `dotGit`: `{ gitDir, commonDir }`. A linked worktree
 // or submodule has a `.git` FILE (`gitdir: <path>`) naming its per-worktree dir, whose `commondir`
 // (when present) names the dir holding `config`, `refs/` and `packed-refs`.
-function gitDirs(dotGit) {
-  const pointer = readText(dotGit) // null for a `.git` directory (EISDIR)
+function gitDirs(dotGit, host) {
+  const pointer = readText(host, dotGit) // null for a `.git` directory (EISDIR)
   const gitDir = pointer?.startsWith('gitdir: ') ? resolve(dirname(dotGit), pointer.slice('gitdir: '.length).trim()) : dotGit
-  const common = readText(join(gitDir, 'commondir'))?.trim()
+  const common = readText(host, join(gitDir, 'commondir'))?.trim()
   return { gitDir, commonDir: common ? resolve(gitDir, common) : gitDir }
 }
 
 // Best-effort: the commit HEAD points at -- a detached sha, else the branch's loose ref, else its
 // `packed-refs` line. Undefined unless it is a full git sha.
-function gitHeadCommit({ gitDir, commonDir }) {
-  const head = readText(join(gitDir, 'HEAD'))?.trim()
+function gitHeadCommit({ gitDir, commonDir }, host) {
+  const head = readText(host, join(gitDir, 'HEAD'))?.trim()
   if (!head) return undefined
   let commit = head
   if (head.startsWith('ref: ')) {
     const ref = head.slice('ref: '.length)
     if (!ref.startsWith('refs/') || posixPathEscapes(ref)) return undefined
-    commit = readText(join(commonDir, ref))?.trim() ??
-      readText(join(commonDir, 'packed-refs'))?.split('\n').find((line) => line.endsWith(` ${ref}`))?.split(' ')[0]
+    commit = readText(host, join(commonDir, ref))?.trim() ??
+      readText(host, join(commonDir, 'packed-refs'))?.split('\n').find((line) => line.endsWith(` ${ref}`))?.split(' ')[0]
   }
   return isValidRepoField('commit', commit) ? commit : undefined
 }
@@ -172,13 +161,13 @@ function gitHeadCommit({ gitDir, commonDir }) {
 //    repo) plus `dir`'s path below it (no commit).
 //    The first `repository` found is authoritative, even a non-GitHub one.
 // Every value is held to the bundle format's validation. Undefined when neither names a GitHub repo.
-export function detectRepo(dir) {
+export function detectRepo(dir, host = diskHost) {
   const start = resolve(dir)
   let pkg = null // null: no package.json `repository` seen yet; undefined: one seen, not GitHub
   for (let cursor = start; ; cursor = dirname(cursor)) {
     const rel = toPosix(relative(cursor, start))
     if (pkg === null) {
-      const { repository, homepage } = readJsonReal(join(cursor, 'package.json')) ?? {}
+      const { repository, homepage } = readJson(join(cursor, 'package.json'), host) ?? {}
       const url = typeof repository === 'string' ? repository : repository?.url
       if (typeof url === 'string') {
         const github = parseGithubRepository(url)
@@ -188,10 +177,10 @@ export function detectRepo(dir) {
       }
     }
     const dotGit = join(cursor, '.git')
-    if (realExistsSync(dotGit)) {
-      const dirs = gitDirs(dotGit)
-      const github = parseGithubRepository(gitOriginUrl(readText(join(dirs.commonDir, 'config'))))
-      if (github) return stripUndefined({ github, directory: joinRepoPath('', rel), commit: gitHeadCommit(dirs) })
+    if (host.stat(dotGit) !== null) {
+      const dirs = gitDirs(dotGit, host)
+      const github = parseGithubRepository(gitOriginUrl(readText(host, join(dirs.commonDir, 'config'))))
+      if (github) return stripUndefined({ github, directory: joinRepoPath('', rel), commit: gitHeadCommit(dirs, host) })
       return pkg ?? undefined
     }
     if (dirname(cursor) === cursor) return pkg ?? undefined

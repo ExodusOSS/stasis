@@ -1,19 +1,15 @@
 import { isUtf8 } from 'node:buffer'
-import * as fs from 'node:fs'
 import { basename, isAbsolute, join, relative } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { NODE_FORMATS } from './artifact-util.js'
+import { diskHost } from './host.js'
 
 // The Node-side half of the util split: byte/name classification for the capture walks, fs/execute-bit
 // observation and CLI parsing. The pure artifact data model (formats universe, keys, merges,
 // executable-set rules, converters) lives in artifact-util.js; re-exported here so
 // `@exodus/stasis-core/util` keeps serving the full set.
 export * from './artifact-util.js'
-
-// Snapshot before `stasis run --fs` patches fs: the patched realpathSync doesn't throw ENOENT (which
-// assertRealPathWithinBase relies on) and patched statSync answers with synthetic Stats modes.
-const { realpathSync, statSync } = fs
 
 // JS_UNRESOLVED_EXTS (.js/.ts type/syntax-dependent, .jsx/.tsx transformed) classify as null, not a format.
 const NODE_EXT_FORMATS = new Map([
@@ -332,28 +328,22 @@ export const isExecutableMode = (stats) => stats.isFile() && (stats.mode & EXECU
 
 // Tri-state: `undefined` means the mode could NOT be observed (gone mid-run, EACCES, ELOOP, a synthetic
 // bundle entry). Callers must not read that as "not executable" -- failing to look is not evidence.
-export function observeExecutable(abs) {
-  let stats
-  try {
-    stats = statSync(abs, { throwIfNoEntry: false })
-  } catch {
-    return undefined
-  }
-  if (stats === undefined) return undefined
-  return isExecutableMode(stats)
+export function observeExecutable(abs, host = diskHost) {
+  const stats = host.stat(abs)
+  return stats === null ? undefined : isExecutableMode(stats)
 }
 
 // Boolean view for callers with nothing to refute (recording a fresh set from scratch).
-export const isExecutableFile = (abs) => observeExecutable(abs) === true
+export const isExecutableFile = (abs, host) => observeExecutable(abs, host) === true
 
 // Windows reports no POSIX execute bits, so a capture there records none and must NOT read "no bit" as
 // "the bit was removed" and strip what a POSIX capture attested.
 export const canObserveExecuteBits = ({ win32 = process.platform === 'win32' } = {}) => !win32
 
 // Throws on a symlink escaping the bundle root: a crafted `link.sh -> /etc/passwd` must not pull an
-// external file into an attestable bundle. realpathSync surfaces ENOENT, which loaders treat as "missing".
-export function assertRealPathWithinBase(realBase, baseDir, relPath) {
-  const real = realpathSync(join(baseDir, relPath))
+// external file into an attestable bundle. realpath surfaces ENOENT, which loaders treat as "missing".
+export function assertRealPathWithinBase(realBase, baseDir, relPath, host = diskHost) {
+  const real = host.realpath(join(baseDir, relPath))
   const rel = toPosix(relative(realBase, real))
   if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`Refusing to follow symlink escaping bundle root: ${relPath} -> ${real}`)
