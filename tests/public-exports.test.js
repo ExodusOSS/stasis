@@ -443,22 +443,29 @@ test('Bundle.serialize round-trip preserves entries, modules, formats, imports',
   t.assert.equal(parsed.imports.get('*').get('src/a.js').get('./b.js'), 'src/b.js')
 })
 
-test('Bundle.serialize writes formats before the file contents (sources, modules)', (t) => {
+test('Bundle.serialize writes the file contents last (sources, then modules)', (t) => {
   const modules = new Map([
     ['.', { name: 'x', version: '1.0.0', files: { 'src/a.js': 'export const x = 1\n' } }],
     ['node_modules/w', { name: 'w', version: '1.0.0', files: { 'i.js': 'export const y = 2\n' } }],
   ])
   const formats = new Map([['src/a.js', 'module'], ['node_modules/w/i.js', 'module']])
-  const full = new Bundle({ config: { scope: 'full' }, entries: new Set(['src/a.js']), modules, formats })
+  const full = new Bundle({
+    config: { scope: 'full' },
+    entries: new Set(['src/a.js']),
+    modules,
+    formats,
+    executable: new Set(['src/a.js']),
+    reason: { bundle: ['src/a.js'] },
+  })
   t.assert.deepEqual(Object.keys(JSON.parse(full.serialize())),
-    ['version', 'config', 'entries', 'formats', 'sources', 'modules', 'imports'])
+    ['version', 'config', 'entries', 'formats', 'imports', 'executable', 'reason', 'sources', 'modules'])
 
   const nm = new Bundle({
     config: { scope: 'node_modules' },
     modules: new Map([...modules].filter(([dir]) => dir !== '.')),
     formats: new Map([['node_modules/w/i.js', 'module']]),
   })
-  t.assert.deepEqual(Object.keys(JSON.parse(nm.serialize())), ['version', 'config', 'formats', 'modules', 'imports'])
+  t.assert.deepEqual(Object.keys(JSON.parse(nm.serialize())), ['version', 'config', 'formats', 'imports', 'modules'])
 })
 
 test('Bundle round-trip carries code and resources side-by-side in one bundle', (t) => {

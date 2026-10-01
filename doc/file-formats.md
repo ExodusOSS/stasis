@@ -182,6 +182,11 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   "config": { "scope": "full" },
   "entries": ["src/index.js"],
   "formats": { "src/index.js": "module", "scripts/build.sh": "shell" },
+  "imports": {
+    "*": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } },
+    "node, import": { "node_modules/foo/index.js": { "./impl.js": "node_modules/foo/impl.js" } }
+  },
+  "executable": ["scripts/build.sh"],
   "sources": {
     ".": {
       "name": "@exodus/stasis",
@@ -196,12 +201,7 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
       "ecosystem": "npm",
       "files": { "index.js": "..." }
     }
-  },
-  "imports": {
-    "*": { "src/index.js": { "@exodus/bytes": "node_modules/@exodus/bytes/index.js" } },
-    "node, import": { "node_modules/foo/index.js": { "./impl.js": "node_modules/foo/impl.js" } }
-  },
-  "executable": ["scripts/build.sh"]
+  }
 }
 ```
 
@@ -475,6 +475,7 @@ tagged in `formats` by payload encoding:
     "src/icon.svg": "resource",
     "src/logo.png": "resource:base64"
   },
+  "imports": { "*": { "src/index.js": {} } },
   "sources": {
     ".": { "name": "...", "version": "...", "files": {
       "src/index.js": "…source…",
@@ -482,8 +483,7 @@ tagged in `formats` by payload encoding:
       "src/logo.png": "<base64>"
     } }
   },
-  "modules": {},
-  "imports": { "*": { "src/index.js": {} } }
+  "modules": {}
 }
 ```
 
