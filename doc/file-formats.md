@@ -253,12 +253,10 @@ other field. Each bucket's `files` still lists its paths (`Object.keys`,
 the `@exodus/stasis/sbom` API, but not for `diff` or `extract`, which read file
 bytes.
 
-`Bundle.fromJSON(value)` is `Bundle.parse` without the `JSON.parse`: it takes an
-already-parsed value and leaves file values as they are. `Bundle.fileKeyAt(path)`
-gives the flat key, as `sources` keys it, of the file whose contents sit at that
-key path in the bundle JSON, or `undefined` for any other position. Together they
-let a streaming reader take each file out as it arrives, and still validate the
-bundle as `Bundle.parse` does.
+`Bundle.fromJSON(value)` is `Bundle.parse` on an already-parsed value, and
+`Bundle.fileKeyAt(path)` names the file whose contents sit at a key path in the
+bundle JSON. Together they let a streaming reader take files out as they arrive
+and still validate the bundle as `Bundle.parse` does.
 
 ### Source-language bundles (Solidity / PHP / Bash / Rust)
 

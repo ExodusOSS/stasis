@@ -60,27 +60,18 @@ const mergeReason = (a, b) => {
 }
 
 function contentsLocked() {
-  throw new Error('bundle: file contents are not retained by this contents-free Bundle (hasContents is ' +
-    'false); only the file list is')
+  throw new Error('bundle: file contents are not retained by this contents-free Bundle')
 }
 
-// The `files` of every contents-free bucket, so a Bundle built on one stays contents-free.
+// Every contents-free bucket's `files`, so a Bundle built on one stays contents-free.
 const lockedFiles = new WeakSet()
 
-// A contents-free bucket: each rel stays an own enumerable key (Object.keys/hasOwn keep working),
-// but reading its value throws, so nothing can mistake a missing payload for an empty file.
-const lockModule = (info) => {
-  if (lockedFiles.has(info.files)) return info
-  const { files, ...rest } = info
+// Each rel stays an own enumerable key, but reading its contents throws.
+const lockModule = ({ files, ...info }) => {
   const locked = Object.create(null)
   for (const rel of Object.keys(files)) Object.defineProperty(locked, rel, { get: contentsLocked, enumerable: true })
   lockedFiles.add(Object.freeze(locked))
-  return { ...rest, files: locked }
-}
-
-const hasLockedBucket = (modules) => {
-  for (const [, { files }] of modules) if (lockedFiles.has(files)) return true
-  return false
+  return { ...info, files: locked }
 }
 
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
@@ -99,18 +90,16 @@ export class Bundle {
   reason
   #contents
 
-  // `contents: false` makes a contents-free Bundle: every other field is kept, and each bucket still
-  // lists its files, but reading a file's contents throws -- as do `sources`, serialize() and merge().
+  // `contents: false` keeps every field and file list, but locks out file contents.
   constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION, contents = true } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
     assert(['node_modules', 'full'].includes(config.scope))
-    assert(typeof contents === 'boolean', 'bundle: `contents` must be a boolean')
+    assert(typeof contents === 'boolean')
     this.version = version
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
-    // Built on a contents-free Bundle's buckets (their reads throw), it is contents-free too.
-    if (contents) contents = !hasLockedBucket(this.modules)
+    contents &&= !this.modules.values().some(({ files }) => lockedFiles.has(files))
     if (!contents) this.modules = new Map([...this.modules].map(([dir, info]) => [dir, lockModule(info)]))
     this.formats = formats ?? new Map()
     this.imports = imports ?? new Map()
@@ -119,17 +108,14 @@ export class Bundle {
     this.#contents = contents
   }
 
-  // False for a contents-free Bundle (see the constructor).
   get hasContents() {
     return this.#contents
   }
 
-  // A new Bundle with this one's fields and contents mode, `overrides` replacing some.
   #copy(overrides) {
     return new Bundle({ ...this, contents: this.#contents, ...overrides })
   }
 
-  // The same Bundle minus file contents: metadata and file lists only.
   withoutContents() {
     return this.#copy({ contents: false })
   }
@@ -164,27 +150,21 @@ export class Bundle {
     return Bundle.fromJSON(JSON.parse(text))
   }
 
-  // Where file contents sit in the bundle JSON, for a reader that meets them mid-stream: the flat
-  // key (as `sources` keys it) of the file at key path `path` -- v1 `sources|modules.<dir>.files.<rel>`,
-  // v0 `sources.<path>` -- or undefined for any other position. A non-canonical key throws, as in
-  // fromJSON. Array indices are numbers, so they never match.
+  // The `sources` key of the file whose contents sit at JSON key path `path`, else undefined; throws if non-canonical.
   static fileKeyAt(path) {
-    if (path.length === 4) {
-      const [top, dir, files, rel] = path
-      if ((top !== 'sources' && top !== 'modules') || files !== 'files') return undefined
-      if (typeof dir !== 'string' || typeof rel !== 'string') return undefined
-      return canonicalFileKey(dir, rel, 'bundle')
+    const [top, dir, files, rel] = path
+    if (typeof dir !== 'string') return undefined
+    if (path.length === 2 && top === 'sources') {
+      const v0 = inferModuleDir(dir)
+      return canonicalFileKey(v0.dir, v0.rel, 'bundle')
     }
-    if (path.length === 2 && path[0] === 'sources' && typeof path[1] === 'string') {
-      const { dir, rel } = inferModuleDir(path[1])
+    if (path.length === 4 && (top === 'sources' || top === 'modules') && files === 'files' && typeof rel === 'string') {
       return canonicalFileKey(dir, rel, 'bundle')
     }
     return undefined
   }
 
-  // parse() minus the JSON.parse: validate and build from an already-parsed value -- JSON.parse's,
-  // or an equivalent streaming parser's. Plain JSON data only; file values are carried over as they
-  // are, never inspected, so a streaming reader may leave a placeholder for each file it took out.
+  // parse() on an already-parsed value; file values are carried over uninspected.
   static fromJSON(json) {
     assert(json.version === VERSION || json.version === LEGACY_VERSION)
     assert(['node_modules', 'full'].includes(json.config?.scope))
@@ -240,7 +220,7 @@ export class Bundle {
         assert(!posixPathEscapes(dir) && !posixPathEscapes(rel))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         const { files } = modules.get(dir)
-        assert(!Object.hasOwn(files, rel), `bundle: duplicate file key '.' ('' and '.' both spell the root listing)`)
+        assert(!Object.hasOwn(files, rel), `bundle: duplicate file key '.' (v0 '' and '.')`)
         files[rel] = content
       }
     }
@@ -330,7 +310,7 @@ export class Bundle {
 
   // Strict union of two Bundles (returns a NEW one): any genuine conflict throws -- a bundle is an attestation.
   merge(other) {
-    // A merge must compare the bytes of every file both sides attest, so both need them.
+    // Merging compares file bytes, so both sides need them.
     if (!this.#contents || other.hasContents === false) contentsLocked()
     assert(this.config.scope === other.config.scope,
       `bundle merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
