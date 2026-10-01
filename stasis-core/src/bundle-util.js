@@ -1,5 +1,4 @@
 import { isUtf8 } from 'node:buffer'
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 
 import { isValidRepoField } from './bundle.js'
@@ -45,26 +44,25 @@ export function findPackageMetadata(baseDir, fileRelPath, { strict = false, chec
 // The error codes that mean nothing is at a path.
 export const NO_ENTRY = new Set(['ENOENT', 'ENOTDIR'])
 
-// `file`'s bytes, or null when there's no file (a directory counts as none). It's opened without
-// blocking and read only when it's a regular file: a FIFO, a socket, a device or a link to one
+// `file`'s bytes, read through `host`, or null when there's no file (a directory counts as none).
+// It's read only when it's a regular file: a FIFO, a socket, a device or a link to one
 // (`/dev/stdin`) throws, naming it `label`, rather than stalling or reading the process's input.
-export function readRegularFileOrNull(file, label) {
-  let fd
-  try {
-    fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
-  } catch (err) {
-    if (NO_ENTRY.has(err.code) || err.code === 'EISDIR') return null
-    if (err.code === 'ENXIO') throw new Error(`${label}: not a regular file`, { cause: err }) // a socket
-    throw err
+// What can't be stat'ed is read to say why: only a path with nothing there is no file, and a loop
+// or a directory that may not be searched throws.
+export function readRegularFileOrNull(file, label, host = diskHost) {
+  const stat = host.stat(file)
+  if (stat === null) {
+    try {
+      host.readFile(file)
+    } catch (err) {
+      if (NO_ENTRY.has(err.code)) return null
+      throw err
+    }
+    throw new Error(`${label}: not a regular file`)
   }
-  try {
-    const stat = fstatSync(fd)
-    if (stat.isDirectory()) return null
-    if (!stat.isFile()) throw new Error(`${label}: not a regular file`)
-    return readFileSync(fd)
-  } finally {
-    closeSync(fd)
-  }
+  if (stat.isDirectory()) return null
+  if (!stat.isFile()) throw new Error(`${label}: not a regular file`)
+  return host.readFile(file)
 }
 
 // The package.json at `rel` (under `baseDir`), parsed (a leading byte-order mark skipped, as npm
@@ -85,7 +83,7 @@ export function readPackageJson(baseDir, rel, { strict = false, check, host = di
     // Strict, it's read as the file's own text or not at all; lenient lookups decode it as they always
     // have (a stray byte as U+FFFD).
     if (strict && !isUtf8(bytes)) throw new Error(`${rel}: not valid UTF-8`)
-    return parseJson(bytes.toString('utf8').replace(/^\uFEFF/u, ''), rel)
+    return parseJson(packageJSONText(bytes), rel)
   } catch (err) {
     if (strict) throw err
     return null

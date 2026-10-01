@@ -3,13 +3,13 @@
 // (foundry.js) and the bundler's --manifests. Dependencies are untrusted input: a link one plants
 // out of itself is never followed.
 
-import { isUtf8 } from 'node:buffer'
-import { lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import { isAbsolute, join, parse, posix, relative, resolve, sep } from 'node:path'
 
 import { utf8toString } from '@exodus/bytes/utf8.js'
 import { LockfileError, parseGitmodules } from '@preventive/lockfile/foundry.js'
 import { NO_ENTRY, readRegularFileOrNull } from '@exodus/stasis-core/bundle-util'
+import { diskHost } from '@exodus/stasis-core/host'
 import { hasNodeModulesSegment } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
 
@@ -19,10 +19,14 @@ const toSlashes = (p) => (sep === '\\' ? p.replaceAll('\\', '/') : p)
 
 // --- Reading --------------------------------------------------------------------------------
 
-// `p`'s real path as the OS resolves it (realpath(3): the filesystem's own spelling), or null.
-export function realpathOrNull(p) {
+// `p`'s real path as `host` resolves it, which throws when it can't: on disk, as the OS does
+// (realpath(3): the filesystem's own spelling, which Node's realpathSync doesn't give).
+const realpathIn = (host, p) => (host === diskHost ? realpathSync.native(p) : host.realpath(p))
+
+// `p`'s real path (realpathIn), or null.
+export function realpathOrNull(p, host = diskHost) {
   try {
-    return realpathSync.native(p)
+    return realpathIn(host, p)
   } catch {
     return null
   }
@@ -37,12 +41,12 @@ const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(re
 // `../` when outside the project. One whose real path the OS can't give (past PATH_MAX) is never
 // normalized, which could name another file: it keeps the path it was read by, `..` and all, from
 // the root however that's spelled (as given or by its real path), for solidityOwnership to refuse,
-// or else stays absolute, a name --manifests refuses as unresolvable.
-export function projectRelative(root, abs) {
+// or else stays absolute, a name --manifests refuses as unresolvable. Real paths are `host`'s.
+export function projectRelative(root, abs, host = diskHost) {
   const rel = toSlashes(relative(root, abs))
   if (inRoot(rel) && !toSlashes(abs).split('/').includes('..')) return rel
-  const real = realpathOrNull(abs)
-  const realRoot = realpathOrNull(root)
+  const real = realpathOrNull(abs, host)
+  const realRoot = realpathOrNull(root, host)
   if (real !== null) return toSlashes(relative(realRoot ?? root, real))
   return below(resolve(root), abs) ?? (realRoot === null ? null : below(realRoot, abs)) ?? toSlashes(abs)
 }
@@ -56,21 +60,22 @@ function below(dir, abs) {
   return d.length < a.length && d.every((c, i) => a[i] === c) ? a.slice(d.length).join('/') : null
 }
 
-// realpath(3) of `p`: `{ real }`, or `{ real: null, missing }`, `missing` only when nothing is
-// there at all. The OS may fail to resolve what is there -- a real path past PATH_MAX, a loop, a
+// realpathIn `host` of `p`: `{ real }`, or `{ real: null, missing }`, `missing` only when nothing
+// is there at all. The OS may fail to resolve what is there -- a real path past PATH_MAX, a loop, a
 // link whose end it can't name (`/proc/self/fd/0` on a pipe), a dir it may not search -- and a
 // read may still get through.
-function osRealpath(p) {
+function osRealpath(p, host) {
   try {
-    return { real: realpathSync.native(p), missing: false }
+    return { real: realpathIn(host, p), missing: false }
   } catch (err) {
-    return { real: null, missing: NO_ENTRY.has(err.code) && !lexists(p) }
+    return { real: null, missing: NO_ENTRY.has(err.code) && !lexists(p, host) }
   }
 }
 
-function lexists(p) {
+// Whether anything is at `p` itself, a link not followed (`host.readlink` throws when nothing is).
+function lexists(p, host) {
   try {
-    lstatSync(p)
+    host.readlink(p)
     return true
   } catch (err) {
     if (NO_ENTRY.has(err.code)) return false
@@ -90,9 +95,9 @@ export function decodeUtf8(bytes, label) {
 }
 
 // A config file's text (decodeUtf8), or null when there's no file (readRegularFileOrNull: a regular
-// file only). Errors name it `label`.
-export function readUtf8OrNull(file, label) {
-  const buf = readRegularFileOrNull(file, label)
+// file only, read through `host`). Errors name it `label`.
+export function readUtf8OrNull(file, label, host = diskHost) {
+  const buf = readRegularFileOrNull(file, label, host)
   return buf === null ? null : decodeUtf8(buf, label)
 }
 
@@ -105,8 +110,8 @@ export function readUtf8OrNull(file, label) {
 // doesn't check (`update = none`, `active`, a `[core]` section) -- never fails the bundle: it's
 // warned about and read submodule by submodule (gitmodulesLeniently). One git itself refuses is an
 // error: read past what git can't, a submodule's section would be lost, and its directory with it.
-export function readGitmodules(baseDir) {
-  const text = readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules')
+export function readGitmodules(baseDir, host = diskHost) {
+  const text = readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules', host)
   if (text === null) return []
   try {
     return Object.values(parseGitmodules(text, { checkUrls: false }))
@@ -326,9 +331,9 @@ function readGitConfig(text) {
 
 // --- Ownership --------------------------------------------------------------------------------
 
-const readdirOrEmpty = (dir) => {
+const readdirOrEmpty = (dir, host) => {
   try {
-    return readdirSync(dir, { withFileTypes: true })
+    return host.readdir(dir)
   } catch {
     return []
   }
@@ -358,9 +363,10 @@ const TARGET_SEPARATORS = sep === '\\' ? /[\\/]/u : /\//u
 //   path is refused rather than trusted. `real` null with no `escape` means nothing is there. A
 //   link the project placed (a workspace package in node_modules, a linked `lib/` entry) may lead
 //   anywhere in the root, and so may one on the path the project was named by (a symlinked
-//   checkout, macOS's `/tmp`).
-export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
-  const realBase = realpathSync.native(baseDir)
+//   checkout, macOS's `/tmp`). The project is read through `host`.
+export function solidityOwnership(baseDir, { dirs = [], packages = [], host = diskHost } = {}) {
+  const realBase = realpathIn(host, baseDir)
+  const realOf = (p) => realpathOrNull(p, host)
   const named = resolve(baseDir)
   const onNamedPath = (abs) => named === abs || named.startsWith(abs.endsWith(sep) ? abs : `${abs}${sep}`)
   const toRel = (abs) => toSlashes(relative(realBase, abs)) || '.'
@@ -372,20 +378,20 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   const holders = new Set()
   const roots = new Set()
   const addReal = (set, rel) => {
-    const real = realpathOrNull(join(baseDir, rel))
+    const real = realOf(join(baseDir, rel))
     if (real !== null && inside(toRel(real))) set.add(toRel(real))
   }
   // A dir as the project names it: relative to the root, or (an absolute lib) by its real path.
   const projectDir = (d) => {
     if (!isAbsolute(d)) return clean(d)
-    const real = realpathOrNull(d)
+    const real = realOf(d)
     return real === null ? null : toRel(real)
   }
   for (const d of dirs.map(projectDir).filter((rel) => rel !== null && inside(rel))) {
     if (posix.basename(d) === 'node_modules') continue // a package's own rule, below
     holders.add(d)
     addReal(holders, d)
-    for (const e of readdirOrEmpty(join(baseDir, d))) if (e.isSymbolicLink() && isDir(join(baseDir, d, e.name))) addReal(roots, `${d}/${e.name}`)
+    for (const e of readdirOrEmpty(join(baseDir, d), host)) if (e.isSymbolicLink() && isDir(join(baseDir, d, e.name), host)) addReal(roots, `${d}/${e.name}`)
   }
   for (const p of packages.map(clean).filter(inside)) {
     roots.add(p)
@@ -425,21 +431,21 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
       const next = join(cur, part)
       let target
       try {
-        if (!lstatSync(next).isSymbolicLink()) {
-          cur = next
-          continue
-        }
-        const bytes = readlinkSync(next, { encoding: 'buffer' })
-        if (!isUtf8(bytes)) return NOTHING // not a name a string path can spell: unresolved
-        target = bytes.toString('utf8')
+        target = host.readlink(next)
       } catch {
         return NOTHING
       }
+      if (target === null) {
+        cur = next
+        continue
+      }
+      // A target that isn't UTF-8 reads with U+FFFD in it: not a name a string path can spell.
+      if (target.includes('\uFFFD')) return NOTHING
       if (depth >= 40) return NOTHING // ELOOP
       const r = walk(isAbsolute(target) ? parse(target).root : cur, target.split(TARGET_SEPARATORS), depth + 1)
       if (r.abs === null || r.escape !== null) return r
-      const dir = realpathOrNull(cur) ?? cur
-      const abs = realpathOrNull(r.abs)
+      const dir = realOf(cur) ?? cur
+      const abs = realOf(r.abs)
       if (abs === null) return NOTHING
       const at = toRel(join(dir, part))
       const to = toRel(abs)
@@ -465,8 +471,8 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
         // The OS's answer is the one a read gets: the walk must agree with it, or the path is
         // refused, as it is when the OS can't resolve it at all, though a read may still get through.
         // (Past its last link the walk's path is spelled as given; with none, it's `path` itself.)
-        const { real: os, missing } = osRealpath(path)
-        const walked = abs === null ? null : abs === path ? os : realpathOrNull(abs)
+        const { real: os, missing } = osRealpath(path, host)
+        const walked = abs === null ? null : abs === path ? os : realOf(abs)
         if (walked !== os || (os === null && !missing)) escape = { link: rel, root: null, why: 'unresolved' }
         abs = os
       }
@@ -491,11 +497,12 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
 }
 
 // The ownership of the project at `baseDir` given its lib dirs (`soldeer`: forge's `dependencies/`
-// holds dependencies too), with its git submodules, which it keeps as `submodules` (readGitmodules).
-export function projectOwnership(baseDir, libs, { soldeer = false } = {}) {
-  const submodules = readGitmodules(baseDir)
+// holds dependencies too), with its git submodules, which it keeps as `submodules` (readGitmodules),
+// read through `host`.
+export function projectOwnership(baseDir, libs, { soldeer = false, host = diskHost } = {}) {
+  const submodules = readGitmodules(baseDir, host)
   const dirs = [...libs, ...(soldeer ? ['dependencies'] : [])]
-  return { ...solidityOwnership(baseDir, { dirs, packages: submodules.map((s) => s.path) }), submodules }
+  return { ...solidityOwnership(baseDir, { dirs, packages: submodules.map((s) => s.path), host }), submodules }
 }
 
 // Why a path is refused (see solidityOwnership).

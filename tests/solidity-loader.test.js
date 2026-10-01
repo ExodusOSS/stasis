@@ -1,6 +1,5 @@
 import { test } from 'node:test'
-import fs, { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +17,7 @@ import {
   readRemappingsFile,
   resolveSolImport,
 } from '../stasis/src/loaders/solidity.js'
+import { diskHost } from '@exodus/stasis-core/host'
 import { findRemappingsWithContext, foundryProject, foundryTomlRemappings } from '../stasis/src/loaders/foundry.js'
 import { readGitmodules, solidityOwnership } from '../stasis/src/loaders/solidity-ownership.js'
 
@@ -707,28 +707,20 @@ test('solidityOwnership: a link from outside the root back into it is untrusted,
 })
 
 test('solidityOwnership judges the path as the filesystem spells it (a case-insensitive one)', async (t) => {
-  // Emulate a case-insensitive filesystem under `tmp`, whose names are lowercase on disk.
+  // Emulate a case-insensitive filesystem under `tmp`, whose names are lowercase on disk: a host that
+  // reads every path there lowercased, and whose realpath gives the filesystem's spelling.
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'stasis-sol-')))
-  const lower = (p) => (typeof p === 'string' && p.startsWith(tmp) ? tmp + p.slice(tmp.length).toLowerCase() : p)
-  const saved = {}
-  for (const name of ['lstatSync', 'statSync', 'readlinkSync', 'readdirSync']) {
-    saved[name] = fs[name]
-    fs[name] = (p, ...rest) => saved[name](lower(p), ...rest)
-  }
-  saved.native = fs.realpathSync.native
-  fs.realpathSync.native = (p, ...rest) => saved.native(lower(p), ...rest)
-  syncBuiltinESMExports()
+  const lower = (p) => (p.startsWith(tmp) ? tmp + p.slice(tmp.length).toLowerCase() : p)
+  const host = { ...diskHost, realpath: (p) => realpathSync.native(lower(p)) }
+  for (const name of ['stat', 'readFile', 'readdir', 'readlink']) host[name] = (p) => diskHost[name](lower(p))
   try {
     mkdirSync(join(tmp, 'lib/evil/src'), { recursive: true })
     writeFileSync(join(tmp, '.env'), 'K=1\n')
     symlinkSync('../../../.env', join(tmp, 'lib/evil/src/test.sol'))
-    const { of } = solidityOwnership(tmp, { dirs: ['lib'] })
+    const { of } = solidityOwnership(tmp, { dirs: ['lib'], host })
     // A dependency's remapping to `../../LIB/evil/src/` names the same link.
     for (const p of ['lib/evil/src/test.sol', 'LIB/evil/src/Test.sol', 'Lib/Evil/SRC/TEST.sol']) t.assert.equal(of(p).escape?.root, 'lib/evil', p)
   } finally {
-    for (const name of ['lstatSync', 'statSync', 'readlinkSync', 'readdirSync']) fs[name] = saved[name]
-    fs.realpathSync.native = saved.native
-    syncBuiltinESMExports()
     rmSync(tmp, { recursive: true, force: true })
   }
 })

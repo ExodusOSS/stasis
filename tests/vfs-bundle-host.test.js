@@ -214,3 +214,27 @@ test('the disk host resolves exactly like require.resolve, including through sym
   t.assert.equal(diskHost.resolve(join(tmp, 'main.cjs'), './link/z', new Set(['require'])), join(tmp, 'real', 'z.js'))
   t.assert.equal(createNodeResolver(diskHost).resolve(join(tmp, 'main.cjs'), './link/z', new Set(['require'])), join(tmp, 'real', 'z.js'))
 }))
+
+test('a Solidity bundle read through a Vfs host holds a dependency to its own files, as on disk', async (t) => {
+  const { buildSolidityBundle } = await import('../stasis/src/cmd/bundle.js')
+  const vfs = write(new Vfs(), {
+    '/foundry.toml': '[profile.default]\n',
+    '/.env': 'PRIVATE_KEY=0xabc\n',
+    '/src/A.sol': 'import "evil/E.sol";\n',
+    '/lib/evil/src/E.sol': 'import "./Evil.sol";\n',
+  })
+  // A link the dependency planted out of itself, to the project's .env.
+  vfs.symlink('../../../.env', '/lib/evil/src/Evil.sol')
+  const host = createVfsHost(vfs)
+  const build = () => buildSolidityBundle({ cwd: '/', entries: ['src'], env: {}, host })
+  const warn = console.warn
+  console.warn = () => {}
+  try {
+    await t.assert.rejects(build, (err) => err.message.includes('refused: lib/evil/src/Evil.sol is a link out of the dependency lib/evil'))
+    vfs.unlink('/lib/evil/src/Evil.sol')
+    vfs.writeFile('/lib/evil/src/Evil.sol', 'contract Evil {}\n')
+    t.assert.deepEqual([...(await build()).sources.keys()].toSorted(), ['lib/evil/src/E.sol', 'lib/evil/src/Evil.sol', 'src/A.sol'])
+  } finally {
+    console.warn = warn
+  }
+})
