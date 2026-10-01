@@ -1,57 +1,23 @@
 import { test } from 'node:test'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { compress } from '@preventive/archive/compression.js'
 import { pack } from '@preventive/archive/tar.js'
 
 import { buildGitHubBundle } from '../stasis/src/vfs-bundle.js'
+import { fakeClient, json, lockfile } from './vfs-bundle-github.helper.js'
 
 // @exodus/stasis/vfs-bundle's buildGitHubBundle over a fake @preventive/upstream/github.js client
 // serving a repo held in memory: nothing is fetched, and every lockfile here locks no registry package.
 
 const GITHUB = 'ExodusOSS/example'
 const SHA = 'a'.repeat(40)
-const lockfile = (...importers) => ["lockfileVersion: '9.0'", '', 'settings:', '  autoInstallPeers: true', '  excludeLinksFromLockfile: false', '', 'importers:', '', ...importers.map((id) => `  ${id}: {}`), ''].join('\n')
-const json = (value) => `${JSON.stringify(value)}\n`
-const encoder = new TextEncoder()
-
-// A gzipped tarball of `files` under `dir`, as GitHub's: one top directory named for the tree. A
-// `{ symlink }` value is a link to that target.
-const tarballOf = (files, dir = '') => {
-  const prefix = dir ? `${dir}/` : ''
-  const entries = [{ name: 'tree-id/', type: 'directory' }]
-  for (const [path, value] of Object.entries(files)) {
-    if (!path.startsWith(prefix)) continue
-    const name = `tree-id/${path.slice(prefix.length)}`
-    entries.push(typeof value === 'string' ? { name, data: encoder.encode(value) } : { name, type: 'symlink', linkname: value.symlink })
-  }
-  return compress(pack(entries), 'gzip')
-}
-
-const fakeClient = (files) => {
-  const calls = []
-  return {
-    calls,
-    async listRepoDir({ repo, sha, path }) {
-      calls.push(['listRepoDir', repo, sha, path])
-      const names = Object.keys(files).filter((f) => f.startsWith(`${path}/`)).map((f) => f.slice(path.length + 1))
-      // As upstream refuses a path that is no directory in git (a symlink, or under one).
-      if (names.length === 0) throw new Error(`listRepoDir: ${repo}@${sha} has no directory at ${path}`)
-      return names.map((name) => (name.includes('/') ? { path: name.split('/')[0], type: 'tree' } : { path: name, type: 'blob' }))
-    },
-    async getRepoTreeId({ repo, sha, path }) {
-      calls.push(['getRepoTreeId', repo, sha, path])
-      return `tree:${path}`
-    },
-    async getRepoTreeTarball({ repo, tree }) {
-      calls.push(['getRepoTreeTarball', repo, tree])
-      return tarballOf(files, tree.slice('tree:'.length))
-    },
-    async getRepoTarball({ repo, sha }) {
-      calls.push(['getRepoTarball', repo, sha])
-      return tarballOf(files)
-    },
-  }
-}
+const here = dirname(fileURLToPath(import.meta.url))
 
 const build = (options) => buildGitHubBundle({ github: GITHUB, sha: SHA, packageManager: 'pnpm', ...options })
 
@@ -148,4 +114,118 @@ test('buildGitHubBundle resolves a directory that is a symlink in the repo throu
 test('buildGitHubBundle refuses a symlink out of the repo rather than resolving it inside', async (t) => {
   const files = { 'package.json': json({ name: 'p', version: '1.0.0' }), 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': '', 'up.js': { symlink: '../outside.js' } }
   await t.assert.rejects(build({ client: fakeClient(files), entries: ['src/a.js'] }), /symlink "up\.js" points outside the repo/u)
+})
+
+// A pnpm workspace as pnpm writes its lockfile: `packages/app` depends on its sibling `packages/p`
+// through a `link:`, which the tree lays out as node_modules/p -> ../../p. The lockfile locks no
+// registry package, so no tarball is fetched or read from a cache. Besides what the builds reach,
+// it holds what `stasis bundle` would read off a checkout: a `.git` pointer, a tsconfig chain, and
+// entries for every other language stasis bundles.
+const workspaceRepo = {
+  '.git': 'gitdir: ../elsewhere/.git\n',
+  'package.json': json({ name: 'root', version: '1.0.0', private: true }),
+  'pnpm-workspace.yaml': 'packages:\n  - packages/*\n',
+  'pnpm-lock.yaml': [
+    "lockfileVersion: '9.0'",
+    '',
+    'settings:',
+    '  autoInstallPeers: true',
+    '  excludeLinksFromLockfile: false',
+    '',
+    'importers:',
+    '',
+    '  .: {}',
+    '',
+    '  packages/app:',
+    '    dependencies:',
+    '      p:',
+    '        specifier: workspace:*',
+    '        version: link:../p',
+    '',
+    '  packages/p: {}',
+    '',
+  ].join('\n'),
+  'tsconfig.base.json': json({ compilerOptions: { baseUrl: '.', paths: { '@lib/*': ['packages/p/*'] } } }),
+  'packages/p/package.json': json({ name: 'p', version: '1.0.0', main: 'index.js' }),
+  'packages/p/index.js': 'export const x = 1\n',
+  'packages/p/util.ts': 'export const y: number = 2\n',
+  'packages/p/other.js': 'module.exports = 3\n',
+  'packages/app/package.json': json({ name: 'app', version: '1.0.0', dependencies: { p: 'workspace:*' } }),
+  'packages/app/tsconfig.json': json({ extends: '../../tsconfig.base.json' }),
+  'packages/app/src/entry.ts': "import { x } from 'p'\nimport { y } from '@lib/util.js'\nimport z from './lib.js'\nexport const sum: number = x + y + z\n",
+  'packages/app/src/lib.js': { symlink: '../../p/other.js' },
+  'packages/app/src/main.js': "const { x } = require('p')\nmodule.exports = x\n",
+  'packages/app/src/a.sol': 'pragma solidity ^0.8.0;\n',
+  'packages/app/src/a.rs': 'fn main() {}\n',
+  'packages/app/src/a.php': '<?php\n',
+  'packages/app/src/a.sh': 'echo hi\n',
+}
+
+// What the child builds from workspaceRepo: the State path (the Node resolver, tsc's mapping through
+// the tsconfig chain, every bucket's package.json) and the field-resolver path, each of them
+// reading the project and its tree through the Vfs host alone.
+const workspaceBuilds = {
+  typescript: { directory: 'packages/app', entries: ['src/entry.ts'], typescript: true, packageJSON: true },
+  mainFields: { entries: ['packages/app/src/main.js'], mainFields: ['main'], packageJSON: true },
+}
+// Entries of every other language `stasis bundle` takes, and a directory (Solidity's), refused.
+const otherLanguages = ['src/a.sol', 'src/a.rs', 'src/a.php', 'src/a.sh', 'src']
+
+test('buildGitHubBundle reads nothing from disk: the repo, its tree and every file come from memory', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'stasis-vfs-bundle-github-'))
+  t.after(() => rm(tmp, { recursive: true, force: true }))
+  // node:fs is wrapped before stasis is loaded, so every read through it is seen; a first round
+  // loads every module the builds do (oxc-parser among them), so what the second reads is data.
+  const script = `
+    import fs from 'node:fs'
+    import { syncBuiltinESMExports } from 'node:module'
+    const read = new Set()
+    const spy = (obj, name) => {
+      const real = obj[name]
+      obj[name] = Object.assign(function (p, ...rest) {
+        read.add(String(p))
+        return real.call(this, p, ...rest)
+      }, real)
+    }
+    for (const name of ['accessSync', 'existsSync', 'lstatSync', 'openSync', 'opendirSync', 'readFileSync', 'readdirSync', 'readlinkSync', 'realpathSync', 'statSync']) spy(fs, name)
+    for (const name of ['access', 'lstat', 'open', 'opendir', 'readFile', 'readdir', 'readlink', 'realpath', 'stat']) spy(fs.promises, name)
+    syncBuiltinESMExports()
+    // The watch sees a read: a control, so an empty result below means none, not a blind watch.
+    fs.statSync(process.cwd())
+    const watching = read.has(process.cwd())
+    read.clear()
+    const { buildGitHubBundle } = await import(${JSON.stringify(pathToFileURL(join(here, '..', 'stasis', 'src', 'vfs-bundle.js')).href)})
+    const { fakeClient } = await import(${JSON.stringify(pathToFileURL(join(here, 'vfs-bundle-github.helper.js')).href)})
+    const files = ${JSON.stringify(workspaceRepo)}
+    const build = (options) => buildGitHubBundle({ github: ${JSON.stringify(GITHUB)}, sha: ${JSON.stringify(SHA)}, packageManager: 'pnpm', client: fakeClient(files), ...options })
+    const round = async () => {
+      const built = {}
+      for (const [name, options] of Object.entries(${JSON.stringify(workspaceBuilds)})) {
+        const { bundle } = await build(options)
+        built[name] = { sources: [...bundle.sources.keys()], repo: { ...bundle.repo } }
+      }
+      const refused = {}
+      for (const entry of ${JSON.stringify(otherLanguages)}) {
+        refused[entry] = await build({ directory: 'packages/app', entries: [entry] }).then(() => null, (error) => error.message)
+      }
+      return { built, refused }
+    }
+    await round()
+    read.clear()
+    const results = await round()
+    fs.writeFileSync(${JSON.stringify(join(tmp, 'out.json'))}, JSON.stringify({ ...results, watching, read: [...read] }))
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: tmp })
+  const stderr = []
+  child.stderr.on('data', (chunk) => stderr.push(chunk))
+  const [status] = await once(child, 'close')
+  t.assert.equal(status, 0, `stderr: ${Buffer.concat(stderr).toString('utf8')}`)
+  const { built, refused, watching, read } = JSON.parse(await readFile(join(tmp, 'out.json'), 'utf8'))
+  t.assert.equal(watching, true, 'the watch on node:fs sees reads')
+  t.assert.deepEqual(read, [], 'nothing on disk is read')
+  t.assert.deepEqual(built.typescript.sources.toSorted(), ['packages/app/package.json', 'packages/app/src/entry.ts', 'packages/p/index.js', 'packages/p/other.js', 'packages/p/package.json', 'packages/p/util.ts'], 'the link, the symlink and tsc\'s mapping resolve in the Vfs')
+  t.assert.deepEqual(built.typescript.repo, { github: GITHUB, root: true, commit: SHA })
+  t.assert.deepEqual(built.mainFields.sources.toSorted(), ['packages/app/node_modules/p/index.js', 'packages/app/node_modules/p/package.json', 'packages/app/package.json', 'packages/app/src/main.js'], 'the tree is read in place')
+  t.assert.deepEqual(built.mainFields.repo, { github: GITHUB, root: true, commit: SHA })
+  for (const entry of otherLanguages) t.assert.match(refused[entry] ?? '', /only JS bundles are built from a lockfile/u, entry)
 })
