@@ -232,6 +232,23 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   against `entries`.
 - `executable` mirrors the lockfile's (see "Executable files"), restricted to the
   files that bundle carries — in a split layout each half lists only its own.
+- `repo` (optional, right after `config`) records where the bundle was built:
+  `{ "github": "owner/name", "directory": "packages/app", "commit": "<sha>" }`.
+  Every field is optional and is validated only when present:
+  - `github` must be a valid GitHub `owner/name`. The owner is 1–39 alphanumerics
+    or single inner hyphens. The name is 1–100 characters of `[A-Za-z0-9._-]` and
+    can't be `.` or `..`.
+  - `directory` must be a string: the bundle root's repo-relative POSIX path, or
+    `""` at the repository root. It can't be absolute, escape the repository, or
+    end with `/`.
+  - `commit` must be a full lowercase git object id (a 40-hex SHA-1 or a 64-hex
+    SHA-256).
+
+  Unknown keys and invalid values are rejected on both serialize and parse. The
+  field is **purely informational**: it is never attested, never written to the
+  lockfile, and ignored by every verification. On a merge (`stasis bundle --add`,
+  `stasis add`), the incoming bundle's `repo` wins; when the incoming bundle has
+  none, the existing one is kept.
 
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-relative
 path, with no `entries`/`modules`/`formats`/`imports` — is still accepted by
