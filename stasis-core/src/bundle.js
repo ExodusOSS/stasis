@@ -232,9 +232,13 @@ export class Bundle {
     const { modules, sources } = this.#groupedFromModules()
     const formats = fileMapToObject(this.formats)
     const imports = fileMapToObject(this.imports)
+    const full = this.config.scope === 'full'
     const data = { version: VERSION, config: this.config }
-    if (this.config.scope === 'full') Object.assign(data, { entries, sources })
-    Object.assign(data, { modules, formats, imports })
+    if (full) data.entries = entries
+    // Per-file formats precede the file contents (sources, then modules).
+    data.formats = formats
+    if (full) data.sources = sources
+    Object.assign(data, { modules, imports })
     const executable = serializeExecutable(this.executable, {
       what: 'bundle', modules: this.modules, formats: this.formats, scope: this.config.scope,
     })

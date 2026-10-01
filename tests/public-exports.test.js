@@ -443,6 +443,24 @@ test('Bundle.serialize round-trip preserves entries, modules, formats, imports',
   t.assert.equal(parsed.imports.get('*').get('src/a.js').get('./b.js'), 'src/b.js')
 })
 
+test('Bundle.serialize writes formats before the file contents (sources, modules)', (t) => {
+  const modules = new Map([
+    ['.', { name: 'x', version: '1.0.0', files: { 'src/a.js': 'export const x = 1\n' } }],
+    ['node_modules/w', { name: 'w', version: '1.0.0', files: { 'i.js': 'export const y = 2\n' } }],
+  ])
+  const formats = new Map([['src/a.js', 'module'], ['node_modules/w/i.js', 'module']])
+  const full = new Bundle({ config: { scope: 'full' }, entries: new Set(['src/a.js']), modules, formats })
+  t.assert.deepEqual(Object.keys(JSON.parse(full.serialize())),
+    ['version', 'config', 'entries', 'formats', 'sources', 'modules', 'imports'])
+
+  const nm = new Bundle({
+    config: { scope: 'node_modules' },
+    modules: new Map([...modules].filter(([dir]) => dir !== '.')),
+    formats: new Map([['node_modules/w/i.js', 'module']]),
+  })
+  t.assert.deepEqual(Object.keys(JSON.parse(nm.serialize())), ['version', 'config', 'formats', 'modules', 'imports'])
+})
+
 test('Bundle round-trip carries code and resources side-by-side in one bundle', (t) => {
   // The core promise of the collapse: a single bundle holds code (raw UTF-8),
   // 'resource' (raw UTF-8, e.g. an SVG), and 'resource:base64' (base64-encoded
