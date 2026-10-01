@@ -232,15 +232,19 @@ export class Bundle {
     const { modules, sources } = this.#groupedFromModules()
     const formats = fileMapToObject(this.formats)
     const imports = fileMapToObject(this.imports)
+    const full = this.config.scope === 'full'
     const data = { version: VERSION, config: this.config }
-    if (this.config.scope === 'full') Object.assign(data, { entries, sources })
-    Object.assign(data, { modules, formats, imports })
+    if (full) data.entries = entries
+    Object.assign(data, { formats, imports })
     const executable = serializeExecutable(this.executable, {
       what: 'bundle', modules: this.modules, formats: this.formats, scope: this.config.scope,
     })
     if (executable !== undefined) data.executable = executable
-    // Canonicalized like every sorted field above, so a parsed artifact's order can't leak into the bytes.
+    // Canonicalized like every other sorted field, so a parsed artifact's order can't leak into the bytes.
     if (this.reason !== undefined) data.reason = mergeReason(this.reason, undefined)
+    // File contents are written last, after every other key: sources, then modules.
+    if (full) data.sources = sources
+    data.modules = modules
     return JSON.stringify(data, undefined, 2)
   }
 
