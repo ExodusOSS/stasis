@@ -82,6 +82,9 @@ const REPO_FIELDS = {
   commit: (v) => typeof v === 'string' && GIT_SHA.test(v),
 }
 
+// Whether `value` is valid for the `repo` block's `key` (for producers that want to drop, not throw).
+export const isValidRepoField = (key, value) => Object.hasOwn(REPO_FIELDS, key) && REPO_FIELDS[key](value)
+
 // Validate the informational `repo` block; each field is optional. Returned in canonical key order.
 const normalizeRepo = (repo) => {
   if (repo === undefined) return undefined

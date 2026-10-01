@@ -249,6 +249,17 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   `stasis add`), the incoming bundle's `repo` wins; when the incoming bundle has
   none, the existing one is kept.
 
+  Bundles written by `stasis run` (and the bundler plugins), `stasis bundle`, and
+  `stasis add` fill in `github` and `directory` automatically. They come from the
+  nearest `package.json` at or above the bundle root that declares a `repository`:
+  its GitHub URL or `github:`/`owner/name` shorthand, and its
+  `repository.directory` combined with the bundle root's path below that
+  `package.json`. When no `package.json` declares one, stasis falls back on a
+  best-effort basis to the `[remote "origin"]` url in `.git/config` at the work
+  tree root. If a `package.json` names a non-GitHub repository, no `repo` is
+  recorded. A detected value that the rules above would reject is left out
+  instead of failing the write. `commit` is never detected.
+
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-relative
 path, with no `entries`/`modules`/`formats`/`imports` — is still accepted by
 **offline tooling** (`stasis extract`, `stasis diff`, `stasis audit`,

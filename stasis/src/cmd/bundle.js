@@ -13,7 +13,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
+import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import {
   SOLIDITY_PACKAGE_MANIFESTS,
@@ -1192,6 +1192,12 @@ export async function bundleCommand({ cwd = process.cwd(), env = process.env, en
   } else {
     bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   }
+
+  // Informational origin (never in the lockfile). A State-built bundle already carries its own,
+  // detected at the State root its paths are relative to (which may sit above cwd); the others are
+  // rooted at cwd: merge into a repo-only bundle, which keeps a builder's own repo (`merge` prefers the
+  // incoming one). Stamped before an --add merge, which keeps the existing one when undetectable.
+  if (bundle.repo === undefined) bundle = new Bundle({ config: bundle.config, repo: detectRepo(resolve(cwd)) }).merge(bundle)
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.
   const outAbs = target === '-' ? undefined : resolve(cwd, target)

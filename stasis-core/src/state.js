@@ -13,7 +13,7 @@ import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
 import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, erasedTypeScriptFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isNativeArtifact, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
-import { readModuleManifest } from './bundle-util.js'
+import { detectRepo, readModuleManifest } from './bundle-util.js'
 import corePackage from './package.cjs'
 
 // Destructure off the namespace: captures the real fns at eval time, so writes survive --mock's
@@ -132,6 +132,9 @@ export class State {
   #lastUnifiedBundle = null
   #lastCodeBundle = null
   #lastResourcesBundle = null
+  // detectRepo(this.root), memoized by #repo.
+  #repoDetected = false
+  #repoValue
 
   // Options: `preload` (the unique preload State) and `parent` (run as a sidecar sharing the
   // parent's hashes/entries/modules, with its own sources/formats/imports/resources and bundle).
@@ -1448,6 +1451,17 @@ export class State {
     return out ?? this.formats
   }
 
+  // Informational `repo` block for written bundles (package.json `repository`, else git remote),
+  // detected once per State and lazily: only a bundle-producing path reads it. Not attested, never
+  // in the lockfile.
+  get #repo() {
+    if (!this.#repoDetected) {
+      this.#repoValue = detectRepo(this.root)
+      this.#repoDetected = true
+    }
+    return this.#repoValue
+  }
+
   get sourceBundle() {
     // One bundle holds code + resources, with `formats` tagging which; the key sets must be
     // disjoint, asserted so an overlap fails locally rather than silently.
@@ -1466,6 +1480,7 @@ export class State {
       imports: this.imports,
       executable: this.#bundleExecutable(modules, formats),
       reason: this.#bundleReason(contents.keys()),
+      repo: this.#repo,
     })
   }
 
@@ -1492,6 +1507,7 @@ export class State {
       imports: this.imports,
       executable: this.#bundleExecutable(modules, codeFormats),
       reason: this.#bundleReason(this.sources.keys()),
+      repo: this.#repo,
     })
   }
 
@@ -1510,6 +1526,7 @@ export class State {
       imports: new Map(),
       executable: this.#bundleExecutable(modules, resourceFormats),
       reason: this.#bundleReason(this.resources.keys()),
+      repo: this.#repo,
     })
   }
 
