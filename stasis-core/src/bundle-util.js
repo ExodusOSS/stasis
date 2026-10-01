@@ -115,6 +115,20 @@ const readJsonReal = (file) => {
   }
 }
 
+// The package dir a GitHub `homepage` like `https://github.com/o/n/tree/<branch>/<dir>#readme`
+// points at, when it names the `github` repo (case-insensitive); else undefined. The branch is taken
+// as one path segment.
+export function githubHomepageDirectory(homepage, github) {
+  if (typeof homepage !== 'string') return undefined
+  const match = /^https?:\/\/(?:www\.)?github\.com\/([^/]+\/[^/]+)\/tree\/[^/#?]+\/([^#?]+)/iu.exec(homepage.trim())
+  if (!match || match[1].toLowerCase() !== github.toLowerCase()) return undefined
+  try {
+    return decodeURIComponent(match[2])
+  } catch {
+    return undefined
+  }
+}
+
 // `base` (a repo-relative dir) joined with the POSIX `rel` below it, normalized ('' is the repo
 // root); undefined when the bundle format would reject it (escaping the repo).
 const joinRepoPath = (base, rel) => {
@@ -144,7 +158,8 @@ function gitHeadCommit(gitDir) {
 // 1. git: `github` from that root's `.git/config` origin remote, `directory` from `dir`'s path below
 //    it, `commit` from HEAD (git never runs; only `.git` files are read);
 // 2. else the nearest package.json on the way up declaring a `repository`: `github` from its
-//    URL/shorthand, `directory` from `repository.directory` plus `dir`'s path below it (no commit).
+//    URL/shorthand, `directory` from `repository.directory` (else a GitHub tree `homepage` of that
+//    repo) plus `dir`'s path below it (no commit).
 //    The first `repository` found is authoritative, even a non-GitHub one.
 // Every value is held to the bundle format's validation. Undefined when neither names a GitHub repo.
 export function detectRepo(dir) {
@@ -153,11 +168,13 @@ export function detectRepo(dir) {
   for (let cursor = start; ; cursor = dirname(cursor)) {
     const rel = toPosix(relative(cursor, start))
     if (pkg === null) {
-      const repository = readJsonReal(join(cursor, 'package.json'))?.repository
+      const { repository, homepage } = readJsonReal(join(cursor, 'package.json')) ?? {}
       const url = typeof repository === 'string' ? repository : repository?.url
       if (typeof url === 'string') {
         const github = parseGithubRepository(url)
-        pkg = github ? stripUndefined({ github, directory: joinRepoPath(repository.directory, rel) }) : undefined
+        // `repository.directory` is often unset; a GitHub tree `homepage` commonly carries it instead.
+        const base = typeof repository.directory === 'string' ? repository.directory : githubHomepageDirectory(homepage, github ?? '')
+        pkg = github ? stripUndefined({ github, directory: joinRepoPath(base, rel) }) : undefined
       }
     }
     const gitDir = join(cursor, '.git')

@@ -6,7 +6,7 @@ import { brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { addCommand } from '@exodus/stasis-core/add'
-import { detectRepo, gitOriginUrl, parseGithubRepository } from '@exodus/stasis-core/bundle-util'
+import { detectRepo, githubHomepageDirectory, gitOriginUrl, parseGithubRepository } from '@exodus/stasis-core/bundle-util'
 import { State } from '@exodus/stasis-core/state'
 import { bundleCommand } from '../stasis/src/cmd/bundle.js'
 
@@ -174,4 +174,32 @@ test('stasis bundle of JS from a workspace subdir records the State root, which 
   const bundle = JSON.parse(brotliDecompressSync(readFileSync(join(a, 'out.br'))).toString('utf8'))
   t.assert.deepEqual(bundle.entries, ['packages/a/index.js'])
   t.assert.deepEqual(bundle.repo, { github: 'o/n', directory: '' })
+}))
+
+test('githubHomepageDirectory reads the dir of a GitHub tree homepage for the same repo', (t) => {
+  t.assert.equal(githubHomepageDirectory('https://github.com/a/g/tree/master/c/d', 'a/g'), 'c/d')
+  t.assert.equal(githubHomepageDirectory('https://github.com/A/G/tree/main/c/d/#readme', 'a/g'), 'c/d/')
+  t.assert.equal(githubHomepageDirectory('https://github.com/a/g/tree/main/with%20space', 'a/g'), 'with space')
+  t.assert.equal(githubHomepageDirectory('https://github.com/a/g/tree/main/c', 'a/other'), undefined, 'another repo')
+  t.assert.equal(githubHomepageDirectory('https://github.com/a/g#readme', 'a/g'), undefined, 'the repo root')
+  t.assert.equal(githubHomepageDirectory('https://example.com/a/g/tree/main/c', 'a/g'), undefined)
+  t.assert.equal(githubHomepageDirectory(undefined, 'a/g'), undefined)
+})
+
+test('detectRepo takes directory from homepage when repository.directory is unset', withTmp((t, tmp) => {
+  mkdirSync(join(tmp, '.git'))
+  const pkg = join(tmp, 'c', 'd')
+  mkdirSync(join(pkg, 'src'), { recursive: true })
+  writeJson(join(pkg, 'package.json'), {
+    repository: 'git+https://github.com/a/g.git', homepage: 'https://github.com/a/g/tree/master/c/d#readme',
+  })
+  t.assert.deepEqual(detectRepo(pkg), { github: 'a/g', directory: 'c/d' })
+  t.assert.deepEqual(detectRepo(join(pkg, 'src')), { github: 'a/g', directory: 'c/d/src' })
+
+  writeJson(join(pkg, 'package.json'), {
+    repository: { url: 'github:a/g', directory: 'explicit' }, homepage: 'https://github.com/a/g/tree/master/c/d',
+  })
+  t.assert.deepEqual(detectRepo(pkg), { github: 'a/g', directory: 'explicit' }, 'repository.directory wins')
+  writeJson(join(pkg, 'package.json'), { repository: 'a/g', homepage: 'https://github.com/x/y/tree/master/c/d' })
+  t.assert.deepEqual(detectRepo(pkg), { github: 'a/g', directory: '' }, 'a homepage for another repo is ignored')
 }))

@@ -260,7 +260,10 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
      at or above the bundle root that declares a `repository`, up to the work tree
      root. `github` comes from its GitHub URL or `github:`/`owner/name` shorthand,
      and `directory` from `repository.directory` combined with the bundle root's
-     path below that `package.json`. No `commit` is recorded. A `package.json`
+     path below that `package.json`. When `repository.directory` is unset, a GitHub
+     `homepage` of the same repository such as
+     `https://github.com/owner/name/tree/main/packages/app#readme` supplies it
+     (`packages/app`; the branch is taken as one path segment). No `commit` is recorded. A `package.json`
      naming a non-GitHub repository records nothing.
 
   A detected value that the rules above would reject is left out instead of
