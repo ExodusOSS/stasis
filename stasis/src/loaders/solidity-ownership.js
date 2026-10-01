@@ -99,9 +99,11 @@ export function readUtf8OrNull(file, label) {
 // --- .gitmodules ------------------------------------------------------------------------------
 
 // The submodules of the project at `baseDir`, `{ path, url, branch }` (`url` and `branch` when set),
-// from its `.gitmodules` as @preventive/lockfile reads it (as git does, refusing what git reads two
-// ways). A url is taken as written (`checkUrls: false`): relative to the superproject's remote, a
-// path or none, as it only names a GitHub submodule's bucket. A refusal names the file.
+// from its `.gitmodules` as @preventive/lockfile reads it (as git does). A url is taken as written
+// (`checkUrls: false`): relative to the superproject's remote, a path or none, as it only names a
+// GitHub submodule's bucket. A file the library refuses -- something git reads two ways, or that it
+// doesn't check (`update = none`, `active`, a `[core]` section) -- never fails the bundle: it's
+// warned about and read submodule by submodule (gitmodulesLeniently).
 export function readGitmodules(baseDir) {
   const text = readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules')
   if (text === null) return []
@@ -109,8 +111,70 @@ export function readGitmodules(baseDir) {
     return Object.values(parseGitmodules(text, { checkUrls: false }))
   } catch (err) {
     if (!(err instanceof LockfileError)) throw err
-    throw new Error(`.gitmodules: ${err.message}`, { cause: err })
+    const { submodules, notes } = gitmodulesLeniently(text)
+    if (!notes.some((note) => note.startsWith(`${err.message};`))) notes.unshift(`${err.message}; reading it submodule by submodule`)
+    for (const note of notes) console.warn(`[loader.solidity] .gitmodules: ${note}`)
+    return submodules
   }
+}
+
+// The keys a submodule is read for; past `path`, they're dropped in this order to read the rest.
+const SUBMODULE_KEYS = new Set(['path', 'url', 'branch'])
+const DROPPABLE = ['branch', 'url']
+
+// `.gitmodules` text the library refused as a whole, read a `[submodule "name"]` section at a time:
+// its first `path`, `url` and `branch` (the first, as git's submodule commands read it; the
+// sections of one name merged), each submodule then read by the library alone. One that still
+// doesn't read loses its branch, then its url, then is skipped. `notes` say what was dropped.
+function gitmodulesLeniently(text) {
+  const sections = new Map() // the name, as written in the header -> Map<key, its lines>
+  const notes = []
+  let keys = null // the current section's, when it's a submodule's
+  let lines = null // the kept key's lines, while it runs on (a line ending in `\`)
+  let continued = false
+  for (let line of text.split(/\r?\n/u)) {
+    const runsOn = continued
+    continued = /(?:^|[^\\])(?:\\\\)*\\$/u.test(line)
+    if (runsOn) {
+      lines?.push(line)
+      continue
+    }
+    lines = null
+    const header = /^\s*\[\s*([\w.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/u.exec(line)
+    if (header) {
+      const section = header[1].toLowerCase()
+      const name = section === 'submodule' ? header[2] : undefined
+      if (name === undefined && section.startsWith('submodule.')) notes.push(`[${header[1]}], a section git reads with its name lowercased; skipping it`)
+      keys = name === undefined ? null : (sections.get(name) ?? sections.set(name, new Map()).get(name))
+      line = line.slice(header[0].length) // a key may follow on the line
+    }
+    const key = keys && /^\s*([A-Za-z][\w-]*)\s*(?:=|$)/u.exec(line)?.[1].toLowerCase()
+    if (SUBMODULE_KEYS.has(key) && !keys.has(key)) keys.set(key, (lines = [line]))
+  }
+  const submodules = []
+  for (const [name, kept] of sections) {
+    const read = () => Object.values(parseGitmodules([`[submodule "${name}"]`, ...[...kept.values()].flat(), ''].join('\n'), { checkUrls: false }))
+    let first = null
+    const dropped = []
+    for (;;) {
+      try {
+        submodules.push(...read())
+        if (first !== null) notes.push(`${first.message}; ignoring its ${dropped.join(' and ')}`)
+        break
+      } catch (err) {
+        if (!(err instanceof LockfileError)) throw err
+        first ??= err
+        const next = DROPPABLE.find((key) => kept.has(key))
+        if (next === undefined) {
+          notes.push(`${first.message}; skipping the submodule`)
+          break
+        }
+        kept.delete(next)
+        dropped.push(next)
+      }
+    }
+  }
+  return { submodules, notes }
 }
 
 // --- Ownership --------------------------------------------------------------------------------

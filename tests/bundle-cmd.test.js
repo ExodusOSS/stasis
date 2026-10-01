@@ -965,13 +965,28 @@ test('buildSolidityBundle never reads the process\'s stdin as a config, a depend
   await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: 'remappings.txt: not a regular file' })
 }))
 
-test('buildSolidityBundle fails on a .gitmodules git reads two ways, naming it, and takes a submodule\'s url as written', withTmp(async (t, tmp) => {
-  writeProject(tmp, { 'foundry.toml': '[profile.default]\n', 'src/A.sol': 'import "x/X.sol";\n', 'lib/x/src/X.sol': 'contract X {}\n' })
-  writeFileSync(join(tmp, '.gitmodules'), '[submodule "x"]\n\tpath = lib/x\n\tpath = lib/y\n\turl = https://github.com/o/x\n')
-  await t.assert.rejects(
+test('buildSolidityBundle never fails on a .gitmodules the library refuses, and takes a submodule\'s url as written', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    'foundry.toml': '[profile.default]\n',
+    'src/A.sol': 'import "x/X.sol";\nimport "../vendor/evil/E.sol";\n',
+    'lib/x/src/X.sol': 'contract X {}\n',
+    'secret/K.sol': 'contract K {}\n',
+    // git registers vendor/evil (`update = none` makes git submodule update skip it); stasis reads
+    // it submodule by submodule, and vendor/evil stays a dependency, its link out refused.
+    '.gitmodules': '[core]\n\tbare = false\n[submodule "vendor/evil"]\n\tpath = vendor/evil\n\turl = https://github.com/e/evil\n\tupdate = none\n\tactive = true\n',
+  })
+  mkdirSync(join(tmp, 'vendor/evil'), { recursive: true })
+  symlinkSync('../../secret/K.sol', join(tmp, 'vendor/evil/E.sol'))
+  const { lines } = await captureStderr(() => t.assert.rejects(
     () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
-    { message: ".gitmodules: x.path: twice, of which git's submodule commands read the first and git config the last, at line 3" },
-  )
+    (err) => err.message.includes('refused: vendor/evil/E.sol is a link out of the dependency vendor/evil'),
+  ))
+  t.assert.ok(lines.includes('[loader.solidity] .gitmodules: a section of [core] where .gitmodules has [submodule "name"] alone, at line 1; reading it submodule by submodule'), lines.join('\n'))
+  rmSync(join(tmp, 'vendor/evil/E.sol'))
+  writeFileSync(join(tmp, 'vendor/evil/E.sol'), 'contract E {}\n')
+  const { result: named } = await captureStderr(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }))
+  t.assert.equal(named.modules.get('vendor/evil').name, 'e/evil')
+  writeFileSync(join(tmp, 'src/A.sol'), 'import "x/X.sol";\n')
   // A url relative to the superproject's remote, or none, still makes lib/x a submodule: a
   // dependency, but not one with a GitHub name to bucket it by.
   for (const url of ['\turl = ../x.git\n', '']) {
