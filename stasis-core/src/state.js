@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Config } from './config.js'
-import { Bundle } from './bundle.js'
+import { Bundle, mergeRepo } from './bundle.js'
 import { Lockfile } from './lockfile.js'
 import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
@@ -135,8 +135,10 @@ export class State {
   #lastUnifiedBundle = null
   #lastCodeBundle = null
   #lastResourcesBundle = null
-  // { value: detectRepo(this.root, this.#host) }, filled lazily by #repo.
-  #repoCache
+  // Lazy `{ value: detectRepo(this.root, this.#host) }`.
+  #detectedRepoCache
+  // Half ('code' | 'resources') -> `repo` of the bundle absorbed there for adding to.
+  #absorbedRepos = new Map()
 
   // Options: `preload` (the unique preload State) and `parent` (run as a sidecar sharing the
   // parent's hashes/entries/modules, with its own sources/formats/imports/resources and bundle).
@@ -199,6 +201,7 @@ export class State {
           this.imports = bundle.imports
           this.#absorbExecutable(bundle)
           this.#seedReasonFromBundle(bundle)
+          this.#absorbRepo('code', bundle)
           if (this.config.frozenBundle) {
             this.#bundleSources = new Set(this.sources.keys())
             this.#bundleResources = new Set(this.resources.keys())
@@ -429,6 +432,7 @@ export class State {
     this.imports = bundle.imports
     this.#absorbExecutable(bundle)
     this.#seedReasonFromBundle(bundle)
+    this.#absorbRepo('code', bundle)
     if (this.config.frozenBundle) {
       // Snapshot before addFile/addImport mutate the live maps; imports is deep-cloned because
       // this.imports shares bundle.imports's nested Maps.
@@ -541,6 +545,7 @@ export class State {
     }
     this.#absorbExecutable(bundle)
     this.#seedReasonFromBundle(bundle)
+    this.#absorbRepo('resources', bundle)
     if (this.config.frozenBundle) {
       // Extend the frozen snapshot, init lazily: resources-only deployments are legal, so
       // bundleFile may not have populated these.
@@ -1464,10 +1469,19 @@ export class State {
     return out ?? this.formats
   }
 
-  // Informational `repo` block for written bundles, detected once and lazily (only bundle-producing
-  // paths read it). Not attested, never in the lockfile.
-  get #repo() {
-    return (this.#repoCache ??= { value: detectRepo(this.root, this.#host) }).value
+  #absorbRepo(half, bundle) {
+    this.#absorbedRepos.set(half, this.#absorbedRepos.has(half) ? mergeRepo(this.#absorbedRepos.get(half), bundle.repo) : bundle.repo)
+  }
+
+  get #detectedRepo() {
+    return (this.#detectedRepoCache ??= { value: detectRepo(this.root, this.#host) }).value
+  }
+
+  // `repo` to write for a half: detected, merged with that half's absorbed one when adding to it.
+  #repoFor(half) {
+    if (!this.#absorbedRepos.has(half)) return this.#detectedRepo
+    const absorbed = this.#absorbedRepos.get(half)
+    return absorbed && mergeRepo(absorbed, this.#detectedRepo)
   }
 
   get sourceBundle() {
@@ -1488,7 +1502,7 @@ export class State {
       imports: this.imports,
       executable: this.#bundleExecutable(modules, formats),
       reason: this.#bundleReason(contents.keys()),
-      repo: this.#repo,
+      repo: this.#repoFor('code'),
     })
   }
 
@@ -1515,7 +1529,7 @@ export class State {
       imports: this.imports,
       executable: this.#bundleExecutable(modules, codeFormats),
       reason: this.#bundleReason(this.sources.keys()),
-      repo: this.#repo,
+      repo: this.#repoFor('code'),
     })
   }
 
@@ -1534,7 +1548,7 @@ export class State {
       imports: new Map(),
       executable: this.#bundleExecutable(modules, resourceFormats),
       reason: this.#bundleReason(this.resources.keys()),
-      repo: this.#repo,
+      repo: this.#repoFor('resources'),
     })
   }
 

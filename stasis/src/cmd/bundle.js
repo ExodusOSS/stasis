@@ -1119,7 +1119,7 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
 // A JS bundle from the lockfile of the project held in `vfs` alone (@exodus/stasis/vfs-bundle),
 // `cwd` a path there: buildBundle's JS options, resolved through the node_modules `packageManager`
 // would install, with nothing read from disk but tarballs and no EXODUS_STASIS_* setting read.
-// `repo`, the informational `{ github, directory, commit }`, is the Bundle's, over what is detected
+// `repo`, the informational `{ github, directory | root, commit }`, is the Bundle's, over what is detected
 // in the Vfs as `stasis bundle` detects it on disk.
 // -> { bundle: Bundle, lockfile: Lockfile, stats }
 export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, repo, ...options } = {}) {
@@ -1239,10 +1239,7 @@ export async function bundleCommand({ cwd = process.cwd(), env = process.env, en
     bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   }
 
-  // Informational origin (never in the lockfile). State-built bundles already carry the repo of the
-  // State root their paths are relative to (even when none was detected there: a cwd fallback would
-  // record a directory the State-root-relative paths are not below); other builders are rooted at
-  // cwd. detectRepo's result is pre-validated, so it is assigned directly.
+  // State-built bundles keep the State root's repo (no cwd fallback: their paths are relative to that root).
   const stateBuilt = kind === 'js' && !metro && mainFields === undefined
   if (!stateBuilt) bundle.repo ??= detectRepo(cwd)
 

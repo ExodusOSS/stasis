@@ -172,7 +172,7 @@ test('buildVfsBundle puts `repo` on the Bundle, never on its lockfile, over what
 
   // Detected in the Vfs, as `stasis bundle` detects it on disk, under what is given.
   const declared = project({ 'package.json': { name: 'p', version: '1.0.0', repository: 'github:ExodusOSS/stasis' }, 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': 'module.exports = 1\n' })
-  t.assert.deepEqual((await build({ vfs: declared, entries: ['src/a.js'] })).bundle.repo, { github: 'ExodusOSS/stasis', directory: '' })
-  t.assert.deepEqual((await build({ vfs: declared, entries: ['src/a.js'], mainFields: ['main'] })).bundle.repo, { github: 'ExodusOSS/stasis', directory: '' })
+  t.assert.deepEqual((await build({ vfs: declared, entries: ['src/a.js'] })).bundle.repo, { github: 'ExodusOSS/stasis', root: true })
+  t.assert.deepEqual((await build({ vfs: declared, entries: ['src/a.js'], mainFields: ['main'] })).bundle.repo, { github: 'ExodusOSS/stasis', root: true })
   t.assert.deepEqual((await build({ vfs: declared, entries: ['src/a.js'], repo })).bundle.repo, built.bundle.repo)
 })

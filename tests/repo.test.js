@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { brotliDecompressSync } from 'node:zlib'
+import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
 
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { addCommand } from '@exodus/stasis-core/add'
@@ -66,7 +66,7 @@ test('detectRepo reads package.json repository, combining its directory with a s
   mkdirSync(join(tmp, 'packages', 'b'), { recursive: true })
   writeJson(join(tmp, 'packages', 'b', 'package.json'), { name: 'b' })
 
-  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', directory: '' }, 'repo root: empty directory')
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', root: true }, 'repo root: root: true')
   t.assert.deepEqual(detectRepo(join(tmp, 'packages', 'a')), { github: 'o/n', directory: 'packages/a' })
   t.assert.deepEqual(detectRepo(join(tmp, 'packages', 'a', 'src')), { github: 'o/n', directory: 'packages/a/src' },
     'a subdir below the declaring package.json is combined with repository.directory')
@@ -78,7 +78,7 @@ test('detectRepo normalizes repository.directory and accepts the string shorthan
   writeJson(join(tmp, 'package.json'), { repository: { url: 'github:o/n', directory: './pkg/' } })
   t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', directory: 'pkg' })
   writeJson(join(tmp, 'package.json'), { repository: 'o/n' })
-  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', directory: '' })
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', root: true })
 }))
 
 test('detectRepo treats a non-GitHub package.json repository as authoritative', withTmp((t, tmp) => {
@@ -92,7 +92,7 @@ test('detectRepo prefers git over package.json, and only git yields commit', wit
   writeFileSync(join(tmp, '.git', 'HEAD'), `${SHA}\n`)
   writeJson(join(tmp, 'package.json'), { repository: { url: 'github:o/pkg', directory: 'elsewhere' } })
   mkdirSync(join(tmp, 'sub', 'dir'), { recursive: true })
-  t.assert.deepEqual(detectRepo(tmp), { github: 'o/git', directory: '', commit: SHA })
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/git', root: true, commit: SHA })
   t.assert.deepEqual(detectRepo(join(tmp, 'sub', 'dir')), { github: 'o/git', directory: 'sub/dir', commit: SHA })
 
   writeGitConfig(tmp, '[remote "upstream"]\n\turl = git@github.com:o/git.git\n')
@@ -106,7 +106,7 @@ test('detectRepo reads the commit from a branch ref, loose or packed', withTmp((
   writeGitConfig(tmp, ORIGIN('https://github.com/o/n'))
   const git = join(tmp, '.git')
   writeFileSync(join(git, 'HEAD'), 'ref: refs/heads/main\n')
-  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', directory: '' }, 'an unborn branch has no commit')
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', root: true }, 'an unborn branch has no commit')
 
   writeFileSync(join(git, 'packed-refs'), `# pack-refs with: peeled fully-peeled sorted\n${SHA2} refs/heads/main\n`)
   t.assert.equal(detectRepo(tmp).commit, SHA2, 'packed-refs')
@@ -142,7 +142,7 @@ test('stasis add records the detected repo', withTmp(async (t, tmp) => {
   writeFileSync(join(tmp, 'index.js'), 'export {}\n')
   addCommand({ cwd: tmp, entries: ['index.js'] })
   const bundle = Bundle.parse(brotliDecompressSync(readFileSync(join(tmp, 'stasis.code.br'))).toString('utf8'))
-  t.assert.deepEqual({ ...bundle.repo }, { github: 'o/n', directory: '' })
+  t.assert.deepEqual({ ...bundle.repo }, { github: 'o/n', root: true })
 }))
 
 test('State records repo in the bundle but not in the lockfile', withTmp((t, tmp) => {
@@ -173,7 +173,7 @@ test('stasis bundle of JS from a workspace subdir records the State root, which 
   await bundleCommand({ cwd: a, entries: ['index.js'], output: 'out.br', lockfile: undefined })
   const bundle = JSON.parse(brotliDecompressSync(readFileSync(join(a, 'out.br'))).toString('utf8'))
   t.assert.deepEqual(bundle.entries, ['packages/a/index.js'])
-  t.assert.deepEqual(bundle.repo, { github: 'o/n', directory: '' })
+  t.assert.deepEqual(bundle.repo, { github: 'o/n', root: true })
 }))
 
 test('githubHomepageDirectory reads the dir of a GitHub tree homepage for the same repo', (t) => {
@@ -201,7 +201,7 @@ test('detectRepo takes directory from homepage when repository.directory is unse
   })
   t.assert.deepEqual(detectRepo(pkg), { github: 'a/g', directory: 'explicit' }, 'repository.directory wins')
   writeJson(join(pkg, 'package.json'), { repository: 'a/g', homepage: 'https://github.com/x/y/tree/master/c/d' })
-  t.assert.deepEqual(detectRepo(pkg), { github: 'a/g', directory: '' }, 'a homepage for another repo is ignored')
+  t.assert.deepEqual(detectRepo(pkg), { github: 'a/g', root: true }, 'a homepage for another repo is ignored')
 }))
 
 test('detectRepo follows a linked worktree `.git` file to its git and common dirs', withTmp((t, tmp) => {
@@ -230,4 +230,86 @@ test('stasis bundle of JS does not fall back to a cwd repo below the State root'
   const bundle = JSON.parse(brotliDecompressSync(readFileSync(join(a, 'out.br'))).toString('utf8'))
   t.assert.deepEqual(bundle.entries, ['packages/a/index.js'])
   t.assert.equal(bundle.repo, undefined)
+}))
+
+test('State adding to a bundle keeps only repo fields that agree with detection', withTmp((t, tmp) => {
+  writeJson(join(tmp, 'package.json'), { name: 'app', version: '1.0.0' })
+  const writeExisting = (repo) =>
+    writeFileSync(join(tmp, 'stasis.code.br'), brotliCompressSync(new Bundle({ config: { scope: 'full' }, repo }).serialize()))
+  const written = () => JSON.parse(new State(tmp, { bundle: 'add', lock: 'replace', scope: 'full' }).sourceData).repo
+  const recorded = { github: 'o/n', root: true, commit: SHA }
+
+  mkdirSync(join(tmp, '.git')) // a work tree with no GitHub origin: nothing detected
+  writeExisting(recorded)
+  t.assert.equal(written(), undefined, 'undetected place: reset')
+
+  writeGitConfig(tmp, ORIGIN('git@github.com:o/n.git'))
+  writeFileSync(join(tmp, '.git', 'HEAD'), `${SHA}\n`)
+  writeExisting(recorded)
+  t.assert.deepEqual(written(), recorded, 'agreeing: kept')
+  writeFileSync(join(tmp, '.git', 'HEAD'), `${SHA2}\n`)
+  t.assert.deepEqual(written(), { github: 'o/n', root: true }, 'another commit: only the commit is dropped')
+  writeGitConfig(tmp, ORIGIN('git@github.com:o/other.git'))
+  t.assert.equal(written(), undefined, 'another repo: reset, not overwritten')
+  writeExisting(undefined)
+  t.assert.equal(written(), undefined, 'adding to a bundle without repo: not overwritten')
+
+  rmSync(join(tmp, 'stasis.code.br'))
+  t.assert.deepEqual(written(), { github: 'o/other', root: true, commit: SHA2 }, 'a fresh bundle records the detected repo')
+}))
+
+test('detectRepo turns a Windows-style repository.directory into a POSIX path', withTmp((t, tmp) => {
+  mkdirSync(join(tmp, '.git'))
+  writeJson(join(tmp, 'package.json'), { repository: { url: 'github:o/n', directory: 'packages\\a' } })
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', directory: 'packages/a' })
+  writeJson(join(tmp, 'package.json'), { repository: { url: 'github:o/n', directory: '..\\outside' } })
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n' }, 'an escaping one is dropped')
+}))
+
+test('both halves of a split bundle record the repo', withTmp(async (t, tmp) => {
+  writeGitConfig(tmp, ORIGIN('git@github.com:o/n.git'))
+  writeFileSync(join(tmp, '.git', 'HEAD'), `${SHA}\n`)
+  writeJson(join(tmp, 'package.json'), { name: 'app', version: '1.0.0' })
+  writeJson(join(tmp, 'stasis.config.json'), { bundleFile: 'code.br', resourcesBundleFile: 'res.br', resources: ['txt'] })
+  writeFileSync(join(tmp, 'index.js'), 'export {}\n')
+  writeFileSync(join(tmp, 'notes.txt'), 'hi\n')
+  const repo = { github: 'o/n', root: true, commit: SHA }
+  const read = (file) => Bundle.parse(brotliDecompressSync(readFileSync(join(tmp, file))).toString('utf8'))
+
+  addCommand({ cwd: tmp, entries: ['index.js', 'notes.txt'] })
+  t.assert.deepEqual({ ...read('code.br').repo }, repo, 'stasis add: code half')
+  t.assert.deepEqual({ ...read('res.br').repo }, repo, 'stasis add: resources half')
+
+  const state = new State(tmp, { bundle: 'replace', lock: 'replace', scope: 'full' })
+  t.assert.deepEqual({ ...state.codeBundle.repo }, repo, 'State: code half')
+  t.assert.deepEqual({ ...state.resourcesBundle.repo }, repo, 'State: resources half')
+}))
+
+test('detectRepo strips ./ and trailing slashes from repository.directory', withTmp((t, tmp) => {
+  mkdirSync(join(tmp, '.git'))
+  mkdirSync(join(tmp, 'sub'))
+  const dirOf = (directory, at = tmp) => {
+    writeJson(join(tmp, 'package.json'), { repository: { url: 'github:o/n', directory } })
+    return detectRepo(at)
+  }
+  for (const directory of ['./', '.', '', '/', 'a/../', './a/../', './/']) {
+    t.assert.deepEqual(dirOf(directory), { github: 'o/n', root: true }, JSON.stringify(directory))
+  }
+  t.assert.deepEqual(dirOf('./packages/a/'), { github: 'o/n', directory: 'packages/a' })
+  t.assert.deepEqual(dirOf('packages//a///'), { github: 'o/n', directory: 'packages/a' })
+  t.assert.deepEqual(dirOf('./', join(tmp, 'sub')), { github: 'o/n', directory: 'sub' })
+}))
+
+test('State adding to a split bundle merges each half with its own repo', withTmp((t, tmp) => {
+  writeGitConfig(tmp, ORIGIN('git@github.com:o/n.git'))
+  writeFileSync(join(tmp, '.git', 'HEAD'), `${SHA2}\n`)
+  writeJson(join(tmp, 'package.json'), { name: 'app', version: '1.0.0' })
+  writeJson(join(tmp, 'stasis.config.json'), { bundleFile: join(tmp, 'add-code.br'), resourcesBundleFile: join(tmp, 'add-res.br'), resources: ['txt'] })
+  const write = (file, repo) =>
+    writeFileSync(join(tmp, file), brotliCompressSync(new Bundle({ config: { scope: 'full' }, repo }).serialize()))
+  write('add-code.br', { github: 'o/n', root: true, commit: SHA }) // code from commit SHA
+  write('add-res.br', undefined) // resources from an undetected place
+  const state = new State(tmp, { bundle: 'add', lock: 'replace', scope: 'full' })
+  t.assert.deepEqual({ ...state.codeBundle.repo }, { github: 'o/n', root: true }, 'code: another commit drops just the commit')
+  t.assert.equal(state.resourcesBundle.repo, undefined, 'resources: its own (absent) repo is not overwritten')
 }))

@@ -238,16 +238,27 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   - `github` must be a valid GitHub `owner/name`. The owner is 1–39 alphanumerics
     or single inner hyphens. The name is 1–100 characters of `[A-Za-z0-9._-]` and
     can't be `.` or `..`.
-  - `directory` must be a string: the bundle root's repo-relative POSIX path, or
-    `""` at the repository root. It can't be absolute or escape the repository.
+  - `directory` must be a non-empty string: the bundle root's repo-relative POSIX
+    path, at most 1024 characters. It must be safe to use
+    unencoded in a GitHub URL (`https://github.com/<github>/tree/<ref>/<directory>`):
+    `/`-separated segments of `[A-Za-z0-9._~@+-]`, none empty, `.` or `..`. So it
+    is normalized, never absolute and never escapes the repository, and has no
+    backslash, drive prefix, space, `%`, `#`, `?` or `:`.
+  - `root` must be `true`: the bundle root is the repository root. It replaces
+    `directory` there (the two are exclusive), so a missing `directory` means
+    "unknown", never "the root".
   - `commit` must be a full lowercase git object id (a 40-hex SHA-1 or a 64-hex
     SHA-256).
 
   Unknown keys and invalid values are rejected on both serialize and parse. The
   field is **purely informational**: it is never attested, never written to the
-  lockfile, and ignored by every verification. On a merge (`stasis bundle --add`,
-  `stasis add`), the incoming bundle's `repo` wins; when the incoming bundle has
-  none, the existing one is kept.
+  lockfile, and ignored by every verification. Adding to an existing bundle
+  (`stasis add`, `stasis bundle --add`, `stasis run` with `bundle = add`) never
+  overwrites its `repo`: only the fields that agree between the existing bundle and
+  the new build survive, and none if `github` differs or the new build has none.
+  `root` follows the same rule as `directory`. For example, the same repository
+  and directory at a different commit keeps `github` and `directory` and drops
+  `commit`.
 
   Bundles written by `stasis run` (and the bundler plugins), `stasis bundle`, and
   `stasis add` fill in `repo` automatically, from git first:
@@ -266,8 +277,12 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
      (`packages/app`; the branch is taken as one path segment). No `commit` is recorded. A `package.json`
      naming a non-GitHub repository records nothing.
 
-  A detected value that the rules above would reject is left out instead of
-  failing the write.
+  At the repository root, detection records `root: true` rather than a
+  `directory`. A detected value that the rules above would reject is left out
+  instead of failing the write; a directory that isn't URL-safe therefore records
+  neither `directory` nor `root`. In a split layout (`resourcesBundleFile`), each half
+  records the origin of its own contents: a fresh write gives both the detected
+  `repo`, and adding to one half merges only that half's.
 
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-relative
 path, with no `entries`/`modules`/`formats`/`imports` — is still accepted by
