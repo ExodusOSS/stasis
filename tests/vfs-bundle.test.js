@@ -1,7 +1,7 @@
 import { after, before, describe, test } from 'node:test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { link, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -372,4 +372,27 @@ test('buildVfsBundle refuses layouts and options it cannot reproduce', async (t)
   await t.assert.rejects(build({ vfs: new Vfs(), entries: ['a.sol'] }), /^Error: buildVfsBundle: only JS bundles are built with pnpm$/u)
   await t.assert.rejects(build({ vfs: new Vfs(), entries: ['a.js'], metro: true, metroResolver: true, platforms: ['ios'] }), /^Error: buildVfsBundle: metroResolver is not supported/u)
   await t.assert.rejects(build({ entries: ['a.js'] }), /^TypeError: buildVfsBundle: vfs must be a @preventive\/vfs Vfs holding the project/u)
+})
+
+test('createMetroResolver refuses a host that is not the disk: it reads the disk itself', async (t) => {
+  const { createMetroResolver } = await import('../stasis/src/metro-resolver.js')
+  t.assert.throws(() => createMetroResolver({ projectDir: '/', platform: 'ios', host: { stat: () => null } }), /^Error: createMetroResolver: metro-resolver reads the disk, so it is not supported off disk/u)
+})
+
+// What reads through `host` must not reach the disk itself: none of these names node:fs (or fs, or
+// fs/promises) anywhere -- a static import, an export, import(), require() -- but to import its
+// `constants`, which read nothing.
+test('the host-aware modules import nothing from node:fs to read with', (t) => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const modules = ['stasis/src/scan.js', 'stasis/src/resolve-node.js', 'stasis/src/resolve-fields.js', 'stasis/src/resolve-typescript.js', 'stasis-core/src/bundle-util.js', 'stasis/src/vfs-bundle.js', 'stasis/src/vfs-bundle/github.js', 'stasis/src/vfs-bundle/tree.js', 'stasis/src/loaders/foundry.js']
+  const FS = /(['"`])(?:node:)?fs(?:\/promises)?\1/gu
+  const CONSTANTS = /\bimport\s*\{\s*constants\s*\}\s*from\s*(['"])(?:node:)?fs\1/gu
+  for (const file of modules) {
+    const text = readFileSync(join(root, file), 'utf8')
+    t.assert.equal(text.match(FS)?.length ?? 0, text.match(CONSTANTS)?.length ?? 0, `${file} names node:fs other than for its constants`)
+  }
+  // The check itself sees each spelling a reader could come by.
+  for (const text of ["import {\n  readFileSync,\n} from 'node:fs'", 'import { readFileSync } from "fs"', "const fs = await import('node:fs/promises')", "createRequire(import.meta.url)('fs')", "export { readFile } from 'fs/promises'"]) {
+    t.assert.notEqual(text.match(FS)?.length ?? 0, text.match(CONSTANTS)?.length ?? 0, text)
+  }
 })

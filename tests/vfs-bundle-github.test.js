@@ -80,6 +80,12 @@ test('buildGitHubBundle checks its arguments before anything is fetched', async 
   await t.assert.rejects(build({ client, directory: '../up', entries: ['a.js'] }), /invalid directory: "\.\.\/up"/u)
   await t.assert.rejects(build({ client, github: undefined, entries: ['a.js'] }), /github and sha are required/u)
   await t.assert.rejects(build({ client, packageManager: 'npm', entries: ['a.js'] }), /packageManager must be one of/u)
+  await t.assert.rejects(build({ client, libc: 'bionic', entries: ['a.js'] }), /^TypeError: buildGitHubBundle: libc must be one of/u)
+  await t.assert.rejects(build({ client, os: '', entries: ['a.js'] }), /^TypeError: buildGitHubBundle: os must be a non-empty string/u)
+  await t.assert.rejects(build({ client, entries: ['a.sol'] }), /^Error: buildGitHubBundle: only JS bundles are built with pnpm/u)
+  await t.assert.rejects(build({ client, entries: ['a.js'], metro: true, metroResolver: true, platforms: ['ios'] }), /^Error: buildGitHubBundle: metroResolver is not supported/u)
+  await t.assert.rejects(build({ client, entries: [] }), /^Error: buildGitHubBundle: at least one entry file is required/u)
+  await t.assert.rejects(build({ client, entries: ['a.js'], scope: 'node_modules', metro: true, platforms: ['ios'] }), /^Error: buildGitHubBundle: --scope is not supported with --mainFields or --metro/u)
   t.assert.deepEqual(client.calls, [])
 })
 

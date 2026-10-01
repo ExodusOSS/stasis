@@ -4,9 +4,9 @@ import { isValidRepoField } from '@exodus/stasis-core/bundle'
 import { decompress } from '@preventive/archive/compression.js'
 import { ArchiveError, unpack } from '@preventive/archive/tar.js'
 import { createClient } from '@preventive/upstream/github.js'
-import { vfsFromEntries } from '@preventive/vfs'
-import { buildVfsBundle } from '../cmd/bundle.js'
-import { installedAlone, lockfileOf, lockfileRoot, packageManagerOf } from './tree.js'
+import { Vfs, vfsFromEntries } from '@preventive/vfs'
+import { buildVfsBundle, checkVfsOptions } from '../cmd/bundle.js'
+import { checkTarget, installedAlone, lockfileOf, lockfileRoot, packageManagerOf, vfsHost } from './tree.js'
 
 // As upstream's tree verification bounds a tarball's unpacked size.
 const MAX_TAR_BYTES = 2 ** 30
@@ -80,7 +80,10 @@ async function subtreeEntries(client, { github, sha, directory, packageManager, 
 // come from GitHub, or from the cache setCacheDir names, held to the git tree id either way
 // (@preventive/upstream), and are unpacked into a Vfs that buildVfsBundle reads alone.
 export async function buildGitHubBundle({ github, sha, directory, client, packageManager, ...options } = {}) {
-  packageManagerOf('buildGitHubBundle', packageManager)
+  const pm = packageManagerOf('buildGitHubBundle', packageManager)
+  checkTarget('buildGitHubBundle', options)
+  // buildVfsBundle's checks, over an empty tree: what the tree is never decides them.
+  checkVfsOptions('buildGitHubBundle', pm, packageManager, { ...options, cwd: '/', host: vfsHost(new Vfs()) })
   if (github === undefined || sha === undefined) throw new Error('buildGitHubBundle: github and sha are required')
   // Checked as the Bundle checks them, before anything is fetched.
   for (const [key, value] of Object.entries({ github, commit: sha, directory: directory || undefined })) {
