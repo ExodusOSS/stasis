@@ -328,6 +328,54 @@ test('Bundle.parse rejects a v0 flat source path that escapes the project root',
   t.assert.throws(() => Bundle.parse(v0('/etc/passwd')))
 })
 
+test('Bundle.parse and Lockfile.parse reject a non-canonical file key', (t) => {
+  // An empty, '.' or '..' segment spells a file more than one way, or makes its key absolute.
+  const sources = (spec, value) => Object.fromEntries(Object.entries(spec).map(([dir, names]) =>
+    [dir, { name: 'x', version: '1.0.0', files: Object.fromEntries(names.map((name) => [name, value])) }]))
+  const bundle = (spec) => JSON.stringify({
+    version: 1, config: { scope: 'full' }, entries: [], sources: sources(spec, 'x'), formats: {}, imports: {},
+  })
+  const lockfile = (spec) => JSON.stringify({
+    version: 0, config: { scope: 'full' }, entries: [], sources: sources(spec, 'sha512-x'), modules: {}, formats: {}, imports: {},
+  })
+  const rejected = [
+    { '': ['etc/passwd'] },
+    { '': [''] },
+    ...['src/', 'src/.', './src', 'src//lib', 'a/../src'].map((dir) => ({ [dir]: ['x.js'] })),
+    ...['./x.js', 'a/../x.js', 'x//y.js', '/x.js', 'x/'].map((name) => ({ '.': [name] })),
+    { '.': ['src/x.js'], src: ['./x.js'] },
+  ]
+  for (const spec of rejected) {
+    t.assert.throws(() => Bundle.parse(bundle(spec)), /non-canonical file key/, JSON.stringify(spec))
+    t.assert.throws(() => Lockfile.parse(lockfile(spec)), /non-canonical file key/, JSON.stringify(spec))
+  }
+  const v0 = (paths) => JSON.stringify({
+    version: 0, config: { scope: 'full' }, formats: {}, imports: {}, sources: Object.fromEntries(paths.map((path) => [path, 'x'])),
+  })
+  t.assert.throws(() => Bundle.parse(v0(['src/x.js', './src/x.js'])), /non-canonical file key/)
+  // Dot-names are ordinary names.
+  const names = ['x.js', '..foo', '...', '.pnpm/x', 'node_modules/.bin/x']
+  const accepted = { '.': names, src: ['a/b.js'] }
+  t.assert.deepStrictEqual([...Bundle.parse(bundle(accepted)).sources.keys()], [...names, 'src/a/b.js'])
+  t.assert.deepStrictEqual(Object.keys(Lockfile.parse(lockfile(accepted)).modules.get('.').files), names)
+})
+
+test('Bundle and Lockfile refuse to merge or serialize what their parse rejects', (t) => {
+  const absolute = () => new Map([['', { name: 'x', version: '1.0.0', files: { 'etc/passwd': 'x' } }]])
+  const duplicate = () => new Map([
+    ['.', { name: 'a', version: '1.0.0', files: { 'src/x.js': 'x' } }],
+    ['src', { name: 's', version: '1.0.0', files: { 'x.js': 'y' } }],
+  ])
+  const full = { config: { scope: 'full' } }
+  t.assert.throws(() => new Bundle({ modules: absolute() }).serialize(), /non-canonical file key "\/etc\/passwd"/)
+  t.assert.throws(() => new Bundle({ modules: duplicate() }).serialize(), /duplicate file key 'src\/x\.js'/)
+  t.assert.throws(() => new Bundle().merge(new Bundle({ modules: absolute() })), /bundle merge: non-canonical file key/)
+  t.assert.throws(() => new Lockfile({ ...full, modules: absolute() }).serialize(), /non-canonical file key/)
+  t.assert.throws(() => new Lockfile({ ...full, modules: duplicate() }).serialize(), /duplicate file key 'src\/x\.js'/)
+  t.assert.throws(() => new Lockfile(full).merge(new Lockfile({ ...full, modules: absolute() })), /non-canonical file key/)
+  t.assert.throws(() => new Bundle({ modules: new Map([[1, { name: 'x', files: { a: 'b' } }]]) }).serialize(), /bucket dir 1 is not a string/)
+})
+
 test('Bundle.parse keeps accepting a directory listing keyed at a module root (rel === \'\')', (t) => {
   // `stasis run --fs` keys a readdir of a package root at rel '' inside its own
   // bucket (moduleFileKey collapses that to the dir itself, see fs.test.js).
