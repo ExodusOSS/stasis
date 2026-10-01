@@ -245,8 +245,8 @@ source). Bundles are always written as `version: 1`.
 
 ### Contents-free bundles
 
-A contents-free `Bundle` (`hasContents === false`, from
-`bundle.withoutContents()` or `new Bundle({ …, contents: false })`) keeps every
+A contents-free `Bundle` (`hasContents === false`) is what a streaming reader
+builds, with `Bundle.fromJSON(value, { contents: false })` below. It keeps every
 other field. Each bucket's `files` still lists its paths (`Object.keys`,
 `Object.hasOwn`), but reading a file's contents throws, as do `sources`,
 `serialize()` and `merge()`. That is enough for metadata-only consumers such as

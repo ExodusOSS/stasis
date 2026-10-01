@@ -38,9 +38,12 @@ function sampleBundle() {
   })
 }
 
-test('withoutContents keeps every field and file list, only the contents go', (t) => {
+// What a streaming reader builds: the same bundle, contents-free.
+const contentsFreeOf = (bundle) => Bundle.fromJSON(JSON.parse(bundle.serialize()), { contents: false })
+
+test('a contents-free Bundle keeps every field and file list, only the contents go', (t) => {
   const full = Bundle.parse(sampleBundle().serialize())
-  const bundle = full.withoutContents()
+  const bundle = contentsFreeOf(full)
   t.assert.equal(full.hasContents, true)
   t.assert.equal(bundle.hasContents, false)
   for (const field of ['version', 'config', 'entries', 'formats', 'imports', 'executable', 'reason']) {
@@ -62,8 +65,7 @@ test('withoutContents keeps every field and file list, only the contents go', (t
 
 test('a contents-free Bundle locks out contents, serialize() and merge()', (t) => {
   const full = sampleBundle()
-  const bundle = full.withoutContents()
-  t.assert.equal(full.modules.get('.').files['bin/run.sh'], '#!/bin/sh\necho "hi"\n', 'the source Bundle is untouched')
+  const bundle = contentsFreeOf(full)
 
   const files = bundle.modules.get('.').files
   t.assert.ok(Object.hasOwn(files, 'src/index.js'))
@@ -82,8 +84,6 @@ test('a contents-free Bundle locks out contents, serialize() and merge()', (t) =
   const stamped = bundle.withReason('audit')
   t.assert.equal(stamped.hasContents, false)
   t.assert.deepStrictEqual(stamped.reason.audit, full.withReason('audit').reason.audit)
-  t.assert.equal(bundle.withoutContents().hasContents, false)
-  t.assert.equal(stamped.modules.get('.').files, files, 'locked buckets are reused, not rebuilt')
 
   // The constructor option is the same lock.
   const constructed = new Bundle({ modules: new Map([['.', { name: 'app', files: { 'a.js': 'A' } }]]), contents: false })
@@ -91,11 +91,7 @@ test('a contents-free Bundle locks out contents, serialize() and merge()', (t) =
   t.assert.throws(() => constructed.modules.get('.').files['a.js'], /not retained/)
   t.assert.throws(() => new Bundle({ contents: 'no' }))
 
-  // Rebuilt from its public fields, it stays contents-free: its buckets still refuse reads.
-  const rebuilt = new Bundle({ ...bundle })
-  t.assert.equal(rebuilt.hasContents, false)
-  t.assert.throws(() => rebuilt.serialize(), /file contents are not retained/)
-  // A Bundle-like without hasContents (e.g. from another stasis-core copy) still merges.
+  // A Bundle-like without hasContents still merges.
   const plain = { config: { scope: 'full' }, entries: new Set(), modules: new Map(), formats: new Map(), imports: new Map(), executable: new Set() }
   t.assert.equal(full.merge(plain).hasContents, true)
 })

@@ -91,16 +91,11 @@ function contentsLocked() {
   throw new Error('bundle: file contents are not retained by this contents-free Bundle')
 }
 
-// Every contents-free bucket's `files`, so a Bundle built on one stays contents-free.
-const lockedFiles = new WeakSet()
-
 // Each rel stays an own enumerable key, but reading its contents throws.
 const lockModule = ({ files, ...info }) => {
-  if (lockedFiles.has(files)) return { ...info, files }
   const locked = Object.create(null)
   for (const rel of Object.keys(files)) Object.defineProperty(locked, rel, { get: contentsLocked, enumerable: true })
-  lockedFiles.add(Object.freeze(locked))
-  return { ...info, files: locked }
+  return { ...info, files: Object.freeze(locked) }
 }
 
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
@@ -128,7 +123,6 @@ export class Bundle {
     this.config = config
     this.entries = entries ?? new Set()
     this.modules = modules ?? new Map()
-    for (const { files } of this.modules.values()) if (lockedFiles.has(files)) contents = false
     if (!contents) this.modules = new Map([...this.modules].map(([dir, info]) => [dir, lockModule(info)]))
     this.formats = formats ?? new Map()
     this.imports = imports ?? new Map()
@@ -139,14 +133,6 @@ export class Bundle {
 
   get hasContents() {
     return this.#contents
-  }
-
-  #copy(overrides) {
-    return new Bundle({ ...this, contents: this.#contents, ...overrides })
-  }
-
-  withoutContents() {
-    return this.#copy({ contents: false })
   }
 
   // Flat project-relative view of the raw stored file contents (resources stay base64).
@@ -328,7 +314,7 @@ export class Bundle {
   // Stamp `consumer` onto every carried file in the informational `reason` map.
   withReason(consumer) {
     // Keys only, so it works on a contents-free Bundle too.
-    return this.#copy({ reason: mergeReason(this.reason, { [consumer]: [...moduleFileKeys(this.modules)] }) })
+    return new Bundle({ ...this, contents: this.#contents, reason: mergeReason(this.reason, { [consumer]: [...moduleFileKeys(this.modules)] }) })
   }
 
   // Strict union of two Bundles (returns a NEW one): any genuine conflict throws -- a bundle is an attestation.
