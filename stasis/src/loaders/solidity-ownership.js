@@ -7,6 +7,7 @@ import { isUtf8 } from 'node:buffer'
 import { lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, parse, posix, relative, resolve, sep } from 'node:path'
 
+import { LockfileError, parseGitmodules } from '@preventive/lockfile/foundry.js'
 import { NO_ENTRY, readRegularFileOrNull } from '@exodus/stasis-core/bundle-util'
 import { hasNodeModulesSegment } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
@@ -78,64 +79,21 @@ export function readUtf8OrNull(file, label) {
 
 // --- .gitmodules ------------------------------------------------------------------------------
 
-const GIT_ESCAPES = { n: '\n', t: '\t', b: '\b' }
-
-// A git-config value as git reads it: `"` quotes (dropped), `\` escapes, a `#`/`;` comment outside
-// quotes, and whitespace trimmed at both ends outside quotes.
-function gitConfigValue(raw) {
-  let out = ''
-  let held = '' // unquoted whitespace, kept only if more value follows
-  let quoted = false
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i]
-    if (ch === '\\') {
-      const next = raw[++i] ?? ''
-      out += held + (GIT_ESCAPES[next] ?? next)
-      held = ''
-    } else if (ch === '"') {
-      quoted = !quoted
-    } else if (!quoted && (ch === '#' || ch === ';')) {
-      break
-    } else if (!quoted && (ch === ' ' || ch === '\t')) {
-      if (out !== '') held += ch
-    } else {
-      out += held + ch
-      held = ''
-    }
+// The submodules of the project at `baseDir`, `{ path, url, branch }` (`branch` when set), from its
+// `.gitmodules` as @preventive/lockfile reads it: as git does, refusing what git reads two ways (a
+// key twice, a second section, `[submodule.x]`), a path outside the repository or not in normal
+// form, and a url that isn't a host's (one relative to the superproject's remote, or none). One it
+// refuses throws, naming the file.
+export function readGitmodules(baseDir) {
+  const text = readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules')
+  if (text === null) return []
+  try {
+    return Object.values(parseGitmodules(text))
+  } catch (err) {
+    if (!(err instanceof LockfileError)) throw err
+    throw new Error(`.gitmodules: ${err.message}`, { cause: err })
   }
-  return out
 }
-
-// `.gitmodules` text -> its submodules, `{ name, path, url, branch }` (those set), as git reads the
-// file: keys case-insensitive, values unquoted and unescaped, a line ending in `\` continued, a
-// key after a section header on its line (`[submodule "x"] path = lib/x`), and a submodule's
-// sections merged by name.
-export function parseGitmodules(text) {
-  const byName = new Map()
-  let cur = null
-  const lines = text.split(/\r?\n/u)
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i]
-    while (/(?:^|[^\\])(?:\\\\)*\\$/u.test(line) && i + 1 < lines.length) line = line.slice(0, -1) + lines[++i]
-    const header = /^\s*\[\s*([\w.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/u.exec(line)
-    if (header) {
-      const section = header[1].toLowerCase()
-      let name = null
-      if (section === 'submodule' && header[2] !== undefined) name = header[2].replaceAll(/\\(.)/gu, '$1')
-      else if (section.startsWith('submodule.')) name = header[1].slice('submodule.'.length)
-      cur = name === null ? null : (byName.get(name) ?? byName.set(name, { name }).get(name))
-      line = line.slice(header[0].length)
-    }
-    const pair = cur && /^\s*([a-z][\w-]*)\s*(?:=(.*))?$/iu.exec(line)
-    if (!pair) continue
-    const key = pair[1].toLowerCase()
-    if (key === 'path' || key === 'url' || key === 'branch') cur[key] = gitConfigValue(pair[2] ?? '')
-  }
-  return [...byName.values()]
-}
-
-// The submodules of the project at `baseDir` (its `.gitmodules`, see parseGitmodules).
-export const readGitmodules = (baseDir) => parseGitmodules(readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules') ?? '')
 
 // --- Ownership --------------------------------------------------------------------------------
 
@@ -306,7 +264,7 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
 // The ownership of the project at `baseDir` given its lib dirs (`soldeer`: forge's `dependencies/`
 // holds dependencies too), with its git submodules.
 export const projectOwnership = (baseDir, libs, { soldeer = false } = {}) =>
-  solidityOwnership(baseDir, { dirs: [...libs, ...(soldeer ? ['dependencies'] : [])], packages: readGitmodules(baseDir).map((s) => s.path).filter(Boolean) })
+  solidityOwnership(baseDir, { dirs: [...libs, ...(soldeer ? ['dependencies'] : [])], packages: readGitmodules(baseDir).map((s) => s.path) })
 
 // Why a path is refused (see solidityOwnership).
 function escapeReason(path, { link, root, why }) {

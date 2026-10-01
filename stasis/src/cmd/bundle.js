@@ -87,13 +87,13 @@ function githubSlug(url) {
   return m ? `${m[1]}/${m[2]}` : null
 }
 
-// `.gitmodules` (as git reads it) -> Map<submodulePath, { name, branch }>, github.com submodules
+// `.gitmodules` (readGitmodules) -> Map<submodulePath, { name, branch }>, github.com submodules
 // only.
 function parseGithubSubmodules(baseDir) {
   const byPath = new Map()
   for (const { path, url, branch } of readGitmodules(baseDir)) {
-    const name = path && url ? githubSlug(url) : null
-    if (name) byPath.set(path.replace(/\/+$/u, ''), { name, branch })
+    const name = githubSlug(url)
+    if (name) byPath.set(path, { name, branch })
   }
   return byPath
 }

@@ -957,6 +957,18 @@ test('buildSolidityBundle never reads the process\'s stdin as a config, a depend
   await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: 'remappings.txt: not a regular file' })
 }))
 
+test('buildSolidityBundle fails on a .gitmodules git reads two ways, or with a url that isn\'t a host\'s, naming it', withTmp(async (t, tmp) => {
+  writeProject(tmp, { 'foundry.toml': '[profile.default]\n', 'src/A.sol': 'contract A {}\n' })
+  for (const [text, message] of [
+    ['[submodule "x"]\n\tpath = lib/x\n\tpath = lib/y\n\turl = https://github.com/o/x\n', 'x.path: twice, of which git\'s submodule commands read the first and git config the last, at line 3'],
+    ['[submodule "x"]\n\tpath = lib/x\n\turl = ../x.git\n', 'x.url: "../x.git" is relative to the superproject\'s remote, which only a clone of it knows'],
+  ]) {
+    writeFileSync(join(tmp, '.gitmodules'), text)
+    // eslint-disable-next-line no-await-in-loop -- each run rewrites .gitmodules
+    await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: `.gitmodules: ${message}` })
+  }
+}))
+
 test('buildSolidityBundle never stalls on a package.json that isn\'t a regular file', withTmp(async (t, tmp) => {
   writeProject(tmp, { 'contracts/A.sol': 'import "pkg/P.sol";\n', 'node_modules/pkg/P.sol': 'contract P {}\n' })
   // A FIFO: read blocking, it would wait for a writer forever.
@@ -3321,9 +3333,10 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   // exited 0 with no warning at all. The setup error must propagate with its
   // install hint instead. Exercised against a copy of stasis whose node_modules
   // carries only the zero-dep @exodus/stasis-core (so the moved-module shims
-  // resolve) and @preventive/lockfile (whose TOML parser the loaders import), so
-  // the bundle command loads, but no oxc-parser, so the lazy lookup (createRequire
-  // from src/scan.js) genuinely misses.
+  // resolve) and @preventive/lockfile (whose TOML and .gitmodules readers the
+  // loaders import) with its one dependency, @exodus/bytes, so the bundle command
+  // loads, but no oxc-parser, so the lazy lookup (createRequire from src/scan.js)
+  // genuinely misses.
   const stasisCopy = join(tmp, 'stasis')
   mkdirSync(stasisCopy)
   for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis', entry), join(stasisCopy, entry), { recursive: true })
@@ -3334,8 +3347,10 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   mkdirSync(coreDest, { recursive: true })
   for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis-core', entry), join(coreDest, entry), { recursive: true })
   cpSync(join(here, '..', 'stasis-core', 'package.json'), join(coreDest, 'package.json'))
-  // pnpm links it from its store: the real directory is what gets copied.
-  cpSync(realpathSync(join(here, '..', 'stasis', 'node_modules', '@preventive', 'lockfile')), join(stasisCopy, 'node_modules', '@preventive', 'lockfile'), { recursive: true })
+  // pnpm links them from its store: the real directories are what get copied.
+  const lockfile = realpathSync(join(here, '..', 'stasis', 'node_modules', '@preventive', 'lockfile'))
+  cpSync(lockfile, join(stasisCopy, 'node_modules', '@preventive', 'lockfile'), { recursive: true })
+  cpSync(realpathSync(join(lockfile, '..', '..', '@exodus', 'bytes')), join(stasisCopy, 'node_modules', '@exodus', 'bytes'), { recursive: true })
   const proj = join(tmp, 'proj')
   mkdirSync(proj)
   jsProject(proj, { 'file.mjs': 'export * from "@noble/ciphers/_arx.js"\n' })

@@ -412,8 +412,11 @@ decided by where it really is, spelled as the filesystem spells it (on a
 case-insensitive one, `LIB/evil` is `lib/evil`). The dependencies are the
 entries of forge's `libs` (an absolute one by its real path; a symlinked
 `lib/forge-std` is the dependency where it points), Soldeer's `dependencies/`,
-git submodules (`.gitmodules` read as git reads it: quoted and escaped paths,
-and a key on its section header's line) and every `node_modules` package; a file
+git submodules (`.gitmodules` read with `@preventive/lockfile`'s reader, as git
+reads it: one git reads two ways — a key twice, a second section,
+`[submodule.x]` — a path outside the repository or not in normal form, or a url
+that isn't a host's, relative to the superproject's or missing, is an error
+naming it) and every `node_modules` package; a file
 is a dependency's when its real path lies in one, however the path got there
 (`src/vendor -> ../lib/dep/src` holds the dependency's code). An import from a
 dependency must land on a dependency's file too: it may import its own files and

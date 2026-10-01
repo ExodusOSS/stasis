@@ -19,7 +19,7 @@ import {
   resolveSolImport,
 } from '../stasis/src/loaders/solidity.js'
 import { findRemappingsWithContext, foundryProject, foundryTomlRemappings } from '../stasis/src/loaders/foundry.js'
-import { parseGitmodules, solidityOwnership } from '../stasis/src/loaders/solidity-ownership.js'
+import { readGitmodules, solidityOwnership } from '../stasis/src/loaders/solidity-ownership.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'solidity-bundle')
 
@@ -733,32 +733,46 @@ test('solidityOwnership judges the path as the filesystem spells it (a case-inse
   }
 })
 
-test('parseGitmodules reads .gitmodules as git does: quotes, escapes, comments, key case, continuations', (t) => {
-  const text = [
+test('readGitmodules reads .gitmodules as git does: quotes, escapes, comments, key case, continuations', withProject({
+  '.gitmodules': [
     '[submodule "a"]',
     '\tpath = "vendor/a" ; a comment',
     '\tURL = https://github.com/o/a',
+    '\tbranch = "v1"',
     '[submodule "b"]',
     '\tpath = lib/b\\',
     'x',
-    '\turl = "https://github.com/o/b" # comment',
-    '[core]',
-    '\tpath = not/a/submodule',
-    '[submodule "a"]',
-    '\tbranch = "v1 \\"x\\""',
-    '[submodule.c]',
-    '\tpath = lib/c  ',
+    '\turl = "git@github.com:o/b.git" # comment',
     // A key may follow its section header on the line.
     '[submodule "d"] path = vendor/d',
+    '\turl = https://github.com/o/d',
     '',
-  ].join('\n')
-  t.assert.deepEqual(parseGitmodules(text), [
-    { name: 'a', path: 'vendor/a', url: 'https://github.com/o/a', branch: 'v1 "x"' },
-    { name: 'b', path: 'lib/bx', url: 'https://github.com/o/b' },
-    { name: 'c', path: 'lib/c' },
-    { name: 'd', path: 'vendor/d' },
+  ].join('\n'),
+}, (t, dir) => {
+  t.assert.deepEqual(readGitmodules(dir), [
+    { path: 'vendor/a', url: 'https://github.com/o/a', branch: 'v1' },
+    { path: 'lib/bx', url: 'git@github.com:o/b.git', branch: undefined },
+    { path: 'vendor/d', url: 'https://github.com/o/d', branch: undefined },
   ])
-})
+  t.assert.deepEqual(readGitmodules(join(dir, 'none')), [])
+}))
+
+test('readGitmodules refuses what git reads two ways, a path out of normal form, and a url that is not a host\'s', withProject({}, (t, dir) => {
+  const url = '\turl = https://github.com/o/x\n'
+  for (const [text, message] of [
+    // git's submodule commands read the first `path`, git config the last.
+    [`[submodule "x"]\n\tpath = lib/x\n\tpath = lib/y\n${url}`, 'x.path: twice, of which git\'s submodule commands read the first and git config the last, at line 3'],
+    [`[submodule "x"]\n\tpath = lib/x\n[submodule "x"]\n${url}`, 'x: a second section, at line 3, where git writes one'],
+    [`[submodule.x]\n\tpath = lib/x\n${url}`, 'a section of the form [submodule.name], whose name git lowercases, where .gitmodules has [submodule "name"] alone, at line 1'],
+    [`[submodule "x"]\n\tpath = ./lib/x\n${url}`, 'x.path: "./lib/x" is not a relative path in normal form'],
+    [`[submodule "x"]\n\tpath = ../x\n${url}`, 'x.path: "../x" is outside the repository, where git writes no submodule'],
+    ['[submodule "x"]\n\tpath = lib/x\n\turl = ../x.git\n', 'x.url: "../x.git" is relative to the superproject\'s remote, which only a clone of it knows'],
+    ['[submodule "x"]\n\tpath = lib/x\n', 'x.url: expected a url, without which git cannot clone the submodule'],
+  ]) {
+    writeFileSync(join(dir, '.gitmodules'), text)
+    t.assert.throws(() => readGitmodules(dir), { message: `.gitmodules: ${message}` })
+  }
+}))
 
 test('a remappings.txt taken as written (solc) may map a prefix to nothing', (t) => {
   const remappings = parseRemappings('x/=\nctx:y/=\n')
