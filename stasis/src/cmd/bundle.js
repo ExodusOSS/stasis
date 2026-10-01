@@ -497,12 +497,18 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
   await walk(normalized)
   // The tree pass may name in-tree crate roots the walk left out (a crate whose name a file also
   // binds as a value, `use crate::util::log;` beside `log::info!`), or walked as fewer units than
-  // it is named as: buildRustTree's wantedRoots. Load them and build again, until none is new.
+  // it is named as: buildRustTree's wantedRoots. Load them and build again, until none is new. A
+  // root the walk was asked for and didn't load -- refused (a link out of its package) or gone --
+  // is not asked for again: the walk has said why.
+  const tried = new Set()
   const complete = async () => {
     const built = buildRustTree(sources, { roots, baseDir, cargo: cargoCtx, formats, units })
-    const wanted = built.wantedRoots.filter((r) => addUnits(r, built.wantedUnits.get(r)) || !sources.has(r))
+    const wanted = built.wantedRoots.filter((r) => addUnits(r, built.wantedUnits.get(r)) || (!sources.has(r) && !tried.has(r)))
     if (wanted.length === 0) return built
-    for (const r of wanted) if (!roots.includes(r)) roots.push(r)
+    for (const r of wanted) {
+      tried.add(r)
+      if (!roots.includes(r)) roots.push(r)
+    }
     await walk(wanted)
     return complete()
   }
@@ -547,12 +553,16 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
     }
   }
 
-  // Deps live outside the bundle root unless vendored; with no vendor dir the fix is one command.
-  if (unresolvedCrates.size > 0 && !existsSync(join(baseDir, cargoCtx.vendorDir))) {
-    const names = [...unresolvedCrates].toSorted()
+  // A crate the code names that the bundle doesn't hold: a registry dependency that isn't vendored
+  // (or not in a version its requirement allows), a path or patch outside the bundle root (the
+  // loader warned of those), or a crate root the walk refused. Reported whatever the vendor dir
+  // holds; with none, the fix is one command.
+  const notLoaded = tree.wantedRoots.filter((r) => !sources.has(r)).map((r) => `${cargoCtx.packageInfo(r)?.name ?? r} (${r})`)
+  if (unresolvedCrates.size > 0 || notLoaded.length > 0) {
+    const names = [...unresolvedCrates, ...notLoaded].toSorted()
     const shown = names.slice(0, 10).join(', ') + (names.length > 10 ? `, ... and ${names.length - 10} more` : '')
-    console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not found in the bundle root: ${shown}`)
-    console.warn('[stasis] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first.')
+    console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not in the bundle: ${shown}`)
+    if (!existsSync(join(baseDir, cargoCtx.vendorDir))) console.warn('[stasis] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first.')
   }
 
   return assembleCodeBundle({

@@ -768,7 +768,8 @@ test('parseCargoManifest reads package, lib, dependencies in every shape, and wo
   t.assert.deepEqual(m.lib, { name: 'myapp_lib', path: 'src/the_lib.rs', procMacro: false })
   const dep = (k) => {
     const d = m.deps.get(k)
-    return { path: d.path, package: d.package, workspace: d.workspace, kinds: [...d.kinds.keys()].toSorted() }
+    const [r] = d.kinds.values() // one table each here: a dependency's identity is its table's
+    return { path: r.path, package: r.package, workspace: r.workspace, kinds: [...d.kinds.keys()].toSorted() }
   }
   t.assert.deepEqual([...m.deps.keys()].toSorted(), ['inline_sub', 'nix', 'serde', 'shared', 'tempfile', 'tools', 'util'])
   t.assert.deepEqual(dep('inline_sub'), { path: '../sub', package: null, workspace: false, kinds: ['normal'] })
@@ -2263,4 +2264,54 @@ test('buildRustTree places a template\'s mod at an invocation in its own crate, 
   ])
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.equal(edges(resolutions.get('vendor/a/src/x.rs'))['helper!'], 'vendor/a/src/lib.rs')
+})
+
+// --- eighth review: nested macro_rules!, glob-provided names against local ones, cfg strings ---
+
+test('buildRustTree keeps a template\'s calls and includes with the template when it defines a macro_rules! of its own', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'macro_rules! helper { () => {} }\nmacro_rules! outer { () => { macro_rules! inner { () => {} } fn f() -> &\'static str { helper!(); include_str!("data.txt") } } }\nmod user;\n'],
+    ['src/user.rs', 'outer!();\n'],
+    ['src/data.txt', 'x'],
+  ])
+  const items = scanRustItems(sources.get('src/lib.rs'))
+  t.assert.deepEqual(items.macros.map((m) => [m.name, m.includes.map((i) => i.path), [...m.calls]]), [['helper', [], []], ['outer', ['data.txt'], ['helper', 'include_str']], ['inner', [], []]])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual(edges(resolutions.get('src/user.rs')), { 'outer!': 'src/lib.rs', 'include_str data.txt': 'src/data.txt', 'helper!': 'src/lib.rs' })
+})
+
+test('buildRustTree lets a local module under a custom cfg stand against a glob, giving way only to the module\'s own binding', (t) => {
+  const base = [
+    ['src/lib.rs', 'mod other;\n#[cfg(docsrs)]\nmod util;\nuse other::*;\nfn f() { util::g(); }\n'],
+    ['src/other.rs', 'pub mod util;\n'],
+    ['src/other/util.rs', 'pub fn g() {}\n'],
+    ['src/util.rs', 'pub fn g() {}\n'],
+  ]
+  const r = (sources) => edges(buildRustTree(new Map(sources), { roots: ['src/lib.rs'] }).resolutions.get('src/lib.rs'))['util::g']
+  t.assert.equal(r(base), 'src/util.rs') // a glob never shadows a module that is there
+  // serde: the docsrs-only module beside the `pub use` of every other build.
+  t.assert.equal(r([...base, ['src/lib.rs', 'mod other;\n#[cfg(docsrs)]\nmod util;\n#[cfg(not(docsrs))]\nuse other::util;\nfn f() { util::g(); }\n']]), 'src/other/util.rs')
+})
+
+test('buildRustTree looks a macro call up among macros: a fn or module of the name is no `m!`', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'mod macros;\nmod user;\nmod m {}\n'],
+    ['src/macros.rs', 'macro_rules! m { () => {} }\npub(crate) use m;\n'],
+    ['src/user.rs', 'use crate::macros::*;\nfn m() {}\nfn f() { m!(); }\n'],
+  ])
+  t.assert.equal(edges(buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs'))['m!'], 'src/macros.rs')
+  const viaRoot = new Map([...sources, ['src/user.rs', 'use crate::*;\nfn f() { m!(); }\n'], ['src/lib.rs', 'mod macros;\nmod user;\nmod m {}\npub(crate) use macros::*;\n']])
+  t.assert.equal(edges(buildRustTree(viaRoot, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs'))['m!'], 'src/macros.rs')
+  const besideModule = new Map([...sources, ['src/user.rs', 'use crate::macros::*;\nmod m;\nfn f() { m!(); }\n'], ['src/user/m.rs', '']])
+  t.assert.equal(edges(buildRustTree(besideModule, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs'))['m!'], 'src/macros.rs')
+})
+
+test('evalCfg and buildRustTree keep cfg values that differ only in spaces apart', (t) => {
+  t.assert.equal(evalCfg('all(my = "a b", not(my = "ab"))'), null)
+  t.assert.equal(evalCfg('all(my = "a  b", not(my = "a b"))'), null)
+  t.assert.equal(evalCfg('all(my="a b", not(my = "a b"))'), false) // the same leaf, spaced differently
+  for (const cfg of ['all(my = "a b", not(my = "ab"))', 'all(my = "a  b", not(my = "a b"))']) {
+    const { resolutions } = buildRustTree(new Map([['src/lib.rs', `#[cfg(${cfg})]\nmod x;\n`], ['src/x.rs', '']]), { roots: ['src/lib.rs'] })
+    t.assert.deepEqual(edges(resolutions.get('src/lib.rs')), { 'mod x': 'src/x.rs' })
+  }
 })

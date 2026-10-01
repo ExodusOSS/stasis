@@ -4090,8 +4090,8 @@ test('buildRustBundle bundles what is in-tree and hints at `cargo vendor` when d
   const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'no-vendor'), entries: ['src/main.rs'] }))
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/a.rs', 'src/main.rs'])
   // Two short lines: the crates, then the remedy (no absolute path).
-  const listed = warnings.find((w) => w.includes('not found in the bundle root'))
-  t.assert.equal(listed, '[stasis] 2 crates referenced but not found in the bundle root: serde, syn') // not std, not the local module `a`
+  const listed = warnings.find((w) => w.includes('referenced but not in the bundle'))
+  t.assert.equal(listed, '[stasis] 2 crates referenced but not in the bundle: serde, syn') // not std, not the local module `a`
   const hint = warnings.find((w) => w.includes('cargo vendor'))
   t.assert.equal(hint, '[stasis] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first.')
 })
@@ -4100,7 +4100,7 @@ test('CLI: bundle (rust) prints the `cargo vendor` hint to stderr and still exit
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'src/main.rs'], { cwd: join(rustFixtures, 'no-vendor') })
   t.assert.equal(r.status, 0, r.stderr)
-  t.assert.match(r.stderr, /^\[stasis\] 2 crates referenced but not found in the bundle root: serde, syn$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] 2 crates referenced but not in the bundle: serde, syn$/mu)
   t.assert.match(r.stderr, /^\[stasis\] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first\.$/mu)
   t.assert.match(r.stderr, /Bundled 2 files in 1 package/u)
 }))

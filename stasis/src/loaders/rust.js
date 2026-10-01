@@ -501,6 +501,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   // `crate_root! { … mod de; … }`) appears where the macro is invoked, not where it is defined, so
   // such a `mod` takes the offset of the macro's first bare invocation in this file (`calls`).
   let templateName = null
+  let templateMacro = null // the top-level `macro_rules!` whose body the scan is in: what its body calls and includes is its own, nested definitions' too
 
   const inlinePath = () => stack.map((s) => s.name)
   const closeTo = (targetDepth, at) => {
@@ -698,7 +699,10 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
           open = skipWs(open + name.length)
           const gate = GATE_MACRO_RE.test(name) && masked[open] === '{' ? gatePredicate(code, masked, open, matchClose(masked, open)) : undefined
           macros.push({ name, exported: pending.some((a) => a.macroExport === true), includes: [], calls: new Set(), offset: i, at: i, template: i < macroUntil && macroName === 'macro_rules' ? templateName : null, gate })
-          if (i >= macroUntil) templateName = name
+          if (i >= macroUntil) {
+            templateName = name
+            templateMacro = macros.at(-1)
+          }
         }
       }
       if (masked[open] === '{' || masked[open] === '(' || masked[open] === '[') {
@@ -722,7 +726,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
           // it where the macro is invoked, not where it is written -- and a recursive arm's
           // `m!(…)` is no invocation of this file's.
           if (!pathQualified) {
-            if (i < macroUntil && macroName === 'macro_rules' && macros.length > 0) macros.at(-1).calls.add(word)
+            if (i < macroUntil && macroName === 'macro_rules' && templateMacro !== null) templateMacro.calls.add(word)
             else {
               invocations.add(word)
               ;(calls.get(word) ?? calls.set(word, []).get(word)).push(i)
@@ -737,7 +741,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
             // (`concat!(env!("OUT_DIR"), …)`) is nobody's to follow; any other unreadable argument
             // is counted, for a warning.
             if (arg === null) unfollowed += /\bOUT_DIR\b/u.test(text) ? 0 : 1
-            else if (i < macroUntil && macroName === 'macro_rules' && macros.length > 0) macros.at(-1).includes.push({ kind: word, ...arg })
+            else if (i < macroUntil && macroName === 'macro_rules' && templateMacro !== null) templateMacro.includes.push({ kind: word, ...arg })
             else includes.push({ kind: word, ...arg, conditional })
           }
         }
@@ -1598,14 +1602,23 @@ function commonDepth(a, b) {
 // the file the path was written in, with its cfg leaves (see cfg compatibility): an import, item
 // or glob source exclusive with them is passed over. The candidates are listed once per (at,
 // name, what `from` may see) -- providedAll -- and the asker picks among them.
-function provided(root, at, name, from, ctx, asker, typesOnly = false) {
-  return pick(providedAll(root, at, name, commonDepth(from, at), ctx), root, ctx, asker, typesOnly) // scopes are ancestors of `at`: `from` is inside those this deep or shallower
+function provided(root, at, name, from, ctx, asker, ns = null) {
+  return pick(providedAll(root, at, name, commonDepth(from, at), ctx), root, ctx, asker, ns) // scopes are ancestors of `at`: `from` is inside those this deep or shallower
+}
+
+// What module `at` binds `name` to itself, as seen from `from` -- a `use` of the name or an item
+// it defines (see providedAll), not what its globs bring in -- or null.
+function bound(root, at, name, from, ctx, asker, ns = null) {
+  const list = [...importsOf(root, at, name, commonDepth(from, at), ctx)]
+  for (const d of ctx.defined.get(root)?.get(at)?.get(name) ?? NONE) list.push({ answer: { kind: 'item', file: d.file }, leaves: d.leaves, ns: d.ns })
+  return pick({ get: (i) => list[i] }, root, ctx, asker, ns)
 }
 
 // The answer of the first of `candidates` (see providedAll: in written order) whose cfgs the
 // asker's entail (entailed) -- else the first compatible with them under no custom cfg, else the
-// first compatible at all (doubtful) -- and, for a path's lead or
-// prefix (`typesOnly`), in the type namespace: a `fn log` can't lead `log::info`. A child module,
+// first compatible at all (doubtful) -- in the namespace `ns` asks for: for a path's lead or
+// prefix (`type`), a `fn log` can't lead `log::info`; for a macro (`macro`), an item the module
+// defines (`fn m`), a module, or an import of a module or crate is no `m!`. A child module,
 // item or macro answers as it is; an import answers what it leads to (followImport, on the
 // asker's behalf, so its cfgs hold along the whole chain), resolved when first asked and then
 // kept on the import per asker -- unless the answer came out of an import cycle still being
@@ -1613,10 +1626,10 @@ function provided(root, at, name, from, ctx, asker, typesOnly = false) {
 // log;` in every platform file of a module asks the module for `log`, which is these imports):
 // nothing here. An import that leads nowhere the bundle can see -- when it is a path, not a crate
 // named outright (`use serde;`, passed over) -- answers where it is: the name is an item of its
-// file, as far as the bundle knows. A value where a type is wanted (`typesOnly`: a `fn`
-// defined here, an import of one) is passed over too, and when nothing else answers, the answer
-// is VALUE_ONLY rather than nothing: the name is taken, but not in this namespace.
-function pick(candidates, root, ctx, asker, typesOnly = false) {
+// file, as far as the bundle knows. A value where a type is wanted (a `fn` defined here, an
+// import of one) is passed over too, and when nothing else answers, the answer is VALUE_ONLY
+// rather than nothing: the name is taken, but not in this namespace.
+function pick(candidates, root, ctx, asker, ns = null) {
   const maybes = [] // the compatible answers under no doubt, for when none is entailed (see withAlternatives)
   let doubted = null // the first compatible answer under a doubtful cfg, for when there is nothing else
   let lastResort = null // the first under a cfg the asker's build can't compile (see deadUnder)
@@ -1625,10 +1638,11 @@ function pick(candidates, root, ctx, asker, typesOnly = false) {
     const c = candidates.get(i)
     if (c === undefined) break
     if (!compatible(asker, c.leaves)) continue
-    if (typesOnly && c.ns === 'value') {
+    if (ns === 'type' && c.ns === 'value') {
       valueOnly = true
       continue
     }
+    if (ns === 'macro' && (c.ns !== undefined || c.answer?.kind === 'module')) continue
     const dead = deadFor(asker, c.leaves)
     const doubt = !dead && doubtful(asker, c.leaves)
     const sure = !dead && !doubt && entailed(asker, c.leaves)
@@ -1643,12 +1657,12 @@ function pick(candidates, root, ctx, asker, typesOnly = false) {
         ctx.hits.add(im.following)
         continue
       }
-      const key = `${asker?.set.key ?? ''}\0${typesOnly}`
+      const key = `${asker?.set.key ?? ''}\0${ns}`
       r = im.answers?.get(key)
       if (r === undefined) {
         const depth = ctx.walking++
         im.following = depth
-        r = followImport(im, root, ctx, asker, typesOnly)
+        r = followImport(im, root, ctx, asker, ns)
         im.following = undefined
         ctx.walking--
         ctx.hits.delete(depth)
@@ -1666,6 +1680,7 @@ function pick(candidates, root, ctx, asker, typesOnly = false) {
         valueOnly = true
         continue
       }
+      if (ns === 'macro' && (r.kind === 'module' || r.kind === 'crate')) continue
     }
     if (sure) return { ...r, through: c.through }
     if (dead) lastResort = { ...r, through: c.through }
@@ -1850,10 +1865,10 @@ function hasAll(root, at, name, seeing, ctx) {
 const NONE = Object.freeze([])
 
 // The file in which module `at` defines item `name` (a `struct`, `fn`, … visible `seeing` levels
-// in, under cfgs the asker's allow; in the type namespace when `typesOnly`, see pick), or null --
+// in, under cfgs the asker's allow; in the type namespace when `ns` is `type`, see pick), or null --
 // or `{ file, alternatives }` when several files define it, none for certain (see
 // withAlternatives; itemAt makes an answer of either).
-function definedIn(root, at, name, seeing, ctx, asker, typesOnly = false) {
+function definedIn(root, at, name, seeing, ctx, asker, ns = null) {
   const defs = ctx.defined.get(root)?.get(at)?.get(name)
   if (defs === undefined) return null
   const own = ctx.trees.get(root).get(at)
@@ -1865,7 +1880,7 @@ function definedIn(root, at, name, seeing, ctx, asker, typesOnly = false) {
   let bestRank = Infinity
   const maybes = []
   for (const d of defs) {
-    if (d.scopeDepth > seeing || !compatible(asker, d.leaves) || (typesOnly && d.ns === 'value')) continue
+    if (d.scopeDepth > seeing || !compatible(asker, d.leaves) || (ns === 'type' && d.ns === 'value')) continue
     const tier = deadFor(asker, d.leaves) ? 3 : (doubtful(asker, d.leaves) ? 2 : (entailed(asker, d.leaves) ? 0 : 1))
     if (tier === 1) maybes.push({ answer: { kind: 'item', file: d.file }, leaves: d.leaves })
     const rank = tier * 2 + (d.file === own ? 0 : 1)
@@ -1887,10 +1902,10 @@ function definedIn(root, at, name, seeing, ctx, asker, typesOnly = false) {
 // name, then its own globs; only then the module's imports at large (providedAll). For a module
 // held in one file the two agree, so the shortcut is taken only when they may not. Memoized like
 // providedAll: a `use log;` in such a file asks for `log` in its own module, which is this import.
-function providedFrom(root, at, name, ctx, file, asker, typesOnly = false) {
+function providedFrom(root, at, name, ctx, file, asker, ns = null) {
   const of = ctx.imports.get(root)?.get(at)
   const several = of !== undefined && [...of.globs, ...[...of.named.values()].flat()].some((im) => im.file !== file)
-  if (!several) return provided(root, at, name, at, ctx, asker, typesOnly)
+  if (!several) return provided(root, at, name, at, ctx, asker, ns)
   const memo = ctx.provided.get(root) ?? ctx.provided.set(root, new Map()).get(root)
   const seeing = at.split('::').length
   const key = `${at}\0${name}\0@${file}`
@@ -1923,7 +1938,7 @@ function providedFrom(root, at, name, ctx, file, asker, typesOnly = false) {
     ctx.hits.add(list.depth)
     return null
   }
-  return pick(list, root, ctx, asker, typesOnly)
+  return pick(list, root, ctx, asker, ns)
 }
 
 // The `use` items of module `at` binding `name`, visible to one seeing `seeing` levels into it,
@@ -2011,9 +2026,9 @@ function globSource(im, root, ctx) {
 // What an import leads to: its path resolved as written in its module, else the crate its lead
 // names -- the sysroot's (`use core::fmt`: an item, living here as far as the bundle knows), an
 // in-tree one, or null for one that isn't (nor anything the tree can model).
-function followImport(im, root, ctx, asker, typesOnly = false) {
+function followImport(im, root, ctx, asker, ns = null) {
   if (!im.absolute) {
-    const r = walkPath(im.segments, root, im.module, ctx, { file: im.file, asker, typesOnly })
+    const r = walkPath(im.segments, root, im.module, ctx, { file: im.file, asker, ns })
     if (r !== null) return r
   }
   const head = im.segments[0]
@@ -2045,17 +2060,20 @@ const onlyValues = (root, at, name, ctx) => {
 // walk goes on from a module that provides, or ends at whatever else it provides. A segment
 // nothing provides is an item of the module reached, in the file defining it when that is known.
 // At the crate root a final segment may name a `#[macro_export]` macro, which lives in the file
-// defining it: `$crate::name!` names the macro before anything else (`macroCall`), any other path
-// the module or import of that name first. In the module the path is written in, `file`'s own
-// imports come first: the module's other files, if any, are cfg variants (providedFrom). `asker`
-// (see cfg compatibility) rules out what can't be compiled together with the path.
-function walkPath(segments, root, from, ctx, { macroCall = false, file, asker, typesOnly = false } = {}) {
+// defining it: `$crate::name!` names the macro before anything else (`ns` is `macro`: a path
+// invoked), any other path the module or import of that name first. In the module the path is
+// written in, `file`'s own imports come first: the module's other files, if any, are cfg variants
+// (providedFrom). `asker` (see cfg compatibility) rules out what can't be compiled together with
+// the path.
+function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
   const tree = ctx.trees.get(root)
   const head = segments[0]
   // A segment with more after it names a module or type-namespace item: a `fn log` doesn't lead
-  // `log::info!`, the crate does (`typed`, see pick) -- the last one too when the caller wants a
-  // type (`typesOnly`: an import followed as a path's prefix).
-  const lookup = (at, name, typed) => (at === from && file !== undefined ? providedFrom(root, at, name, ctx, file, asker, typed) : provided(root, at, name, from, ctx, asker, typed))
+  // `log::info!`, the crate does (`type`, see pick); the last one is in the namespace the caller
+  // wants (`type` for an import followed as a path's prefix, `macro` for one invoked).
+  const nsOf = (last) => (last ? ns : 'type')
+  const isModule = (path, last) => tree.has(path) && !(last && ns === 'macro') // a `mod m` is no `m!`
+  const lookup = (at, name, want) => (at === from && file !== undefined ? providedFrom(root, at, name, ctx, file, asker, want) : provided(root, at, name, from, ctx, asker, want))
   let cur = from.split('::')
   let i = 0
   let via
@@ -2064,14 +2082,14 @@ function walkPath(segments, root, from, ctx, { macroCall = false, file, asker, t
     i = 1
   } else if (head === 'self') {
     i = 1
-  } else if (head !== 'super' && !tree.has(`${from}::${head}`)) {
-    const typed = segments.length > 1 || typesOnly
-    const p = lookup(from, head, typed)
+  } else if (head !== 'super' && !isModule(`${from}::${head}`, segments.length === 1)) {
+    const want = nsOf(segments.length === 1)
+    const p = lookup(from, head, want)
     if (p === null || p === VALUE_ONLY) {
       // An item of the module itself (`enum Kind { … } use Kind::*;`), or a macro of the file.
-      const own = definedIn(root, from, head, Infinity, ctx, asker, typed)
+      const own = definedIn(root, from, head, Infinity, ctx, asker, want)
       if (own !== null) return itemAt(own)
-      if (typed && (p === VALUE_ONLY || onlyValues(root, from, head, ctx))) return VALUE_ONLY
+      if (want === 'type' && (p === VALUE_ONLY || onlyValues(root, from, head, ctx))) return VALUE_ONLY
       return segments.length === 1 && file !== undefined && ctx.fileMacros.get(file)?.has(head) === true ? { kind: 'item', file } : null
     }
     via = { modulePath: from, consumed: 0, through: p.through }
@@ -2089,27 +2107,29 @@ function walkPath(segments, root, from, ctx, { macroCall = false, file, asker, t
     const name = segments[i]
     const last = i === segments.length - 1
     const macro = at === 'crate' && last ? ctx.macros.get(root)?.get(name) : undefined
-    if (macro !== undefined && macroCall) return { kind: 'item', file: macro, via }
+    if (macro !== undefined && ns === 'macro') return { kind: 'item', file: macro, via }
     const child = `${at}::${name}`
-    const typed = !last || typesOnly
+    const want = nsOf(last)
     let p
-    if (tree.has(child)) {
-      // A child module the asker's build presumably doesn't compile -- under a cfg off in it, or
-      // a custom one (doubtful): serde's docsrs-only `mod de` beside the `pub use serde_core::de`
-      // of every other build -- gives way to what else the module has of the name, if anything.
+    if (isModule(child, last)) {
+      // A child module the asker's build doesn't compile (under a cfg off in it) gives way to what
+      // else the module has of the name, if anything; one it presumably doesn't (under a custom
+      // cfg, doubtful: serde's docsrs-only `mod de` beside the `pub use serde_core::de` of every
+      // other build) only to what the module binds the name to itself, which can stand beside the
+      // module only under other cfgs. What a glob brings in never shadows a module that is there.
       const set = ctx.files.get(tree.get(child))?.leaves
-      p = set !== undefined && (deadFor(asker, set) || doubtful(asker, set)) ? lookup(at, name, typed) : null
+      p = set === undefined ? null : (deadFor(asker, set) ? lookup(at, name, want) : (doubtful(asker, set) ? bound(root, at, name, from, ctx, asker, want) : null))
       if (p === null || p === VALUE_ONLY) {
         cur.push(name)
         i++
         continue
       }
-    } else p = lookup(at, name, typed)
+    } else p = lookup(at, name, want)
     if (p === null || p === VALUE_ONLY) {
       if (macro !== undefined) return { kind: 'item', file: macro, via }
-      const def = definedIn(root, at, name, Infinity, ctx, asker, typed)
+      const def = definedIn(root, at, name, Infinity, ctx, asker, want)
       if (def !== null) return { ...itemAt(def), via }
-      if (typed && (p === VALUE_ONLY || onlyValues(root, at, name, ctx))) return VALUE_ONLY
+      if (want === 'type' && (p === VALUE_ONLY || onlyValues(root, at, name, ctx))) return VALUE_ONLY
       return { kind: 'item', file: tree.get(at), via }
     }
     via ??= { modulePath: at, consumed: i, through: p.through }
@@ -2218,7 +2238,7 @@ function resolvePathRef(ref, file, bindings, ctx) {
   const from = here ? [here.modulePath, ...inlinePath].join('::') : null
   let valueOnly = false
   if (!absolute && here) {
-    const r = walkPath(segments, here.root, from, ctx, { macroCall: ref.macroCall, file, asker: here.asker })
+    const r = walkPath(segments, here.root, from, ctx, { ns: ref.macroCall ? 'macro' : null, file, asker: here.asker })
     if (r === VALUE_ONLY) valueOnly = true // the lead is bound here, but as a value: `log::…` names the crate
     else if (r !== null) return r
   }
@@ -2226,7 +2246,7 @@ function resolvePathRef(ref, file, bindings, ctx) {
   if (lead === null) return null
   const name = ctx.externPrelude.get(here?.root)?.get(lead) ?? lead
   if (name === 'self') {
-    const r = walkPath(['crate', ...segments.slice(1)], here.root, from, ctx, { macroCall: ref.macroCall, file, asker: here.asker })
+    const r = walkPath(['crate', ...segments.slice(1)], here.root, from, ctx, { ns: ref.macroCall ? 'macro' : null, file, asker: here.asker })
     return r === VALUE_ONLY ? null : r
   }
   const target = ctx.resolveCrate(name, file)
@@ -2795,7 +2815,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
       const macroFileAt = (name, offset) => {
         const inScope = macroAt(path, name, offset, offset, above) ?? exported?.get(name)
         if (inScope !== undefined) return inScope
-        const byPath = walkPath([name], here.root, here.modulePath, pathCtx, { macroCall: true, file: path, asker: here.asker })?.file
+        const byPath = walkPath([name], here.root, here.modulePath, pathCtx, { ns: 'macro', file: path, asker: here.asker })?.file
         return byPath !== undefined && fileMacros.get(byPath)?.has(name) === true ? byPath : undefined // a file that defines a macro of that name, not a `fn write` beside `write!`
       }
       for (const [name, offsets] of items.calls) {

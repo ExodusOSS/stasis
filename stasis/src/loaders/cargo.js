@@ -54,9 +54,12 @@ const kindOf = (request) => request.split('@')[0]
 const DEP_IMPLICATION_RE = /^dep:(.+)$/u
 const DEP_FEATURE_RE = /^([^/?]+)(\?)?\/(.+)$/u
 
-// What one dependency table asks of a crate. `defaultFeatures` is tri-state: null until the table
-// says (an inherited `workspace = true` entry can only turn defaults on, not off).
-const newRequest = () => ({ optional: false, defaultFeatures: null, features: [] })
+// What one dependency table says of a crate: which crate (`version`, `path`, `package`, or
+// `workspace = true` to inherit those), and what it asks of it. Each table is a dependency of its
+// own: `[dependencies] rand = "0.7"` beside `[build-dependencies] rand = "0.8"` are two crates.
+// `defaultFeatures` is tri-state: null until the table says (an inherited `workspace = true` entry
+// can only turn defaults on, not off).
+const newRequest = () => ({ version: null, path: null, package: null, workspace: false, optional: false, defaultFeatures: null, features: [] })
 
 // `--features a,b pkg/c` (cargo's syntax: repeatable, comma- or space-separated) → the list of names.
 export function parseFeatureList(values) {
@@ -85,8 +88,8 @@ export function parseCargoManifest(text, file = null) {
     resolver: null, // "1" | "2" | "3" from [workspace] or [package]
     lib: { name: null, path: null, procMacro: false }, // `procMacro`: `[lib] proc-macro = true`, a crate compiled for the host
     features: new Map(), // name -> implied entries (`other`, `dep:key`, `key/feat`, `key?/feat`)
-    // key -> { key, name, version, path, package, workspace, kinds: Map<request, { optional, defaultFeatures, features }> }:
-    // what identifies the crate is shared, what is asked of it is per dependency table -- sha2's
+    // key -> { key, name, kinds: Map<request, { version, path, package, workspace, optional, defaultFeatures, features }> }:
+    // each dependency table is a request of its own, for the crate it names -- sha2's
     // `[dependencies] digest = "0.10"` and `[dev-dependencies] digest = { features = ["dev"] }` are
     // two requests, and only the first is part of a build of sha2's dependents. A request is the
     // table's kind (`normal`, `dev`, `build`), with `@<cfg>` appended for a target-specific table:
@@ -103,23 +106,22 @@ export function parseCargoManifest(text, file = null) {
   const depOf = (map, name, { flat }) => {
     const key = normName(name)
     if (!map.has(key)) {
-      map.set(key, { key, name, version: null, path: null, package: null, workspace: false, ...(flat ? newRequest() : { kinds: new Map() }) })
+      map.set(key, { key, name, ...(flat ? newRequest() : { kinds: new Map() }) })
     }
     return map.get(key)
   }
-  // Apply one dependency's spec to its record: identity fields on the record, request fields on
-  // the entry for `kind` (or on the record itself for a flat one).
+  // Apply one dependency's spec to the entry for `kind` (or to the record itself for a flat one).
   const setDepFields = (dep, spec, kind) => {
     const request = kind === null ? dep : (dep.kinds.get(kind) ?? dep.kinds.set(kind, newRequest()).get(kind))
     if (typeof spec === 'string') {
-      dep.version = spec // `foo = "1.2"`: a registry dep
+      request.version = spec // `foo = "1.2"`: a registry dep
       return
     }
     if (!isTomlTable(spec)) return
-    if (typeof spec.version === 'string') dep.version = spec.version
-    if (typeof spec.path === 'string') dep.path = spec.path
-    if (typeof spec.package === 'string') dep.package = spec.package
-    if (spec.workspace === true) dep.workspace = true
+    if (typeof spec.version === 'string') request.version = spec.version
+    if (typeof spec.path === 'string') request.path = spec.path
+    if (typeof spec.package === 'string') request.package = spec.package
+    if (spec.workspace === true) request.workspace = true
     if (spec.optional === true) request.optional = true
     const defaults = spec['default-features'] ?? spec.default_features
     if (defaults === true || defaults === false) request.defaultFeatures = defaults
@@ -320,7 +322,9 @@ export function findCargoLock(baseDir) {
 
 // --- cfg predicates ---------------------------------------------------------------------
 
-export const normalizeCfg = (pred) => pred.replaceAll(/\s+/gu, ' ').trim()
+// A cfg predicate with its whitespace collapsed outside string literals: `my = "a  b"` and
+// `my = "a b"` are two values.
+export const normalizeCfg = (pred) => pred.replaceAll(/"(?:[^"\\]|\\.)*"|\s+/gu, (m) => (m.startsWith('"') ? m : ' ')).trim()
 
 const FEATURE_CFG_RE = /^feature\s*=\s*"([^"]*)"$/u
 // Any other leaf: `unix`, `target_os = "linux"`.
@@ -372,7 +376,8 @@ function evalCfgWith(pred, env, assume, free = null) {
   if (!m) {
     const known = evalCfgLeaf(p, env)
     if (known !== null) return known
-    const leaf = p.replaceAll(/\s+/gu, '')
+    const kv = CFG_LEAF_RE.exec(p) // the same leaf however it is spaced, its value as written
+    const leaf = kv === null ? p : (kv[2] === undefined ? kv[1] : `${kv[1]}="${kv[2]}"`)
     if (assume?.has(leaf)) return assume.get(leaf)
     if (free !== null) (free.counts ??= new Map()).set(leaf, (free.counts.get(leaf) ?? 0) + 1)
     return null
@@ -741,15 +746,14 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       })
     : null
   // A dependency as the package sees it through one of its tables (`request`, an entry of
-  // `dep.kinds`; omit it for the identity alone): a `workspace = true` entry merged with the
-  // workspace's -- features add up, the path is relative to the workspace root, and defaults are
-  // the workspace's call (a member's `default-features = false` is ignored, with a cargo warning,
-  // unless the workspace entry disables them too; a member's `true` turns them back on). Null when
-  // it can't be resolved. `defaultFeatures` comes out boolean.
-  const depSpec = (m, dep, request = null) => {
-    const own = request ?? newRequest()
-    if (!dep.workspace) {
-      return { key: dep.key, version: dep.version, path: dep.path, package: dep.package, defaultFeatures: own.defaultFeatures !== false, features: own.features, relTo: m.dir }
+  // `dep.kinds`): a `workspace = true` entry merged with the workspace's -- features add up, the
+  // path is relative to the workspace root, and defaults are the workspace's call (a member's
+  // `default-features = false` is ignored, with a cargo warning, unless the workspace entry
+  // disables them too; a member's `true` turns them back on). Null when it can't be resolved.
+  // `defaultFeatures` comes out boolean.
+  const depSpec = (m, dep, request) => {
+    if (!request.workspace) {
+      return { key: dep.key, version: request.version, path: request.path, package: request.package, defaultFeatures: request.defaultFeatures !== false, features: request.features, relTo: m.dir }
     }
     const ws = workspaceFor(m.dir)
     const base = ws?.workspaceDeps.get(dep.key)
@@ -759,28 +763,61 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       version: base.version,
       path: base.path,
       package: base.package,
-      defaultFeatures: base.defaultFeatures !== false || own.defaultFeatures === true,
-      features: [...new Set([...base.features, ...own.features])],
+      defaultFeatures: base.defaultFeatures !== false || request.defaultFeatures === true,
+      features: [...new Set([...base.features, ...request.features])],
       relTo: ws.dir,
     }
   }
-  // Dependency → package, memoized per (package, dependency): the fixed-point loop asks many times.
-  const depTargets = new Map()
-  // The in-tree package a dependency of `m` resolves to: a `path` dep (or a `[patch]` path
-  // override in the workspace root's manifest), else the vendored crate of that name -- the
-  // version Cargo.lock records for `m`, else the one vendored version that satisfies the
-  // requirement. A package can depend on two versions of one crate (`borsh = "1"` beside
-  // `borsh0-9 = { package = "borsh", version = "0.9" }`): the lock then lists both under it, and
-  // the requirement tells which is which. Null when it isn't in-tree -- a path outside the bundle
-  // root, or no vendored copy -- and, warned, when the vendored copies don't settle it: the locked
-  // version isn't among them, none satisfies the requirement, or several do and no lock chooses.
-  // Cargo would build none of those from what the bundle holds, so none is guessed.
-  const resolveDep = (m, dep) => {
-    const memo = `${m.dir}\0${dep.key}`
-    if (!depTargets.has(memo)) depTargets.set(memo, resolveDepUncached(m, dep))
-    return depTargets.get(memo)
+  // The `[patch]` path for crate `crate` in a build rooted at `root` (the workspace root's manifest,
+  // else the bundle root's), as `{ dir, from }`: the cargo config's `[patch.<registry>]` tables
+  // first -- of every directory from the root up to the bundle root, the nearest first, each path
+  // relative to the directory holding its `.cargo` -- then the root manifest's, relative to it.
+  // `dir` is null for a path outside the bundle root. Undefined when nothing patches the crate.
+  const configPatchMemo = new Map()
+  const configPatches = (dir) => {
+    if (!configPatchMemo.has(dir)) {
+      const out = new Map()
+      for (let d = dir; ; d = posix.dirname(d)) {
+        const rel = cargoConfigIn(baseDir, d)
+        const text = rel === null ? null : readFileOrNull(join(baseDir, rel))
+        const patch = text === null ? undefined : readToml(text, rel).patch
+        for (const registry of Object.values(isTomlTable(patch) ? patch : {})) {
+          for (const [crate, spec] of Object.entries(isTomlTable(registry) ? registry : {})) {
+            const key = normName(crate)
+            if (!out.has(key) && isTomlTable(spec) && typeof spec.path === 'string') out.set(key, { dir: normalizeRel(d, spec.path), from: rel })
+          }
+        }
+        if (d === '.') break
+      }
+      configPatchMemo.set(dir, out)
+    }
+    return configPatchMemo.get(dir)
   }
-  const resolveDepUncached = (m, dep) => {
+  const patchFor = (root, crate) => {
+    const fromConfig = configPatches(root?.dir ?? '.').get(crate)
+    if (fromConfig !== undefined) return fromConfig
+    const path = root?.patches.get(crate)
+    return path === undefined ? undefined : { dir: normalizeRel(root.dir, path), from: posix.join(root.dir, 'Cargo.toml') }
+  }
+  // Dependency → package, memoized per (package, request): the fixed-point loop asks many times.
+  const depTargets = new Map()
+  // The in-tree package a dependency of `m` resolves to through one of its tables (`request`): a
+  // `path` dep, else a `[patch]` path override (patchFor) whose version satisfies the requirement,
+  // else the vendored crate of that name -- the version Cargo.lock records for `m` when it
+  // satisfies the requirement, else the one vendored version that does. A package can depend on
+  // two versions of one crate (`borsh = "1"` beside `borsh0-9 = { package = "borsh", version =
+  // "0.9" }`, or one per table): the lock then lists both under it, and the requirement tells which
+  // is which. Null when it isn't in-tree -- a path (or patch) outside the bundle root, or no
+  // vendored copy -- and, warned, when the vendored copies don't settle it: the locked version
+  // isn't among them, none satisfies the requirement, or several do and no lock chooses. Cargo
+  // would build none of those from what the bundle holds, so none is guessed.
+  const resolveDep = (m, dep, request) => {
+    let byRequest = depTargets.get(m.dir)
+    if (byRequest === undefined) depTargets.set(m.dir, byRequest = new Map())
+    if (!byRequest.has(request)) byRequest.set(request, resolveDepUncached(m, dep, request))
+    return byRequest.get(request)
+  }
+  const resolveDepUncached = (m, dep, request) => {
     const asPackage = (dir) => {
       const t = dir === null ? null : readManifest(dir)
       return t?.package ? t : null
@@ -788,31 +825,47 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     // cargo metadata knows exactly which package each dependency edge points at.
     const known = metadata?.deps.get(m.dir)?.get(dep.key)
     if (known !== undefined) return asPackage(known)
-    const spec = depSpec(m, dep)
+    const spec = depSpec(m, dep, request)
     if (!spec) return null
-    if (spec.path) return asPackage(normalizeRel(spec.relTo, spec.path))
+    const who = `${m.package.name} ${version(m)}`
+    if (spec.path) {
+      const dir = normalizeRel(spec.relTo, spec.path)
+      const t = asPackage(dir)
+      if (dir === null) console.warn(`[loader.cargo] ${who}'s dependency ${dep.name} is a path outside the bundle root: ${spec.path}`)
+      else if (t === null) console.warn(`[loader.cargo] ${who}'s dependency ${dep.name} names ${dir}, which holds no Cargo.toml with a [package]`)
+      return t
+    }
     const crate = normName(spec.package ?? spec.key)
-    const root = workspaceFor(m.dir) ?? readManifest('.')
-    const patch = root?.patches.get(crate)
-    if (patch !== undefined) return asPackage(normalizeRel(root.dir, patch))
-    const candidates = vendored().byName.get(crate) ?? []
-    if (candidates.length === 0) return null
     const req = typeof spec.version === 'string' ? spec.version : null
     const fits = (ver) => req === null || satisfiesCargoReq(ver, req)
-    const who = `${m.package.name} ${version(m)}`
+    const patch = patchFor(workspaceFor(m.dir) ?? readManifest('.'), crate)
+    if (patch !== undefined) {
+      if (patch.dir === null) {
+        console.warn(`[loader.cargo] ${patch.from} patches ${crate} with a path outside the bundle root`)
+        return null
+      }
+      const t = asPackage(patch.dir)
+      // cargo uses a patch only where its version satisfies the requirement ("patch … was not used").
+      if (t !== null && fits(version(t))) return t
+      console.warn(t === null
+        ? `[loader.cargo] ${patch.from} patches ${crate} with ${patch.dir}, which holds no Cargo.toml with a [package]`
+        : `[loader.cargo] ${patch.from}'s patch of ${crate} (${version(t)}) doesn't satisfy ${who}'s requirement ${req}: not used`)
+    }
+    const candidates = vendored().byName.get(crate) ?? []
+    if (candidates.length === 0) return null
     const vendoredList = candidates.map((c) => c.version).toSorted(compareVersionsDesc).join(', ')
     const lk = lockfile()
     if (lk) {
       const entry = lk.byId.get(`${normName(m.package.name)} ${version(m)}`)
-      // The lock names a dependency with its version only when several versions of that crate are locked.
+      // The lock names a dependency with its version only when several versions of that crate are
+      // locked: the one this requirement allows is this table's.
       const listed = (entry?.deps ?? []).filter((x) => x.name === crate)
-      let want = null
-      if (listed.length === 1) {
-        const only = lk.byName.get(crate)
-        want = listed[0].version ?? (only?.length === 1 ? only[0].version : null)
-      } else if (listed.length > 1) {
-        want = listed.map((x) => x.version).find((ver) => ver !== null && fits(ver)) ?? null
-      }
+      const only = lk.byName.get(crate)
+      const pins = listed.map((x) => x.version ?? (only?.length === 1 ? only[0].version : null)).filter((ver) => ver !== null)
+      const want = pins.find(fits) ?? null
+      // A lock whose pin the requirement no longer allows is out of date: cargo would resolve
+      // again, so the requirement decides.
+      if (want === null && pins.length > 0) console.warn(`[loader.cargo] Cargo.lock pins ${who} to ${crate} ${pins.join(', ')}, which ${req} doesn't allow: the lock is out of date`)
       if (want !== null) {
         const hit = candidates.find((c) => c.version === want)
         if (hit) return readManifest(hit.dir)
@@ -952,8 +1005,10 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
           activate(c, m, d.key)
           if (implicitFeatures(m).has(d.name)) enable(c, m, d.name)
         }
-        const t = resolveDep(m, d)
-        if (t) for (const [request] of activeRequests(c, m, d)) enable(depCtx(c, request, t), t, depFeature[3])
+        for (const [request, r] of activeRequests(c, m, d)) {
+          const t = resolveDep(m, d, r)
+          if (t) enable(depCtx(c, request, t), t, depFeature[3])
+        }
         return true
       }
       if (featureImplications(m, imp) === null) return false
@@ -1003,7 +1058,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
         for (const d of m.deps.values()) {
           for (const [request, r] of activeRequests(c, m, d)) {
             const spec = depSpec(m, d, r)
-            const t = spec === null ? null : resolveDep(m, d)
+            const t = spec === null ? null : resolveDep(m, d, r)
             if (!t) continue
             const dc = depCtx(c, request, t)
             inGraph(dc, t)
@@ -1076,25 +1131,39 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // vendored crate of that lib or package name. A package's own name for a crate is its manifest's
   // word: a declared dependency that doesn't resolve in-tree (a path outside the bundle root, a
   // version no vendored copy has) never falls back to some vendored copy of that name, and a
-  // name it doesn't declare is no crate of its. Memoized per (package, name): every file of a
-  // package asks for the same few crates.
+  // name it doesn't declare is no crate of its. Which of the dependency's tables names the crate
+  // is the asking file's `role`: a build script's are the `[build-dependencies]`, a test or bench
+  // target's the `[dependencies]` and `[dev-dependencies]`, other code's the `[dependencies]` (any
+  // table when none of those has it). Memoized per (package, name, role): every file of a package
+  // asks for the same few crates.
   const crateTargets = new Map()
-  const depCrate = (m, norm) => {
-    const memo = `${m?.dir ?? ''}\0${norm}`
-    if (!crateTargets.has(memo)) crateTargets.set(memo, depCrateUncached(m, norm))
+  const depCrate = (m, norm, role) => {
+    const memo = `${m?.dir ?? ''}\0${norm}\0${role}`
+    if (!crateTargets.has(memo)) crateTargets.set(memo, depCrateUncached(m, norm, role))
     return crateTargets.get(memo)
   }
-  const depCrateUncached = (m, norm) => {
+  const ROLE_KINDS = { build: ['build'], test: ['normal', 'dev'], normal: ['normal'] }
+  const requestsFor = (d, role) => {
+    const all = [...d.kinds]
+    const own = all.filter(([request]) => ROLE_KINDS[role].includes(kindOf(request)))
+    return (own.length > 0 ? own : all).map(([, r]) => r)
+  }
+  const depCrateUncached = (m, norm, role) => {
     if (m) {
       const d = m.deps.get(norm)
       if (d) {
-        const t = resolveDep(m, d)
-        return t ? libPath(t) : null
+        for (const r of requestsFor(d, role)) {
+          const t = resolveDep(m, d, r)
+          if (t) return libPath(t)
+        }
+        return null
       }
       for (const other of m.deps.values()) {
-        if (other.package !== null) continue // a rename is used by its key, not its lib name
-        const t = resolveDep(m, other)
-        if (t && libName(t) === norm) return libPath(t)
+        for (const r of requestsFor(other, role)) {
+          if (depSpec(m, other, r)?.package) continue // a rename is used by its key, not its lib name
+          const t = resolveDep(m, other, r)
+          if (t && libName(t) === norm) return libPath(t)
+        }
       }
       return null
     }
@@ -1136,7 +1205,8 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
         const lib = libPath(m)
         if (lib && lib !== fromFile) return lib
       }
-      return depCrate(m, norm)
+      const script = m === null || m.package.build === false ? null : normalizeRel(m.dir, m.package.build ?? 'build.rs')
+      return depCrate(m, norm, fromFile === script ? 'build' : (isTestTarget(fromFile) ? 'test' : 'normal'))
     },
     isTestTarget,
     // Whether `fromFile`'s package declares a dependency of that name (in any table, by the key

@@ -45,21 +45,17 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
   t.assert.deepEqual(m.package, { name: 'app', version: '0.1.0', versionFromWorkspace: false, edition: '2021', editionFromWorkspace: false, build: null })
   t.assert.equal(m.resolver, '2')
   t.assert.deepEqual([...m.features], [['default', ['std']], ['std', []], ['full', ['std', 'dep:opt', 'sub/two', 'opt?/extra']]])
-  const dep = (k) => {
-    const d = m.deps.get(k)
-    return { version: d.version, kinds: Object.fromEntries([...d.kinds].toSorted()) }
-  }
-  // Each dependency table is its own request: a dev-dependency's features stay out of the normal one.
-  // `defaultFeatures` stays null until a table says (an inherited entry may only turn defaults on).
-  t.assert.deepEqual(dep('plain'), { version: '1', kinds: {
-    dev: { optional: false, defaultFeatures: null, features: ['dev-only'] },
-    normal: { optional: false, defaultFeatures: null, features: [] },
-  } })
-  t.assert.deepEqual(dep('opt'), { version: '1', kinds: { normal: { optional: true, defaultFeatures: false, features: ['a'] } } })
-  t.assert.deepEqual(dep('sub'), { version: '2', kinds: { normal: { optional: false, defaultFeatures: null, features: ['one', 'two'] } } })
-  t.assert.deepEqual(Object.keys(dep('cc').kinds), ['build'])
+  const dep = (k) => Object.fromEntries([...m.deps.get(k).kinds].toSorted())
+  const ask = (version, more) => ({ version, path: null, package: null, workspace: false, optional: false, defaultFeatures: null, features: [], ...more })
+  // Each dependency table is its own request, for the crate it names: a dev-dependency's features
+  // stay out of the normal one. `defaultFeatures` stays null until a table says (an inherited
+  // entry may only turn defaults on).
+  t.assert.deepEqual(dep('plain'), { dev: ask('1', { features: ['dev-only'] }), normal: ask('1') })
+  t.assert.deepEqual(dep('opt'), { normal: ask('1', { optional: true, defaultFeatures: false, features: ['a'] }) })
+  t.assert.deepEqual(dep('sub'), { normal: ask('2', { features: ['one', 'two'] }) })
+  t.assert.deepEqual(Object.keys(dep('cc')), ['build'])
   // A target-specific table is a request of its own, beside the plain one.
-  t.assert.deepEqual(Object.keys(dep('nix').kinds), ['normal@cfg(unix)'])
+  t.assert.deepEqual(Object.keys(dep('nix')), ['normal@cfg(unix)'])
   // the key is the `use` spelling, the name the manifest's (an optional dep's implicit feature name)
   t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').kinds.get('normal').optional], ['pm_crate', 'pm-crate', true])
   // `[patch.<source>]` entries in every spelling: inline table, dotted key, sub-table.
@@ -81,9 +77,9 @@ test('parseCargoManifest splits dotted dependency keys and survives multi-line s
   ].join('\n'))
   t.assert.equal(m.package.version, '0.4.0')
   t.assert.deepEqual([...m.deps.keys()], ['util', 'serde'])
-  t.assert.equal(m.deps.get('util').workspace, true)
+  t.assert.equal(m.deps.get('util').kinds.get('normal').workspace, true)
   t.assert.deepEqual(m.deps.get('util').kinds.get('normal').features, ['extra'])
-  t.assert.equal(m.deps.get('serde').version, '1')
+  t.assert.equal(m.deps.get('serde').kinds.get('normal').version, '1')
   t.assert.deepEqual(m.deps.get('serde').kinds.get('normal').features, ['derive'])
 })
 
@@ -95,8 +91,8 @@ test('parseCargoManifest reads a pair by the table it lands in, whichever way th
     '[dependencies]\nfoo = { version = "1", features = ["x"] }\n',
   ]
   for (const text of spellings) {
-    const dep = parseCargoManifest(text).deps.get('foo')
-    t.assert.deepEqual([dep.version, dep.kinds.get('normal').features], ['1', ['x']], text)
+    const normal = parseCargoManifest(text).deps.get('foo').kinds.get('normal')
+    t.assert.deepEqual([normal.version, normal.features], ['1', ['x']], text)
   }
   const m = parseCargoManifest([
     '[package]', 'name = "app"', 'version = { workspace = true }',
@@ -106,7 +102,7 @@ test('parseCargoManifest reads a pair by the table it lands in, whichever way th
     '[workspace.package]', 'version = "0.9.0"', // a [workspace.*] table alone makes this a workspace root
   ].join('\n'))
   t.assert.deepEqual(m.package, { name: 'app', version: null, versionFromWorkspace: true, edition: null, editionFromWorkspace: false, build: null })
-  t.assert.deepEqual([m.deps.get('winapi').version, [...m.deps.get('winapi').kinds.keys()]], ['0.3', ['dev@cfg(windows)']])
+  t.assert.deepEqual([...m.deps.get('winapi').kinds].map(([request, r]) => [request, r.version]), [['dev@cfg(windows)', '0.3']])
   t.assert.deepEqual([...m.patches], [['plain', 'patches/plain']])
   t.assert.deepEqual([m.isWorkspace, m.workspacePackage.version], [true, '0.9.0'])
 })
@@ -1292,5 +1288,110 @@ test('buildRustBundle declares a template\'s mod in each module of its package i
     const cargo = createCargoContext(tmp, { entries })
     const sources = await collectRustFilesFromDisk(tmp, entries, { cargo })
     t.assert.deepEqual(sorted(buildRustTree(sources, { roots: entries, baseDir: tmp, cargo }).unresolvedCrates), [])
+  })
+})
+
+// Warnings `fn` prints, and its result.
+const captureWarningsSync = (fn) => {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    return { result: fn(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+const vendoredPackage = (name, version) => ({
+  [`vendor/${name}-${version}/Cargo.toml`]: `[package]\nname = "${name}"\nversion = "${version}"\n`,
+  [`vendor/${name}-${version}/src/lib.rs`]: '',
+})
+
+test('createCargoContext resolves each dependency table on its own: one version per table, the asking file\'s table', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nrand = "0.7"\n[build-dependencies]\nrand = "0.8"\n[dev-dependencies]\nfake = { package = "rand", version = "0.8" }\n',
+    'src/main.rs': '', 'build.rs': '', 'tests/it.rs': '',
+    ...vendoredPackage('rand', '0.7.3'), ...vendoredPackage('rand', '0.8.5'),
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    const { result, warnings } = captureWarningsSync(() => [
+      cargo.resolveCrate('rand', 'src/main.rs'), cargo.resolveCrate('rand', 'build.rs'), cargo.resolveCrate('rand', 'tests/it.rs'), cargo.resolveCrate('fake', 'tests/it.rs'),
+    ])
+    t.assert.deepEqual(result, ['vendor/rand-0.7.3/src/lib.rs', 'vendor/rand-0.8.5/src/lib.rs', 'vendor/rand-0.7.3/src/lib.rs', 'vendor/rand-0.8.5/src/lib.rs'])
+    t.assert.deepEqual(warnings, [])
+    // both are in the build: the normal one for the target, the build-dependency for the host
+    t.assert.deepEqual([...cargo.featureResolution('target').keys(), ...cargo.featureResolution('host').keys()].toSorted(), ['.', 'vendor/rand-0.7.3', 'vendor/rand-0.8.5'])
+  })
+})
+
+test('createCargoContext takes a Cargo.lock pin only when the requirement allows it', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nrand = "0.8"\n',
+    // out of date: the manifest moved on to 0.8, the lock still says 0.7.3
+    'Cargo.lock': 'version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["rand"]\n\n[[package]]\nname = "rand"\nversion = "0.7.3"\n',
+    'src/main.rs': '',
+    ...vendoredPackage('rand', '0.7.3'), ...vendoredPackage('rand', '0.8.5'),
+  }, (tmp) => {
+    const { result, warnings } = captureWarningsSync(() => createCargoContext(tmp, { entries: ['src/main.rs'] }).resolveCrate('rand', 'src/main.rs'))
+    t.assert.equal(result, 'vendor/rand-0.8.5/src/lib.rs')
+    t.assert.deepEqual(warnings, ['[loader.cargo] Cargo.lock pins app 0.1.0 to rand 0.7.3, which 0.8 doesn\'t allow: the lock is out of date'])
+  })
+})
+
+test('createCargoContext applies a [patch] only where it fits, from the manifest or the cargo config', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nfoo = "1"\nbar = "1"\nbaz = "1"\n[patch.crates-io]\nfoo = { path = "patches/foo" }\nbaz = { path = "../outside/baz" }\n',
+    '.cargo/config.toml': '[patch.crates-io]\nbar = { path = "patches/bar" }\n',
+    'src/main.rs': '',
+    'patches/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "2.0.0"\n', 'patches/foo/src/lib.rs': '', // doesn't satisfy `1`
+    'patches/bar/Cargo.toml': '[package]\nname = "bar"\nversion = "1.5.0"\n', 'patches/bar/src/lib.rs': '',
+    ...vendoredPackage('foo', '1.0.0'), ...vendoredPackage('bar', '1.0.0'), ...vendoredPackage('baz', '1.0.0'),
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    const { result, warnings } = captureWarningsSync(() => ['foo', 'bar', 'baz'].map((name) => cargo.resolveCrate(name, 'src/main.rs')))
+    // foo: the patch isn't used, the registry's (vendored) 1.0.0 is; bar: the config's patch; baz:
+    // patched with a crate outside the bundle, which is not some vendored copy of that name
+    t.assert.deepEqual(result, ['vendor/foo-1.0.0/src/lib.rs', 'patches/bar/src/lib.rs', null])
+    t.assert.deepEqual(warnings, [
+      '[loader.cargo] Cargo.toml\'s patch of foo (2.0.0) doesn\'t satisfy app 0.1.0\'s requirement 1: not used',
+      '[loader.cargo] Cargo.toml patches baz with a path outside the bundle root',
+    ])
+  })
+})
+
+test('createCargoContext says when a path dependency lies outside the bundle root or names no package', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nfar = { path = "../far" }\nempty = { path = "crates/empty" }\n',
+    'src/main.rs': '', 'crates/empty/README.md': '',
+    ...vendoredPackage('far', '1.0.0'),
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    const { result, warnings } = captureWarningsSync(() => [cargo.resolveCrate('far', 'src/main.rs'), cargo.resolveCrate('empty', 'src/main.rs')])
+    t.assert.deepEqual(result, [null, null])
+    t.assert.deepEqual(warnings, [
+      '[loader.cargo] app 0.1.0\'s dependency far is a path outside the bundle root: ../far',
+      '[loader.cargo] app 0.1.0\'s dependency empty names crates/empty, which holds no Cargo.toml with a [package]',
+    ])
+  })
+})
+
+test('buildRustBundle ends when a crate root it wants is refused, and reports every crate it lacks, vendor dir or not', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlinks')
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlinked = "1"\nmissing = "1"\nfar = { path = "../far" }\n',
+    'src/main.rs': 'use linked::X;\nuse missing::Y;\nuse far::Z;\nfn main() {}\n',
+    'vendor/linked/Cargo.toml': '[package]\nname = "linked"\nversion = "1.0.0"\n',
+    'secret.rs': 'pub struct X;\n',
+  }, async (tmp) => {
+    // a vendored crate whose root is a link out of its package: the walk refuses it, the tree pass asks for it
+    mkdirSync(join(tmp, 'vendor', 'linked', 'src'))
+    symlinkSync(join('..', '..', '..', 'secret.rs'), join(tmp, 'vendor', 'linked', 'src', 'lib.rs'))
+    const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }))
+    t.assert.deepEqual([...bundle.sources.keys()], ['src/main.rs'])
+    t.assert.deepEqual([...new Set(warnings)], [
+      '[loader.cargo] app 0.1.0\'s dependency far is a path outside the bundle root: ../far',
+      '[loader.rust] Refusing file outside its package: vendor/linked/src/lib.rs (a link out of vendor/linked)',
+      '[stasis] 3 crates referenced but not in the bundle: far, linked (vendor/linked/src/lib.rs), missing',
+    ])
   })
 })

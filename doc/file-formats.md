@@ -522,10 +522,14 @@ that crate's root in: the package's own lib target (`use my_app::…` from
 `vendor/` (or the `directory` of the source the project's cargo config replaces
 crates.io with, through any chain of `replace-with`s, whatever its name). A
 `path` or `[patch]` dependency outside the bundle root is not in-tree, and never
-bound to a vendored crate of its name instead. Registry dependencies live in `~/.cargo/registry`, outside the bundle
-root, so they're never read: vendor them first (`cargo vendor`). When a bundle
-references crates it can't find and there is no `vendor/` dir, `stasis bundle`
-says so and suggests it.
+bound to a vendored crate of its name instead: the loader says so, and so it
+does of a `path` naming a directory with no `Cargo.toml` holding a `[package]`.
+Registry dependencies live in `~/.cargo/registry`, outside the bundle
+root, so they're never read: vendor them first (`cargo vendor`). Whenever a
+bundle references crates it lacks -- none in-tree, or one whose root the walk
+refused (a symlink leading out of the bundle root) -- `stasis bundle` lists
+them, `vendor/` dir or not; with no `vendor/` dir it also suggests `cargo
+vendor`.
 
 A path edge (`crate::a::b::Item`, `super::x`, a relative `child::y`) resolves
 module by module along the crate's tree, inline `mod x { … }` blocks included
@@ -575,10 +579,11 @@ set it: a name its build script prints as `cargo:rustc-cfg=…`, or that a
 rustflags `--cfg` sets (the cargo config's `build`/`target.<…>` `rustflags`,
 `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`), is neither
 presumed off nor on, and a build script that formats a name or uses `autocfg`
-makes every custom cfg of its package so. A child module under a custom cfg,
-or one the build rules out, gives way to an import of its name in the same
-module (serde's docsrs-only `mod de` beside the `pub use serde_core::de` of
-every other build). With `--cargo-target`, every file compiled
+makes every custom cfg of its package so. A child module the build rules out
+gives way to whatever else its module has of the name; one under a custom cfg
+only to an import or item of its name in the same module (serde's docsrs-only
+`mod de` beside the `pub use serde_core::de` of every other build) -- what a
+glob brings in never shadows a module that is there. With `--cargo-target`, every file compiled
 for the target is under the target's cfgs too, so a `windows` candidate is
 out for every file and a `target_os = "linux"` file takes the `any(android,
 linux)` branch over the `any(aix, solaris)` one (mio's `sys::Waker` is the
@@ -616,7 +621,10 @@ parse.rs). At the crate root the final segment may be a
 `#[macro_export]` macro (`$crate::name!`), which lives in the file defining it:
 an invocation (`crate::helper!()`, recorded as `crate::helper!`) names the
 macro before an import or module of that name, an ordinary path
-(`crate::helper()`) the other way round, and a one-segment path written at the
+(`crate::helper()`) the other way round. An invocation is looked up among
+macros throughout: an item a module defines (`fn m`), a module, or an import
+of a module or crate is no `m!`, so a `fn m` beside `use crate::macros::*` leaves
+the glob's `m!` in place. A one-segment path written at the
 crate root names it when no crate has the name (anyhow's `pub use anyhow as
 format_err;` in lib.rs; a child module's `use x;` does not reach it). The
 answers are the same whatever order the files are listed in: each module's
@@ -696,9 +704,23 @@ test code reaches for. Two kinds of cfg are decided:
   kept, but a missing module behind it is not fatal, and a candidate under it
   is never taken as certain. Resolver 1 unifies it all, every table included.
   The resolver is the workspace's: its `resolver`, else its edition.
-  The crate a versioned dependency resolves to comes from `Cargo.lock`, so two
-  vendored versions of one crate each get their own features and edges;
-  without a lock entry, it is the one vendored version the requirement allows.
+  Each dependency table is a dependency of its own, as cargo has it: `rand =
+  "0.7"` under `[dependencies]` beside `rand = "0.8"` under
+  `[build-dependencies]` (or a `[dev-dependencies] fake = { package = "rand",
+  version = "0.8" }`) is two crates, and a file is followed into the one its
+  target uses -- the build script into the build-dependency, a test target into
+  the normal or dev one, anything else into the normal one.
+  The crate a versioned dependency resolves to comes from `Cargo.lock`: a
+  version it lists for the crate that the requirement allows, so two
+  vendored versions of one crate each get their own features and edges; a lock
+  that lists only versions the requirement doesn't allow is out of date, and the
+  loader says so and goes by the requirement, as when there is no lock entry:
+  the one vendored version the requirement allows. A `[patch]` -- in the root
+  manifest, or in the cargo config of a directory from the package's up to the
+  bundle root (nearest first, ahead of the manifest's, its `path` relative to
+  the directory holding `.cargo`) -- replaces a crate only where its version
+  fits the dependent's requirement, as cargo applies it; one that doesn't is
+  reported and not used.
   When the locked version isn't vendored, or no vendored version fits, or
   several do and no lock says which, the loader warns and doesn't follow the
   dependency rather than guess: cargo would build none of them from what the
@@ -749,6 +771,8 @@ test code reaches for. Two kinds of cfg are decided:
 
 `all(…)`/`any(…)`/`not(…)` compose; a predicate that reduces to true (`not(test)`,
 an enabled feature) is as firm as no cfg, so a missing module behind it is fatal.
+A leaf's value is taken as written, spacing outside its quotes aside: `my = "a
+b"` and `my = "ab"` (or `"a  b"`) are different values.
 One an undecided leaf occurs in more than once is decided when it comes out the
 same whatever that leaf is: an item's cfg joined with its enclosing blocks'
 `all(any(test, kani), not(kani))` never holds (zerocopy's test-only `use
@@ -840,7 +864,8 @@ followed, never a resource. An include written inside a `macro_rules!` body
 resolves relative to each file that invokes the macro, as rustc expands it --
 through the macros whose bodies invoke it, the outermost call (the edge is
 that file's, at the invocation); so are the bare macro calls a body makes
-made and resolved where it is invoked. `<name>!` marks a `macro_rules!`
+made and resolved where it is invoked -- the body's own, even past a
+`macro_rules!` it defines inside. `<name>!` marks a `macro_rules!`
 invoked by bare name and defined in another file the invocation can see -- in
 textual scope, as rustc has it: the files above it in the module tree, each up
 to the `mod` that mounts the next (a macro defined after `mod early;` is not
