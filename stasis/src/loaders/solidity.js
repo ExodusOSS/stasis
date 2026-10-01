@@ -25,6 +25,7 @@ import {
   foundryTomlRemappings,
   parseRemappingLines,
   readFoundryTomlRemappings,
+  shownFrom,
   toSolcRemapping,
 } from './foundry.js'
 import { projectOwnership, projectRelative, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
@@ -149,15 +150,15 @@ export function parseRemappingsFromToml(tomlContent, { env = process.env } = {})
 // Read a mapping file -> its remappings as listed (no discovery around it) and the files read. A
 // foundry.toml (its selected profile, with its `extends` base) is forge's, and so is a
 // remappings.txt when `forge` says forge reads it: slash-terminated the way forge reads them.
-// Otherwise (solc, Hardhat) a remappings.txt applies as written.
-function readMapping(mappingFile, { env, forge }) {
+// Otherwise (solc, Hardhat) a remappings.txt applies as written. Messages name files `show(file)`.
+function readMapping(mappingFile, { env, forge, show = (f) => f }) {
   if (mappingFile.endsWith('.toml')) {
-    const { remappings, files, profiled } = readFoundryTomlRemappings(mappingFile, foundryProfile(env))
+    const { remappings, files, profiled } = readFoundryTomlRemappings(mappingFile, foundryProfile(env), { show })
     return { remappings: remappings.map(toSolcRemapping), files, profiled }
   }
-  const text = readUtf8OrNull(mappingFile)
-  if (text === null) throw new Error(`${mappingFile}: no such file`)
-  const listed = parseRemappingLines(text, { label: mappingFile, emptyPath: !forge })
+  const text = readUtf8OrNull(mappingFile, show(mappingFile))
+  if (text === null) throw new Error(`${show(mappingFile)}: no such file`)
+  const listed = parseRemappingLines(text, { label: show(mappingFile), emptyPath: !forge })
   return { remappings: listed.map(forge ? toSolcRemapping : toLoaderRemapping), files: [mappingFile] }
 }
 
@@ -184,17 +185,19 @@ export async function readRemappingsFile(mappingFile, { env = process.env, forge
 export async function discoverSolidityConfig(baseDir, { mappingFile, env = process.env } = {}) {
   const forge = isFile(join(baseDir, FOUNDRY_TOML))
   if (forge && !mappingFile) return foundryProject(baseDir, { env })
-  const { libs, profiled } = forge ? foundryLibs(baseDir, { env }) : { libs: [], profiled: false }
+  const { libs, profiled, files: libsFiles } = forge ? foundryLibs(baseDir, { env }) : { libs: [], profiled: false, files: [] }
   const ownership = projectOwnership(baseDir, libs, { soldeer: forge })
+  const show = shownFrom(toPosix(resolve(baseDir)))
   if (mappingFile) {
     const abs = resolve(baseDir, mappingFile)
-    const { remappings, files, profiled: mappingProfiled } = readMapping(abs, { env, forge })
-    // The profile picks the mapping file's remappings (a .toml) or the root foundry.toml's libs.
+    const { remappings, files, profiled: mappingProfiled } = readMapping(abs, { env, forge, show })
+    // The profile picks the mapping file's remappings (a .toml) or the root foundry.toml's libs: the
+    // files read are both's.
     const envUsed = profiled || mappingProfiled ? [`FOUNDRY_PROFILE=${env.FOUNDRY_PROFILE}`] : []
-    return { remappings, libs, ownership, files: files.map((f) => projectRelative(baseDir, f)), envUsed }
+    return { remappings, libs, ownership, files: [...new Set([...files, ...libsFiles].map((f) => projectRelative(baseDir, f)))], envUsed }
   }
   const txt = join(baseDir, REMAPPINGS_TXT)
-  const remappings = isFile(txt) ? readMapping(txt, { env, forge }).remappings : []
+  const remappings = isFile(txt) ? readMapping(txt, { env, forge, show }).remappings : []
   return { remappings, libs, ownership, files: isFile(txt) ? [REMAPPINGS_TXT] : [], envUsed: [] }
 }
 

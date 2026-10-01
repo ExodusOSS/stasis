@@ -367,9 +367,11 @@ A `foundry.toml` or `extends` base that isn't TOML, a config that isn't UTF-8
   or `{ path, strategy }`), and an invalid remapping (a `remappings.txt` line or
   `FOUNDRY_REMAPPINGS` entry that isn't `[context:]prefix=target`, or a
   `remappings` value that isn't an array of such strings), is an error naming
-  the file, whosever it is and in every mode: nothing falls back to a default
-  (forge refuses these too, but quietly skips a dependency's `foundry.toml` it
-  can't read). A `remappings.txt` line is trimmed as forge trims it, so a
+  the file (from the root), whosever it is and in every mode: nothing falls back
+  to a default (forge refuses these too, but quietly skips a dependency's
+  `foundry.toml` it can't read). So is a config that isn't a regular file: a
+  FIFO, a device or a link to one (`remappings.txt -> /dev/stdin`) is never
+  read, so the bundle can't stall on it or take the process's input as config. A `remappings.txt` line is trimmed as forge trims it, so a
   byte-order mark stays part of the first remapping. A dependency's config forge
   rejects for its settings (a missing `extends` base, nested inheritance) is
   skipped with a warning, as forge skips it.
@@ -400,7 +402,8 @@ A `foundry.toml` or `extends` base that isn't TOML, a config that isn't UTF-8
   `foundry.toml` still gives the `libs` (the default ones, warned, when forge
   would reject the file), and `FOUNDRY_PROFILE` picking them is reported (one
   that isn't a profile of the `foundry.toml` is warned about instead, as without
-  `--mapping`).
+  `--mapping`); that `foundry.toml` and its `extends` base count among the
+  config files read.
 
 Dependencies are input the project didn't write, so whatever resolves an import,
 the result must be a `.sol` file inside the bundle root (an `import ".env";` or
@@ -423,18 +426,23 @@ dependency linked from elsewhere, `lib/evil -> ../../shared/evil`, holding a
 link to the project's `.env`). Links are followed one by one and the result
 checked against the OS's own realpath: a path the two resolve differently (a
 link target that isn't UTF-8, one whose `\` the OS reads as part of a name), or
-one the OS can't resolve at all (a real path past `PATH_MAX`), is refused, not
-trusted. An `extends` path is joined as forge joins it and resolved by the OS,
-so a `..` after a symlink leads where forge's does. Whoever's import, entry or
+one the OS can't resolve at all (a real path past `PATH_MAX`, a link whose end it
+can't name: `/proc/self/fd/0` or `/dev/stdin` on a pipe), is refused, not
+trusted; only a path with nothing there counts as missing. An `extends` path is
+joined as forge joins it and resolved by the OS, so a `..` after a symlink leads
+where forge's does, in the project's config and a dependency's alike. Whoever's import, entry or
 manifest the path is, the import is refused, the entry rejected, the manifest
 not carried, and a dependency's own `foundry.toml`, `extends` base or
 `remappings.txt` skipped with a warning (one that is another dependency's file
 is read). A dependency's config reaches only what the path from the root does:
 one found through an absolute or `/proc/self/cwd` lib is judged by its real
 path, a dependency outside the root reads nothing, and a dir a dependency's
-`libs` names must be a dependency itself. A `package.json` that decides a file's package is refused the same way
-when a dependency planted it as a link, and one that doesn't parse is an error
-naming it (not quoting it) rather than giving its files to the parent package. A
+`libs` names must be a dependency itself; a config refused says why. A
+`package.json` that decides a file's package is refused the same way when a
+dependency planted it as a link, and one that doesn't parse (a leading
+byte-order mark is skipped, as npm skips it) is an error naming it (not quoting
+it) rather than giving its files to the parent package; other bundles walk past
+a malformed one, as they always have. A
 link the project placed (a workspace package linked into `node_modules`, a
 linked `lib/` entry, `src/vendor`) may lead anywhere in the root, and so may one
 on the path the project was named by (a symlinked checkout); a workspace package
@@ -444,7 +452,8 @@ The config files are read, not bundled. `--manifests` bundles the build
 description too: every config file the resolution read, whatever it's called (an
 `extends = "base.conf"`, a `--mapping=remaps`), by its path in the project (by
 its real path once a `..` or an absolute or `/proc/self/cwd` lib leads
-elsewhere), the root's `foundry.lock`, `soldeer.lock`, `.gitmodules` and
+elsewhere; one whose real path the OS can't give, past `PATH_MAX`, is refused:
+normalized, its name would be another file's), the root's `foundry.lock`, `soldeer.lock`, `.gitmodules` and
 `package.json`, and the `package.json`, `foundry.toml` and `remappings.txt`
 of every package the bundle holds files of — `json` for a `package.json`,
 `resource` otherwise, so `stasis extract` restores them. They are carried as

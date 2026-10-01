@@ -41,17 +41,17 @@ export function findPackageMetadata(baseDir, fileRelPath, { strict = false, chec
   }
 }
 
-// The package.json at `rel` (under `baseDir`), parsed; null when there's none, or when it doesn't
-// parse -- unless `strict`, then that throws, saying where with the parser's line and column but
-// never its message, which quotes the text (a file that isn't JSON may be anything, a secret
-// included). `check(rel)`, when given, sees the path before it is read, and may throw to refuse it.
-// Read through `host`.
+// The package.json at `rel` (under `baseDir`), parsed (a leading byte-order mark skipped, as npm
+// and Node skip it); null when there's none, or when it doesn't parse -- unless `strict`, then that
+// throws, saying where with the parser's line and column but never its message, which quotes the
+// text (a file that isn't JSON may be anything, a secret included). `check(rel)`, when given, sees
+// the path before it is read, and may throw to refuse it. Read through `host`.
 export function readPackageJson(baseDir, rel, { strict = false, check, host = diskHost } = {}) {
   const file = join(baseDir, rel)
   if (!host.stat(file)?.isFile()) return null
   check?.(rel)
   try {
-    return JSON.parse(host.readFile(file).toString('utf8'))
+    return JSON.parse(host.readFile(file).toString('utf8').replace(/^\uFEFF/u, ''))
   } catch (err) {
     if (!strict) return null
     const at = /\(line \d+ column \d+\)/u.exec(err.message)?.[0]

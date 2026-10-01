@@ -24,7 +24,7 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
-import { readGitmodules } from '../loaders/solidity-ownership.js'
+import { readGitmodules, readRegularFileOrNull } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -153,13 +153,13 @@ function executableSources(baseDir, sources, host) {
 // nearest package.json (node_modules -> `npm`-tagged bucket, workspace -> its dir, none ->
 // "." with the placeholder identity); a node_modules file whose nearest package.json is the
 // workspace root is rejected, not mislabeled; `packageOf(path)` finds that package.json
-// (packageLookup, strict, by default). `classifyDep(path)` optionally places a file
-// directly (non-node_modules ecosystems like Soldeer/github); null defers. `format` tags
+// (packageLookup by default, which walks past a malformed one). `classifyDep(path)` optionally
+// places a file directly (non-node_modules ecosystems like Soldeer/github); null defers. `format` tags
 // every file; `formats` (Map<path,format>) overrides it per file. `resolutions` values are
 // a flat target string or a Map<platform,target>; both round-trip untouched.
 function assembleCodeBundle({
   baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep, host,
-  packageOf = packageLookup(baseDir, { strict: true, host }),
+  packageOf = packageLookup(baseDir, { host }),
 }) {
   const modules = new Map()
   const ensureBucket = (dir, name, version, bucketEcosystem) => {
@@ -242,12 +242,13 @@ function solidityManifests(baseDir, sources, configFiles, { classifyDep, package
     if (reason) return { why: reason }
     let buf
     try {
-      assertRealPathWithinBase(realBase, baseDir, rel, host)
-      buf = host.readFile(join(baseDir, rel))
+      assertRealPathWithinBase(realBase, baseDir, rel)
+      buf = readRegularFileOrNull(join(baseDir, rel), rel)
     } catch (err) {
-      if (err.code !== 'ENOENT' && err.code !== 'EISDIR') throw err
-      return { why: null }
+      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err
+      buf = null
     }
+    if (buf === null) return { why: null }
     if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
     return { text: buf.toString('utf8') }
   }
@@ -338,7 +339,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   if (manifests) {
     for (const [path, text] of solidityManifests(baseDir, sources, configFiles, { classifyDep, packageOf, ownership })) {
       bundled.set(path, text)
-      formats.set(path, path.endsWith('.json') ? 'json' : 'resource')
+      formats.set(path, posix.basename(path) === 'package.json' ? 'json' : 'resource')
     }
   }
 

@@ -5,8 +5,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { toPosix } from '@exodus/stasis-core/util'
-
 import {
   applyRemappings,
   buildSolidityTree,
@@ -540,7 +538,7 @@ test('foundryProject reads a profile\'s sub-tables however they are spelled: `ex
   t.assert.throws(() => foundryProject(dir, { env: {} }), { message: /key collision in profile 'default' when extending base\.toml: fuzz$/u })
 }))
 
-test('discoverSolidityConfig: --mapping takes exactly that file; no foundry.toml falls back to remappings.txt', withProject({
+test('discoverSolidityConfig: --mapping takes exactly that file\'s remappings; no foundry.toml falls back to remappings.txt', withProject({
   'foundry.toml': '[profile.default]\n',
   'mapping.txt': '@m/=lib/m/\nforge-std=lib/forge-std/src\nconsole.sol=lib/forge-std/src/console.sol\n',
   'lib/forge-std/src/Test.sol': '',
@@ -549,7 +547,8 @@ test('discoverSolidityConfig: --mapping takes exactly that file; no foundry.toml
   const pinned = await discoverSolidityConfig(dir, { mappingFile: 'mapping.txt', env: {} })
   // Slash-terminated as forge reads a remappings file.
   t.assert.deepEqual(pinned.remappings.map(show), ['@m/=lib/m/', 'forge-std/=lib/forge-std/src/', 'console.sol=lib/forge-std/src/console.sol'])
-  t.assert.deepEqual(pinned.files, ['mapping.txt'])
+  // ...and the root foundry.toml, read for its lib dirs.
+  t.assert.deepEqual(pinned.files, ['mapping.txt', 'foundry.toml'])
   t.assert.deepEqual((await discoverSolidityConfig(dir, { env: {} })).remappings.map(show), ['forge-std/=lib/forge-std/src/'])
   const plain = await discoverSolidityConfig(join(dir, 'plain'), { env: {} })
   t.assert.deepEqual(plain.remappings.map(show), ['@p/=lib/p/'])
@@ -773,10 +772,9 @@ test('an invalid remapping in a foundry.toml or remappings variable is an error,
   'num/foundry.toml': '[profile.default]\nremappings = [1]\n',
   'ok/foundry.toml': '[profile.default]\n',
 }, (t, dir) => {
-  const root = toPosix(dir)
-  t.assert.throws(() => foundryProject(dir, { env: {} }), { message: `${root}/foundry.toml: \`remappings\`: invalid remapping "nope"` })
-  t.assert.throws(() => foundryProject(join(dir, 'list'), { env: {} }), { message: `${root}/list/foundry.toml: \`remappings\` is not an array of strings` })
-  t.assert.throws(() => foundryProject(join(dir, 'num'), { env: {} }), { message: `${root}/num/foundry.toml: \`remappings\`: invalid remapping 1` })
+  t.assert.throws(() => foundryProject(dir, { env: {} }), { message: 'foundry.toml: `remappings`: invalid remapping "nope"' })
+  t.assert.throws(() => foundryProject(join(dir, 'list'), { env: {} }), { message: 'foundry.toml: `remappings` is not an array of strings' })
+  t.assert.throws(() => foundryProject(join(dir, 'num'), { env: {} }), { message: 'foundry.toml: `remappings`: invalid remapping 1' })
   t.assert.throws(() => foundryProject(join(dir, 'ok'), { env: { FOUNDRY_REMAPPINGS: 'x/=y/\nbad' } }), { message: 'FOUNDRY_REMAPPINGS:2: invalid remapping "bad"' })
   t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["=x/"]\n'), { message: '`remappings`: invalid remapping "=x/"' })
 }))

@@ -1,5 +1,5 @@
 import { test } from 'node:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -438,6 +438,59 @@ const captureStderr = async (fn) => {
   }
 }
 
+// `dir/name` -> a chain of 22 dirs with 200-char names, one short hop each (`n -> next/n`), the last
+// hop `n -> last(levels)`; `atBottom()` runs in the deepest dir. Each hop resolves, but the chain's
+// real path is past PATH_MAX (4096).
+function linkPastPathMax(dir, name, last, atBottom = () => {}) {
+  const seg = (i) => `${'d'.repeat(200)}${i}`
+  const levels = 22
+  const cwd = process.cwd()
+  try {
+    process.chdir(dir)
+    symlinkSync(`${seg(0)}/n`, name)
+    for (let i = 0; i < levels; i++) {
+      mkdirSync(seg(i))
+      process.chdir(seg(i))
+      symlinkSync(i + 1 < levels ? `${seg(i + 1)}/n` : last(levels), 'n')
+    }
+    atBottom()
+  } finally {
+    process.chdir(cwd)
+  }
+}
+
+// buildSolidityBundle on `cwd` in a child whose stdin is an anonymous pipe left open (`sleep` holds
+// its other end), so a read of stdin never ends: the child's output lines (its warnings, then `OK`
+// and the bundled paths, or `ERR` and the error), or a rejection when it hangs.
+function bundleWithOpenStdin(cwd) {
+  const script = [
+    `import { buildSolidityBundle } from ${JSON.stringify(new URL('../stasis/src/cmd/bundle.js', import.meta.url).href)}`,
+    'try {',
+    `  const bundle = await buildSolidityBundle({ cwd: ${JSON.stringify(cwd)}, entries: ['src'], env: {} })`,
+    "  console.log('OK', [...bundle.sources.keys()].join(' '))",
+    '} catch (err) {',
+    "  console.log('ERR', err.message)",
+    '}',
+    "console.log('DONE')",
+  ].join('\n')
+  return new Promise((resolve, reject) => {
+    const child = spawn('sh', ['-c', 'sleep 60 2>/dev/null | "$0" --input-type=module -e "$1" 2>&1', process.execPath, script], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    let out = ''
+    const end = (settle) => {
+      clearTimeout(timer)
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {}
+      settle()
+    }
+    const timer = setTimeout(() => end(() => reject(new Error(`hung reading stdin, after: ${out}`))), 20_000)
+    child.stdout.on('data', (chunk) => {
+      out += chunk
+      if (out.endsWith('DONE\n')) end(() => resolve(out.slice(0, -'DONE\n'.length).trimEnd().split('\n')))
+    })
+  })
+}
+
 test('buildSolidityBundle refuses an import of a non-.sol file, however it is spelled', withTmp(async (t, tmp) => {
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\n',
@@ -564,7 +617,7 @@ test('buildSolidityBundle with manifests carries no dependency config reached th
   const { result: bundle, lines } = await captureStderr(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} }))
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['.gitmodules', 'foundry.toml', 'lib/evil/foundry.toml', 'lib/evil/src/E.sol', 'lib/evil2/src/E.sol', 'src/A.sol'])
   // Nor are they read as its config.
-  t.assert.ok(lines.some((l) => l.includes("Skipping a dependency's") && l.includes('lib/evil/remappings.txt: it is a link out of the dependency')))
+  t.assert.ok(lines.includes("[loader.solidity] Skipping a dependency's lib/evil/remappings.txt: lib/evil/remappings.txt is a link out of the dependency lib/evil"), lines.join('\n'))
   t.assert.ok(lines.some((l) => l.includes("Skipping a dependency's config") && l.includes('lib/evil2/foundry.toml: refusing to read it')))
   t.assert.ok(lines.some((l) => l === '[stasis] Not carrying lib/evil/remappings.txt: lib/evil/remappings.txt is a link out of the dependency lib/evil'))
 }))
@@ -672,7 +725,7 @@ test('buildSolidityBundle refuses a path the ownership walk reads differently fr
 test('buildSolidityBundle fails on a config that isn\'t UTF-8 or holds a mistyped setting, as forge does', withTmp(async (t, tmp) => {
   writeProject(tmp, { 'foundry.toml': '[profile.default]\n', 'src/A.sol': 'import "x/X.sol";\n', 'lib/x/X.sol': 'contract X {}\n', 'deps/x/X.sol': 'contract Y {}\n' })
   writeFileSync(join(tmp, 'remappings.txt'), Buffer.concat([Buffer.from('x/=lib/x'), Buffer.from([0xff]), Buffer.from('/\n')]))
-  await captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: `${join(tmp, 'remappings.txt')}: not valid UTF-8` }))
+  await captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: 'remappings.txt: not valid UTF-8' }))
   rmSync(join(tmp, 'remappings.txt'))
   for (const [setting, message] of [
     ['libs = "deps"', '`libs` must be an array of strings'],
@@ -682,7 +735,7 @@ test('buildSolidityBundle fails on a config that isn\'t UTF-8 or holds a mistype
   ]) {
     writeFileSync(join(tmp, 'foundry.toml'), `[profile.default]\n${setting}\n`)
     // eslint-disable-next-line no-await-in-loop -- each run rewrites foundry.toml
-    await captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: `${join(tmp, 'foundry.toml')}: ${message}` }))
+    await captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: `foundry.toml: ${message}` }))
   }
 }))
 
@@ -754,24 +807,23 @@ test('buildSolidityBundle fails on a foundry.toml that isn\'t TOML, naming the f
   })
   await captureStderr(() => t.assert.rejects(
     () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
-    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/foundry.toml')}: expected "," or "]", found the end of the text at line 3` },
+    { name: 'TomlError', message: 'lib/dep/foundry.toml: expected "," or "]", found the end of the text at line 3' },
   ))
   // ...and so is its `extends` base.
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\nextends = "base.toml"\n', 'lib/dep/base.toml': '[profile.default]\nsrc = "src" junk\n' })
   await captureStderr(() => t.assert.rejects(
     () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
-    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/base.toml')}: expected the end of the line, found "junk" at line 2` },
+    { name: 'TomlError', message: 'lib/dep/base.toml: expected the end of the line, found "junk" at line 2' },
   ))
   // With a pinned mapping file, the root foundry.toml is still read for its lib dirs.
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\n', 'foundry.toml': '[profile.default]\nlibs = ["lib"\n', 'remappings.txt': 'dep/=lib/dep/src/\n' })
   await captureStderr(() => t.assert.rejects(
     () => buildSolidityBundle({ cwd: tmp, entries: ['src'], mappingFile: 'remappings.txt', env: {} }),
-    { name: 'TomlError', message: `${join(tmp, 'foundry.toml')}: expected "," or "]", found the end of the text at line 3` },
+    { name: 'TomlError', message: 'foundry.toml: expected "," or "]", found the end of the text at line 3' },
   ))
 }))
 
 test('buildSolidityBundle fails on an invalid remapping, the project\'s or a dependency\'s, naming the file and line', withTmp(async (t, tmp) => {
-  const root = realpathSync(tmp)
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\n',
     'remappings.txt': 'dep/=lib/dep/src/\n# not a remapping\n',
@@ -779,15 +831,15 @@ test('buildSolidityBundle fails on an invalid remapping, the project\'s or a dep
     'lib/dep/src/D.sol': 'contract D {}\n',
   })
   const fails = (opts, message) => captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {}, ...opts }), { message }))
-  await fails({}, `${join(tmp, 'remappings.txt')}:2: invalid remapping "# not a remapping"`)
+  await fails({}, 'remappings.txt:2: invalid remapping "# not a remapping"')
   // As written for solc, and as a pinned mapping file, alike.
-  await fails({ mappingFile: 'remappings.txt' }, `${join(tmp, 'remappings.txt')}:2: invalid remapping "# not a remapping"`)
+  await fails({ mappingFile: 'remappings.txt' }, 'remappings.txt:2: invalid remapping "# not a remapping"')
   writeFileSync(join(tmp, 'remappings.txt'), 'dep/=lib/dep/src/\n')
   // forge skips a dependency's config holding one; here it's an error, not a config left out.
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\nremappings = ["x"]\n' })
-  await fails({}, `${join(root, 'lib/dep/foundry.toml')}: \`remappings\`: invalid remapping "x"`)
+  await fails({}, 'lib/dep/foundry.toml: `remappings`: invalid remapping "x"')
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\n', 'lib/dep/remappings.txt': 'y/=src/\n=z\n' })
-  await fails({}, `${join(root, 'lib/dep/remappings.txt')}:2: invalid remapping "=z"`)
+  await fails({}, 'lib/dep/remappings.txt:2: invalid remapping "=z"')
   writeFileSync(join(tmp, 'lib/dep/remappings.txt'), 'y/=src/\n')
   const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['lib/dep/src/D.sol', 'src/A.sol'])
@@ -803,22 +855,9 @@ test('buildSolidityBundle refuses a dependency config whose real path the OS can
     'lib/evil/foundry.toml': '[profile.default]\n',
     'lib/evil/0xabc/Y.sol': 'contract Y {}\n',
   })
-  // lib/evil/remappings.txt -> a chain of 22 dirs with 200-char names, each hop short, ending in a
-  // link to the project's .env: readable, but its real path is past PATH_MAX (4096).
-  const seg = (i) => `${'d'.repeat(200)}${i}`
-  const levels = 22
-  const cwd = process.cwd()
-  try {
-    process.chdir(join(tmp, 'lib/evil'))
-    symlinkSync(`${seg(0)}/n`, 'remappings.txt')
-    for (let i = 0; i < levels; i++) {
-      mkdirSync(seg(i))
-      process.chdir(seg(i))
-      symlinkSync(i + 1 < levels ? `${seg(i + 1)}/n` : `${'../'.repeat(levels + 2)}.env`, 'n')
-    }
-  } finally {
-    process.chdir(cwd)
-  }
+  // lib/evil/remappings.txt -> a chain ending in a link to the project's .env: readable, but its real
+  // path is past PATH_MAX.
+  linkPastPathMax(join(tmp, 'lib/evil'), 'remappings.txt', (levels) => `${'../'.repeat(levels + 2)}.env`)
   t.assert.equal(readFileSync(join(tmp, 'lib/evil/remappings.txt'), 'utf8'), 'PRIVATE_KEY=0xabc\n')
   await Promise.all([false, true].map(async (manifests) => {
     const { lines } = await captureStderr(() => t.assert.rejects(
@@ -866,6 +905,120 @@ test('buildSolidityBundle with manifests fails on a config the resolution read b
     const bundle = await buildSolidityBundle({ cwd: proj, entries: ['src'], env: {} })
     t.assert.deepEqual([...bundle.sources.keys()], ['src/A.sol'])
   }
+}))
+
+test('buildSolidityBundle with manifests refuses a config whose real path the OS can\'t give (past PATH_MAX), not another file of that name', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    // `L/../base.toml`: L leads to a dir whose real path is past PATH_MAX, and forge reads the base
+    // beside that dir. Normalized, the name would be the root's base.toml: another file.
+    'foundry.toml': '[profile.default]\nextends = "L/../base.toml"\n',
+    'base.toml': '[profile.default]\nremappings = ["x/=lib/textual/"]\n',
+    'src/A.sol': 'import "x/X.sol";\n',
+    'lib/textual/X.sol': 'contract T {}\n',
+    'lib/physical/X.sol': 'contract P {}\n',
+  })
+  linkPastPathMax(tmp, 'L', () => 'in', () => {
+    mkdirSync('in')
+    writeFileSync('base.toml', '[profile.default]\nremappings = ["x/=lib/physical/"]\n')
+  })
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
+  t.assert.equal(bundle.imports.get('solidity').get('src/A.sol').get('x/X.sol'), 'lib/physical/X.sol')
+  await t.assert.rejects(
+    () => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} }),
+    { message: "--manifests can't carry L/../base.toml, which the Solidity resolution read: L/../base.toml crosses a link stasis can't follow the way the filesystem does" },
+  )
+}))
+
+test('buildSolidityBundle never reads the process\'s stdin as a config, a dependency\'s or the project\'s', { skip: !existsSync('/proc/self/fd/0') }, withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    'foundry.toml': '[profile.default]\n',
+    'src/A.sol': 'contract A {}\n',
+    'lib/a/foundry.toml': '[profile.default]\n',
+    'lib/b/B.sol': '',
+    'lib/c/foundry.toml': '[profile.default]\nextends = "base.toml"\n',
+  })
+  // A pipe on stdin is a link whose end the OS can't name (`pipe:[N]`): refused, not read.
+  symlinkSync('/proc/self/fd/0', join(tmp, 'lib/a/remappings.txt'))
+  symlinkSync('/dev/stdin', join(tmp, 'lib/b/foundry.toml'))
+  symlinkSync('/proc/self/fd/0', join(tmp, 'lib/c/base.toml'))
+  const unresolved = (path) => `${path} crosses a link stasis can't follow the way the filesystem does`
+  t.assert.deepEqual(await bundleWithOpenStdin(tmp), [
+    `[loader.solidity] Skipping a dependency's lib/a/remappings.txt: ${unresolved('lib/a/remappings.txt')}`,
+    `[loader.solidity] Skipping a dependency's config: lib/b/foundry.toml: refusing to read it: ${unresolved('lib/b/foundry.toml')}`,
+    `[loader.solidity] Skipping a dependency's config: lib/c/foundry.toml: refusing to extend base.toml: ${unresolved('lib/c/base.toml')}`,
+    'OK src/A.sol',
+  ])
+  // The project's own link to it, or a FIFO, is read only if it's a regular file: it isn't.
+  rmSync(join(tmp, 'lib'), { recursive: true })
+  symlinkSync('/dev/stdin', join(tmp, 'remappings.txt'))
+  t.assert.deepEqual(await bundleWithOpenStdin(tmp), ['ERR remappings.txt: not a regular file'])
+  rmSync(join(tmp, 'remappings.txt'))
+  spawnSync('mkfifo', [join(tmp, 'remappings.txt')])
+  await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: 'remappings.txt: not a regular file' })
+}))
+
+test('buildSolidityBundle resolves a dependency\'s `extends` through its own symlink as forge does', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    'foundry.toml': '[profile.default]\n',
+    'src/A.sol': 'import "y/Y.sol";\n',
+    // `sub` is a link to real/in: forge reads real/base.toml; a `..` taken textually would refuse it.
+    'lib/dep/foundry.toml': '[profile.default]\nextends = "sub/../base.toml"\n',
+    'lib/dep/real/base.toml': '[profile.default]\nremappings = ["y/=src/"]\n',
+    'lib/dep/real/in/.keep': '',
+    'lib/dep/src/Y.sol': 'contract Y {}\n',
+  })
+  symlinkSync('real/in', join(tmp, 'lib/dep/sub'))
+  const { result: bundle, lines } = await captureStderr(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }))
+  t.assert.equal(bundle.imports.get('solidity').get('src/A.sol').get('y/Y.sol'), 'lib/dep/src/Y.sol')
+  t.assert.deepEqual(lines, [])
+}))
+
+test('buildSolidityBundle with --mapping and manifests carries the root config read for its lib dirs, `extends` base included', withTmp(async (t, tmp) => {
+  const proj = join(tmp, 'proj')
+  writeProject(proj, {
+    'foundry.toml': '[profile.default]\nextends = "base.toml"\n',
+    'base.toml': '[profile.default]\nlibs = ["deps"]\n',
+    'remappings.txt': 'x/=deps/x/\n',
+    'src/A.sol': 'import "x/X.sol";\n',
+    'deps/x/X.sol': 'contract X {}\n',
+  })
+  const opts = { cwd: proj, entries: ['src'], mappingFile: 'remappings.txt', manifests: true, env: {} }
+  const bundle = await buildSolidityBundle(opts)
+  t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['base.toml', 'deps/x/X.sol', 'foundry.toml', 'remappings.txt', 'src/A.sol'])
+  // ...and fails on one it can't carry, as without --mapping.
+  writeFileSync(join(tmp, 'shared-base.toml'), '[profile.default]\nlibs = ["deps"]\n')
+  writeFileSync(join(proj, 'foundry.toml'), '[profile.default]\nextends = "../shared-base.toml"\n')
+  await t.assert.rejects(() => buildSolidityBundle(opts), { message: "--manifests can't carry ../shared-base.toml, which the Solidity resolution read: it lies outside the bundle root" })
+}))
+
+test('buildSolidityBundle with manifests tags a package.json `json`, any other config (`--mapping=remaps.json`) `resource`', withTmp(async (t, tmp) => {
+  writeProject(tmp, { 'package.json': '{ "name": "proj", "version": "1.0.0" }\n', 'remaps.json': 'x/=lib/x/\n', 'src/A.sol': 'import "x/X.sol";\n', 'lib/x/X.sol': 'contract X {}\n' })
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], mappingFile: 'remaps.json', manifests: true, env: {} })
+  t.assert.equal(bundle.formats.get('remaps.json'), 'resource')
+  t.assert.equal(bundle.formats.get('package.json'), 'json')
+}))
+
+test('buildSolidityBundle reads a package.json with a byte-order mark, as npm does, and carries it as written', withTmp(async (t, tmp) => {
+  const pkg = '\uFEFF{ "name": "proj", "version": "1.0.0" }\n'
+  writeProject(tmp, { 'package.json': pkg, 'src/A.sol': 'contract A {}\n', 'node_modules/dep/package.json': '\uFEFF{ "name": "dep", "version": "2.0.0" }\n', 'node_modules/dep/D.sol': 'contract D {}\n' })
+  writeFileSync(join(tmp, 'src/A.sol'), 'import "dep/D.sol";\n')
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} })
+  t.assert.equal(bundle.sources.get('package.json'), pkg)
+  t.assert.deepEqual([...bundle.modules.keys()].toSorted(), ['.', 'node_modules/dep'])
+  t.assert.equal(bundle.modules.get('node_modules/dep').version, '2.0.0')
+}))
+
+test('buildBashBundle and buildRustBundle walk past a malformed package.json, as they always have', withTmp(async (t, tmp) => {
+  writeProject(tmp, {
+    'run.sh': '#!/bin/sh\n. ./sub/lib.sh\n',
+    'sub/lib.sh': 'echo hi\n',
+    'sub/package.json': '{ "name": "sub",\n}\n',
+    'src/main.rs': 'mod a;\nfn main() {}\n',
+    'src/a.rs': '',
+    'src/package.json': '{ bad',
+  })
+  t.assert.deepEqual([...(await buildBashBundle({ cwd: tmp, entries: ['run.sh'] })).sources.keys()].toSorted(), ['run.sh', 'sub/lib.sh'])
+  t.assert.deepEqual([...(await buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] })).sources.keys()].toSorted(), ['src/a.rs', 'src/main.rs'])
 }))
 
 test('buildSolidityBundle with --mapping bundles when forge would reject the root foundry.toml', withTmp(async (t, tmp) => {
@@ -936,7 +1089,7 @@ test('buildSolidityBundle with manifests carries configs as written, never `.env
   // `.env` and hardhat.config.* are never carried, and the submodule's `extends` reaching the
   // project's `.env` is neither read as config nor carried.
   for (const [, text] of bundle.sources) t.assert.doesNotMatch(text, /KEY[67]/u)
-  t.assert.ok(lines.some((l) => l.includes("Skipping a dependency's config") && l.includes('outside the dependency')))
+  t.assert.ok(lines.includes("[loader.solidity] Skipping a dependency's config: lib/dep/foundry.toml: refusing to extend ../../.env: it resolves to the project's own .env"), lines.join('\n'))
 }))
 
 test('buildSolidityBundle says when the environment shaped the resolution; buildBundle passes `env` on', withTmp(async (t, tmp) => {

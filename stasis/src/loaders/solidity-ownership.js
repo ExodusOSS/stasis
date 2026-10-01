@@ -4,7 +4,7 @@
 // out of itself is never followed.
 
 import { isUtf8 } from 'node:buffer'
-import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, parse, posix, relative, resolve, sep } from 'node:path'
 
 import { hasNodeModulesSegment } from '@exodus/stasis-core/util'
@@ -25,34 +25,71 @@ const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(re
 // `abs`, a file the resolution read, relative to the project `root` (slashes): as spelled when that
 // lies inside it with no `..` to resolve (a linked lib's files keep the lib's path), else by real
 // paths -- where the read went (an absolute or `/proc/self/cwd` lib; a `..` after a symlink) --
-// `../` when outside the project.
+// `../` when outside the project. One whose real path the OS can't give (past PATH_MAX) keeps the
+// path it was read by, `..` and all, for solidityOwnership to refuse: normalized, it would name
+// another file.
 export function projectRelative(root, abs) {
   const rel = toSlashes(relative(root, abs))
   if (inRoot(rel) && !toSlashes(abs).split('/').includes('..')) return rel
-  return toSlashes(relative(realpathOrNull(root) ?? root, realpathOrNull(abs) ?? abs))
+  const real = realpathOrNull(abs)
+  if (real !== null) return toSlashes(relative(realpathOrNull(root) ?? root, real))
+  const prefix = `${resolve(root)}${sep}`
+  return abs.startsWith(prefix) ? toSlashes(abs.slice(prefix.length)) : rel
 }
 
-// realpath(3) of `p`: `{ real }`, or `{ real: null, missing }`, `missing` false when something is
-// there that the OS can't resolve (a real path past PATH_MAX, a loop, a dir it may not search).
+const NO_ENTRY = new Set(['ENOENT', 'ENOTDIR'])
+
+// realpath(3) of `p`: `{ real }`, or `{ real: null, missing }`, `missing` only when nothing is
+// there at all. The OS may fail to resolve what is there -- a real path past PATH_MAX, a loop, a
+// link whose end it can't name (`/proc/self/fd/0` on a pipe), a dir it may not search -- and a
+// read may still get through.
 function osRealpath(p) {
   try {
     return { real: realpathSync.native(p), missing: false }
   } catch (err) {
-    return { real: null, missing: err.code === 'ENOENT' || err.code === 'ENOTDIR' }
+    return { real: null, missing: NO_ENTRY.has(err.code) && !lexists(p) }
   }
 }
 
-// A config file's text, or null when there's no file. One that isn't UTF-8 throws: forge and git
-// refuse it, and a text read with U+FFFD in it isn't the one they read. A byte-order mark stays.
-export function readUtf8OrNull(file) {
-  let buf
+function lexists(p) {
   try {
-    buf = readFileSync(file)
+    lstatSync(p)
+    return true
   } catch (err) {
-    if (err.code === 'ENOENT' || err.code === 'ENOTDIR' || err.code === 'EISDIR') return null
+    if (NO_ENTRY.has(err.code)) return false
     throw err
   }
-  if (!isUtf8(buf)) throw new Error(`${file}: not valid UTF-8`)
+}
+
+// `file`'s bytes, or null when there's no file (a directory counts as none). It's opened without
+// blocking and read only when it's a regular file: a FIFO, a socket, a device or a link to one
+// (`/dev/stdin`) throws, naming it `label`, rather than stalling or reading the process's input.
+export function readRegularFileOrNull(file, label = file) {
+  let fd
+  try {
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
+  } catch (err) {
+    if (NO_ENTRY.has(err.code) || err.code === 'EISDIR') return null
+    if (err.code === 'ENXIO') throw new Error(`${label}: not a regular file`, { cause: err }) // a socket
+    throw err
+  }
+  try {
+    const stat = fstatSync(fd)
+    if (stat.isDirectory()) return null
+    if (!stat.isFile()) throw new Error(`${label}: not a regular file`)
+    return readFileSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+// A config file's text, or null when there's no file (readRegularFileOrNull). One that isn't UTF-8
+// throws: forge and git refuse it, and a text read with U+FFFD in it isn't the one they read. A
+// byte-order mark stays. Errors name it `label`.
+export function readUtf8OrNull(file, label = file) {
+  const buf = readRegularFileOrNull(file, label)
+  if (buf === null) return null
+  if (!isUtf8(buf)) throw new Error(`${label}: not valid UTF-8`)
   return buf.toString('utf8')
 }
 
@@ -115,7 +152,7 @@ export function parseGitmodules(text) {
 }
 
 // The submodules of the project at `baseDir` (its `.gitmodules`, see parseGitmodules).
-export const readGitmodules = (baseDir) => parseGitmodules(readUtf8OrNull(join(baseDir, '.gitmodules')) ?? '')
+export const readGitmodules = (baseDir) => parseGitmodules(readUtf8OrNull(join(baseDir, '.gitmodules'), '.gitmodules') ?? '')
 
 // --- Ownership --------------------------------------------------------------------------------
 
@@ -251,7 +288,8 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
   const of = (rel) => {
     let owner = owners.get(rel)
     if (owner === undefined) {
-      const path = join(realBase, rel)
+      // As given, not normalized: the OS resolves a `..` after a link from where the link leads.
+      const path = rel === '' ? realBase : `${realBase}${sep}${rel}`
       let { abs, escape } = walk(realBase, rel.split('/'), 0)
       // The OS's answer is the one a read gets: the walk must agree with it, or the path is refused,
       // as it is when the OS can't resolve it at all, though a read may still get through.
