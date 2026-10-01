@@ -347,6 +347,13 @@ test('evalCfg decides test/doc-only predicates and leaves target/feature ones un
   t.assert.equal(evalCfg('unix'), null)
   t.assert.equal(evalCfg('all()'), true)
   t.assert.equal(evalCfg('any()'), false)
+  // the boolean literals (rustc 1.88), and a raw identifier as the name it spells
+  t.assert.equal(evalCfg('true'), true)
+  t.assert.equal(evalCfg('not(false)'), true)
+  t.assert.equal(evalCfg('all(unix, false)'), false)
+  t.assert.equal(evalCfg('r#test'), false)
+  t.assert.equal(evalCfg('r#unix', { target: new Set(['unix']) }), true)
+  t.assert.equal(evalCfg('r#true'), null) // a cfg named `true`, not the literal
 })
 
 test('evalCfg decides a predicate an unknown leaf repeats in when it holds, or fails, whatever that leaf is', (t) => {
@@ -764,29 +771,27 @@ test('parseCargoManifest reads package, lib, dependencies in every shape, and wo
     '[workspace.package]', 'version = "0.9.0"',
     '[workspace.dependencies]', 'shared = { path = "crates/shared" }',
   ].join('\n'))
-  t.assert.deepEqual(m.package, { name: 'my-app', version: null, versionFromWorkspace: true, edition: '2021', editionFromWorkspace: false, build: null })
+  t.assert.deepEqual(m.package, { name: 'my-app', version: '0.9.0', edition: '2021', build: null }) // the version its own [workspace] gives
   t.assert.deepEqual(m.lib, { name: 'myapp_lib', path: 'src/the_lib.rs', procMacro: false })
   const dep = (k) => {
     const d = m.deps.get(k)
     const [r] = d.kinds.values() // one table each here: a dependency's identity is its table's
-    return { path: r.path, package: r.package, workspace: r.workspace, kinds: [...d.kinds.keys()].toSorted() }
+    return { path: r.path, package: r.package, renamed: r.renamed, inherited: r.inherited, kinds: [...d.kinds.keys()].toSorted() }
   }
   t.assert.deepEqual([...m.deps.keys()].toSorted(), ['inline_sub', 'nix', 'serde', 'shared', 'tempfile', 'tools', 'util'])
-  t.assert.deepEqual(dep('inline_sub'), { path: '../sub', package: null, workspace: false, kinds: ['normal'] })
-  t.assert.deepEqual(dep('nix'), { path: '../nix', package: null, workspace: false, kinds: ['normal@cfg(unix)'] }) // a target table: its own request
-  t.assert.deepEqual(dep('serde'), { path: null, package: null, workspace: false, kinds: ['normal'] })
-  t.assert.deepEqual(dep('shared'), { path: null, package: null, workspace: true, kinds: ['normal'] })
-  t.assert.deepEqual(dep('tempfile'), { path: null, package: null, workspace: false, kinds: ['dev'] })
-  t.assert.deepEqual(dep('tools'), { path: '../tools', package: 'dev-tools', workspace: false, kinds: ['normal'] })
+  t.assert.deepEqual(dep('inline_sub'), { path: '../sub', package: 'inline-sub', renamed: false, inherited: false, kinds: ['normal'] })
+  t.assert.deepEqual(dep('nix'), { path: '../nix', package: 'nix', renamed: false, inherited: false, kinds: ['normal@cfg(unix)'] }) // a target table: its own request
+  t.assert.deepEqual(dep('serde'), { path: null, package: 'serde', renamed: false, inherited: false, kinds: ['normal'] })
+  t.assert.deepEqual(dep('shared'), { path: 'crates/shared', package: 'shared', renamed: false, inherited: true, kinds: ['normal'] }) // relative to the workspace root
+  t.assert.deepEqual(dep('tempfile'), { path: null, package: 'tempfile', renamed: false, inherited: false, kinds: ['dev'] })
+  t.assert.deepEqual(dep('tools'), { path: '../tools', package: 'dev-tools', renamed: true, inherited: false, kinds: ['normal'] })
   t.assert.equal(m.isWorkspace, true)
-  t.assert.equal(m.workspacePackage.version, '0.9.0')
-  t.assert.deepEqual([...m.workspaceDeps.keys()], ['shared'])
-  t.assert.equal(m.workspaceDeps.get('shared').path, 'crates/shared')
+  t.assert.deepEqual(m.cargo.workspace.members, ['crates/*'])
 })
 
-test('parseCargoManifest returns no package without a name', (t) => {
+test('parseCargoManifest returns no package for a virtual manifest, and refuses a package without a name', (t) => {
   t.assert.equal(parseCargoManifest('[workspace]\nmembers = ["a"]\n').package, null)
-  t.assert.equal(parseCargoManifest('[package]\nversion = "1.0.0"\n').package, null)
+  t.assert.throws(() => parseCargoManifest('[package]\nversion = "1.0.0"\n', 'Cargo.toml'), { name: 'LockfileError', message: 'Cargo.toml: package.name: expected a string, found nothing' })
 })
 
 test('createCargoContext identifies the owning package, resolving version.workspace through the root', (t) => {

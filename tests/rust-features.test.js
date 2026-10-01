@@ -2,20 +2,19 @@ import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, parse } from 'node:path'
+import { dirname, join, parse, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  HOST_UNIT,
   createCargoContext,
   evalCfg,
   findCargoLock,
-  parseCargoLock,
   parseCargoManifest,
   parseFeatureList,
   parseRustcCfg,
   resolutionFromMetadata,
   rustcTargetCfgs,
-  satisfiesCargoReq,
 } from '../stasis/src/loaders/cargo.js'
 import { buildRustBundle } from '../stasis/src/cmd/bundle.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../stasis/src/loaders/rust.js'
@@ -27,6 +26,58 @@ const sorted = (iter) => [...iter].toSorted()
 const enabledOf = (cargo, context) => Object.fromEntries([...cargo.resolvedFeatures(context)].map(([dir, set]) => [dir, sorted(set)]).toSorted())
 // The packages built only maybe, or with features on only maybe: dir -> those features.
 const maybeOf = (cargo, context) => Object.fromEntries([...cargo.featureResolution(context)].filter(([dir, r]) => r.maybe.size > 0 || !cargo.resolvedFeatures(context).has(dir)).map(([dir, r]) => [dir, sorted(r.maybe)]).toSorted())
+
+// A throwaway project: `files` maps project-relative paths to their text.
+const writeProject = (files) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-cargo-'))
+  for (const [rel, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(tmp, rel)), { recursive: true })
+    writeFileSync(join(tmp, rel), text)
+  }
+  return tmp
+}
+const withProject = (files, fn) => {
+  const tmp = writeProject(files)
+  try {
+    return fn(tmp)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+}
+const captureWarningsAsync = async (fn) => {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    return { result: await fn(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+const withProjectAsync = async (files, fn) => {
+  const tmp = writeProject(files)
+  try {
+    return await fn(tmp)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+// Warnings `fn` prints, and its result.
+const captureWarningsSync = (fn) => {
+  const original = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    return { result: fn(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+const vendoredPackage = (name, version) => ({
+  [`vendor/${name}-${version}/Cargo.toml`]: `[package]\nname = "${name}"\nversion = "${version}"\n`,
+  [`vendor/${name}-${version}/src/lib.rs`]: '',
+})
 
 // --- Cargo.toml / Cargo.lock ---
 
@@ -42,43 +93,44 @@ test('parseCargoManifest reads multi-line arrays, feature tables, dependency kin
     '[patch.crates-io]', 'plain = { path = "patches/plain" }', 'dotted.path = "patches/dotted"',
     '[patch.crates-io.subbed]', 'path = "patches/subbed"',
   ].join('\n'))
-  t.assert.deepEqual(m.package, { name: 'app', version: '0.1.0', versionFromWorkspace: false, edition: '2021', editionFromWorkspace: false, build: null })
-  t.assert.equal(m.resolver, '2')
-  t.assert.deepEqual([...m.features], [['default', ['std']], ['std', []], ['full', ['std', 'dep:opt', 'sub/two', 'opt?/extra']]])
+  t.assert.deepEqual(m.package, { name: 'app', version: '0.1.0', edition: '2021', build: null })
+  t.assert.equal(m.resolver, 2)
+  // cargo's feature map: as written, and a feature for the optional dependency no `dep:` names
+  t.assert.deepEqual([...m.features], [['default', ['std']], ['std', []], ['full', ['std', 'dep:opt', 'sub/two', 'opt?/extra']], ['pm-crate', ['dep:pm-crate']]])
   const dep = (k) => Object.fromEntries([...m.deps.get(k).kinds].toSorted())
-  const ask = (version, more) => ({ version, path: null, package: null, workspace: false, optional: false, defaultFeatures: null, features: [], ...more })
+  const ask = (pkg, version, more) => ({ version, path: null, source: 'registry', package: pkg, renamed: false, inherited: false, optional: false, defaultFeatures: true, features: [], ...more })
   // Each dependency table is its own request, for the crate it names: a dev-dependency's features
-  // stay out of the normal one. `defaultFeatures` stays null until a table says (an inherited
-  // entry may only turn defaults on).
-  t.assert.deepEqual(dep('plain'), { dev: ask('1', { features: ['dev-only'] }), normal: ask('1') })
-  t.assert.deepEqual(dep('opt'), { normal: ask('1', { optional: true, defaultFeatures: false, features: ['a'] }) })
-  t.assert.deepEqual(dep('sub'), { normal: ask('2', { features: ['one', 'two'] }) })
+  // stay out of the normal one.
+  t.assert.deepEqual(dep('plain'), { dev: ask('plain', '1', { features: ['dev-only'] }), normal: ask('plain', '1') })
+  t.assert.deepEqual(dep('opt'), { normal: ask('opt', '1', { optional: true, defaultFeatures: false, features: ['a'] }) })
+  t.assert.deepEqual(dep('sub'), { normal: ask('sub', '2', { features: ['one', 'two'] }) })
   t.assert.deepEqual(Object.keys(dep('cc')), ['build'])
   // A target-specific table is a request of its own, beside the plain one.
   t.assert.deepEqual(Object.keys(dep('nix')), ['normal@cfg(unix)'])
   // the key is the `use` spelling, the name the manifest's (an optional dep's implicit feature name)
   t.assert.deepEqual([m.deps.get('pm_crate').key, m.deps.get('pm_crate').name, m.deps.get('pm_crate').kinds.get('normal').optional], ['pm_crate', 'pm-crate', true])
   // `[patch.<source>]` entries in every spelling: inline table, dotted key, sub-table.
-  t.assert.deepEqual([...m.patches], [['plain', 'patches/plain'], ['dotted', 'patches/dotted'], ['subbed', 'patches/subbed']])
+  t.assert.deepEqual(Object.entries(m.cargo.patch['crates-io']).map(([name, spec]) => [name, spec.source.path]), [['plain', 'patches/plain'], ['dotted', 'patches/dotted'], ['subbed', 'patches/subbed']])
 })
 
-test('parseCargoManifest reads a workspace-inherited edition', (t) => {
-  const m = parseCargoManifest(['[workspace]', '[workspace.package]', 'edition = "2021"', '[package]', 'name = "app"', 'version = "0.1.0"', 'edition.workspace = true'].join('\n'))
-  t.assert.equal(m.package.edition, null)
-  t.assert.equal(m.package.editionFromWorkspace, true)
-  t.assert.equal(m.workspacePackage.edition, '2021')
-  t.assert.equal(parseCargoManifest('[package]\nname = "app"\nedition = { workspace = true }\n').package.editionFromWorkspace, true)
+test('parseCargoManifest reads a workspace-inherited edition, from its own [workspace] or the root given', (t) => {
+  const root = parseCargoManifest(['[workspace]', '[workspace.package]', 'edition = "2021"', '[package]', 'name = "app"', 'version = "0.1.0"', 'edition.workspace = true'].join('\n'))
+  t.assert.equal(root.package.edition, '2021')
+  const member = '[package]\nname = "lib"\nedition = { workspace = true }\n'
+  t.assert.equal(parseCargoManifest(member, 'crates/lib/Cargo.toml', root).package.edition, '2021')
+  t.assert.throws(() => parseCargoManifest(member, 'crates/lib/Cargo.toml'), { name: 'LockfileError', message: 'crates/lib/Cargo.toml: package.edition: inherits from a workspace, and no workspace root is given' })
 })
 
 test('parseCargoManifest splits dotted dependency keys and survives multi-line strings', (t) => {
+  const root = parseCargoManifest('[workspace]\n[workspace.dependencies]\nutil = { path = "crates/util" }\n')
   const m = parseCargoManifest([
     '[package]', 'name = "app"', 'description = """', 'Not a table: [x]', 'nor a key = value', '"""', 'version = "0.4.0"',
     '[dependencies]', 'util.workspace = true', 'util.features = ["extra"]', "serde.version = '1'", 'serde.features = [', '  "derive",', ']',
-  ].join('\n'))
+  ].join('\n'), 'crates/app/Cargo.toml', root)
   t.assert.equal(m.package.version, '0.4.0')
   t.assert.deepEqual([...m.deps.keys()], ['util', 'serde'])
-  t.assert.equal(m.deps.get('util').kinds.get('normal').workspace, true)
-  t.assert.deepEqual(m.deps.get('util').kinds.get('normal').features, ['extra'])
+  const util = m.deps.get('util').kinds.get('normal')
+  t.assert.deepEqual([util.inherited, util.path, util.features], [true, 'crates/util', ['extra']]) // the path is the workspace root's
   t.assert.equal(m.deps.get('serde').kinds.get('normal').version, '1')
   t.assert.deepEqual(m.deps.get('serde').kinds.get('normal').features, ['derive'])
 })
@@ -91,7 +143,7 @@ test('parseCargoManifest reads a pair by the table it lands in, whichever way th
     '[dependencies]\nfoo = { version = "1", features = ["x"] }\n',
   ]
   for (const text of spellings) {
-    const normal = parseCargoManifest(text).deps.get('foo').kinds.get('normal')
+    const normal = parseCargoManifest(`[package]\nname = "app"\n${text}`).deps.get('foo').kinds.get('normal')
     t.assert.deepEqual([normal.version, normal.features], ['1', ['x']], text)
   }
   const m = parseCargoManifest([
@@ -101,31 +153,50 @@ test('parseCargoManifest reads a pair by the table it lands in, whichever way th
     '[patch.crates-io.plain]', 'path = "patches/plain"',
     '[workspace.package]', 'version = "0.9.0"', // a [workspace.*] table alone makes this a workspace root
   ].join('\n'))
-  t.assert.deepEqual(m.package, { name: 'app', version: null, versionFromWorkspace: true, edition: null, editionFromWorkspace: false, build: null })
+  t.assert.deepEqual(m.package, { name: 'app', version: '0.9.0', edition: '2015', build: null })
   t.assert.deepEqual([...m.deps.get('winapi').kinds].map(([request, r]) => [request, r.version]), [['dev@cfg(windows)', '0.3']])
-  t.assert.deepEqual([...m.patches], [['plain', 'patches/plain']])
-  t.assert.deepEqual([m.isWorkspace, m.workspacePackage.version], [true, '0.9.0'])
+  t.assert.deepEqual(Object.keys(m.cargo.patch['crates-io']), ['plain'])
+  t.assert.equal(m.isWorkspace, true)
 })
 
-test('parseCargoManifest and parseCargoLock refuse text that is not TOML, naming the file and line', (t) => {
+test('parseCargoManifest refuses text that is not TOML, or not a manifest cargo reads, naming the file and line', (t) => {
   t.assert.throws(() => parseCargoManifest('[package]\nname = "app"\nversion = 0.1.0\n', 'crates/app/Cargo.toml'), {
     name: 'TomlError', message: 'crates/app/Cargo.toml: expected a value, found "0.1.0" at line 3',
   })
   t.assert.throws(() => parseCargoManifest('[dependencies]\nserde = { version = "1", version = "2" }\n'), { message: 'duplicate key "version" at line 2' })
-  t.assert.throws(() => parseCargoLock('version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["a" "b"]\n', 'Cargo.lock'), {
-    name: 'TomlError', message: 'Cargo.lock: expected "," or "]", found "\\"b\\"]" at line 6',
+  // what cargo would refuse, or read in a way the reader can't tell: @preventive/lockfile's word
+  t.assert.throws(() => parseCargoManifest('[package]\nname = "app"\n[features]\nstd = ["nothing"]\n', 'Cargo.toml'), {
+    name: 'LockfileError', message: 'Cargo.toml: features.std: "nothing" is neither a feature nor a dependency',
   })
+  t.assert.throws(() => parseCargoManifest('[package]\nname = "app"\n[replace]\n"foo:1.0.0" = { path = "foo" }\n', 'Cargo.toml'), { name: 'LockfileError', message: 'Cargo.toml: replace: [replace] is not supported' })
   // through the context, with the manifest's project-relative path
-  const tmp = mkdtempSync(join(tmpdir(), 'stasis-toml-'))
-  try {
-    mkdirSync(join(tmp, 'crates', 'app', 'src'), { recursive: true })
-    writeFileSync(join(tmp, 'Cargo.toml'), '[workspace]\nmembers = ["crates/app"]\n')
-    writeFileSync(join(tmp, 'crates', 'app', 'Cargo.toml'), '[package]\nname = "app"\nversion = "0.1.0\n')
-    writeFileSync(join(tmp, 'crates', 'app', 'src', 'main.rs'), 'fn main() {}\n')
+  withProject({
+    'Cargo.toml': '[workspace]\nmembers = ["crates/app"]\n',
+    'crates/app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0\n',
+    'crates/app/src/main.rs': 'fn main() {}\n',
+  }, (tmp) => {
     t.assert.throws(() => createCargoContext(tmp).packageInfo('crates/app/src/main.rs'), { name: 'TomlError', message: 'crates/app/Cargo.toml: unterminated string at line 3', line: 2 })
-  } finally {
-    rmSync(tmp, { recursive: true, force: true })
-  }
+  })
+})
+
+test('createCargoContext refuses a Cargo.lock older than version 3, or not TOML, naming it', (t) => {
+  const files = (lock) => ({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nrand = "0.8"\n',
+    'Cargo.lock': lock,
+    'src/main.rs': '',
+    ...vendoredPackage('rand', '0.8.5'),
+  })
+  const v2 = '[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["rand"]\n\n[[package]]\nname = "rand"\nversion = "0.8.5"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n'
+  withProject(files(v2), (tmp) => {
+    t.assert.throws(() => createCargoContext(tmp, { entries: ['src/main.rs'] }).resolveCrate('rand', 'src/main.rs'), {
+      name: 'LockfileError', message: 'Cargo.lock: version: no `version`: this is lockfile version 1 or 2, which is not read here, where 3 and 4 are',
+    })
+  })
+  withProject(files('version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["a" "b"]\n'), (tmp) => {
+    t.assert.throws(() => createCargoContext(tmp, { entries: ['src/main.rs'] }).resolveCrate('rand', 'src/main.rs'), {
+      name: 'TomlError', message: 'Cargo.lock: expected "," or "]", found "\\"b\\"]" at line 6',
+    })
+  })
 })
 
 test('parseFeatureList splits cargo\'s repeatable, comma- or space-separated feature flags', (t) => {
@@ -154,62 +225,6 @@ test('findCargoLock finds the lock beside the workspace root (a member dir\'s is
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
-})
-
-test('parseCargoLock indexes packages and their (possibly versioned) dependency edges', (t) => {
-  const lock = parseCargoLock([
-    'version = 3', '', '[[package]]', 'name = "app"', 'version = "0.1.0"', 'dependencies = [', ' "lib-a",', ' "winnowish 0.6.1",', ']', '',
-    '[[package]]', 'name = "lib-a"', 'version = "0.2.0"', 'dependencies = ["winnowish 0.5.0"]', '',
-    '[[package]]', 'name = "winnowish"', 'version = "0.5.0"', 'source = "registry+https://github.com/rust-lang/crates.io-index"', '',
-    '[[package]]', 'name = "winnowish"', 'version = "0.6.1"',
-  ].join('\n'))
-  t.assert.deepEqual(lock.byId.get('app 0.1.0').deps, [{ name: 'lib_a', version: null }, { name: 'winnowish', version: '0.6.1' }])
-  t.assert.deepEqual(lock.byId.get('lib_a 0.2.0').deps, [{ name: 'winnowish', version: '0.5.0' }])
-  t.assert.deepEqual(lock.byName.get('winnowish').map((p) => p.version), ['0.5.0', '0.6.1'])
-  t.assert.equal(parseCargoLock(null), null)
-})
-
-test('satisfiesCargoReq implements Cargo requirement semantics', (t) => {
-  // caret is the default; the leftmost non-zero part may not change
-  t.assert.equal(satisfiesCargoReq('1.5.0', '1'), true)
-  t.assert.equal(satisfiesCargoReq('2.0.0', '1'), false)
-  t.assert.equal(satisfiesCargoReq('1.2.9', '1.2'), true)
-  t.assert.equal(satisfiesCargoReq('1.1.0', '1.2'), false)
-  t.assert.equal(satisfiesCargoReq('0.9.3', '0.9'), true)
-  t.assert.equal(satisfiesCargoReq('0.10.3', '0.9'), false)
-  t.assert.equal(satisfiesCargoReq('0.10.3', '0.10'), true)
-  t.assert.equal(satisfiesCargoReq('0.0.3', '0.0.3'), true)
-  t.assert.equal(satisfiesCargoReq('0.0.4', '0.0.3'), false)
-  t.assert.equal(satisfiesCargoReq('0.5.0', '^0'), true)
-  t.assert.equal(satisfiesCargoReq('1.0.0', '^0'), false)
-  // a wildcard with an operator keeps the operator: the `*` only omits the component
-  t.assert.equal(satisfiesCargoReq('3.0.0', '>=1.*'), true)
-  t.assert.equal(satisfiesCargoReq('1.5.0', '>1.*'), false)
-  t.assert.equal(satisfiesCargoReq('2.0.0', '>1.*'), true)
-  t.assert.equal(satisfiesCargoReq('1.2.9', '=1.2.*'), true)
-  t.assert.equal(satisfiesCargoReq('1.3.0', '=1.2.*'), false)
-  t.assert.equal(satisfiesCargoReq('2.0.0', '1.*'), false)
-  // tilde, wildcard, exact, comparisons, several comparators
-  t.assert.equal(satisfiesCargoReq('1.2.9', '~1.2.3'), true)
-  t.assert.equal(satisfiesCargoReq('1.3.0', '~1.2.3'), false)
-  t.assert.equal(satisfiesCargoReq('1.7.0', '1.*'), true)
-  t.assert.equal(satisfiesCargoReq('1.7.0', '1.2.*'), false)
-  t.assert.equal(satisfiesCargoReq('1.2.3', '=1.2.3'), true)
-  t.assert.equal(satisfiesCargoReq('1.2.4', '=1.2.3'), false)
-  t.assert.equal(satisfiesCargoReq('1.2.4', '=1.2'), true)
-  t.assert.equal(satisfiesCargoReq('1.9.0', '>=1.2, <2.0'), true)
-  t.assert.equal(satisfiesCargoReq('2.0.0', '>=1.2, <2.0'), false)
-  // a partial bound covers its whole minor: `>1.2` is `>=1.3.0`, `<=1.2` is `<1.3.0`
-  t.assert.equal(satisfiesCargoReq('1.2.5', '>1.2'), false)
-  t.assert.equal(satisfiesCargoReq('1.3.0', '>1.2'), true)
-  t.assert.equal(satisfiesCargoReq('1.2.9', '<=1.2'), true)
-  t.assert.equal(satisfiesCargoReq('1.3.0', '<=1.2'), false)
-  t.assert.equal(satisfiesCargoReq('1.2.1', '>1.2.0'), true)
-  t.assert.equal(satisfiesCargoReq('1.2.0', '<=1.2.0'), true)
-  t.assert.equal(satisfiesCargoReq('9.9.9', '*'), true)
-  // a prerelease sorts below its release
-  t.assert.equal(satisfiesCargoReq('1.0.0-beta.1', '>=1.0.0'), false)
-  t.assert.equal(satisfiesCargoReq('junk', '1'), false)
 })
 
 // --- feature resolution from the manifests ---
@@ -263,42 +278,6 @@ test('createCargoContext falls back to the requirement when there is no Cargo.lo
     rmSync(tmp, { recursive: true, force: true })
   }
 })
-
-// A throwaway project: `files` maps project-relative paths to their text.
-const writeProject = (files) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'stasis-cargo-'))
-  for (const [rel, text] of Object.entries(files)) {
-    mkdirSync(dirname(join(tmp, rel)), { recursive: true })
-    writeFileSync(join(tmp, rel), text)
-  }
-  return tmp
-}
-const withProject = (files, fn) => {
-  const tmp = writeProject(files)
-  try {
-    return fn(tmp)
-  } finally {
-    rmSync(tmp, { recursive: true, force: true })
-  }
-}
-const captureWarningsAsync = async (fn) => {
-  const original = console.warn
-  const warnings = []
-  console.warn = (...args) => warnings.push(args.join(' '))
-  try {
-    return { result: await fn(), warnings }
-  } finally {
-    console.warn = original
-  }
-}
-const withProjectAsync = async (files, fn) => {
-  const tmp = writeProject(files)
-  try {
-    return await fn(tmp)
-  } finally {
-    rmSync(tmp, { recursive: true, force: true })
-  }
-}
 
 test('createCargoContext applies a bare --cargo-features name to every root package that has it', (t) => {
   withProject({
@@ -361,16 +340,20 @@ test('createCargoContext applies a weak `dep?/feat` once the dependency is activ
     t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': ['default', 'std'] })
     t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'], features: ['with-dep'] })), { '.': ['default', 'std', 'with-dep'], 'vendor/dep': ['std'] })
   })
-  // required without default features: active from the start
-  withProject(files(['[dependencies]', 'dep = { version = "1", default-features = false }']), (tmp) => {
-    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': ['default', 'std'], 'vendor/dep': ['std'] })
+  // optional in one table, required in another: active from the start
+  withProject(files(['[dependencies]', 'dep = { version = "1", optional = true }', '[build-dependencies]', 'dep = { version = "1", default-features = false }']), (tmp) => {
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] }), 'host'), { 'vendor/dep': ['std'] })
   })
-  // required only on a target: without one, the target table makes the dependency's `std` a maybe
-  withProject(files(["[target.'cfg(unix)'.dependencies]", 'dep = { version = "1", default-features = false }']), (tmp) => {
+  // optional, and required only on a target: without one, the target table makes the dependency's `std` a maybe
+  withProject(files(['[dependencies]', 'dep = { version = "1", optional = true }', "[target.'cfg(unix)'.dependencies]", 'dep = { version = "1", default-features = false }']), (tmp) => {
     const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
     t.assert.deepEqual(enabledOf(cargo), { '.': ['default', 'std'] })
     t.assert.deepEqual(maybeOf(cargo), { 'vendor/dep': ['std'] })
     t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'], target: LINUX })), { '.': ['default', 'std'], 'vendor/dep': ['std'] })
+  })
+  // `dep?/std` of a dependency no table makes optional is a manifest cargo refuses
+  withProject(files(['[dependencies]', 'dep = { version = "1", default-features = false }']), (tmp) => {
+    t.assert.throws(() => createCargoContext(tmp, { entries: ['src/main.rs'] }).featuresFor('src/main.rs'), { name: 'LockfileError', message: 'Cargo.toml: features.std: "dep?/std" names "dep", which is not an optional dependency' })
   })
 })
 
@@ -1291,22 +1274,6 @@ test('buildRustBundle declares a template\'s mod in each module of its package i
   })
 })
 
-// Warnings `fn` prints, and its result.
-const captureWarningsSync = (fn) => {
-  const original = console.warn
-  const warnings = []
-  console.warn = (...args) => warnings.push(args.join(' '))
-  try {
-    return { result: fn(), warnings }
-  } finally {
-    console.warn = original
-  }
-}
-const vendoredPackage = (name, version) => ({
-  [`vendor/${name}-${version}/Cargo.toml`]: `[package]\nname = "${name}"\nversion = "${version}"\n`,
-  [`vendor/${name}-${version}/src/lib.rs`]: '',
-})
-
 test('createCargoContext resolves each dependency table on its own: one version per table, the asking file\'s table', (t) => {
   withProject({
     'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nrand = "0.7"\n[build-dependencies]\nrand = "0.8"\n[dev-dependencies]\nfake = { package = "rand", version = "0.8" }\n',
@@ -1328,7 +1295,7 @@ test('createCargoContext takes a Cargo.lock pin only when the requirement allows
   withProject({
     'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nrand = "0.8"\n',
     // out of date: the manifest moved on to 0.8, the lock still says 0.7.3
-    'Cargo.lock': 'version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["rand"]\n\n[[package]]\nname = "rand"\nversion = "0.7.3"\n',
+    'Cargo.lock': 'version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["rand"]\n\n[[package]]\nname = "rand"\nversion = "0.7.3"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n',
     'src/main.rs': '',
     ...vendoredPackage('rand', '0.7.3'), ...vendoredPackage('rand', '0.8.5'),
   }, (tmp) => {
@@ -1393,5 +1360,228 @@ test('buildRustBundle ends when a crate root it wants is refused, and reports ev
       '[loader.rust] Refusing file outside its package: vendor/linked/src/lib.rs (a link out of vendor/linked)',
       '[stasis] 3 crates referenced but not in the bundle: far, linked (vendor/linked/src/lib.rs), missing',
     ])
+  })
+})
+
+// --- ninth round: @preventive/lockfile's reading and cargo's resolver ---
+
+// A workspace cargo locked and vendored, and in recorded.json what cargo itself made of it: the
+// features `cargo build --unit-graph` built each package with for a few command lines under
+// resolver 1 and 2, null where cargo refused one, and the targets' `rustc --print cfg`. It is
+// @preventive/lockfile's fixture (PreventiveMeasures/libraries#56, MIT), recorded there by
+// lockfile/scripts/record-cargo.js.
+const cargoRecorded = join(fixtures, 'cargo-recorded')
+const recordedProject = (resolver) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'stasis-recorded-'))
+  cpSync(cargoRecorded, tmp, { recursive: true })
+  if (resolver === '1') writeFileSync(join(tmp, 'Cargo.toml'), readFileSync(join(tmp, 'Cargo.toml'), 'utf8').replace('[workspace]\n', '[workspace]\nresolver = "1"\n'))
+  return tmp
+}
+
+test('createCargoContext turns on the features cargo builds each package with, given the lockfile and the target', (t) => {
+  const recorded = JSON.parse(readFileSync(join(cargoRecorded, 'recorded.json'), 'utf8'))
+  const dirOf = new Map([
+    ...Object.entries(recorded.manifests).map(([key, path]) => [key, dirname(path)]),
+    ...Object.entries(recorded.vendored).map(([key, directory]) => [key, `vendor/${directory}`]),
+  ])
+  const memberDir = { app: '.', lib: 'crates/lib', macros: 'crates/macros' }
+  const platform = (triple) => ({ triple, cfgs: parseRustcCfg(recorded.cfg[triple].join('\n')) })
+  for (const [resolver, builds] of Object.entries(recorded.features)) {
+    const tmp = recordedProject(resolver)
+    try {
+      for (const build of builds) {
+        const label = `resolver ${resolver}: ${JSON.stringify({ ...build, built: undefined })}`
+        const names = build.packages === 'all' ? ['lib', 'macros', 'app'] : build.packages
+        const entries = names.map((name) => posix.join(memberDir[name], build.dev ? 'tests/t.rs' : 'src/lib.rs'))
+        const cargo = () => createCargoContext(tmp, {
+          entries,
+          features: build.features ?? [],
+          noDefaultFeatures: build.noDefaultFeatures === true,
+          allFeatures: build.allFeatures === true,
+          target: platform(build.target ?? recorded.host),
+          host: platform(recorded.host),
+        })
+        if (build.built === null) {
+          t.assert.throws(() => cargo().featuresFor('src/lib.rs'), { name: 'LockfileError' }, label)
+          continue
+        }
+        const ctx = cargo()
+        const got = (unit) => {
+          const [key, fk] = [unit.slice(0, unit.lastIndexOf(' ')), unit.slice(unit.lastIndexOf(' ') + 1)]
+          return ctx.resolvedFeatures(fk === 'normal' ? 'target' : 'host').get(dirOf.get(key))
+        }
+        for (const [unit, on] of Object.entries(build.built)) t.assert.deepEqual(sorted(got(unit) ?? []), on, `${label}: ${unit}`)
+        if (resolver === '1') continue // one set per package, both ways
+        // Nothing else is built, but the proc-macro member for the target, which cargo's resolver
+        // lists in case it has more targets than its library.
+        for (const [context, fk] of [['target', 'normal'], ['host', 'host']]) {
+          for (const dir of ctx.resolvedFeatures(context).keys()) {
+            const key = [...dirOf].find(([, d]) => d === dir)[0]
+            if (!(`${key} ${fk}` in build.built)) t.assert.deepEqual([key, fk], ['macros 0.1.0', 'normal'], label)
+          }
+        }
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+})
+
+test('createCargoContext resolves through cargo\'s graph: each table\'s source, the [patch], the proc-macro for the host', (t) => {
+  const tmp = recordedProject('2')
+  try {
+    const recorded = JSON.parse(readFileSync(join(tmp, 'recorded.json'), 'utf8'))
+    const ctx = createCargoContext(tmp, { entries: ['src/lib.rs'], features: ['fmt,git'], target: { triple: recorded.host, cfgs: parseRustcCfg(recorded.cfg[recorded.host].join('\n')) } })
+    for (const dir of ['vendor/itoa', 'vendor/itoa-0.4.8', 'vendor/itoa-1.0.0', 'patched/cfg-if', 'crates/lib', 'crates/macros']) mkdirSync(join(tmp, dir, 'src'), { recursive: true })
+    for (const dir of ['vendor/itoa', 'vendor/itoa-0.4.8', 'vendor/itoa-1.0.0', 'patched/cfg-if', 'crates/lib', 'crates/macros']) writeFileSync(join(tmp, dir, 'src', 'lib.rs'), '')
+    // `itoa = "1"` from crates.io, `itoa04 = { package = "itoa", version = "0.4" }`, `itoa-git` from
+    // git at tag 1.0.0: three copies, each the one its table names
+    t.assert.equal(ctx.resolveCrate('itoa', 'src/lib.rs'), 'vendor/itoa/src/lib.rs')
+    t.assert.equal(ctx.resolveCrate('itoa04', 'src/lib.rs'), 'vendor/itoa-0.4.8/src/lib.rs')
+    t.assert.equal(ctx.resolveCrate('itoa_git', 'src/lib.rs'), 'vendor/itoa-1.0.0/src/lib.rs')
+    t.assert.equal(ctx.resolveCrate('cfg_if', 'src/lib.rs'), 'patched/cfg-if/src/lib.rs') // [patch.crates-io], a path
+    t.assert.equal(ctx.resolveCrate('macros', 'src/lib.rs'), 'crates/macros/src/lib.rs')
+    // the proc-macro and what it depends on are built for the host, with the host's features
+    t.assert.deepEqual(sorted(ctx.featuresFor('crates/macros/src/lib.rs', HOST_UNIT)), [])
+    t.assert.deepEqual(sorted(ctx.featuresFor('vendor/memchr/src/lib.rs', HOST_UNIT)), ['alloc'])
+    t.assert.deepEqual(sorted(ctx.featuresFor('vendor/memchr/src/lib.rs')), ['alloc', 'std'])
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('createCargoContext stops the build where the lockfile and the vendored copies disagree, and replays the manifests where it lacks a package', (t) => {
+  const recorded = JSON.parse(readFileSync(join(cargoRecorded, 'recorded.json'), 'utf8'))
+  const target = { triple: recorded.host, cfgs: parseRustcCfg(recorded.cfg[recorded.host].join('\n')) }
+  const tmp = recordedProject('2')
+  try {
+    // a vendored copy whose checksum isn't the lockfile's: cargo refuses to build from it
+    const sums = join(tmp, 'vendor', 'paste', '.cargo-checksum.json')
+    const original = readFileSync(sums, 'utf8')
+    writeFileSync(sums, original.replace(/"package":"[\da-f]{64}"/u, `"package":"${'0'.repeat(64)}"`))
+    t.assert.throws(() => createCargoContext(tmp, { entries: ['src/lib.rs'], target }).featuresFor('src/lib.rs'), { name: 'LockfileError', message: /^Cargo\.lock: paste 1\.0\.15 .*: "paste" holds it with checksum 0{64}, where the lockfile has / })
+    writeFileSync(sums, original)
+    // a manifest the lockfile is out of date with: lib's entry in it has no cfg-if
+    const manifest = readFileSync(join(tmp, 'crates', 'lib', 'Cargo.toml'), 'utf8')
+    writeFileSync(join(tmp, 'crates', 'lib', 'Cargo.toml'), manifest.replace('[target.', 'cfg-if = "1"\n[target.'))
+    t.assert.throws(() => createCargoContext(tmp, { entries: ['src/lib.rs'], target }).featuresFor('src/lib.rs'), { name: 'LockfileError', message: /^Cargo\.lock: lib 0\.2\.0: the lockfile resolves no "cfg-if", which the members' features turn on: is it out of date\?$/u })
+    writeFileSync(join(tmp, 'crates', 'lib', 'Cargo.toml'), manifest)
+    // a package the lockfile has and the vendor directory doesn't: the replay decides, as without a lockfile
+    rmSync(join(tmp, 'vendor', 'paste'), { recursive: true })
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/lib.rs'], target }))['.'], ['default', 'fast'])
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+// A registry package's `.cargo-checksum.json` and lockfile checksum; a git checkout's has none.
+const REGISTRY = 'registry+https://github.com/rust-lang/crates.io-index'
+const sha = (c) => c.repeat(64)
+const vendoredCopy = (dir, manifest, checksum) => ({
+  [`vendor/${dir}/Cargo.toml`]: manifest,
+  [`vendor/${dir}/.cargo-checksum.json`]: JSON.stringify({ files: {}, package: checksum }),
+  [`vendor/${dir}/src/lib.rs`]: '',
+})
+
+test('createCargoContext resolves a host it doesn\'t know both ways: its target-specific tables only maybe', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[target.\'cfg(unix)\'.build-dependencies]\ncc = { version = "1", features = ["parallel"] }\n',
+    'Cargo.lock': `version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["cc"]\n\n[[package]]\nname = "cc"\nversion = "1.0.0"\nsource = "${REGISTRY}"\nchecksum = "${sha('c')}"\n`,
+    'src/lib.rs': '', 'build.rs': '',
+    ...vendoredCopy('cc', '[package]\nname = "cc"\nversion = "1.0.0"\n[features]\nparallel = []\n', sha('c')),
+  }, (tmp) => {
+    // the target known, the host not: the build-dependency's table is about the host
+    const cross = createCargoContext(tmp, { entries: ['src/lib.rs'], target: LINUX })
+    t.assert.equal(cross.featuresFor('vendor/cc/src/lib.rs', HOST_UNIT).size, 0)
+    t.assert.deepEqual(sorted(cross.maybeFeaturesFor('vendor/cc/src/lib.rs', HOST_UNIT)), ['parallel'])
+    // the host known: decided
+    const native = createCargoContext(tmp, { entries: ['src/lib.rs'], target: LINUX, host: LINUX })
+    t.assert.deepEqual(sorted(native.featuresFor('vendor/cc/src/lib.rs', HOST_UNIT)), ['parallel'])
+    t.assert.equal(native.maybeFeaturesFor('vendor/cc/src/lib.rs', HOST_UNIT), null)
+  })
+})
+
+test('createCargoContext takes a git dependency\'s copy from a git checkout, a registry one\'s from the registry, lockfile or not', (t) => {
+  const git = 'git+https://github.com/dtolnay/itoa?tag=1.0.0#e6a8f6f2f193aa852a3d2d84f2721e75d4517bff'
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nitoa = "1"\nitoa-git = { package = "itoa", git = "https://github.com/dtolnay/itoa", tag = "1.0.0" }\n',
+    'src/main.rs': '',
+    ...vendoredCopy('itoa', '[package]\nname = "itoa"\nversion = "1.0.18"\n', sha('a')),
+    ...vendoredCopy('itoa-1.0.0', '[package]\nname = "itoa"\nversion = "1.0.0"\n', null),
+  }
+  const check = (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+    t.assert.equal(cargo.resolveCrate('itoa', 'src/main.rs'), 'vendor/itoa/src/lib.rs') // not the git 1.0.0, which "1" allows too
+    t.assert.equal(cargo.resolveCrate('itoa_git', 'src/main.rs'), 'vendor/itoa-1.0.0/src/lib.rs') // no version: any, but a git one
+  }
+  withProject(files, check)
+  withProject({
+    ...files,
+    'Cargo.lock': `version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = [\n "itoa 1.0.0",\n "itoa 1.0.18",\n]\n\n[[package]]\nname = "itoa"\nversion = "1.0.0"\nsource = "${git}"\n\n[[package]]\nname = "itoa"\nversion = "1.0.18"\nsource = "${REGISTRY}"\nchecksum = "${sha('a')}"\n`,
+  }, check)
+})
+
+test('createCargoContext turns a package\'s feature of a dependency\'s name on with `dep/feature`, written or implicit', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[features]\ndefault = ["full"]\nfull = ["serde/derive"]\nserde = ["dep:serde", "chrono?/serde", "extra"]\nextra = []\n[dependencies]\nserde = { version = "1", optional = true }\nchrono = { version = "0.4", optional = true }\n',
+    'src/lib.rs': '',
+    'vendor/serde/Cargo.toml': '[package]\nname = "serde"\nversion = "1.0.0"\n[features]\nderive = []\n', 'vendor/serde/src/lib.rs': '',
+    'vendor/chrono/Cargo.toml': '[package]\nname = "chrono"\nversion = "0.4.0"\n[features]\nserde = []\n', 'vendor/chrono/src/lib.rs': '',
+  }, (tmp) => {
+    t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/lib.rs'] })), { '.': ['default', 'extra', 'full', 'serde'], 'vendor/serde': ['derive'] })
+  })
+})
+
+test('createCargoContext resolves a proc-macro entry for the host, where cargo builds it', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "derive"\nversion = "0.1.0"\nedition = "2021"\n[lib]\nproc-macro = true\n[features]\ndefault = ["printing"]\nprinting = ["quote/std"]\n[dependencies]\nquote = { version = "1", default-features = false }\n',
+    'src/lib.rs': '',
+    'vendor/quote/Cargo.toml': '[package]\nname = "quote"\nversion = "1.0.0"\n[features]\ndefault = ["std"]\nstd = []\n', 'vendor/quote/src/lib.rs': '',
+  }, (tmp) => {
+    const cargo = createCargoContext(tmp, { entries: ['src/lib.rs'] })
+    t.assert.deepEqual(enabledOf(cargo, 'host'), { '.': ['default', 'printing'], 'vendor/quote': ['std'] })
+    t.assert.deepEqual(enabledOf(cargo, 'target'), {})
+    t.assert.deepEqual(sorted(cargo.featuresFor('src/lib.rs', HOST_UNIT)), ['default', 'printing'])
+  })
+})
+
+test('createCargoContext matches versions by the semver crate\'s rules: a requirement takes no prerelease it doesn\'t name', (t) => {
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nfoo = "1"\nbar = "=2.0.0-rc.1"\n',
+    'src/main.rs': '',
+    ...vendoredPackage('foo', '1.0.0'), ...vendoredPackage('foo', '1.1.0-beta.1'),
+    ...vendoredPackage('bar', '2.0.0-rc.1'),
+  }, (tmp) => {
+    const { result, warnings } = captureWarningsSync(() => {
+      const cargo = createCargoContext(tmp, { entries: ['src/main.rs'] })
+      return [cargo.resolveCrate('foo', 'src/main.rs'), cargo.resolveCrate('bar', 'src/main.rs')]
+    })
+    t.assert.deepEqual(result, ['vendor/foo-1.0.0/src/lib.rs', 'vendor/bar-2.0.0-rc.1/src/lib.rs'])
+    t.assert.deepEqual(warnings, [])
+  })
+})
+
+test('createCargoContext reads the lockfile of the entries\' workspace, below the bundle root too', (t) => {
+  withProject({
+    'proj/Cargo.toml': '[workspace]\nmembers = ["app"]\n',
+    'proj/app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nserde = "1"\n',
+    'proj/app/src/lib.rs': '',
+    'proj/Cargo.lock': `version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\ndependencies = ["serde"]\n\n[[package]]\nname = "serde"\nversion = "1.0.100"\nsource = "${REGISTRY}"\n`,
+    ...vendoredPackage('serde', '1.0.100'), ...vendoredPackage('serde', '1.0.200'),
+  }, (tmp) => {
+    const { result, warnings } = captureWarningsSync(() => createCargoContext(tmp, { entries: ['proj/app/src/lib.rs'] }).resolveCrate('serde', 'proj/app/src/lib.rs'))
+    t.assert.equal(result, 'vendor/serde-1.0.100/src/lib.rs')
+    t.assert.deepEqual(warnings, [])
+  })
+})
+
+test('buildRustBundle scans a proc-macro entry as the host build, with the features cargo builds it with', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "derive"\nversion = "0.1.0"\nedition = "2021"\n[lib]\nproc-macro = true\n[features]\ndefault = ["printing"]\nprinting = []\nextra = []\n',
+    'src/lib.rs': '#[cfg(feature = "printing")]\nmod printing;\n#[cfg(feature = "extra")]\nmod extra;\n',
+    'src/printing.rs': '', 'src/extra.rs': '',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'] })
+    t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/lib.rs', 'src/printing.rs'])
   })
 })

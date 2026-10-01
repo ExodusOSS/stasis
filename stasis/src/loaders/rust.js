@@ -1234,7 +1234,8 @@ function cfgLeaves(pred) {
   const p = pred.trim()
   const m = /^(all|any|not)\s*\(([\s\S]*)\)$/u.exec(p)
   if (!m) {
-    const kv = /^([\w-]+)\s*(?:=\s*"([^"]*)")?$/u.exec(p)
+    if (p === 'true') return [] // holds: decides nothing (`false` is a leaf the build rules out, see leafFalse)
+    const kv = /^(?:r#)?([\w-]+)\s*(?:=\s*"([^"]*)")?$/u.exec(p)
     return kv ? [{ key: kv[1], value: kv[2] ?? null, neg: false }] : []
   }
   const parts = splitTopLevel(m[2]).filter((part) => part.trim() !== '').map(cfgLeaves)
@@ -1413,7 +1414,7 @@ const compatible = (asker, set) => {
 // build may compile, and only when there is none -- a path written behind the same gate, whose
 // code the build doesn't compile either, means what it would mean where it compiles. For an
 // asker whose own leaves can't hold (`deadHere`) the build says nothing.
-const EVALUABLE_CFG_KEYS = new Set([...TARGET_CFG_KEYS, 'feature', 'test', 'doc', 'doctest'])
+const EVALUABLE_CFG_KEYS = new Set([...TARGET_CFG_KEYS, 'feature', 'test', 'doc', 'doctest', 'false'])
 const leafFalseMemo = new WeakMap() // build → leaf → verdict (builds are interned per settled context, see buildOf)
 const leafFalse = (l, build) => {
   if (l.alts !== undefined) return l.alts.every((alt) => alt.some((m) => leafFalse(m, build)))
@@ -1466,7 +1467,7 @@ const entailed = (asker, set) => {
 // custom`, see customFor). An `any` leaf is doubtful when each alternative is, or can't hold with
 // the asker. A gate macro's leaf (`cfg_x!`) and a `mod` variant's are neither, nor is a leaf the
 // asker holds itself (a file under `#[cfg(loom)]` takes the loom candidates).
-const KNOWN_CFG_KEYS = new Set([...TARGET_CFG_KEYS, 'feature', 'test', 'doctest', 'doc', 'debug_assertions', 'overflow_checks', 'panic', 'proc_macro', 'miri', 'sanitize', 'target_feature', 'target_thread_local', 'ub_checks', 'relocation_model', 'fmt_debug', 'clippy', 'rustfmt', 'variant'])
+const KNOWN_CFG_KEYS = new Set([...TARGET_CFG_KEYS, 'false', 'feature', 'test', 'doctest', 'doc', 'debug_assertions', 'overflow_checks', 'panic', 'proc_macro', 'miri', 'sanitize', 'target_feature', 'target_thread_local', 'ub_checks', 'relocation_model', 'fmt_debug', 'clippy', 'rustfmt', 'variant'])
 const customKey = (key) => !KNOWN_CFG_KEYS.has(key) && !key.endsWith('!')
 // The custom-cfg test of an asker whose build may set `settable` (`{ names, any }`), one per object.
 const customMemo = new WeakMap()
@@ -2289,6 +2290,13 @@ function effectiveInvokers(name, invokers, templateCalls, seen = new Set()) {
 // the target's alone.
 const DEFAULT_UNITS = new Set([TARGET_UNIT])
 const unitsOf = (units, rel) => units?.get(rel) ?? DEFAULT_UNITS
+// `units` (a new map for none) with each entry it doesn't name compiled as its package is
+// (unitOfCrate): a proc-macro crate's for the host, as cargo builds it, any other's for the target.
+function withEntryUnits(units, entries, ctx) {
+  const out = units ?? new Map()
+  for (const e of entries) if (!out.has(e)) out.set(e, new Set([ctx?.unitOfCrate(e, TARGET_UNIT) ?? TARGET_UNIT]))
+  return out
+}
 
 // The build `rel` is scanned under (scanRustItems' options): per unit it is compiled as, its
 // crate's features in that unit's feature context -- on for certain, and on maybe -- and the cfg
@@ -2344,8 +2352,9 @@ function cachedScan(sources, path, content, build, templates = undefined) {
 // `#[cfg(feature = …)]`, and the build target's cfg set when one was given, which decides
 // `#[cfg(unix)]` and the like. `units`: file → the compile units it is compiled as (see
 // collectRustFilesFromDisk); `wantedUnits` gives each wanted root's, for the walk.
-export function buildRustTree(sources, { roots = [], baseDir = null, cargo = null, formats = null, units = null } = {}) {
+export function buildRustTree(sources, { roots = [], baseDir = null, cargo = null, formats = null, units: given = null } = {}) {
   const ctx = cargo ?? (baseDir ? createCargoContext(baseDir, { entries: roots }) : null)
+  const units = withEntryUnits(given, roots, ctx)
   const rootSet = crateRoots(sources, roots, ctx)
   const resolutions = new Map()
   const missing = []
@@ -2912,7 +2921,7 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
     for (const u of more) have.add(u)
     return true
   }
-  for (const e of entries) addUnits(e, unitsOf(units, e))
+  withEntryUnits(units, entries, ctx)
   // Files already walked that are now compiled as more units: gone through again (their build
   // changed, and so may what they name, and as what).
   const revisit = new Set(entries.filter((e) => sources.has(e) && !formats?.has(e)))

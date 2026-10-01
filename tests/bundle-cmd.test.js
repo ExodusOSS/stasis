@@ -3445,8 +3445,8 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   // exited 0 with no warning at all. The setup error must propagate with its
   // install hint instead. Exercised against a copy of stasis whose node_modules
   // carries only the zero-dep @exodus/stasis-core (so the moved-module shims
-  // resolve), @preventive/lockfile (whose TOML and .gitmodules readers the loaders
-  // import) and @exodus/bytes (its dependency, and the loaders' UTF-8 decoder), so
+  // resolve), @preventive/lockfile (whose TOML, .gitmodules and Cargo readers the
+  // loaders import) and @exodus/bytes (its dependency, and the loaders' UTF-8 decoder), so
   // the bundle command loads, but no oxc-parser, so the lazy lookup (createRequire
   // from src/scan.js) genuinely misses.
   const stasisCopy = join(tmp, 'stasis')

@@ -1,0 +1,42 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/extra", "patched/cfg-if"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+
+[workspace.dependencies]
+memchr = { version = "2", default-features = false }
+itoa = "1"
+
+[features]
+default = ["fast"]
+fast = ["memchr/std", "lib/std"]
+fmt = ["dep:itoa04", "itoa04?/i128"]
+git = ["dep:itoa-git"]
+
+[dependencies]
+lib = { path = "crates/lib" }
+macros = { path = "crates/macros" }
+memchr = { workspace = true }
+itoa = { workspace = true }
+itoa04 = { package = "itoa", version = "0.4", optional = true, default-features = false }
+itoa-git = { package = "itoa", git = "https://github.com/dtolnay/itoa", tag = "1.0.0", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+cfg-if = "1"
+
+[build-dependencies]
+autocfg = "1"
+
+[dev-dependencies]
+paste = "1"
+
+[patch.crates-io]
+cfg-if = { path = "patched/cfg-if" }
