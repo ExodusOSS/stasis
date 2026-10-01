@@ -13,7 +13,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { detectRepo, findPackageMetadata, jsonError, normalizeEntries, packageType, readJson, readModuleManifest, readPackageJson } from '@exodus/stasis-core/bundle-util'
+import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest, readPackageJson, readRegularFileOrNull } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isDotEnvFile, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, posixPathEscapes, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import { diskHost } from '@exodus/stasis-core/host'
 import {
@@ -24,7 +24,7 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
-import { readGitmodules, readRegularFileOrNull } from '../loaders/solidity-ownership.js'
+import { readGitmodules } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -236,19 +236,15 @@ function packageLookup(baseDir, options) {
 // with --package-json.
 function solidityManifests(baseDir, sources, configFiles, { classifyDep, packageOf, ownership }) {
   const realBase = realpathSync(baseDir)
-  // `{ text }`, or `{ why }` it can't be carried (null: nothing is there).
+  // `{ text }`, or `{ why }` it can't be carried (null: nothing is there). Read by the real path
+  // `ownership` resolved `rel` to, so what's carried is the file it vouched for.
   const carry = (rel) => {
-    const { reason } = ownership.of(rel)
+    const { reason, real, outside } = ownership.of(rel)
     if (reason) return { why: reason }
-    let buf
-    try {
-      assertRealPathWithinBase(realBase, baseDir, rel)
-      buf = readRegularFileOrNull(join(baseDir, rel), rel)
-    } catch (err) {
-      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err
-      buf = null
-    }
-    if (buf === null) return { why: null }
+    if (real === null) return { why: null }
+    if (outside) throw new Error(`Refusing to follow symlink escaping bundle root: ${rel} -> ${resolve(realBase, real)}`)
+    const buf = readRegularFileOrNull(join(realBase, real), rel)
+    if (buf === null) return { why: null } // a directory
     if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
     return { text: buf.toString('utf8') }
   }

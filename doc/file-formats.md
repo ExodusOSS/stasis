@@ -440,8 +440,8 @@ path, a dependency outside the root reads nothing, and a dir a dependency's
 `libs` names must be a dependency itself; a config refused says why. A
 `package.json` that decides a file's package is refused the same way when a
 dependency planted it as a link, and one that doesn't parse (a leading
-byte-order mark is skipped, as npm skips it) is an error naming it (not quoting
-it) rather than giving its files to the parent package; other bundles walk past
+byte-order mark is skipped, as npm skips it) or isn't a regular file is an error
+naming it (not quoting it) rather than giving its files to the parent package; other bundles walk past
 a malformed one, as they always have. A
 link the project placed (a workspace package linked into `node_modules`, a
 linked `lib/` entry, `src/vendor`) may lead anywhere in the root, and so may one

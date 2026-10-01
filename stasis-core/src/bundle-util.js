@@ -1,4 +1,5 @@
 import { isUtf8 } from 'node:buffer'
+import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 
 import { isValidRepoField } from './bundle.js'
@@ -41,17 +42,56 @@ export function findPackageMetadata(baseDir, fileRelPath, { strict = false, chec
   }
 }
 
+// The error codes that mean nothing is at a path.
+export const NO_ENTRY = new Set(['ENOENT', 'ENOTDIR'])
+
+// `file`'s bytes, or null when there's no file (a directory counts as none). It's opened without
+// blocking and read only when it's a regular file: a FIFO, a socket, a device or a link to one
+// (`/dev/stdin`) throws, naming it `label`, rather than stalling or reading the process's input.
+export function readRegularFileOrNull(file, label) {
+  let fd
+  try {
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
+  } catch (err) {
+    if (NO_ENTRY.has(err.code) || err.code === 'EISDIR') return null
+    if (err.code === 'ENXIO') throw new Error(`${label}: not a regular file`, { cause: err }) // a socket
+    throw err
+  }
+  try {
+    const stat = fstatSync(fd)
+    if (stat.isDirectory()) return null
+    if (!stat.isFile()) throw new Error(`${label}: not a regular file`)
+    return readFileSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
 // The package.json at `rel` (under `baseDir`), parsed (a leading byte-order mark skipped, as npm
-// and Node skip it); null when there's none, or when it doesn't parse -- unless `strict`, then that
-// throws, saying where with the parser's line and column but never its message, which quotes the
-// text (a file that isn't JSON may be anything, a secret included). `check(rel)`, when given, sees
-// the path before it is read, and may throw to refuse it. Read through `host`.
+// and Node skip it), read through `host`; null when there's none (a directory counts as none), or
+// when it doesn't parse or isn't a regular file -- unless `strict`, then that throws, saying where
+// with the parser's line and column but never its message, which quotes the text (a file that isn't
+// JSON may be anything, a secret included). `check(rel)`, when given, sees the path before it is
+// read, and may throw to refuse it.
 export function readPackageJson(baseDir, rel, { strict = false, check, host = diskHost } = {}) {
   const file = join(baseDir, rel)
-  if (!host.stat(file)?.isFile()) return null
+  const stat = host.stat(file)
+  if (stat === null || stat.isDirectory()) return null
   check?.(rel)
+  // A FIFO, a socket or a device (or a link to one) is never read: it could stall the bundle.
+  if (!stat.isFile()) {
+    if (!strict) return null
+    throw new Error(`${rel}: not a regular file`)
+  }
+  let text
   try {
-    return JSON.parse(host.readFile(file).toString('utf8').replace(/^\uFEFF/u, ''))
+    text = host.readFile(file).toString('utf8')
+  } catch (err) {
+    if (!strict) return null
+    throw err
+  }
+  try {
+    return JSON.parse(text.replace(/^\uFEFF/u, ''))
   } catch (err) {
     if (!strict) return null
     const at = /\(line \d+ column \d+\)/u.exec(err.message)?.[0]

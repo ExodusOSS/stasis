@@ -957,6 +957,13 @@ test('buildSolidityBundle never reads the process\'s stdin as a config, a depend
   await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }), { message: 'remappings.txt: not a regular file' })
 }))
 
+test('buildSolidityBundle never stalls on a package.json that isn\'t a regular file', withTmp(async (t, tmp) => {
+  writeProject(tmp, { 'contracts/A.sol': 'import "pkg/P.sol";\n', 'node_modules/pkg/P.sol': 'contract P {}\n' })
+  // A FIFO: read blocking, it would wait for a writer forever.
+  spawnSync('mkfifo', [join(tmp, 'node_modules/pkg/package.json')])
+  await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['contracts'], env: {} }), { message: 'node_modules/pkg/package.json: not a regular file' })
+}))
+
 test('buildSolidityBundle resolves a dependency\'s `extends` through its own symlink as forge does', withTmp(async (t, tmp) => {
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\n',

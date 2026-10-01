@@ -156,9 +156,10 @@ function readMapping(mappingFile, { env, forge, show = (f) => f }) {
     const { remappings, files, profiled } = readFoundryTomlRemappings(mappingFile, foundryProfile(env), { show })
     return { remappings: remappings.map(toSolcRemapping), files, profiled }
   }
-  const text = readUtf8OrNull(mappingFile, show(mappingFile))
-  if (text === null) throw new Error(`${show(mappingFile)}: no such file`)
-  const listed = parseRemappingLines(text, { label: show(mappingFile), emptyPath: !forge })
+  const name = show(mappingFile)
+  const text = readUtf8OrNull(mappingFile, name)
+  if (text === null) throw new Error(`${name}: no such file`)
+  const listed = parseRemappingLines(text, { label: name, emptyPath: !forge })
   return { remappings: listed.map(forge ? toSolcRemapping : toLoaderRemapping), files: [mappingFile] }
 }
 
@@ -197,8 +198,8 @@ export async function discoverSolidityConfig(baseDir, { mappingFile, env = proce
     return { remappings, libs, ownership, files: [...new Set([...files, ...libsFiles].map((f) => projectRelative(baseDir, f)))], envUsed }
   }
   const txt = join(baseDir, REMAPPINGS_TXT)
-  const remappings = isFile(txt) ? readMapping(txt, { env, forge, show }).remappings : []
-  return { remappings, libs, ownership, files: isFile(txt) ? [REMAPPINGS_TXT] : [], envUsed: [] }
+  if (!isFile(txt)) return { remappings: [], libs, ownership, files: [], envUsed: [] }
+  return { remappings: readMapping(txt, { env, forge, show }).remappings, libs, ownership, files: [REMAPPINGS_TXT], envUsed: [] }
 }
 
 // Solc's remapping choice for the source unit `name` imported from `fromFile`: among the

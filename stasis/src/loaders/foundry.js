@@ -76,8 +76,7 @@ function canonicalize(p) {
 
 // How messages name a file of the project at `root` (absolute POSIX): from the root, by its lexical
 // or its canonical path, else as given.
-export function shownFrom(root) {
-  const canonicalRoot = canonicalize(root) ?? root
+export function shownFrom(root, canonicalRoot = canonicalize(root) ?? root) {
   return (abs) => stripPrefix(abs, root) || stripPrefix(abs, canonicalRoot) || abs
 }
 
@@ -483,7 +482,7 @@ const isExtends = (v) => typeof v === 'string'
 // parseFoundryToml). Throws where forge refuses the config, and where `refused` (a dependency's
 // config: see findNestedFoundryRemappings) gives a reason not to read the file or its base: a
 // dependency's config may not read the project's files. Messages name files `show(file)`.
-function readFoundryProfiles(file, profile, { refused = () => null, show = (f) => f } = {}) {
+function readFoundryProfiles(file, profile, { refused = () => null, show }) {
   const name = show(file)
   const refusal = refused(file)
   if (refusal) throw new ConfigRefused(`${name}: refusing to read it: ${refusal}`)
@@ -500,9 +499,10 @@ function readFoundryProfiles(file, profile, { refused = () => null, show = (f) =
     const baseFile = rustJoin(posix.dirname(file), extPath)
     const baseRefusal = refused(baseFile)
     if (baseRefusal) throw new ConfigRefused(`${name}: refusing to extend ${extPath}: ${baseRefusal}`)
-    const baseText = readUtf8OrNull(baseFile, show(baseFile))
+    const baseName = show(baseFile)
+    const baseText = readUtf8OrNull(baseFile, baseName)
     if (baseText === null) throw new ConfigRefused(`${name}: the inherited config file does not exist: ${extPath}`)
-    const base = parseFoundryToml(baseText, show(baseFile)).profiles
+    const base = parseFoundryToml(baseText, baseName).profiles
     if (base.get(profile)?.has('extends')) {
       throw new ConfigRefused(`${name}: nested inheritance is not allowed (${extPath} has an 'extends' field in profile '${profile}')`)
     }
@@ -540,7 +540,7 @@ export function foundryTomlRemappings(text, profile = 'default') {
 // The same for a foundry.toml file, with its `extends` base: what `--mapping=foundry.toml` takes.
 // `files` lists what was read; `profiled` whether the selected `profile` is one of the file's.
 // Messages name files `show(file)`.
-export function readFoundryTomlRemappings(file, profile = 'default', { show = (f) => f } = {}) {
+export function readFoundryTomlRemappings(file, profile, { show }) {
   const abs = toPosix(resolve(file))
   const read = readFoundryProfiles(abs, profile, { show })
   return { remappings: profileRemappings(read, profile, show(abs)), files: read.files, profiled: hasProfile(read.profiles, profile) }
@@ -571,15 +571,17 @@ function detectLibs(root, host) {
 
 // The selected profile's settings for a Foundry project at `root` (absolute POSIX), defaults
 // filled in the way forge fills them. `remappings` are the profile's own, unnormalized; an invalid
-// one throws (configRemappings). `refused`, `show`: see readFoundryProfiles.
-function loadFoundryConfig(root, profile, { refused, show = (f) => f } = {}) {
+// one throws (configRemappings). `refused`, `show` (from the root by default): see
+// readFoundryProfiles.
+function loadFoundryConfig(root, profile, { refused, show = shownFrom(root) } = {}) {
   const file = rustJoin(root, FOUNDRY_TOML)
+  const name = show(file)
   const { profiles, files } = readFoundryProfiles(file, profile, { refused, show })
   const dict = selectProfile(profiles, profile)
   // A setting of the wrong type throws, as forge refuses the config: no quiet default.
   const setting = (key, ok, what) => {
     const value = dict.get(key)
-    if (value !== undefined && !ok(value)) throw new Error(`${show(file)}: \`${key}\` must be ${what}`)
+    if (value !== undefined && !ok(value)) throw new Error(`${name}: \`${key}\` must be ${what}`)
     return value
   }
   const isString = (v) => typeof v === 'string'
@@ -590,7 +592,7 @@ function loadFoundryConfig(root, profile, { refused, show = (f) => f } = {}) {
     test: setting('test', isString, 'a string') ?? 'test',
     script: setting('script', isString, 'a string') ?? 'script',
     libs: setting('libs', (v) => Array.isArray(v) && v.every(isString), 'an array of strings') ?? detectLibs(root),
-    remappings: dict.has('remappings') ? configRemappings(dict.get('remappings'), show(file)) : [],
+    remappings: dict.has('remappings') ? configRemappings(dict.get('remappings'), name) : [],
     autoDetect: setting('auto_detect_remappings', (v) => typeof v === 'boolean', 'a boolean') !== false,
   }
 }
@@ -653,16 +655,17 @@ function loadNestedConfig(canonical, profile, { refused, show }) {
     return null
   }
   const txt = rustJoin(canonical, REMAPPINGS_TXT)
+  const txtName = show(txt)
   const refusal = refused(txt) // (null when nothing is there)
-  if (refusal) console.warn(`[loader.solidity] Skipping a dependency's ${show(txt)}: ${refusal}`)
-  const text = refusal ? null : readUtf8OrNull(txt, show(txt))
+  if (refusal) console.warn(`[loader.solidity] Skipping a dependency's ${txtName}: ${refusal}`)
+  const text = refusal ? null : readUtf8OrNull(txt, txtName)
   return {
     src: config.src,
     libs: config.libs,
     files: [...config.files, ...(text === null ? [] : [txt])],
     // `sanitized()` roots them, then `Remapping::from` makes the path absolute and slash-terminated.
     remappings: config.remappings.map((r) => fromRelative(relativePreservingBoundary(fromRelative({ ...r, path: { parent: null, path: r.path } }), canonical))),
-    fileRemappings: text === null ? [] : parseRemappingLines(text, { label: show(txt) }),
+    fileRemappings: text === null ? [] : parseRemappingLines(text, { label: txtName }),
   }
 }
 
@@ -672,7 +675,10 @@ function loadNestedConfig(canonical, profile, { refused, show }) {
 // solidityOwnership), as forge would find them from its lexical path.
 function findNestedFoundryRemappings(root, libPaths, profile, files, ownership) {
   const canonicalRoot = canonicalize(root) ?? root
-  const shown = shownFrom(root)
+  const shown = shownFrom(root, canonicalRoot)
+  // A dependency's file (a path from its canonical dir) under its lexical path: where the bundle
+  // sees it, and how messages name it.
+  const lexical = (entry, file) => rustJoin(entry.path, stripPrefix(file, entry.canonical) ?? file)
   // Why the config of the dependency at `entry` may not read `file` (a path from its canonical
   // dir), or null: judged by the path from the root, the lexical one or else the canonical one (an
   // absolute lib, `/proc/self/cwd/...`). It may read its own files and other dependencies'; a
@@ -692,8 +698,7 @@ function findNestedFoundryRemappings(root, libPaths, profile, files, ownership) 
     if (o.real === null || o.dependency || pathStartsWith(rustJoin(canonicalRoot, o.real), entry.canonical)) return null
     return `it resolves to the project's own ${o.real}`
   }
-  // Messages name a dependency's files under its lexical path, from the root.
-  const show = (entry) => (file) => shown(rustJoin(entry.path, stripPrefix(file, entry.canonical) ?? file))
+  const show = (entry) => (file) => shown(lexical(entry, file))
   // A BTreeSet popped in (canonical, path) order.
   const pending = new Map()
   const addPending = (e) => pending.set(`${e.canonical}\0${e.path}`, e)
@@ -712,8 +717,7 @@ function findNestedFoundryRemappings(root, libPaths, profile, files, ownership) 
     if (!configs.has(entry.canonical)) {
       const config = loadNestedConfig(entry.canonical, profile, { refused: refused(entry), show: show(entry) })
       configs.set(entry.canonical, config)
-      // Record what was read under the dependency's lexical path (where the bundle sees it).
-      for (const f of config?.files ?? []) files.add(rustJoin(entry.path, stripPrefix(f, entry.canonical) ?? f))
+      for (const f of config?.files ?? []) files.add(lexical(entry, f))
     }
     const config = configs.get(entry.canonical)
     if (!config) continue
@@ -855,7 +859,7 @@ export function foundryLibs(baseDir, { env = process.env } = {}) {
   const root = toPosix(resolve(baseDir))
   const profile = foundryProfile(env)
   try {
-    const config = loadFoundryConfig(root, profile, { show: shownFrom(root) })
+    const config = loadFoundryConfig(root, profile)
     return { libs: config.libs, profiled: profileApplies(config.profiles, profile), files: config.files }
   } catch (err) {
     if (!(err instanceof ConfigRefused)) throw err
@@ -872,9 +876,8 @@ export function foundryLibs(baseDir, { env = process.env } = {}) {
 // FOUNDRY_REMAPPINGS / DAPP_REMAPPINGS.
 export function foundryProject(baseDir, { env = process.env } = {}) {
   const root = toPosix(resolve(baseDir))
-  const show = shownFrom(root)
   const profile = foundryProfile(env)
-  const config = loadFoundryConfig(root, profile, { show })
+  const config = loadFoundryConfig(root, profile)
   const profiled = profileApplies(config.profiles, profile)
   const ownership = projectOwnership(baseDir, config.libs, { soldeer: true })
   const files = new Set(config.files)

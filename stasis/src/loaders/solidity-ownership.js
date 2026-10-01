@@ -4,9 +4,10 @@
 // out of itself is never followed.
 
 import { isUtf8 } from 'node:buffer'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
+import { lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, parse, posix, relative, resolve, sep } from 'node:path'
 
+import { NO_ENTRY, readRegularFileOrNull } from '@exodus/stasis-core/bundle-util'
 import { hasNodeModulesSegment } from '@exodus/stasis-core/util'
 import { isDir } from '../resolve-typescript.js'
 
@@ -17,7 +18,13 @@ const toSlashes = (p) => (sep === '\\' ? p.replaceAll('\\', '/') : p)
 // --- Reading --------------------------------------------------------------------------------
 
 // `p`'s real path as the OS resolves it (realpath(3): the filesystem's own spelling), or null.
-export const realpathOrNull = (p) => osRealpath(p).real
+export function realpathOrNull(p) {
+  try {
+    return realpathSync.native(p)
+  } catch {
+    return null
+  }
+}
 
 // A path relative to a dir (slashes) that stays inside it.
 const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel)
@@ -36,8 +43,6 @@ export function projectRelative(root, abs) {
   const prefix = `${resolve(root)}${sep}`
   return abs.startsWith(prefix) ? toSlashes(abs.slice(prefix.length)) : rel
 }
-
-const NO_ENTRY = new Set(['ENOENT', 'ENOTDIR'])
 
 // realpath(3) of `p`: `{ real }`, or `{ real: null, missing }`, `missing` only when nothing is
 // there at all. The OS may fail to resolve what is there -- a real path past PATH_MAX, a loop, a
@@ -61,32 +66,10 @@ function lexists(p) {
   }
 }
 
-// `file`'s bytes, or null when there's no file (a directory counts as none). It's opened without
-// blocking and read only when it's a regular file: a FIFO, a socket, a device or a link to one
-// (`/dev/stdin`) throws, naming it `label`, rather than stalling or reading the process's input.
-export function readRegularFileOrNull(file, label = file) {
-  let fd
-  try {
-    fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
-  } catch (err) {
-    if (NO_ENTRY.has(err.code) || err.code === 'EISDIR') return null
-    if (err.code === 'ENXIO') throw new Error(`${label}: not a regular file`, { cause: err }) // a socket
-    throw err
-  }
-  try {
-    const stat = fstatSync(fd)
-    if (stat.isDirectory()) return null
-    if (!stat.isFile()) throw new Error(`${label}: not a regular file`)
-    return readFileSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-}
-
-// A config file's text, or null when there's no file (readRegularFileOrNull). One that isn't UTF-8
-// throws: forge and git refuse it, and a text read with U+FFFD in it isn't the one they read. A
-// byte-order mark stays. Errors name it `label`.
-export function readUtf8OrNull(file, label = file) {
+// A config file's text, or null when there's no file (readRegularFileOrNull: a regular file only).
+// One that isn't UTF-8 throws: forge and git refuse it, and a text read with U+FFFD in it isn't the
+// one they read. A byte-order mark stays. Errors name it `label`.
+export function readUtf8OrNull(file, label) {
   const buf = readRegularFileOrNull(file, label)
   if (buf === null) return null
   if (!isUtf8(buf)) throw new Error(`${label}: not valid UTF-8`)
@@ -291,11 +274,11 @@ export function solidityOwnership(baseDir, { dirs = [], packages = [] } = {}) {
       // As given, not normalized: the OS resolves a `..` after a link from where the link leads.
       const path = rel === '' ? realBase : `${realBase}${sep}${rel}`
       let { abs, escape } = walk(realBase, rel.split('/'), 0)
-      // The OS's answer is the one a read gets: the walk must agree with it, or the path is refused,
-      // as it is when the OS can't resolve it at all, though a read may still get through.
-      // (Past its last link the walk's path is spelled as given; with none, it's `path` itself.)
-      const { real: os, missing } = osRealpath(path)
       if (escape === null) {
+        // The OS's answer is the one a read gets: the walk must agree with it, or the path is
+        // refused, as it is when the OS can't resolve it at all, though a read may still get through.
+        // (Past its last link the walk's path is spelled as given; with none, it's `path` itself.)
+        const { real: os, missing } = osRealpath(path)
         const walked = abs === null ? null : abs === path ? os : realpathOrNull(abs)
         if (walked !== os || (os === null && !missing)) escape = { link: rel, root: null, why: 'unresolved' }
         abs = os
