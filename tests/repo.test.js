@@ -25,6 +25,8 @@ const writeGitConfig = (dir, text) => {
   writeFileSync(join(dir, '.git', 'config'), text)
 }
 
+const SHA = '0123456789abcdef0123456789abcdef01234567'
+const SHA2 = 'fedcba9876543210fedcba9876543210fedcba98'
 const ORIGIN = (url) => `[core]\n\tbare = false\n[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`
 
 test('parseGithubRepository accepts package.json repository spellings of a GitHub repo', (t) => {
@@ -80,22 +82,42 @@ test('detectRepo normalizes repository.directory and accepts the string shorthan
 }))
 
 test('detectRepo treats a non-GitHub package.json repository as authoritative', withTmp((t, tmp) => {
-  writeGitConfig(tmp, ORIGIN('git@github.com:o/n.git'))
+  mkdirSync(join(tmp, '.git'))
   writeJson(join(tmp, 'package.json'), { repository: 'https://gitlab.com/o/n' })
   t.assert.equal(detectRepo(tmp), undefined)
 }))
 
-test('detectRepo falls back to the .git/config origin remote', withTmp((t, tmp) => {
-  writeGitConfig(tmp, ORIGIN('git@github.com:o/n.git'))
+test('detectRepo prefers git over package.json, and only git yields commit', withTmp((t, tmp) => {
+  writeGitConfig(tmp, ORIGIN('git@github.com:o/git.git'))
+  writeFileSync(join(tmp, '.git', 'HEAD'), `${SHA}\n`)
+  writeJson(join(tmp, 'package.json'), { repository: { url: 'github:o/pkg', directory: 'elsewhere' } })
   mkdirSync(join(tmp, 'sub', 'dir'), { recursive: true })
-  writeJson(join(tmp, 'sub', 'package.json'), { name: 'sub' })
-  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', directory: '' })
-  t.assert.deepEqual(detectRepo(join(tmp, 'sub', 'dir')), { github: 'o/n', directory: 'sub/dir' })
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/git', directory: '', commit: SHA })
+  t.assert.deepEqual(detectRepo(join(tmp, 'sub', 'dir')), { github: 'o/git', directory: 'sub/dir', commit: SHA })
 
-  writeGitConfig(tmp, '[remote "upstream"]\n\turl = git@github.com:o/n.git\n')
-  t.assert.equal(detectRepo(tmp), undefined, 'only origin is consulted')
+  writeGitConfig(tmp, '[remote "upstream"]\n\turl = git@github.com:o/git.git\n')
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/pkg', directory: 'elsewhere' },
+    'only origin is consulted; without it, package.json is used (no commit)')
   writeGitConfig(tmp, ORIGIN('https://gitlab.com/o/n'))
-  t.assert.equal(detectRepo(tmp), undefined, 'a non-GitHub origin yields nothing')
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/pkg', directory: 'elsewhere' }, 'a non-GitHub origin falls back too')
+}))
+
+test('detectRepo reads the commit from a branch ref, loose or packed', withTmp((t, tmp) => {
+  writeGitConfig(tmp, ORIGIN('https://github.com/o/n'))
+  const git = join(tmp, '.git')
+  writeFileSync(join(git, 'HEAD'), 'ref: refs/heads/main\n')
+  t.assert.deepEqual(detectRepo(tmp), { github: 'o/n', directory: '' }, 'an unborn branch has no commit')
+
+  writeFileSync(join(git, 'packed-refs'), `# pack-refs with: peeled fully-peeled sorted\n${SHA2} refs/heads/main\n`)
+  t.assert.equal(detectRepo(tmp).commit, SHA2, 'packed-refs')
+  mkdirSync(join(git, 'refs', 'heads'), { recursive: true })
+  writeFileSync(join(git, 'refs', 'heads', 'main'), `${SHA}\n`)
+  t.assert.equal(detectRepo(tmp).commit, SHA, 'a loose ref wins over packed-refs')
+
+  writeFileSync(join(git, 'refs', 'heads', 'main'), 'not-a-sha\n')
+  t.assert.equal(detectRepo(tmp).commit, undefined, 'an invalid sha is left out')
+  writeFileSync(join(git, 'HEAD'), 'ref: ../../escape\n')
+  t.assert.equal(detectRepo(tmp).commit, undefined, 'a ref outside refs/ is not followed')
 }))
 
 test('detectRepo stops at the work tree root', withTmp((t, tmp) => {

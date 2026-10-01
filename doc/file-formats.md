@@ -250,15 +250,21 @@ SIGINT shutdown, a CLI reporting failures) still persists what it cleanly captur
   none, the existing one is kept.
 
   Bundles written by `stasis run` (and the bundler plugins), `stasis bundle`, and
-  `stasis add` fill in `github` and `directory` automatically. They come from the
-  nearest `package.json` at or above the bundle root that declares a `repository`:
-  its GitHub URL or `github:`/`owner/name` shorthand, and its
-  `repository.directory` combined with the bundle root's path below that
-  `package.json`. When no `package.json` declares one, stasis falls back on a
-  best-effort basis to the `[remote "origin"]` url in `.git/config` at the work
-  tree root. If a `package.json` names a non-GitHub repository, no `repo` is
-  recorded. A detected value that the rules above would reject is left out
-  instead of failing the write. `commit` is never detected.
+  `stasis add` fill in `repo` automatically, from git first:
+  1. **Git:** the nearest work tree root (a directory holding `.git`) at or above
+     the bundle root. `github` comes from the `[remote "origin"]` url in
+     `.git/config`, `directory` from the bundle root's path below the work tree
+     root, and `commit` from `HEAD` (a detached sha, or the branch's loose ref or
+     `packed-refs` entry). stasis only reads files under `.git` and never runs git.
+  2. **package.json:** if git yields no GitHub origin, the nearest `package.json`
+     at or above the bundle root that declares a `repository`, up to the work tree
+     root. `github` comes from its GitHub URL or `github:`/`owner/name` shorthand,
+     and `directory` from `repository.directory` combined with the bundle root's
+     path below that `package.json`. No `commit` is recorded. A `package.json`
+     naming a non-GitHub repository records nothing.
+
+  A detected value that the rules above would reject is left out instead of
+  failing the write.
 
 A legacy `version: 0` shape — flat top-level `sources` keyed by project-relative
 path, with no `entries`/`modules`/`formats`/`imports` — is still accepted by

@@ -6,6 +6,7 @@ import { findPackageJSON } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
 import { isValidRepoField } from './bundle.js'
+import { posixPathEscapes } from './artifact-util.js'
 import { assertRealPathWithinBase, hasNodeModulesSegment, toPosix } from './util.js'
 
 export function packageType(file) {
@@ -109,40 +110,74 @@ const joinRepoPath = (base, rel) => {
   return isValidRepoField('directory', directory) ? directory : undefined
 }
 
-// The detected `repo` block, without an undefined `directory`.
-const repoOf = (github, directory) => (directory === undefined ? { github } : { github, directory })
+// The detected `repo` block, without undefined fields.
+const repoOf = (github, directory, commit) => ({
+  github,
+  ...(directory === undefined ? {} : { directory }),
+  ...(commit === undefined ? {} : { commit }),
+})
 
-// Informational repo identity for a bundle rooted at `dir`: `{ github: 'owner/name', directory }`,
-// `directory` being `dir`'s path within the repo ('' at its root). Taken from the nearest
-// package.json (at or above `dir`) declaring a `repository` -- its `repository.directory` combined
-// with `dir`'s path below that package.json -- else, best-effort, from the `.git/config` origin
-// remote of the work tree root, where the walk stops. Undefined when neither names a GitHub
-// repository. Never throws.
-export function detectRepo(dir) {
-  const start = resolve(dir)
-  let cursor = start
-  while (true) {
+const readText = (file) => {
+  try {
+    return realReadFileSync(file, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+// Best-effort: the commit HEAD points at in a plain `.git` dir -- a detached sha, else the branch's
+// loose ref, else its `packed-refs` line. Undefined unless it is a full git sha.
+function gitHeadCommit(gitDir) {
+  const head = readText(join(gitDir, 'HEAD'))?.trim()
+  if (!head) return undefined
+  let commit = head
+  if (head.startsWith('ref: ')) {
+    const ref = head.slice('ref: '.length)
+    if (!ref.startsWith('refs/') || posixPathEscapes(ref)) return undefined
+    commit = readText(join(gitDir, ref))?.trim() ??
+      readText(join(gitDir, 'packed-refs'))?.split('\n').find((line) => line.endsWith(` ${ref}`))?.split(' ')[0]
+  }
+  return isValidRepoField('commit', commit) ? commit : undefined
+}
+
+// From git: the nearest work tree root (a dir holding `.git`) at or above `start`; `github` from its
+// `.git/config` origin remote, `directory` from `start`'s path below the root, `commit` from HEAD.
+// Undefined without a work tree or a GitHub origin. Reads `.git` files only -- git never runs.
+function gitRepo(start) {
+  for (let cursor = start; ; cursor = dirname(cursor)) {
+    if (realExistsSync(join(cursor, '.git'))) {
+      const gitDir = join(cursor, '.git')
+      const github = parseGithubRepository(gitOriginUrl(readText(join(gitDir, 'config')) ?? ''))
+      if (!github) return undefined
+      return repoOf(github, joinRepoPath('', toPosix(relative(cursor, start))), gitHeadCommit(gitDir))
+    }
+    if (dirname(cursor) === cursor) return undefined
+  }
+}
+
+// From package.json: the nearest one at or above `start` declaring a `repository` (the walk stops
+// at the work tree root); `github` from its URL/shorthand, `directory` from `repository.directory`
+// combined with `start`'s path below that package.json. A non-GitHub repository yields undefined.
+function packageRepo(start) {
+  for (let cursor = start; ; cursor = dirname(cursor)) {
     let repository
     try {
       repository = JSON.parse(realReadFileSync(join(cursor, 'package.json'), 'utf8'))?.repository
     } catch { /* absent or malformed -- keep walking */ }
     const url = typeof repository === 'string' ? repository : repository?.url
     if (typeof url === 'string') {
-      // The package's own declaration is authoritative, even when it names a non-GitHub host.
       const github = parseGithubRepository(url)
-      if (!github) return undefined
-      return repoOf(github, joinRepoPath(repository.directory, toPosix(relative(cursor, start))))
+      return github ? repoOf(github, joinRepoPath(repository.directory, toPosix(relative(cursor, start)))) : undefined
     }
-    // Best-effort fallback: the work tree root's `.git/config` origin remote.
-    if (realExistsSync(join(cursor, '.git'))) {
-      let github = null
-      try {
-        github = parseGithubRepository(gitOriginUrl(realReadFileSync(join(cursor, '.git', 'config'), 'utf8')))
-      } catch { /* not a plain .git dir (worktree/submodule file) or unreadable */ }
-      return github ? repoOf(github, joinRepoPath('', toPosix(relative(cursor, start)))) : undefined
-    }
-    const parent = dirname(cursor)
-    if (parent === cursor) return undefined
-    cursor = parent
+    if (realExistsSync(join(cursor, '.git')) || dirname(cursor) === cursor) return undefined
   }
+}
+
+// Informational repo identity for a bundle rooted at `dir`, `{ github, directory?, commit? }` with
+// `directory` being `dir`'s path within the repo ('' at its root). Git first (see gitRepo, the only
+// source of `commit`), else package.json (see packageRepo). Every value is held to the bundle
+// format's validation; undefined when neither names a GitHub repository. Never throws.
+export function detectRepo(dir) {
+  const start = resolve(dir)
+  return gitRepo(start) ?? packageRepo(start)
 }
