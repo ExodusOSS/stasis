@@ -65,6 +65,9 @@ const mergeReason = (a, b) => {
   return fromEntries([...merged.keys()].toSorted().map((c) => [c, fileSetToObject(merged.get(c))]))
 }
 
+// Informational and unvalidated: copied as is (each list shallowly), never sorted, so a malformed one can't fail a parse.
+const copyReason = (reason) => Object.fromEntries(Object.entries(reason).map(([consumer, files]) => [consumer, Array.isArray(files) ? [...files] : files]))
+
 function contentsLocked() {
   throw new Error('bundle: file contents are not retained by this contents-free Bundle')
 }
@@ -272,7 +275,7 @@ export class Bundle {
       executable: json.version === VERSION
         ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
-      reason: isPlainObject(json.reason) ? mergeReason(json.reason, undefined) : undefined,
+      reason: isPlainObject(json.reason) ? copyReason(json.reason) : undefined,
       contents,
     })
   }
@@ -322,7 +325,8 @@ export class Bundle {
   // Strict union of two Bundles (returns a NEW one): any genuine conflict throws -- a bundle is an attestation.
   merge(other) {
     // Merging compares file bytes, so both sides need them.
-    if (!this.#contents || other.hasContents === false) contentsLocked()
+    if (!this.#contents) contentsLocked()
+    if (other.hasContents === false) throw new Error('bundle merge: the other Bundle is contents-free')
     assert(this.config.scope === other.config.scope,
       `bundle merge: scope mismatch ('${this.config.scope}' vs '${other.config.scope}')`)
     return new Bundle({

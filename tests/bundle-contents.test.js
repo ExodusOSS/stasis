@@ -76,7 +76,7 @@ test('a contents-free Bundle locks out contents, serialize() and merge()', (t) =
   t.assert.throws(() => bundle.sources, /file contents are not retained/)
   t.assert.throws(() => bundle.serialize(), /file contents are not retained/)
   t.assert.throws(() => bundle.merge(full), /file contents are not retained/)
-  t.assert.throws(() => full.merge(bundle), /file contents are not retained/)
+  t.assert.throws(() => full.merge(bundle), /the other Bundle is contents-free/)
 
   // Metadata-only operations keep working, and keep the Bundle contents-free.
   const stamped = bundle.withReason('audit')
@@ -141,6 +141,10 @@ test('Bundle.fromJSON builds what Bundle.parse builds and rejects what it reject
   value.reason.run.push('src/ios.js')
   t.assert.deepStrictEqual(built.config, { scope: 'full' })
   t.assert.deepStrictEqual(built.reason, Bundle.parse(v1).reason)
+
+  // `reason` is informational: a malformed one is kept as is, never a reason to reject the bundle.
+  const reason = JSON.parse('{"run": [2, 1, null], "odd": "x", "__proto__": ["a.js"]}')
+  t.assert.deepStrictEqual(Bundle.fromJSON({ ...JSON.parse(v1), reason }).reason, reason)
 })
 
 test('Bundle.fileKeyAt finds every file in the bundle JSON, keyed as sources keys it', (t) => {
