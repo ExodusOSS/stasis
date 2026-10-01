@@ -81,7 +81,11 @@ export function readPackageJson(baseDir, rel, { strict = false, check, host = di
   try {
     // A FIFO, a socket or a device (or a link to one) is never read: it could stall the bundle.
     if (!stat.isFile()) throw new Error(`${rel}: not a regular file`)
-    return parseJson(host.readFile(file).toString('utf8').replace(/^\uFEFF/u, ''), rel)
+    const bytes = host.readFile(file)
+    // Strict, it's read as the file's own text or not at all; lenient lookups decode it as they always
+    // have (a stray byte as U+FFFD).
+    if (strict && !isUtf8(bytes)) throw new Error(`${rel}: not valid UTF-8`)
+    return parseJson(bytes.toString('utf8').replace(/^\uFEFF/u, ''), rel)
   } catch (err) {
     if (strict) throw err
     return null

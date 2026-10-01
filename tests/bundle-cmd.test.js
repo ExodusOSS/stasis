@@ -983,6 +983,18 @@ test('buildSolidityBundle fails on a .gitmodules git reads two ways, naming it, 
   }
 }))
 
+test('buildSolidityBundle refuses a .sol file that isn\'t UTF-8, rather than bundle it with U+FFFD in it', withTmp(async (t, tmp) => {
+  // \xe9 alone is Latin-1's é: solc refuses it, and the bundle must hold the file's own text.
+  writeProject(tmp, { 'src/A.sol': 'import "./B.sol";\ncontract A {}\n' })
+  writeFileSync(join(tmp, 'src/B.sol'), Buffer.from('// caf\xe9\ncontract B {}\n', 'latin1'))
+  await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src/A.sol'], env: {} }), { message: 'src/B.sol: not valid UTF-8' })
+  await t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src/B.sol'], env: {} }), { message: 'src/B.sol: not valid UTF-8' })
+  // A byte-order mark is UTF-8: kept, as written.
+  writeFileSync(join(tmp, 'src/B.sol'), '\uFEFFcontract B {}\n')
+  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src/A.sol'], env: {} })
+  t.assert.equal(bundle.sources.get('src/B.sol'), '\uFEFFcontract B {}\n')
+}))
+
 test('buildSolidityBundle never stalls on a package.json that isn\'t a regular file', withTmp(async (t, tmp) => {
   writeProject(tmp, { 'contracts/A.sol': 'import "pkg/P.sol";\n', 'node_modules/pkg/P.sol': 'contract P {}\n' })
   // A FIFO: read blocking, it would wait for a writer forever.
@@ -3347,10 +3359,10 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   // exited 0 with no warning at all. The setup error must propagate with its
   // install hint instead. Exercised against a copy of stasis whose node_modules
   // carries only the zero-dep @exodus/stasis-core (so the moved-module shims
-  // resolve) and @preventive/lockfile (whose TOML and .gitmodules readers the
-  // loaders import) with its one dependency, @exodus/bytes, so the bundle command
-  // loads, but no oxc-parser, so the lazy lookup (createRequire from src/scan.js)
-  // genuinely misses.
+  // resolve), @preventive/lockfile (whose TOML and .gitmodules readers the loaders
+  // import) and @exodus/bytes (its dependency, and the loaders' UTF-8 decoder), so
+  // the bundle command loads, but no oxc-parser, so the lazy lookup (createRequire
+  // from src/scan.js) genuinely misses.
   const stasisCopy = join(tmp, 'stasis')
   mkdirSync(stasisCopy)
   for (const entry of ['bin', 'src']) cpSync(join(here, '..', 'stasis', entry), join(stasisCopy, entry), { recursive: true })

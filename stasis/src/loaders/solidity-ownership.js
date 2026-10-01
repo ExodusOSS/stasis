@@ -7,6 +7,7 @@ import { isUtf8 } from 'node:buffer'
 import { lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, parse, posix, relative, resolve, sep } from 'node:path'
 
+import { utf8toString } from '@exodus/bytes/utf8.js'
 import { LockfileError, parseGitmodules } from '@preventive/lockfile/foundry.js'
 import { NO_ENTRY, readRegularFileOrNull } from '@exodus/stasis-core/bundle-util'
 import { hasNodeModulesSegment } from '@exodus/stasis-core/util'
@@ -77,14 +78,22 @@ function lexists(p) {
   }
 }
 
-// A config file's text, or null when there's no file (readRegularFileOrNull: a regular file only).
-// One that isn't UTF-8 throws: forge and git refuse it, and a text read with U+FFFD in it isn't the
-// one they read. A byte-order mark stays. Errors name it `label`.
+// `bytes` as UTF-8 text, a byte-order mark kept. Bytes that aren't UTF-8 throw, naming them
+// `label`, rather than read with U+FFFD in their place: forge, solc and git refuse such a file, and
+// the text bundled or read must be the file's own.
+export function decodeUtf8(bytes, label) {
+  try {
+    return utf8toString(bytes)
+  } catch (err) {
+    throw new Error(`${label}: not valid UTF-8`, { cause: err })
+  }
+}
+
+// A config file's text (decodeUtf8), or null when there's no file (readRegularFileOrNull: a regular
+// file only). Errors name it `label`.
 export function readUtf8OrNull(file, label) {
   const buf = readRegularFileOrNull(file, label)
-  if (buf === null) return null
-  if (!isUtf8(buf)) throw new Error(`${label}: not valid UTF-8`)
-  return buf.toString('utf8')
+  return buf === null ? null : decodeUtf8(buf, label)
 }
 
 // --- .gitmodules ------------------------------------------------------------------------------

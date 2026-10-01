@@ -362,7 +362,9 @@ resolve the way solc does under the project's build tool:
   copy of a package; aliases of the project's own `src`/`test`/`script` dirs
   are dropped, and `auto_detect_remappings = false` turns detection off.
 A `foundry.toml` or `extends` base that isn't TOML, a config that isn't UTF-8
-  (`foundry.toml`, `remappings.txt`, `.gitmodules`), a setting of the wrong type
+  (`foundry.toml`, `remappings.txt`, `.gitmodules`) — or a `.sol` file that isn't,
+  which solc refuses and the bundle won't hold with U+FFFD in place of its
+  bytes — a setting of the wrong type
   (`libs = "deps"`, a `src` that isn't a string, an `extends` that isn't a path
   or `{ path, strategy }`), and an invalid remapping (a `remappings.txt` line or
   `FOUNDRY_REMAPPINGS` entry that isn't `[context:]prefix=target`, or a

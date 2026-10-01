@@ -24,6 +24,7 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
+import { decodeUtf8 } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -245,8 +246,7 @@ function solidityManifests(baseDir, sources, configFiles, { classifyDep, package
     if (outside) throw new Error(`Refusing to follow symlink escaping bundle root: ${rel} -> ${resolve(realBase, real)}`)
     const buf = readRegularFileOrNull(join(realBase, real), rel)
     if (buf === null) return { why: null } // a directory
-    if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
-    return { text: buf.toString('utf8') }
+    return { text: decodeUtf8(buf, rel) }
   }
   const unreproducible = (rel, why) => new Error(`--manifests can't carry ${rel}, which the Solidity resolution read: ${why}`)
   const out = new Map()

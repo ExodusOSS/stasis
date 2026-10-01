@@ -28,7 +28,7 @@ import {
   shownFrom,
   toSolcRemapping,
 } from './foundry.js'
-import { projectOwnership, projectRelative, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
+import { decodeUtf8, projectOwnership, projectRelative, readUtf8OrNull, realpathOrNull, solidityOwnership } from './solidity-ownership.js'
 
 // --- Import scan ------------------------------------------------------------------------------
 
@@ -369,7 +369,7 @@ export async function collectSolidityFilesFromDisk(baseDir, entries, remappings,
       toLoad.map(async (relPath) => {
         try {
           assertRealPathWithinBase(realBase, baseDir, relPath)
-          return [relPath, await readFile(join(baseDir, relPath), 'utf8')]
+          return [relPath, decodeUtf8(await readFile(join(baseDir, relPath)), relPath)]
         } catch (err) {
           if (err.code === 'ENOENT') {
             console.warn(`[loader.solidity] Missing import: ${relPath}`)
@@ -472,7 +472,7 @@ function assertWithinBase(baseDir, candidate, label) {
 // a mapping line, the remappings are discovered as for `stasis bundle` (discoverSolidityConfig).
 export async function loadSolidity(solTxtFile, { env = process.env } = {}) {
   const baseDir = dirname(resolve(solTxtFile))
-  const listing = await readFile(solTxtFile, 'utf8')
+  const listing = decodeUtf8(await readFile(solTxtFile), solTxtFile)
   const lines = listing.split('\n').map((l) => l.trim()).filter(Boolean)
   if (lines.length === 0) throw new Error(`Empty Solidity listing: ${solTxtFile}`)
 

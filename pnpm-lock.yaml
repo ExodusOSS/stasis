@@ -73,6 +73,9 @@ importers:
 
   stasis:
     dependencies:
+      '@exodus/bytes':
+        specifier: ^1.16.0
+        version: 1.16.0
       '@exodus/stasis-core':
         specifier: 1.0.0-beta.4
         version: link:../stasis-core
