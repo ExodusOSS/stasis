@@ -59,6 +59,11 @@ test('yarn1: links each workspace, and cwd may be in any of them', async (t) => 
   // Below a package.json that is only a `type` marker, still the root's; a package of its own, not.
   t.assert.deepEqual([...(await load({ vfs: project({ ...files, 'src/package.json': { type: 'module' } }), cwd: '/src' })).projects], ['.', 'packages/a', 'packages/b'])
   await t.assert.rejects(load({ vfs: project({ ...files, 'tools/package.json': { name: 'tools', version: '1.0.0' } }), cwd: '/tools' }), (err) => err.message === "/yarn.lock does not install /tools: it is none of the lockfile's projects")
+  // A workspace is installed from the root that declares it, whatever yarn.lock is nearer; a package
+  // that is no workspace, from its own.
+  t.assert.equal((await load({ vfs: project({ ...files, 'packages/b/yarn.lock': LOCKFILE }), cwd: '/packages/b' })).root, '/')
+  const website = await load({ vfs: project({ ...files, 'website/package.json': { name: 'website', version: '1.0.0' }, 'website/yarn.lock': LOCKFILE }), cwd: '/website' })
+  t.assert.deepEqual([website.root, [...website.projects]], ['/website', ['.']])
 })
 
 test('yarn1: refuses, naming the file, what it cannot reproduce', async (t) => {
@@ -72,6 +77,8 @@ test('yarn1: refuses, naming the file, what it cannot reproduce', async (t) => {
 
 test('packageManager is one of those reproduced', async (t) => {
   const vfs = project({ 'package.json': { name: 'p', version: '1.0.0' }, 'yarn.lock': LOCKFILE })
-  await Promise.all([undefined, 'yarn', 'npm'].map((packageManager) => t.assert.rejects(loadNodeModules({ vfs, packageManager }), /^TypeError: loadNodeModules: packageManager must be one of 'pnpm', 'yarn1'/u)))
-  await t.assert.rejects(buildVfsBundle({ vfs, entries: ['a.js'] }), /^TypeError: buildVfsBundle: packageManager must be one of 'pnpm', 'yarn1'/u)
+  await Promise.all([undefined, 'yarn', 'npm', 'soldeer'].map((packageManager) => t.assert.rejects(loadNodeModules({ vfs, packageManager }), /^TypeError: loadNodeModules: packageManager must be one of 'pnpm', 'yarn1'$/u)))
+  await t.assert.rejects(buildVfsBundle({ vfs, entries: ['a.js'] }), /^TypeError: buildVfsBundle: packageManager must be one of 'pnpm', 'yarn1', 'soldeer'$/u)
+  await t.assert.rejects(buildVfsBundle({ vfs, packageManager: 'yarn1', entries: ['a.sol'] }), /^Error: buildVfsBundle: only JS bundles are built with yarn1$/u)
+  await t.assert.rejects(buildVfsBundle({ vfs, packageManager: 'soldeer', entries: ['a.js'] }), /^Error: buildVfsBundle: only Solidity bundles are built with soldeer$/u)
 })

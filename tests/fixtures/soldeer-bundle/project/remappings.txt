@@ -1,0 +1,1 @@
+stasis-sol-lib/=dependencies/stasis-sol-lib-1.0.0/

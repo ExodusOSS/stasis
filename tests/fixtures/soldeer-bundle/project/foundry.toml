@@ -1,0 +1,10 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["dependencies"]
+
+[dependencies]
+stasis-sol-lib = "1.0.0"
+
+[soldeer]
+remappings_version = false

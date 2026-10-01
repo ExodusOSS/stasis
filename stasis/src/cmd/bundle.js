@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
@@ -13,7 +13,7 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest } from '@exodus/stasis-core/bundle-util'
+import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest, readText } from '@exodus/stasis-core/bundle-util'
 import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import { diskHost } from '@exodus/stasis-core/host'
 import {
@@ -88,9 +88,9 @@ function githubSlug(url) {
 
 // Parse `.gitmodules` (git-config INI) into Map<submodulePath, { name, branch }>,
 // github.com submodules only.
-function parseGithubSubmodules(baseDir) {
+function parseGithubSubmodules(baseDir, host) {
   const byPath = new Map()
-  const text = readFileSyncOrNull(join(baseDir, '.gitmodules'))
+  const text = readText(host, join(baseDir, '.gitmodules'))
   if (!text) return byPath
   let cur = null
   const flush = () => {
@@ -117,19 +117,11 @@ function parseGithubSubmodules(baseDir) {
   return byPath
 }
 
-function readFileSyncOrNull(file) {
-  try {
-    return readFileSync(file, 'utf8')
-  } catch {
-    return null
-  }
-}
-
 // Classify a Solidity file's dep bucket: Soldeer (`dependencies/<name>-<version>/`) or a
 // github submodule (`lib/`, via `.gitmodules`), else null to defer to the node_modules/
 // workspace logic.
-function makeSolidityClassifier(baseDir) {
-  const submodules = parseGithubSubmodules(baseDir)
+function makeSolidityClassifier(baseDir, host) {
+  const submodules = parseGithubSubmodules(baseDir, host)
   return (path) => {
     if (path.startsWith('dependencies/')) {
       const seg = path.slice('dependencies/'.length).split('/')[0]
@@ -140,7 +132,7 @@ function makeSolidityClassifier(baseDir) {
     }
     for (const [sub, { name, branch }] of submodules) {
       if (path === sub || path.startsWith(`${sub}/`)) {
-        const pkg = readJson(join(baseDir, sub, 'package.json'))
+        const pkg = readJson(join(baseDir, sub, 'package.json'), host)
         return { bucketDir: sub, name, version: pkg?.version ?? branch ?? '0.0.0', ecosystem: 'github' }
       }
     }
@@ -242,26 +234,26 @@ function assembleCodeBundle({
 // that exist, for the root and for each package dir `classifyDep`/package.json places a bundled
 // source in. Files inside the root only, carried as written: whatever they hold (an RPC URL with
 // its API key, an Etherscan key, a URL's credentials) is in the bundle too, as with --package-json.
-function solidityManifests(baseDir, sources, configFiles, classifyDep) {
+function solidityManifests(baseDir, sources, configFiles, classifyDep, host) {
   const wanted = new Set([...configFiles.filter((f) => f.endsWith('.toml') || f.endsWith('.txt')), ...SOLIDITY_ROOT_MANIFESTS])
   const dirs = new Set()
   for (const path of sources.keys()) {
     const dep = classifyDep(path)
     if (dep) dirs.add(dep.bucketDir)
-    const meta = findPackageMetadata(baseDir, path)
+    const meta = findPackageMetadata(baseDir, path, host)
     if (meta) dirs.add(meta.pkgDir)
   }
   for (const dir of dirs) {
     for (const name of SOLIDITY_PACKAGE_MANIFESTS) wanted.add(moduleFileKey(dir, name))
   }
-  const realBase = realpathSync(baseDir)
+  const realBase = host.realpath(baseDir)
   const out = new Map()
   for (const rel of [...wanted].toSorted()) {
     if (sources.has(rel) || posix.isAbsolute(rel) || rel.startsWith('../')) continue
     let buf
     try {
-      assertRealPathWithinBase(realBase, baseDir, rel)
-      buf = readFileSync(join(baseDir, rel))
+      assertRealPathWithinBase(realBase, baseDir, rel, host)
+      buf = host.readFile(join(baseDir, rel))
     } catch (err) {
       if (err.code === 'ENOENT' || err.code === 'EISDIR') continue
       throw err
@@ -283,8 +275,9 @@ const isDirEntry = (abs, host = diskHost) => isDir(abs, host) || (extname(abs) =
 // (foundry.toml/remappings.txt) pins them to exactly what it lists. An import is refused when it
 // reaches a non-.sol file or leaves the root, or when a dependency's reaches the project's own
 // files. Config files are read, and bundled only with `manifests` (see solidityManifests). `env`
-// supplies FOUNDRY_PROFILE / FOUNDRY_REMAPPINGS, reported when they apply.
-export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappingFile, manifests = false, env = process.env } = {}) {
+// supplies FOUNDRY_PROFILE / FOUNDRY_REMAPPINGS, reported when they apply. The project is read
+// through `host`.
+export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappingFile, manifests = false, env = process.env, host = diskHost } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error('buildSolidityBundle: at least one entry .sol file or directory is required')
   }
@@ -292,15 +285,15 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
   for (const e of normalized) {
-    if (!e.endsWith('.sol') && !isDirEntry(join(baseDir, e))) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
+    if (!e.endsWith('.sol') && !isDirEntry(join(baseDir, e), host)) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
   }
-  const expanded = expandSolidityEntries(baseDir, normalized)
+  const expanded = expandSolidityEntries(baseDir, normalized, host)
 
-  const { remappings, libs, dependencyDirs, files: configFiles, envUsed } = await discoverSolidityConfig(baseDir, { mappingFile, env })
+  const { remappings, libs, dependencyDirs, files: configFiles, envUsed } = discoverSolidityConfig(baseDir, { mappingFile, env, host })
   // The bundle doesn't record the environment, so say when it shaped the resolution.
   if (envUsed.length > 0) console.warn(`[stasis] Solidity imports resolved with ${envUsed.join(', ')} from the environment`)
-  const sources = await collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs, dependencyDirs })
-  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs, dependencyDirs })
+  const sources = collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs, dependencyDirs, host })
+  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs, dependencyDirs, host })
 
   // Bundles must be self-contained: fail on a missing entry or unresolved import.
   const issues = []
@@ -314,11 +307,11 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  const classifyDep = makeSolidityClassifier(baseDir)
+  const classifyDep = makeSolidityClassifier(baseDir, host)
   const bundled = new Map(sources)
   const formats = new Map()
   if (manifests) {
-    for (const [path, text] of solidityManifests(baseDir, sources, configFiles, classifyDep)) {
+    for (const [path, text] of solidityManifests(baseDir, sources, configFiles, classifyDep, host)) {
       bundled.set(path, text)
       formats.set(path, path.endsWith('.json') ? 'json' : 'resource')
     }
@@ -335,6 +328,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     formats,
     conditionKey: 'solidity',
     classifyDep,
+    host,
   })
 }
 
@@ -1116,44 +1110,54 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   return kind
 }
 
-// A JS bundle from the lockfile of the project held in `vfs` alone (@exodus/stasis/vfs-bundle),
-// `cwd` a path there: buildBundle's JS options, resolved through the node_modules `packageManager`
-// would install, with nothing read from disk but tarballs and no EXODUS_STASIS_* setting read.
-// `repo`, the informational `{ github, directory | root, commit }`, is the Bundle's, over what is detected
-// in the Vfs as `stasis bundle` detects it on disk.
-// -> { bundle: Bundle, lockfile: Lockfile, stats }
-export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, repo, ...options } = {}) {
-  const { checkPackageManager, loadTree, vfsHost } = await import('../vfs-bundle/tree.js')
-  checkPackageManager('buildVfsBundle', packageManager)
+// A JS bundle as `stasis bundle` builds it: by the legacy-field resolver with `mainFields` or
+// `metro`, whose per-platform edges and synthetic empty module a State can't hold, else through a
+// State, which detects the bundle's repo itself. -> { bundle, lockfile: () => Lockfile, stateBuilt }
+async function buildJs({ mainFields, platforms, metro, metroResolver, ...options }) {
+  if (metro || mainFields !== undefined) {
+    const built = await buildResolvedJsBundle({ ...options, mainFields: metro ? METRO_MAIN_FIELDS : mainFields, platforms: metro ? platforms : [null], metro: Boolean(metro), metroResolver: Boolean(metroResolver) })
+    return { bundle: built.bundle, lockfile: () => built.lockfile, stateBuilt: false }
+  }
+  const state = await buildJsBundle(options)
+  // Stamp the `bundle` consumer (the static build carries none).
+  return { bundle: state.sourceBundle.withReason('bundle'), lockfile: () => state.lockfile, stateBuilt: true }
+}
+
+// A bundle from the lockfile of the project held in `vfs` alone (@exodus/stasis/vfs-bundle), `cwd` a
+// path there: buildBundle's JS options, resolved through the node_modules 'pnpm' or 'yarn1' would
+// install, or its Solidity options, through the dependencies folder 'soldeer' would install; with
+// nothing read from disk but tarballs and zips. No EXODUS_STASIS_* setting is read; `env` supplies
+// a Solidity bundle's FOUNDRY_PROFILE and FOUNDRY_REMAPPINGS alone. `repo`, the informational
+// `{ github, directory | root, commit }`, is the Bundle's, over what is detected in the Vfs as
+// `stasis bundle` detects it on disk.
+// -> { bundle: Bundle, lockfile: Lockfile (of a JS bundle), stats }
+export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, repo, env = {}, ...options } = {}) {
+  const { checkVfs, loadTree, packageManagerOf, vfsHost } = await import('../vfs-bundle/tree.js')
+  const pm = packageManagerOf('buildVfsBundle', packageManager)
+  checkVfs('buildVfsBundle', vfs)
   // Checked as the Bundle checks it, before anything is fetched.
   if (repo !== undefined) repo = new Bundle({ repo }).repo
   const project = vfsHost(vfs)
   // A real path, as every file the scan reaches is.
   cwd = project.realpath(posix.resolve('/', cwd))
-  if (classifyEntries('buildVfsBundle', { cwd, ...options, host: project }) !== 'js') throw new Error('buildVfsBundle: only JS bundles are built from a lockfile')
+  if (classifyEntries('buildVfsBundle', { cwd, ...options, host: project }) !== pm.kind) throw new Error(`buildVfsBundle: only ${pm.kind === 'sol' ? 'Solidity' : 'JS'} bundles are built with ${packageManager}`)
   // The project's metro-resolver resolves against the node_modules on disk.
   if (options.metroResolver) throw new Error('buildVfsBundle: metroResolver is not supported')
-  // Checked before any tarball is fetched: an entry out of node_modules is in the project already.
+  // Checked before anything is fetched: an entry out of what the tree installs is in the project
+  // already. (A Solidity entry that is no .sol file is a directory, skipped where it is missing.)
   for (const entry of options.entries) {
     const abs = posix.resolve(cwd, entry)
-    if (!abs.split('/').includes('node_modules') && project.stat(abs) === null) throw new Error(`entry not found: ${abs}`)
+    if (pm.kind === 'sol' && !abs.endsWith('.sol')) continue
+    if (!posix.relative(cwd, abs).split('/').includes(pm.installs) && project.stat(abs) === null) throw new Error(`entry not found: ${abs}`)
   }
   const { host, stats } = await loadTree({ project, packageManager, cwd, packageManagerVersion })
-  const { metro, mainFields, platforms, scope, ...common } = options
-  let bundle
-  let lockfile
-  if (metro || mainFields !== undefined) {
-    ;({ bundle, lockfile } = await buildResolvedJsBundle({ cwd, ...common, host, mainFields: metro ? METRO_MAIN_FIELDS : mainFields, platforms: metro ? platforms : [null], metro: Boolean(metro) }))
-    // Rooted at cwd, where `stasis bundle` detects its repo; a State detects its own.
-    bundle.repo = detectRepo(cwd, host)
-  } else {
-    const state = await buildJsBundle({ cwd, ...common, scope, host, env: {} })
-    // Stamp the `bundle` consumer (the static build carries none).
-    bundle = state.sourceBundle.withReason('bundle')
-    lockfile = state.lockfile
-  }
+  const { bundle, lockfile, stateBuilt } = pm.kind === 'sol'
+    ? { bundle: await buildSolidityBundle({ ...options, cwd, env, host }) }
+    : await buildJs({ ...options, cwd, host, env: {} })
   if (repo !== undefined) bundle.repo = repo
-  return { bundle, lockfile, stats }
+  // Rooted at cwd, where `stasis bundle` detects its repo.
+  else if (!stateBuilt) bundle.repo ??= detectRepo(cwd, host)
+  return { bundle, lockfile: lockfile?.(), stats }
 }
 
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without
@@ -1165,27 +1169,7 @@ export async function buildBundle({ cwd = process.cwd(), env = process.env, entr
   if (kind === 'php') return buildPhpBundle({ cwd, entries })
   if (kind === 'bash') return buildBashBundle({ cwd, entries })
   if (kind === 'rust') return buildRustBundle({ cwd, entries, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
-  if (metro || mainFields !== undefined) {
-    const { bundle } = await buildResolvedJsBundle({
-      cwd,
-      entries,
-      mainFields: metro ? METRO_MAIN_FIELDS : mainFields,
-      platforms: metro ? platforms : [null],
-      conditions,
-      metro: Boolean(metro),
-      metroResolver: Boolean(metroResolver),
-      jsx,
-      flow,
-      typescript,
-      tsconfig,
-      resources,
-      packageJSON,
-    })
-    return bundle
-  }
-  const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON })
-  // Stamp the `bundle` consumer (the static build carries none).
-  return state.sourceBundle.withReason('bundle')
+  return (await buildJs({ cwd, env, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })).bundle
 }
 
 // Default output: stasis.code.br, the same name `stasis run --bundle=load` discovers, so the two round-trip with no flags.
@@ -1209,38 +1193,16 @@ export async function bundleCommand({ cwd = process.cwd(), env = process.env, en
 
   let bundle
   let lockData
-  if (kind === 'js' && (metro || mainFields !== undefined)) {
-    // The legacy-field resolver builds Bundle + Lockfile directly (per-platform edges + a
-    // synthetic empty module State's addFile can't represent).
-    const built = await buildResolvedJsBundle({
-      cwd,
-      entries,
-      mainFields: metro ? METRO_MAIN_FIELDS : mainFields,
-      platforms: metro ? platforms : [null],
-      conditions,
-      metro: Boolean(metro),
-      metroResolver: Boolean(metroResolver),
-      jsx,
-      flow,
-      typescript,
-      tsconfig,
-      resources,
-      packageJSON,
-    })
-    bundle = built.bundle
-    if (lockfile) lockData = built.lockfile.serialize()
-  } else if (kind === 'js' && lockfile) {
-    // Keep the State: only it carries the file hashes the companion lockfile needs (a Bundle holds sources, not digests).
-    const state = await buildJsBundle({ cwd, entries, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON })
-    // Stamp the `bundle` consumer (this branch bypasses buildBundle to keep the State).
-    bundle = state.sourceBundle.withReason('bundle')
-    lockData = state.lockData
+  let stateBuilt = false
+  if (kind === 'js') {
+    const built = await buildJs({ cwd, env, entries, scope, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON })
+    ;({ bundle, stateBuilt } = built)
+    if (lockfile) lockData = built.lockfile().serialize()
   } else {
     bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   }
 
   // State-built bundles keep the State root's repo (no cwd fallback: their paths are relative to that root).
-  const stateBuilt = kind === 'js' && !metro && mainFields === undefined
   if (!stateBuilt) bundle.repo ??= detectRepo(cwd)
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.

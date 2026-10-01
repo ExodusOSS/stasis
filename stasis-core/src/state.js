@@ -12,7 +12,7 @@ import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
 import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, erasedTypeScriptFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isNativeArtifact, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
-import { detectRepo, readModuleManifest } from './bundle-util.js'
+import { detectRepo, packageJSONText, readModuleManifest } from './bundle-util.js'
 import { diskHost } from './host.js'
 import corePackage from './package.cjs'
 
@@ -24,10 +24,20 @@ const FILE_CONFIG = 'stasis.config.json'
 const FILE_LOCK = 'stasis.lock.json'
 const FILE_CODE = 'stasis.code.br'
 
+// A package.json's fields; one that is no JSON object is refused as Node refuses it.
 function readPackageJSON(host, pkgAbsolute) {
   const buf = host.readFile(pkgAbsolute)
   assert.ok(isUtf8(buf))
-  return JSON.parse(buf.toString())
+  let json
+  try {
+    json = JSON.parse(packageJSONText(buf))
+  } catch (cause) {
+    throw Object.assign(new Error(`Invalid package config ${pkgAbsolute}.`, { cause }), { code: 'ERR_INVALID_PACKAGE_CONFIG' })
+  }
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw Object.assign(new Error(`Invalid package config ${pkgAbsolute}.`), { code: 'ERR_INVALID_PACKAGE_CONFIG' })
+  }
+  return json
 }
 
 // Via src/package.cjs: a bundler-safe re-export of package.json.
@@ -726,7 +736,7 @@ export class State {
     let dir = dirAbsolute
     while (true) {
       const candidate = join(dir, 'package.json')
-      if (this.#host.stat(candidate) !== null) return candidate
+      if (this.#host.stat(candidate)?.isFile()) return candidate
       if (dir === this.root) break // checked the root's package.json; never escape root
       const parent = dirname(dir)
       if (parent === dir) break
@@ -784,12 +794,9 @@ export class State {
           break
         }
         assert.ok(Object.keys(json).every((k) => k === 'type'))
-        const next = this.#host.findPackageJSON(dirname(pkgAbsolute))
-        assert.ok(
-          next && !relative(this.root, next).startsWith('..'),
-          `No package.json with a name found for ${file}`
-        )
-        pkgAbsolute = next
+        const dir = dirname(pkgAbsolute)
+        assert.ok(dir !== this.root && !relative(this.root, dir).startsWith('..'), `No package.json with a name found for ${file}`)
+        pkgAbsolute = this.#nearestPackageJsonFor(dirname(dir))
         json = readPackageJSON(this.#host, pkgAbsolute)
       }
     }

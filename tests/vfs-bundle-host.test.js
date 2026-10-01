@@ -40,7 +40,7 @@ test('a Vfs host follows the store\'s symlinks, reports stats as fs does, and re
   vfs.symlink('.pnpm/dep@1.0.0/node_modules/dep', '/node_modules/dep')
   vfs.symlink('loop2', '/node_modules/loop')
   vfs.symlink('loop', '/node_modules/loop2')
-  t.assert.throws(() => createVfsHost(new Map()), /must be a @preventive\/vfs Vfs/u)
+  t.assert.throws(() => createVfsHost(new Map()), /^TypeError: createVfsHost: vfs must be a @preventive\/vfs Vfs/u)
 
   const host = createVfsHost(vfs)
   const store = '/node_modules/.pnpm'
@@ -124,6 +124,23 @@ test('the host loadNodeModules gives serves each pnpm project\'s node_modules fr
   t.assert.equal(aliased.root, '/p')
   t.assert.equal(aliased.host.stat('/alias/node_modules/ws/lib.js').isFile(), true)
   t.assert.equal(aliased.host.stat('/alias/node_modules/installed/index.js'), null)
+})
+
+test('a Vfs of another copy of @preventive/vfs, its errors of classes of its own, is read as one', async (t) => {
+  const vfs = workspace()
+  const rethrow = (fn) => (...args) => {
+    try {
+      return fn(...args)
+    } catch (err) {
+      throw Object.assign(new Error(err.message), { code: err.code })
+    }
+  }
+  const foreign = Object.fromEntries(['lstat', 'readdir', 'readFile', 'readlink'].map((method) => [method, rethrow(vfs[method].bind(vfs))]))
+  const { host } = await loadNodeModules({ vfs: foreign, packageManager: 'pnpm', cwd: '/p/src' })
+  t.assert.equal(host.resolve('/p/src/entry.js', 'ws'), '/p/packages/ws/lib.js')
+  t.assert.equal(host.stat('/p/src/missing.js'), null)
+  t.assert.equal(createVfsHost(foreign).stat('/p/src/missing.js'), null)
+  t.assert.throws(() => createVfsHost({ lstat() {} }), /^TypeError: createVfsHost: vfs must be a @preventive\/vfs Vfs holding the project/u)
 })
 
 test('with yarn1, the installed node_modules of the root and of each workspace are the tree\'s alone', async (t) => {

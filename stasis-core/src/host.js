@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url'
 
 // Snapshotted before `stasis run --fs` patches node:fs, whose realpathSync doesn't throw ENOENT and
 // whose statSync answers with synthetic modes.
-const { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } = fs
+const { lstatSync, opendirSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } = fs
 
 export const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
@@ -21,6 +21,17 @@ export const diskHost = {
   },
   readFile: (p) => readFileSync(p),
   readdir: (p) => readdirSync(p, { withFileTypes: true }).toSorted(byName),
+  // In the filesystem's own order (readdirSync sorts; opendir doesn't).
+  readdirUnsorted(p) {
+    const entries = []
+    const handle = opendirSync(p)
+    try {
+      for (let e = handle.readSync(); e !== null; e = handle.readSync()) entries.push(e)
+    } finally {
+      handle.closeSync()
+    }
+    return entries
+  },
   readlink: (p) => (lstatSync(p).isSymbolicLink() ? readlinkSync(p) : null),
   realpath: (p) => realpathSync(p),
   findPackageJSON: (p) => findPackageJSON(pathToFileURL(p).href),
