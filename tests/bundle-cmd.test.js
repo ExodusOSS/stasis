@@ -754,19 +754,19 @@ test('buildSolidityBundle fails on a foundry.toml that isn\'t TOML, naming the f
   })
   await captureStderr(() => t.assert.rejects(
     () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
-    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/foundry.toml')}:2: unterminated array` },
+    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/foundry.toml')}: expected "," or "]", found the end of the text at line 3` },
   ))
   // ...and so is its `extends` base.
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\nextends = "base.toml"\n', 'lib/dep/base.toml': '[profile.default]\nsrc = "src" junk\n' })
   await captureStderr(() => t.assert.rejects(
     () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} }),
-    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/base.toml')}:2: unexpected text after the value` },
+    { name: 'TomlError', message: `${join(realpathSync(tmp), 'lib/dep/base.toml')}: expected the end of the line, found "junk" at line 2` },
   ))
   // With a pinned mapping file, the root foundry.toml is still read for its lib dirs.
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\n', 'foundry.toml': '[profile.default]\nlibs = ["lib"\n', 'remappings.txt': 'dep/=lib/dep/src/\n' })
   await captureStderr(() => t.assert.rejects(
     () => buildSolidityBundle({ cwd: tmp, entries: ['src'], mappingFile: 'remappings.txt', env: {} }),
-    { name: 'TomlError', message: `${join(tmp, 'foundry.toml')}:2: unterminated array` },
+    { name: 'TomlError', message: `${join(tmp, 'foundry.toml')}: expected "," or "]", found the end of the text at line 3` },
   ))
 }))
 
