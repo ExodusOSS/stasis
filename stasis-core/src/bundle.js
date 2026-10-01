@@ -39,22 +39,6 @@ const duplicateKey = (key) => assert(false, `duplicate file key '${key}' across 
 const inferModuleDir = (path) =>
   splitNodeModulesPath(path) ?? { dir: '.', rel: path === '.' ? '' : path, name: null }
 
-// The bucket split and flat key of the file at bundle-JSON key path `path`, or undefined; throws if non-canonical.
-const filePosition = (path) => {
-  const [top, dir, files, rel] = path
-  if (typeof dir !== 'string') return undefined
-  // v0 `sources.<path>`
-  if (path.length === 2 && top === 'sources') {
-    const split = inferModuleDir(dir)
-    return { ...split, key: canonicalFileKey(split.dir, split.rel, 'bundle') }
-  }
-  // v1 `sources|modules.<dir>.files.<rel>`
-  if (path.length === 4 && (top === 'sources' || top === 'modules') && files === 'files' && typeof rel === 'string') {
-    return { dir, rel, key: canonicalFileKey(dir, rel, 'bundle') }
-  }
-  return undefined
-}
-
 function contentsLocked() {
   throw new Error('bundle: file contents are not retained by this contents-free Bundle')
 }
@@ -147,7 +131,18 @@ export class Bundle {
 
   // The `sources` key of the file whose contents sit at JSON key path `path`, else undefined; throws if non-canonical.
   static fileKeyAt(path) {
-    return filePosition(path)?.key
+    const [top, dir, files, rel] = path
+    if (typeof dir !== 'string') return undefined
+    // v0 `sources.<path>`
+    if (path.length === 2 && top === 'sources') {
+      const split = inferModuleDir(dir)
+      return canonicalFileKey(split.dir, split.rel, 'bundle')
+    }
+    // v1 `sources|modules.<dir>.files.<rel>`
+    if (path.length === 4 && (top === 'sources' || top === 'modules') && files === 'files' && typeof rel === 'string') {
+      return canonicalFileKey(dir, rel, 'bundle')
+    }
+    return undefined
   }
 
   // parse() on an already-parsed value; `contents: false` takes a symbol placeholder per file and locks contents out.
@@ -201,8 +196,9 @@ export class Bundle {
     } else {
       assert(json.sources)
       for (const [path, content] of Object.entries(json.sources)) {
-        // A canonical key can't escape the root, so this covers the path and its bucket split.
-        const { dir, rel, name } = filePosition(['sources', path])
+        assert(!posixPathEscapes(path))
+        const { dir, rel, name } = inferModuleDir(path)
+        assert(!posixPathEscapes(dir) && !posixPathEscapes(rel))
         if (!modules.has(dir)) modules.set(dir, { name, version: null, files: Object.create(null) })
         const { files } = modules.get(dir)
         assert(!Object.hasOwn(files, rel), `bundle: duplicate file key '.' (v0 '' and '.')`)

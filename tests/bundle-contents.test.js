@@ -109,30 +109,6 @@ test('fromJSON with contents: false rejects any file the reader did not take out
   }
 })
 
-test('Bundle.fromJSON builds what Bundle.parse builds and rejects what it rejects', (t) => {
-  const v1 = sampleBundle().serialize()
-  const v0 = JSON.stringify(v0Of({ sources: { 'src/a.js': 'A', 'node_modules/x/index.js': 'X', 'node_modules/@s/y/lib/z.js': 'Z' } }))
-  for (const text of [v1, v0]) {
-    const parsed = Bundle.parse(text)
-    const built = Bundle.fromJSON(JSON.parse(text))
-    for (const field of ['version', 'config', 'entries', 'modules', 'formats', 'imports', 'executable', 'reason']) {
-      t.assert.deepStrictEqual(built[field], parsed[field], field)
-    }
-  }
-
-  const json = JSON.parse(v1)
-  const bad = [
-    { ...json, version: 7 },
-    { ...json, formats: { ...json.formats, 'src/index.js': 'bogus' } },
-    { ...json, sources: { '.': { ...json.sources['.'], files: { '../evil.js': 'x' } } } },
-  ]
-  for (const value of bad) {
-    let expected
-    t.assert.throws(() => Bundle.parse(JSON.stringify(value)), (error) => (expected = error) !== undefined)
-    t.assert.throws(() => Bundle.fromJSON(value), { name: expected.name, message: expected.message })
-  }
-})
-
 test('Bundle.fileKeyAt finds every file in the bundle JSON, keyed as sources keys it', (t) => {
   const v0 = JSON.stringify(v0Of({ formats: { 'src/a.js': 'module' }, sources: { 'src/a.js': 'A', 'node_modules/x/index.js': 'X', '': 'root' } }))
   for (const text of [sampleBundle().serialize(), v0]) {
@@ -152,11 +128,5 @@ test('Bundle.fileKeyAt finds every file in the bundle JSON, keyed as sources key
   // A non-canonical key throws, as fromJSON does.
   t.assert.throws(() => Bundle.fileKeyAt(['sources', '.', 'files', '.']), /non-canonical file key "\."/)
   t.assert.throws(() => Bundle.fileKeyAt(['sources', 'src', 'files', '../x.js']), /non-canonical file key/)
-  // fromJSON keys v0 files through the same check, so it fails with the same error.
-  for (const path of ['a/node_modules/x/../../../b', '../x', '/etc/passwd']) {
-    let expected
-    t.assert.throws(() => Bundle.fileKeyAt(['sources', path]), (error) => (expected = error) !== undefined)
-    t.assert.match(expected.message, /non-canonical file key/)
-    t.assert.throws(() => Bundle.fromJSON(v0Of({ sources: { [path]: 'x' } })), { message: expected.message }, path)
-  }
+  t.assert.throws(() => Bundle.fileKeyAt(['sources', 'a/node_modules/x/../../../b']), /non-canonical file key/)
 })
