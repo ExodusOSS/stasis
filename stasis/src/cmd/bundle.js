@@ -212,8 +212,9 @@ function assembleCodeBundle({
   }).withReason('bundle')
 }
 
-// Files never carried, whatever reads them: `.env` files, and Hardhat's config, which is code.
-const neverCarried = (rel) => isDotEnvFile(rel) || posix.basename(rel).startsWith('hardhat.config.')
+// Files never carried, whatever reads them: `.env` files, and Hardhat's config, which is code
+// (both however they're cased).
+const neverCarried = (rel) => isDotEnvFile(rel) || posix.basename(rel).toLowerCase().startsWith('hardhat.config.')
 
 // findPackageMetadata (with `options`) once per directory, the only thing its answer depends on.
 function packageLookup(baseDir, options) {
@@ -250,6 +251,8 @@ function solidityManifests(baseDir, sources, configFiles, { classifyDep, package
   const unreproducible = (rel, why) => new Error(`--manifests can't carry ${rel}, which the Solidity resolution read: ${why}`)
   const out = new Map()
   for (const rel of configFiles) {
+    // Absolute: the OS couldn't give its real path (see projectRelative).
+    if (posix.isAbsolute(rel)) throw unreproducible(rel, "its real path can't be resolved")
     if (posixPathEscapes(rel)) throw unreproducible(rel, 'it lies outside the bundle root')
     if (neverCarried(rel)) throw unreproducible(rel, '.env files and hardhat.config.* are never carried')
     if (sources.has(rel)) continue

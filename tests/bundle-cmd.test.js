@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'
@@ -894,6 +894,8 @@ test('buildSolidityBundle with manifests fails on a config the resolution read b
     ['.env.toml', '.env files and hardhat.config.* are never carried'],
     ['Base.ENV', '.env files and hardhat.config.* are never carried'],
     ['.env.local', '.env files and hardhat.config.* are never carried'],
+    ['HARDHAT.CONFIG.TOML', '.env files and hardhat.config.* are never carried'],
+    ['Hardhat.config.toml', '.env files and hardhat.config.* are never carried'],
     ['../shared-base.toml', 'it lies outside the bundle root'],
   ]) {
     if (!base.startsWith('../')) writeFileSync(join(proj, base), '[profile.default]\nsrc = "src"\n')
@@ -921,12 +923,18 @@ test('buildSolidityBundle with manifests refuses a config whose real path the OS
     mkdirSync('in')
     writeFileSync('base.toml', '[profile.default]\nremappings = ["x/=lib/physical/"]\n')
   })
-  const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
-  t.assert.equal(bundle.imports.get('solidity').get('src/A.sol').get('x/X.sol'), 'lib/physical/X.sol')
-  await t.assert.rejects(
-    () => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} }),
-    { message: "--manifests can't carry L/../base.toml, which the Solidity resolution read: L/../base.toml crosses a link stasis can't follow the way the filesystem does" },
-  )
+  // However the path is spelled, from the root: as given, through `./`, or with a doubled `/`.
+  for (const extendsPath of ['L/../base.toml', `${tmp}/./L/../base.toml`, `${dirname(tmp)}//${basename(tmp)}/L/../base.toml`]) {
+    writeFileSync(join(tmp, 'foundry.toml'), `[profile.default]\nextends = "${extendsPath}"\n`)
+    // eslint-disable-next-line no-await-in-loop -- each run rewrites foundry.toml
+    const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
+    t.assert.equal(bundle.imports.get('solidity').get('src/A.sol').get('x/X.sol'), 'lib/physical/X.sol')
+    // eslint-disable-next-line no-await-in-loop -- each run rewrites foundry.toml
+    await t.assert.rejects(
+      () => buildSolidityBundle({ cwd: tmp, entries: ['src'], manifests: true, env: {} }),
+      { message: "--manifests can't carry L/../base.toml, which the Solidity resolution read: L/../base.toml crosses a link stasis can't follow the way the filesystem does" },
+    )
+  }
 }))
 
 test('buildSolidityBundle never reads the process\'s stdin as a config, a dependency\'s or the project\'s', { skip: !existsSync('/proc/self/fd/0') }, withTmp(async (t, tmp) => {

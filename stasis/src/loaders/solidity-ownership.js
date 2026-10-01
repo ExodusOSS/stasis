@@ -33,16 +33,26 @@ const inRoot = (rel) => rel !== '..' && !rel.startsWith('../') && !isAbsolute(re
 // `abs`, a file the resolution read, relative to the project `root` (slashes): as spelled when that
 // lies inside it with no `..` to resolve (a linked lib's files keep the lib's path), else by real
 // paths -- where the read went (an absolute or `/proc/self/cwd` lib; a `..` after a symlink) --
-// `../` when outside the project. One whose real path the OS can't give (past PATH_MAX) keeps the
-// path it was read by, `..` and all, for solidityOwnership to refuse: normalized, it would name
-// another file.
+// `../` when outside the project. One whose real path the OS can't give (past PATH_MAX) is never
+// normalized, which could name another file: it keeps the path it was read by, `..` and all, from
+// the root however that's spelled (as given or by its real path), for solidityOwnership to refuse,
+// or else stays absolute, a name --manifests refuses as unresolvable.
 export function projectRelative(root, abs) {
   const rel = toSlashes(relative(root, abs))
   if (inRoot(rel) && !toSlashes(abs).split('/').includes('..')) return rel
   const real = realpathOrNull(abs)
-  if (real !== null) return toSlashes(relative(realpathOrNull(root) ?? root, real))
-  const prefix = `${resolve(root)}${sep}`
-  return abs.startsWith(prefix) ? toSlashes(abs.slice(prefix.length)) : rel
+  const realRoot = realpathOrNull(root)
+  if (real !== null) return toSlashes(relative(realRoot ?? root, real))
+  return below(resolve(root), abs) ?? (realRoot === null ? null : below(realRoot, abs)) ?? toSlashes(abs)
+}
+
+// `abs` from `dir`, component by component as spelled (empty and `.` ones dropped, `..` kept), or
+// null when it doesn't start with `dir`'s components.
+function below(dir, abs) {
+  const parts = (p) => toSlashes(p).split('/').filter((c) => c !== '' && c !== '.')
+  const d = parts(dir)
+  const a = parts(abs)
+  return d.length < a.length && d.every((c, i) => a[i] === c) ? a.slice(d.length).join('/') : null
 }
 
 // realpath(3) of `p`: `{ real }`, or `{ real: null, missing }`, `missing` only when nothing is
