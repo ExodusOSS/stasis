@@ -77,14 +77,14 @@ importers:
         specifier: 1.0.0-beta.4
         version: link:../stasis-plugins
       '@preventive/deptree':
-        specifier: 1.0.0-alpha.4
-        version: 1.0.0-alpha.4
+        specifier: 1.0.0-alpha.5
+        version: 1.0.0-alpha.5
       '@preventive/lockfile':
         specifier: 1.0.0-alpha.4
         version: 1.0.0-alpha.4
       '@preventive/upstream':
-        specifier: 1.0.0-alpha.2
-        version: 1.0.0-alpha.2
+        specifier: 1.0.0-alpha.3
+        version: 1.0.0-alpha.3
       '@preventive/vfs':
         specifier: 1.0.0-beta.2
         version: 1.0.0-beta.2
@@ -667,8 +667,8 @@ packages:
     resolution: {integrity: sha512-2WLNnHNoUCJezrusJrA9QVIJTmo+34KF/6ODd+a8x6Ks5fk/GOWVaWTl8+A4DzOw5dO43Uf5fX1N6ga/gB7TIw==, tarball: https://registry.npmjs.org/@preventive/archive/-/archive-1.0.0-beta.3.tgz}
     engines: {node: '>=24.14.0'}
 
-  '@preventive/deptree@1.0.0-alpha.4':
-    resolution: {integrity: sha512-9ob7IR0Is0i0p6JnS8YpdkxZAN7nepgMQ3KlVhARsdGSxuyrZL/HY2c0dY8x6+lwbTSZ7UOhAoswqULvvBTmcw==, tarball: https://registry.npmjs.org/@preventive/deptree/-/deptree-1.0.0-alpha.4.tgz}
+  '@preventive/deptree@1.0.0-alpha.5':
+    resolution: {integrity: sha512-yLIAiUWoxSN81/ebCcwKRID1C/9Uzg7/XUyijMLMchbfG0VCQfxKnSX6wbWkJsb/SQAcHORteyeeLhhb+6mBiw==, tarball: https://registry.npmjs.org/@preventive/deptree/-/deptree-1.0.0-alpha.5.tgz}
     engines: {node: '>=24.14.0'}
 
   '@preventive/diff@1.0.0':
@@ -679,8 +679,8 @@ packages:
     resolution: {integrity: sha512-D2lgGmn7ca5cPJEUGxlJyed1Lj8co+XQOZ+cer/zOpQnT4GeC338IlVGZkmpMkAltG1cYDZXNhpQVLDJa5NDWg==, tarball: https://registry.npmjs.org/@preventive/lockfile/-/lockfile-1.0.0-alpha.4.tgz}
     engines: {node: '>=24.14.0'}
 
-  '@preventive/upstream@1.0.0-alpha.2':
-    resolution: {integrity: sha512-IWob+bCWXUhV+y1l2uvSjCiZ8Aziwke28HVoRDJvs6/LVYxyb5Pw6kD5sPigeRqvbQCtTXqEWN58BGImPHHYbQ==, tarball: https://registry.npmjs.org/@preventive/upstream/-/upstream-1.0.0-alpha.2.tgz}
+  '@preventive/upstream@1.0.0-alpha.3':
+    resolution: {integrity: sha512-yCi7stUfpKBahNfFdVnvVaO0p7KrSjV2wsPl61/qFOc74847Cp64ESeatLNkrF3gpuWXdAopq3QsnRQ6hKiG9g==, tarball: https://registry.npmjs.org/@preventive/upstream/-/upstream-1.0.0-alpha.3.tgz}
     engines: {node: '>=24.14.0'}
 
   '@preventive/vfs@1.0.0-beta.2':
@@ -2888,12 +2888,12 @@ snapshots:
     transitivePeerDependencies:
       - '@noble/hashes'
 
-  '@preventive/deptree@1.0.0-alpha.4':
+  '@preventive/deptree@1.0.0-alpha.5':
     dependencies:
       '@preventive/archive': 1.0.0-beta.3
       '@preventive/diff': 1.0.0
       '@preventive/lockfile': 1.0.0-alpha.4
-      '@preventive/upstream': 1.0.0-alpha.2
+      '@preventive/upstream': 1.0.0-alpha.3
       '@preventive/vfs': 1.0.0-beta.2
     transitivePeerDependencies:
       - '@noble/hashes'
@@ -2906,7 +2906,7 @@ snapshots:
     transitivePeerDependencies:
       - '@noble/hashes'
 
-  '@preventive/upstream@1.0.0-alpha.2': {}
+  '@preventive/upstream@1.0.0-alpha.3': {}
 
   '@preventive/vfs@1.0.0-beta.2': {}
 
