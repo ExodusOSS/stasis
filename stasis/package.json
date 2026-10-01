@@ -79,8 +79,8 @@
   "dependencies": {
     "@exodus/stasis-core": "1.0.0-beta.4",
     "@exodus/stasis-plugins": "1.0.0-beta.4",
-    "@preventive/lockfile": "1.0.0-alpha.1",
-    "@preventive/upstream": "1.0.0-alpha.0",
+    "@preventive/lockfile": "1.0.0-alpha.2",
+    "@preventive/upstream": "1.0.0-alpha.2",
     "oxc-parser": "^0.94.0"
   },
   "peerDependencies": {
