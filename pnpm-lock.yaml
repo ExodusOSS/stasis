@@ -77,11 +77,11 @@ importers:
         specifier: 1.0.0-beta.4
         version: link:../stasis-plugins
       '@preventive/lockfile':
-        specifier: 1.0.0-alpha.1
-        version: 1.0.0-alpha.1
+        specifier: 1.0.0-alpha.2
+        version: 1.0.0-alpha.2
       '@preventive/upstream':
-        specifier: 1.0.0-alpha.0
-        version: 1.0.0-alpha.0
+        specifier: 1.0.0-alpha.2
+        version: 1.0.0-alpha.2
       esbuild:
         specifier: '*'
         version: 0.27.3
@@ -377,6 +377,15 @@ packages:
       '@noble/hashes':
         optional: true
 
+  '@exodus/bytes@1.16.0':
+    resolution: {integrity: sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA==, tarball: https://registry.npmjs.org/@exodus/bytes/-/bytes-1.16.0.tgz}
+    engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
+    peerDependencies:
+      '@noble/hashes': ^1.8.0 || ^2.0.0
+    peerDependenciesMeta:
+      '@noble/hashes':
+        optional: true
+
   '@exodus/test@1.0.0-rc.116':
     resolution: {integrity: sha512-JrVzY785bRaZhpdKAwKw7IUBvVIkUY3AEp733DlUO7AJ99a3nw8C0zO3Oh9itoKnC7+jIWvSzZdE8TX4nN0bAg==, tarball: https://registry.npmjs.org/@exodus/test/-/test-1.0.0-rc.116.tgz}
     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
@@ -648,12 +657,12 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@preventive/lockfile@1.0.0-alpha.1':
-    resolution: {integrity: sha512-enrcy7d1hUZXXYOM7LNdshTQeiHhJCBoLlEkmJRR9cLsL7bDt6b5wvNUweo3UFmvutgdxg/6oy5vz3ig6nLR8Q==, tarball: https://registry.npmjs.org/@preventive/lockfile/-/lockfile-1.0.0-alpha.1.tgz}
+  '@preventive/lockfile@1.0.0-alpha.2':
+    resolution: {integrity: sha512-TN211DUcMz3GseLUmvXLEtWU2DE07+4+oYZXgWrFXDCwar6a4r/NSfbMgo7gGWXyF/LwF0WMAL6jRop12oVKPA==, tarball: https://registry.npmjs.org/@preventive/lockfile/-/lockfile-1.0.0-alpha.2.tgz}
     engines: {node: '>=24.14.0'}
 
-  '@preventive/upstream@1.0.0-alpha.0':
-    resolution: {integrity: sha512-xqVwQ0QOzanNQy8LHOs7RxGMNggMhvUAAQIZ80FIiYZp7l4/9SqrdZnkO8JqZqDIRlqMOHxU5pyk3e/G1iv+dg==, tarball: https://registry.npmjs.org/@preventive/upstream/-/upstream-1.0.0-alpha.0.tgz}
+  '@preventive/upstream@1.0.0-alpha.2':
+    resolution: {integrity: sha512-IWob+bCWXUhV+y1l2uvSjCiZ8Aziwke28HVoRDJvs6/LVYxyb5Pw6kD5sPigeRqvbQCtTXqEWN58BGImPHHYbQ==, tarball: https://registry.npmjs.org/@preventive/upstream/-/upstream-1.0.0-alpha.2.tgz}
     engines: {node: '>=24.14.0'}
 
   '@rollup/rollup-android-arm-eabi@4.62.4':
@@ -2704,6 +2713,8 @@ snapshots:
 
   '@exodus/bytes@1.15.0': {}
 
+  '@exodus/bytes@1.16.0': {}
+
   '@exodus/test@1.0.0-rc.116(patch_hash=91700ea042ce1ab37dd135b5344f098bb4c862d12dd9cd2c053bc006aaa5be94)': {}
 
   '@jridgewell/gen-mapping@0.3.13':
@@ -2849,9 +2860,13 @@ snapshots:
   '@oxlint/binding-win32-x64-msvc@1.52.0':
     optional: true
 
-  '@preventive/lockfile@1.0.0-alpha.1': {}
+  '@preventive/lockfile@1.0.0-alpha.2':
+    dependencies:
+      '@exodus/bytes': 1.16.0
+    transitivePeerDependencies:
+      - '@noble/hashes'
 
-  '@preventive/upstream@1.0.0-alpha.0': {}
+  '@preventive/upstream@1.0.0-alpha.2': {}
 
   '@rollup/rollup-android-arm-eabi@4.62.4':
     optional: true
