@@ -1119,7 +1119,7 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
 // A JS bundle from the lockfile of the project held in `vfs` alone (@exodus/stasis/vfs-bundle),
 // `cwd` a path there: buildBundle's JS options, resolved through the node_modules `packageManager`
 // would install, with nothing read from disk but tarballs and no EXODUS_STASIS_* setting read.
-// `repo`, the informational `{ github, directory, commit }`, is the Bundle's, over what is detected
+// `repo`, the informational `{ github, directory | root, commit }`, is the Bundle's, over what is detected
 // in the Vfs as `stasis bundle` detects it on disk.
 // -> { bundle: Bundle, lockfile: Lockfile, stats }
 export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, repo, ...options } = {}) {
