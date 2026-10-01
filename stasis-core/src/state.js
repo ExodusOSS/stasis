@@ -132,9 +132,8 @@ export class State {
   #lastUnifiedBundle = null
   #lastCodeBundle = null
   #lastResourcesBundle = null
-  // detectRepo(this.root), memoized by #repo.
-  #repoDetected = false
-  #repoValue
+  // { value: detectRepo(this.root) }, filled lazily by #repo.
+  #repoCache
 
   // Options: `preload` (the unique preload State) and `parent` (run as a sidecar sharing the
   // parent's hashes/entries/modules, with its own sources/formats/imports/resources and bundle).
@@ -1451,15 +1450,10 @@ export class State {
     return out ?? this.formats
   }
 
-  // Informational `repo` block for written bundles (package.json `repository`, else git remote),
-  // detected once per State and lazily: only a bundle-producing path reads it. Not attested, never
-  // in the lockfile.
+  // Informational `repo` block for written bundles, detected once and lazily (only bundle-producing
+  // paths read it). Not attested, never in the lockfile.
   get #repo() {
-    if (!this.#repoDetected) {
-      this.#repoValue = detectRepo(this.root)
-      this.#repoDetected = true
-    }
-    return this.#repoValue
+    return (this.#repoCache ??= { value: detectRepo(this.root) }).value
   }
 
   get sourceBundle() {

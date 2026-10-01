@@ -1193,11 +1193,10 @@ export async function bundleCommand({ cwd = process.cwd(), env = process.env, en
     bundle = await buildBundle({ cwd, env, entries, mappingFile, manifests, scope, conditions, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures })
   }
 
-  // Informational origin (never in the lockfile). A State-built bundle already carries its own,
-  // detected at the State root its paths are relative to (which may sit above cwd); the others are
-  // rooted at cwd: merge into a repo-only bundle, which keeps a builder's own repo (`merge` prefers the
-  // incoming one). Stamped before an --add merge, which keeps the existing one when undetectable.
-  if (bundle.repo === undefined) bundle = new Bundle({ config: bundle.config, repo: detectRepo(resolve(cwd)) }).merge(bundle)
+  // Informational origin (never in the lockfile). State-built bundles already carry the repo of the
+  // State root their paths are relative to; other builders are rooted at cwd. detectRepo's result
+  // is pre-validated, so it is assigned directly.
+  bundle.repo ??= detectRepo(cwd)
 
   // --add: union the fresh build into the existing on-disk bundle; a conflicting file throws. Skipped when nothing is on disk.
   const outAbs = target === '-' ? undefined : resolve(cwd, target)

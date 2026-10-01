@@ -8,6 +8,7 @@ import { join, resolve, sep } from 'node:path'
 export const realReadFileSync = fs.readFileSync
 export const realReadFile = fs.promises.readFile
 export const realReaddirSync = fs.readdirSync
+export const realExistsSync = fs.existsSync
 const { realpathSync } = fs
 
 assert.equal(sep, '/', 'Not tested on Windows')
