@@ -72,6 +72,27 @@ const mergeReason = (a, b) => {
   return fromEntries([...merged.keys()].toSorted().map((c) => [c, fileSetToObject(merged.get(c))]))
 }
 
+// GitHub `owner/name`: owner 1-39 alphanumerics or single inner hyphens; name 1-100 of [\w.-], not '.'/'..'.
+const GITHUB_REPO = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\/(?!\.\.?$)[\w.-]{1,100}$/u
+// Full lowercase git object id: SHA-1 or SHA-256.
+const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
+const REPO_FIELDS = {
+  github: (v) => typeof v === 'string' && GITHUB_REPO.test(v),
+  directory: (v) => typeof v === 'string' && !posixPathEscapes(v),
+  commit: (v) => typeof v === 'string' && GIT_SHA.test(v),
+}
+
+// Validate the informational `repo` block; each field is optional. Returned in canonical key order.
+const normalizeRepo = (repo) => {
+  if (repo === undefined) return undefined
+  assert(isPlainObject(repo), 'bundle repo must be an object')
+  for (const [key, value] of Object.entries(repo)) {
+    assert(Object.hasOwn(REPO_FIELDS, key), `unknown bundle repo key '${key}'`)
+    assert(value === undefined || REPO_FIELDS[key](value), `invalid bundle repo.${key}: ${JSON.stringify(value)}`)
+  }
+  return fromEntries(Object.keys(REPO_FIELDS).filter((key) => repo[key] !== undefined).map((key) => [key, repo[key]]))
+}
+
 // JSON shape of stasis.code.br; callers own the brotli wrap. parse accepts legacy v0 and v1, serialize always writes v1.
 export class Bundle {
   static VERSION = VERSION
@@ -86,8 +107,10 @@ export class Bundle {
   executable
   // Informational only, NOT attested -- never consulted for verification.
   reason
+  // Informational only, NOT attested, never in a lockfile: `{ github?, directory?, commit? }`.
+  repo
 
-  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, version = VERSION } = {}) {
+  constructor({ config = { scope: 'full' }, entries, modules, formats, imports, executable, reason, repo, version = VERSION } = {}) {
     assert([LEGACY_VERSION, VERSION].includes(version))
     assert(['node_modules', 'full'].includes(config.scope))
     this.version = version
@@ -98,6 +121,7 @@ export class Bundle {
     this.imports = imports ?? new Map()
     this.executable = executable ?? new Set()
     this.reason = reason
+    this.repo = normalizeRepo(repo)
   }
 
   // Flat project-relative view of the raw stored file contents (resources stay base64).
@@ -246,6 +270,7 @@ export class Bundle {
         ? parseExecutable(json.executable, { what: 'bundle', files: flatKeys, formats, scope: json.config.scope })
         : new Set(),
       reason: isPlainObject(json.reason) ? json.reason : undefined,
+      repo: json.repo,
     })
   }
 
@@ -274,6 +299,7 @@ export class Bundle {
     const imports = fileMapToObject(this.imports)
     const full = this.config.scope === 'full'
     const data = { version: VERSION, config: this.config }
+    if (this.repo !== undefined) data.repo = this.repo
     if (full) data.entries = entries
     Object.assign(data, { formats, imports })
     const executable = serializeExecutable(this.executable, {
@@ -290,17 +316,9 @@ export class Bundle {
 
   // Stamp `consumer` onto every carried file in the informational `reason` map.
   withReason(consumer) {
-    const files = [...this.sources.keys()]
-    return new Bundle({
-      version: this.version,
-      config: this.config,
-      entries: this.entries,
-      modules: this.modules,
-      formats: this.formats,
-      imports: this.imports,
-      executable: this.executable,
-      reason: mergeReason(this.reason, { [consumer]: files }),
-    })
+    const { version, config, entries, modules, formats, imports, executable, repo } = this
+    const reason = mergeReason(this.reason, { [consumer]: [...this.sources.keys()] })
+    return new Bundle({ version, config, entries, modules, formats, imports, executable, reason, repo })
   }
 
   // Strict union of two Bundles (returns a NEW one): any genuine conflict throws -- a bundle is an attestation.
@@ -316,6 +334,7 @@ export class Bundle {
       // `other` (the incoming, newer build) wins for the files it carries -- see mergeExecutableSets.
       executable: mergeExecutableSets(this.executable, other.executable, other.modules, this.config.scope),
       reason: mergeReason(this.reason, other.reason),
+      repo: other.repo ?? this.repo,
     })
   }
 }
