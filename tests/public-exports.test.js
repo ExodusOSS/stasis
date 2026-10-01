@@ -4,7 +4,7 @@ import { Bundle } from '@exodus/stasis/bundle'
 import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
 import { buildCommand, bundleFromLockfile } from '@exodus/stasis/cmd/build'
 import { diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact } from '@exodus/stasis/diff'
-import { Vfs, buildVfsBundle, createVfsHost, loadNodeModules, setCacheDir } from '@exodus/stasis/vfs-bundle'
+import { Vfs, buildGitHubBundle, buildVfsBundle, createVfsHost, loadNodeModules, setCacheDir } from '@exodus/stasis/vfs-bundle'
 import { Lockfile } from '@exodus/stasis/lockfile'
 import { buildPurl, collectComponents, generateSbom, sbom, toCyclonedx, toSpdx } from '@exodus/stasis/sbom'
 import { StasisEsbuild } from '@exodus/stasis/esbuild'
@@ -52,7 +52,7 @@ test('@exodus/stasis/cmd/build exports the build command and the lockfile-to-bun
 })
 
 test('@exodus/stasis/vfs-bundle exports the in-memory lockfile API', (t) => {
-  for (const fn of [Vfs, buildVfsBundle, createVfsHost, loadNodeModules, setCacheDir]) {
+  for (const fn of [Vfs, buildGitHubBundle, buildVfsBundle, createVfsHost, loadNodeModules, setCacheDir]) {
     t.assert.equal(typeof fn, 'function')
   }
 })
