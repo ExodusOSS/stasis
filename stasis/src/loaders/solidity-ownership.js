@@ -122,10 +122,13 @@ export function readGitmodules(baseDir) {
 const SUBMODULE_KEYS = new Set(['path', 'url', 'branch'])
 const DROPPABLE = ['branch', 'url']
 
-// `.gitmodules` text the library refused as a whole, read a `[submodule "name"]` section at a time:
-// its first `path`, `url` and `branch` (the first, as git's submodule commands read it; the
-// sections of one name merged), each submodule then read by the library alone. One that still
-// doesn't read loses its branch, then its url, then is skipped. `notes` say what was dropped.
+// `.gitmodules` text the library refused as a whole, read a submodule section at a time (`[submodule
+// "name"]`, or `[submodule.name]` with the name lowercased, as git reads it): its first `path`,
+// `url` and `branch` (the first, as git's submodule commands read it; the sections of one name
+// merged), each submodule then read by the library alone. One that still doesn't read loses its
+// branch, then its url; one whose path doesn't read fails closed: its directory, when the path
+// names one inside the repository (`./lib/x`, `lib/x/`), is still a dependency, just unnamed, and
+// else the submodule is skipped. `notes` say what was dropped.
 function gitmodulesLeniently(text) {
   const sections = new Map() // the name, as written in the header -> Map<key, its lines>
   const notes = []
@@ -143,8 +146,11 @@ function gitmodulesLeniently(text) {
     const header = /^\s*\[\s*([\w.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]/u.exec(line)
     if (header) {
       const section = header[1].toLowerCase()
-      const name = section === 'submodule' ? header[2] : undefined
-      if (name === undefined && section.startsWith('submodule.')) notes.push(`[${header[1]}], a section git reads with its name lowercased; skipping it`)
+      let name = section === 'submodule' ? header[2] : undefined
+      if (name === undefined && section.startsWith('submodule.')) {
+        name = section.slice('submodule.'.length)
+        notes.push(`[${header[1]}], a section git reads as [submodule "${name}"]; reading it as that`)
+      }
       keys = name === undefined ? null : (sections.get(name) ?? sections.set(name, new Map()).get(name))
       line = line.slice(header[0].length) // a key may follow on the line
     }
@@ -165,16 +171,61 @@ function gitmodulesLeniently(text) {
         if (!(err instanceof LockfileError)) throw err
         first ??= err
         const next = DROPPABLE.find((key) => kept.has(key))
-        if (next === undefined) {
-          notes.push(`${first.message}; skipping the submodule`)
-          break
+        if (next !== undefined) {
+          kept.delete(next)
+          dropped.push(next)
+          continue
         }
-        kept.delete(next)
-        dropped.push(next)
+        const path = kept.has('path') ? normalSubmodulePath(kept.get('path')) : null
+        if (path === null) {
+          notes.push(`${first.message}; skipping the submodule`)
+        } else {
+          submodules.push({ path, url: undefined, branch: undefined })
+          notes.push(`${first.message}; still taking ${path} as a dependency, unnamed`)
+        }
+        break
       }
     }
   }
   return { submodules, notes }
+}
+
+// A `path = ...` key's lines -> the directory it names, normalized, when that lies inside the
+// repository (else null): `./lib/x` and `lib/x/` are lib/x.
+function normalSubmodulePath(lines) {
+  const raw = lines.map((l, i) => (i < lines.length - 1 ? l.slice(0, -1) : l)).join('') // a `\` runs on
+  const eq = raw.indexOf('=')
+  if (eq === -1) return null
+  const path = posix.normalize(gitConfigValue(raw.slice(eq + 1))).replace(/\/+$/u, '')
+  return path !== '' && path !== '.' && inRoot(path) ? path : null
+}
+
+const GIT_ESCAPES = { n: '\n', t: '\t', b: '\b' }
+
+// A git-config value as git reads it: `"` quotes (dropped), `\` escapes, a `#`/`;` comment outside
+// quotes, and whitespace trimmed at both ends outside quotes.
+function gitConfigValue(raw) {
+  let out = ''
+  let held = '' // unquoted whitespace, kept only if more value follows
+  let quoted = false
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (ch === '\\') {
+      const next = raw[++i] ?? ''
+      out += held + (GIT_ESCAPES[next] ?? next)
+      held = ''
+    } else if (ch === '"') {
+      quoted = !quoted
+    } else if (!quoted && (ch === '#' || ch === ';')) {
+      break
+    } else if (!quoted && (ch === ' ' || ch === '\t')) {
+      if (out !== '') held += ch
+    } else {
+      out += held + ch
+      held = ''
+    }
+  }
+  return out
 }
 
 // --- Ownership --------------------------------------------------------------------------------

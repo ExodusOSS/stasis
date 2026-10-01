@@ -785,14 +785,16 @@ test('readGitmodules reads what the library refuses submodule by submodule, warn
     [`[core]\n\tbare = false\n[include]\n\tpath = more\n${x}`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], [`a section of [core] where .gitmodules has [submodule "name"] alone, at line 1; ${lenient}`]],
     // What git reads two ways: the first, as git's submodule commands read it.
     [`${x}\turl = https://github.com/o/y\n[submodule "x"]\n\tbranch = main\n`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: 'main' }], [`x.url: twice, of which git's submodule commands read the first and git config the last, at line 4; ${lenient}`]],
-    // A branch or url that doesn't read is dropped; a path that doesn't, or a [submodule.x], the submodule.
+    // A branch or url that doesn't read is dropped. A path that doesn't fails closed: its directory,
+    // inside the repository, is still a dependency (unnamed); one outside it, the submodule is dropped.
     [`${x}\tbranch = "v1 x"\n`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], ['x.branch: "v1 x" is not a branch or tag name git takes; ignoring its branch']],
     ['[submodule "x"]\n\tpath = lib/x\n\turl = -oProxy=x\n', [{ path: 'lib/x', url: undefined, branch: undefined }], ['x.url: "-oProxy=x" starts with "-", which git ignores the url for; ignoring its url']],
-    [`[submodule "y"]\n\tpath = ./lib/y\n${x}`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], ['y.path: "./lib/y" is not a relative path in normal form; skipping the submodule']],
+    [`[submodule "y"]\n\tpath = "./lib/y/" # vendored\n${x}`, [{ path: 'lib/y', url: undefined, branch: undefined }, { path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], ['y.path: "./lib/y/" is not a relative path in normal form; still taking lib/y as a dependency, unnamed']],
     [`[submodule "y"]\n\tpath = ../y\n${x}`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], ['y.path: "../y" is outside the repository, where git writes no submodule; skipping the submodule']],
-    [`[submodule.y]\n\tpath = lib/y\n${x}`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], [
+    // A [submodule.Y] is read as git reads it: [submodule "y"].
+    [`[submodule.Y]\n\tpath = lib/y\n${x}`, [{ path: 'lib/y', url: undefined, branch: undefined }, { path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], [
       `a section of the form [submodule.name], whose name git lowercases, where .gitmodules has [submodule "name"] alone, at line 1; ${lenient}`,
-      '[submodule.y], a section git reads with its name lowercased; skipping it',
+      '[submodule.Y], a section git reads as [submodule "y"]; reading it as that',
     ]],
   ]) {
     t.assert.deepEqual(read(text), { submodules, warnings }, text)
