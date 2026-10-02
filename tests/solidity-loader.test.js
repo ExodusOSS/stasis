@@ -775,8 +775,20 @@ test('readGitmodules reads what the library refuses submodule by submodule, warn
     // What git reads but the library doesn't check: kept, bar the keys stasis doesn't use.
     [`${x}\tupdate = none\n\tactive = true\n`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], [`x: unsupported field "active"; ${lenient}`]],
     [`[core]\n\tbare = false\n[include]\n\tpath = more\n${x}`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], [`a section of [core] where .gitmodules has [submodule "name"] alone, at line 1; ${lenient}`]],
-    // What git reads two ways: the first, as git's submodule commands read it.
-    [`${x}\turl = https://github.com/o/y\n[submodule "x"]\n\tbranch = main\n`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: 'main' }], [`x.url: twice, of which git's submodule commands read the first and git config the last, at line 4; ${lenient}`]],
+    // What git reads two ways: the last, as git reads the checkout's .gitmodules, but for a url
+    // starting with "-", which it ignores. Every path given is a dependency: git reads the first of
+    // two from a commit.
+    [`${x}\turl = https://github.com/o/y\n[submodule "x"]\n\tbranch = main\n`, [{ path: 'lib/x', url: 'https://github.com/o/y', branch: 'main' }], [`x.url: twice, of which git's submodule commands read the first and git config the last, at line 4; ${lenient}`]],
+    [`${x}\turl = -oProxy=y\n`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], [`x.url: twice, of which git's submodule commands read the first and git config the last, at line 4; ${lenient}`]],
+    [`${x}\tpath = vendor/x\n`, [{ path: 'vendor/x', url: 'https://github.com/o/x', branch: undefined }, { path: 'lib/x', url: undefined, branch: undefined }], [
+      `x.path: twice, of which git's submodule commands read the first and git config the last, at line 4; ${lenient}`,
+      '[submodule "x"]: path lib/x too, which git reads where it reads .gitmodules from a commit; still taking it as a dependency, unnamed',
+    ]],
+    [`${x}[submodule "x"]\n\tpath = ./vendor/x/\n`, [{ path: 'vendor/x', url: undefined, branch: undefined }, { path: 'lib/x', url: undefined, branch: undefined }], [
+      `x: a second section, at line 4, where git writes one; ${lenient}`,
+      'x.path: "./vendor/x/" is not a relative path in normal form; still taking vendor/x as a dependency, unnamed',
+      '[submodule "x"]: path lib/x too, which git reads where it reads .gitmodules from a commit; still taking it as a dependency, unnamed',
+    ]],
     // A branch or url that doesn't read is dropped. A path that doesn't fails closed: its directory,
     // inside the repository, is still a dependency (unnamed); one outside it, the submodule is dropped.
     [`${x}\tbranch = "v1 x"\n`, [{ path: 'lib/x', url: 'https://github.com/o/x', branch: undefined }], ['x.branch: "v1 x" is not a branch or tag name git takes; ignoring its branch']],

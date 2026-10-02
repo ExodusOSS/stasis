@@ -424,15 +424,19 @@ written, the submodule then having no GitHub name to bucket it by. A file the
 reader refuses — something git reads two ways, or doesn't check, such as
 `update = none`, `active` or a `[core]` section — never fails the bundle: it's
 warned about and read a submodule at a time (`[submodule.x]` as git reads it,
-`[submodule "x"]`), each submodule's first `path`, `url` and `branch`, dropping
-with a warning a branch or url that doesn't read. One whose path doesn't fails
-closed: a path naming a directory inside the repository, such as `./lib/x` or
-`lib/x/`, still makes it a dependency, unnamed, and only one outside it is
-skipped. A `.gitmodules` git itself refuses — a "bad config line", such as a
-header `[submodule x]`, `[submodule.lib/x]` or `[submodule "x"` with no `]`, or
-a value with no closing quote — is an error, as it is to git: read past, a
-submodule's section would be lost, and its directory taken for the project's
-own) and every `node_modules` package; a file
+`[submodule "x"]`), each submodule's last `path`, `url` and `branch`, as git
+reads a checkout's `.gitmodules`, dropping with a warning a branch or url that
+doesn't read. One whose path doesn't fails closed: a path naming a directory
+inside the repository, such as `./lib/x` or `lib/x/`, still makes it a
+dependency, unnamed, and only one outside it is skipped. Every other path a
+submodule is given (a `path` twice, or a second section of its name) is a
+dependency too: git reads the first of two where it reads `.gitmodules` from a
+commit, so no directory a submodule names is taken for the project's own. A
+`.gitmodules` git itself refuses — a "bad config line", such as a header
+`[submodule x]`, `[submodule.lib/x]` or `[submodule "x"` with no `]`, or a value
+with no closing quote — is an error, as it is to git: read past, a submodule's
+section would be lost, and its directory taken for the project's own) and every
+`node_modules` package; a file
 is a dependency's when its real path lies in one, however the path got there
 (`src/vendor -> ../lib/dep/src` holds the dependency's code). An import from a
 dependency must land on a dependency's file too: it may import its own files and

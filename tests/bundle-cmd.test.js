@@ -1005,11 +1005,19 @@ test('buildSolidityBundle never fails on a .gitmodules the library refuses, and 
 
 test('buildSolidityBundle keeps a submodule whose .gitmodules path doesn\'t read a dependency, failing closed', withTmp(async (t, tmp) => {
   // deps/x is outside forge's libs: only .gitmodules makes it a dependency, and a planted link in
-  // it to the project's .env must stay refused however its path is spelled.
+  // it to the project's .env must stay refused however its path is spelled, and whichever of two
+  // paths given it git reads (the last in a checkout, the first from a commit).
   writeProject(tmp, { 'foundry.toml': '[profile.default]\nremappings = ["x/=deps/x/src/"]\n', '.env': 'PRIVATE_KEY=0xabc\n', 'src/A.sol': 'import "x/Evil.sol";\n' })
   mkdirSync(join(tmp, 'deps/x/src'), { recursive: true })
   symlinkSync('../../../.env', join(tmp, 'deps/x/src/Evil.sol'))
-  for (const section of ['[submodule "x"]\n\tpath = ./deps/x\n', '[submodule "x"]\n\tpath = deps/x/\n', '[submodule.x]\n\tpath = deps/x\n']) {
+  for (const section of [
+    '[submodule "x"]\n\tpath = ./deps/x\n',
+    '[submodule "x"]\n\tpath = deps/x/\n',
+    '[submodule.x]\n\tpath = deps/x\n',
+    '[submodule "x"]\n\tpath = lib/none\n\tpath = deps/x\n',
+    '[submodule "x"]\n\tpath = deps/x\n\tpath = lib/none\n',
+    '[submodule "x"]\n\tpath = lib/none\n[submodule "x"]\n\tpath = deps/x\n',
+  ]) {
     writeFileSync(join(tmp, '.gitmodules'), `${section}\turl = https://github.com/e/x\n`)
     // eslint-disable-next-line no-await-in-loop -- each run rewrites .gitmodules
     await captureStderr(() => t.assert.rejects(
