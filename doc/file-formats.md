@@ -322,7 +322,7 @@ const bundle = await readBundle('app.stasis.code.br')
 
 // Or take each file as it streams, and keep only the metadata (a contents-free Bundle).
 const meta = await readBundle('app.stasis.code.br', {
-  onFile: async (file, contents, { signal }) => { /* ... */ },
+  onFile: async (file, contents, { signal, format }) => { /* ... */ },
 })
 ```
 
@@ -335,11 +335,16 @@ const meta = await readBundle('app.stasis.code.br', {
 - Without `onFile`, it accepts exactly what `Bundle.parse` accepts and builds the
   same `Bundle`, running the same validation on an equivalent parse.
 - With `onFile`, each file's stored contents (a `resource:base64` file stays
-  base64) are passed to `await onFile(file, contents, { signal })`. Calls are
+  base64) are passed to `await onFile(file, contents, { signal, format })`. Calls are
   one at a time, in stream order, keyed like `bundle.sources`, and the contents
   are then dropped. It resolves to a contents-free `Bundle` (see above). Files
   stream wherever the bundle puts them: newer bundles write `sources` and
   `modules` after the metadata, older ones before it.
+- `format` is the file's entry in `formats` when the bundle's `formats` has
+  already streamed by, which is always the case in newer bundles. In older ones
+  it is `undefined`; read `bundle.formats` once the promise resolves. A bundle
+  whose final `formats` disagrees with a format already passed to `onFile` is
+  rejected.
 - `onFile` runs before the bundle as a whole is validated, so treat what it
   receives as provisional until the promise resolves, and discard it if the
   promise rejects. A non-canonical or escaping path is never passed to
