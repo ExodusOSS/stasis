@@ -617,7 +617,9 @@ or one the bundle root lacks. A child module the build rules out,
 or one under a custom cfg it presumably lacks, gives way to whatever else its
 module has of the name, as such a candidate does to any other: serde's
 docsrs-only `mod de` to the `pub use serde_core::de` of every other build, a
-`#[cfg(loom)] mod imp` to the `imp` a `use other::*` brings in. With `--cargo-target`, every file compiled
+`#[cfg(loom)] mod imp` to the `imp` a `use other::*` brings in -- but only when
+none of its files may be there: a `#[cfg_attr(loom, path = "loom.rs")] mod
+imp;` falls back to imp.rs in every other build, and shadows the glob. With `--cargo-target`, every file compiled
 for the target is under the target's cfgs too, so a `windows` candidate is
 out for every file and a `target_os = "linux"` file takes the `any(android,
 linux)` branch over the `any(aix, solaris)` one (mio's `sys::Waker` is the

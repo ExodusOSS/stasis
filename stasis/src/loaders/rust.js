@@ -2170,9 +2170,11 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
       // custom cfg, doubtful: serde's docsrs-only `mod de` beside the `pub use serde_core::de` of
       // every other build; a `#[cfg(loom)] mod imp` beside the `use other::*` that brings `imp`
       // in), as a doubtful candidate gives way to any other: where the module isn't there, a
-      // glob's name is the module's name.
-      const set = ctx.files.get(tree.get(child))?.leaves
-      p = set === undefined || !(deadFor(asker, set) || doubtful(asker, set)) ? null : lookup(at, name, want)
+      // glob's name is the module's name. Only a module none of whose files may be there: one
+      // with a variant the build compiles (`#[cfg_attr(loom, path = "loom.rs")] mod imp;` falls
+      // back to imp.rs) is there, and shadows the glob.
+      const sets = (ctx.moduleFiles?.get(root)?.get(child) ?? [tree.get(child)]).map((f) => ctx.files.get(f)?.leaves).filter((set) => set !== undefined)
+      p = sets.length > 0 && sets.every((set) => deadFor(asker, set) || doubtful(asker, set)) ? lookup(at, name, want) : null
       if (p === null || p === VALUE_ONLY) {
         cur.push(name)
         i++
@@ -2639,6 +2641,13 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
     }
     children.set(root, byParent)
   }
+  // Per crate root, each module's files: a `mod` with cfg variants has several, any of which a
+  // build may compile (walkPath asks whether one of them may be there at all).
+  const moduleFiles = new Map()
+  for (const [path, f] of files) {
+    const byModule = moduleFiles.get(f.root) ?? moduleFiles.set(f.root, new Map()).get(f.root)
+    ;(byModule.get(f.modulePath) ?? byModule.set(f.modulePath, []).get(f.modulePath)).push(path)
+  }
   // Per crate root, what a path may continue along where a segment names no module: the imports
   // of each module (by module path: `named` by the name each binds, and `globs`; each with the
   // `file` holding it, its `module`, how deep in the tree the module its visibility reaches sits,
@@ -2828,7 +2837,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [root, byModule] of imports) for (const [module, of] of byModule) for (const name of of.named.keys()) note(having, root, name, module)
   for (const [root, byName] of macros) for (const name of byName.keys()) note(having, root, name, 'crate')
   const declaresCrate = (name, from) => ctx?.declaresCrate?.(name, from) === true
-  const pathCtx = { trees, children, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, macros, fileMacros, externPrelude, leafSets, having, provided: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
+  const pathCtx = { trees, children, moduleFiles, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, macros, fileMacros, externPrelude, leafSets, having, provided: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
   // Every path of every file, on top of the `mod` / include edges (`resolutions`): once, and once
   // more when the first pass left glob closures short of an import cycle (stabilizeClosures).
   const resolveAll = () => {

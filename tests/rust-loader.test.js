@@ -2395,3 +2395,15 @@ test('buildRustTree keeps every candidate under an any(…) of more alternatives
   t.assert.deepEqual(files(buildRustTree(globbed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/common.rs', 'src/lin.rs'])
 })
 
+test('buildRustTree lets a local module give way to a glob of its name only when none of its files may be there', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'mod other;\nuse crate::other::*;\n#[cfg_attr(loom, path = "loom_imp.rs")]\nmod imp;\nfn f() { imp::X::real() }\n'],
+    ['src/other.rs', 'pub mod imp { pub struct X; }\n'],
+    ['src/imp.rs', 'pub struct X;\n'],
+    ['src/loom_imp.rs', 'pub struct X;\n'],
+  ])
+  const r = (s) => edges(buildRustTree(s, { roots: ['src/lib.rs'] }).resolutions.get('src/lib.rs'))['imp::X::real']
+  t.assert.equal(r(sources), 'src/imp.rs') // there in every build, loom.rs or imp.rs: it shadows the glob
+  t.assert.equal(r(new Map([...sources, ['src/lib.rs', 'mod other;\nuse crate::other::*;\n#[cfg(loom)]\nmod imp;\nfn f() { imp::X::real() }\n']])), 'src/other.rs')
+})
+

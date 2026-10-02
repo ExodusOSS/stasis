@@ -1998,3 +1998,18 @@ test('buildRustBundle does not presume off a cfg a build-dependency may print, o
   // a name the build script formats in part: `os_{}` may be `os_linux`, and so may `fast` be anything
   t.assert.deepEqual(await target({ 'build.rs': 'fn main() { let os = "linux"; println!("cargo::rustc-cfg=os_{}", os); }\n' }), either)
 })
+
+test('buildRustBundle keeps a module whose first variant the target rules out ahead of a glob of its name', async (t) => {
+  // tokio's `cfg_has_atomic_u64! { #[path = "…native.rs"] mod imp; }` and its `cfg_not_…!` twin, beside a glob bringing an `imp` in
+  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\n'
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': `${gates}mod other;\nuse crate::other::*;\ncfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\nfn f() { imp::X::real() }\n`,
+    'src/other.rs': 'pub mod imp { pub struct X; }\n',
+    'src/native.rs': 'pub struct X;\n',
+    'src/as_mutex.rs': 'pub struct X;\n',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargoTarget: LINUX }) // no 64-bit atomics in this cfg set
+    t.assert.equal(bundle.imports.get('rust').get('src/lib.rs').get('imp::X::real'), 'src/as_mutex.rs')
+  })
+})
