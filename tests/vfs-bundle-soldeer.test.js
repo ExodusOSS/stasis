@@ -8,7 +8,7 @@ import { dirname, join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { brotliDecompressSync } from 'node:zlib'
 
-import { Vfs, buildVfsBundle, setCacheDir } from '../stasis/src/vfs-bundle.js'
+import { Vfs, buildVfsBundle, setCacheDir, suggestedEntries } from '../stasis/src/vfs-bundle.js'
 import { loadTree, vfsHost } from '../stasis/src/vfs-bundle/tree.js'
 
 // @exodus/stasis/vfs-bundle with Soldeer. The fixture's project depends on stasis-sol-lib, a package
@@ -110,6 +110,27 @@ test('buildVfsBundle builds, from soldeer.lock alone, the byte-identical bundle 
   t.assert.equal(built.lockfile, undefined, 'a Solidity bundle has no lockfile')
   t.assert.deepEqual(built.stats, { dependencies: 1, files: 6, bytes: 637 })
   t.assert.equal((await build({ manifests: true })).bundle.serialize(), oracles.manifests, 'with the manifests too')
+})
+
+test('buildVfsBundle detects Soldeer from soldeer.lock, and refuses to choose beside another lockfile', async (t) => {
+  const built = await build({ packageManager: undefined })
+  t.assert.equal(built.packageManager, 'soldeer')
+  t.assert.equal(built.bundle.serialize(), oracles.plain)
+  await t.assert.rejects(build({ packageManager: undefined, vfs: projectVfs({ 'yarn.lock': '# yarn lockfile v1\n' }) }), /^Error: buildVfsBundle: no packageManager given, and more than one lockfile installs \/: \/yarn\.lock \(yarn1\), \/soldeer\.lock \(soldeer\)$/u)
+})
+
+test('buildVfsBundle builds with the default profile and no remappings from the environment, whatever env says', async (t) => {
+  const warn = t.mock.method(console, 'warn', () => {})
+  const toml = files['foundry.toml'].replace('[profile.default]', '[profile.ci]\nremappings = ["stasis-sol-lib/=src/"]\n\n[profile.default]')
+  const built = await build({ vfs: projectVfs({ 'foundry.toml': toml }), env: { FOUNDRY_PROFILE: 'ci', FOUNDRY_REMAPPINGS: 'stasis-sol-lib/=src/', DAPP_REMAPPINGS: 'stasis-sol-lib/=src/' } })
+  t.assert.equal(built.bundle.serialize(), (await build({ vfs: projectVfs({ 'foundry.toml': toml }) })).bundle.serialize())
+  t.assert.deepEqual(warn.mock.calls.map((call) => call.arguments[0]).filter((line) => /environment/u.test(line)), [])
+})
+
+test('suggestedEntries suggests the .sol entry points, not its tests or scripts, which build the bundle src/ does', async (t) => {
+  const entries = await suggestedEntries({ vfs: projectVfs() })
+  t.assert.deepEqual(entries, ['src/Counter.sol'])
+  t.assert.equal((await build({ entries })).bundle.serialize(), (await build({ entries: ['src'] })).bundle.serialize())
 })
 
 test('whatever the project holds as installed is ignored: a tampered dependencies folder does not reach the bundle', async (t) => {

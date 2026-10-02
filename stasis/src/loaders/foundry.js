@@ -871,6 +871,12 @@ export function foundryLibs(baseDir, { env = process.env, host = diskHost } = {}
   }
 }
 
+// The source directory of the Foundry project at `baseDir`: its default profile's `src`, else
+// forge's (`src` unless only `contracts` exists).
+export function foundrySourceDir(baseDir, { host = diskHost } = {}) {
+  return loadFoundryConfig(toPosix(resolve(baseDir)), 'default', { host }).src
+}
+
 // The Foundry project at `baseDir`: what `forge build` would use. `remappings` are
 // `{ context, prefix, target }` relative to the root, in forge's order; `libs` the lib dirs;
 // `files` the config files read (project-relative, `../` when outside the project); `envUsed` the

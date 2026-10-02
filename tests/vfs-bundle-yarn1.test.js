@@ -77,8 +77,8 @@ test('yarn1: refuses, naming the file, what it cannot reproduce', async (t) => {
 
 test('packageManager is one of those reproduced', async (t) => {
   const vfs = project({ 'package.json': { name: 'p', version: '1.0.0' }, 'yarn.lock': LOCKFILE })
-  await Promise.all([undefined, 'yarn', 'npm', 'soldeer'].map((packageManager) => t.assert.rejects(loadNodeModules({ vfs, packageManager }), /^TypeError: loadNodeModules: packageManager must be one of 'pnpm', 'yarn1'$/u)))
-  await t.assert.rejects(buildVfsBundle({ vfs, entries: ['a.js'] }), /^TypeError: buildVfsBundle: packageManager must be one of 'pnpm', 'yarn1', 'soldeer'$/u)
+  await Promise.all(['yarn', 'npm', 'soldeer'].map((packageManager) => t.assert.rejects(loadNodeModules({ vfs, packageManager }), /^TypeError: loadNodeModules: packageManager must be one of 'pnpm', 'yarn1'$/u)))
+  await t.assert.rejects(buildVfsBundle({ vfs, packageManager: 'npm', entries: ['a.js'] }), /^TypeError: buildVfsBundle: packageManager must be one of 'pnpm', 'yarn1', 'soldeer'$/u)
   await t.assert.rejects(buildVfsBundle({ vfs, packageManager: 'yarn1', entries: ['a.sol'] }), /^Error: buildVfsBundle: only JS bundles are built with yarn1$/u)
   await t.assert.rejects(buildVfsBundle({ vfs, packageManager: 'soldeer', entries: ['a.js'] }), /^Error: buildVfsBundle: only Solidity bundles are built with soldeer$/u)
 })

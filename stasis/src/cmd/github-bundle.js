@@ -9,10 +9,9 @@ import { buildGitHubBundle } from '../vfs-bundle/github.js'
 // Run `stasis github-bundle`: the bundle of a GitHub repo at a commit (the default branch's head
 // without one), as buildGitHubBundle builds it from `options`, written brotli-compressed to `output`
 // (stasis.code.br by default, `-` for stdout), and a JS bundle's lockfile to `lockfile` where given.
-// The tree is fetched with GITHUB_TOKEN from `env` where it is set.
+// The tree is fetched with GITHUB_TOKEN from `env` where it is set; nothing else of `env` is read.
 export async function githubBundleCommand({ cwd = process.cwd(), env = process.env, output = 'stasis.code.br', lockfile, brotliQuality, client, ...options } = {}) {
-  if (lockfile !== undefined && options.packageManager === 'soldeer') throw new Error('github-bundle: --lockfile is only valid for JS bundles')
-  const built = await buildGitHubBundle({ ...options, env, client: client ?? createClient({ token: env.GITHUB_TOKEN || null }) })
+  const built = await buildGitHubBundle({ ...options, lockfile, client: client ?? createClient({ token: env.GITHUB_TOKEN || null }) })
   const write = (path, data) => {
     const at = resolve(cwd, path)
     mkdirSync(dirname(at), { recursive: true })
