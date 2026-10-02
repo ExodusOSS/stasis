@@ -3,6 +3,7 @@ import { createRequire, isBuiltin } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { diskHost } from '@exodus/stasis-core/host'
 import { isTypeDeclaration } from '@exodus/stasis-core/util'
 
 // Adapter that drives the PROJECT's own `metro-resolver` from stasis's static scanner, so
@@ -87,7 +88,10 @@ export function createMetroResolver({
   conditionNames = ['react-native'],
   conditionsByPlatform = { web: ['browser'] },
   enablePackageExports = true,
+  host = diskHost,
 } = {}) {
+  // It loads the project's metro-resolver, which reads the disk: never off it.
+  if (host !== diskHost) throw new Error('createMetroResolver: metro-resolver reads the disk, so it is not supported off disk')
   const require = createRequire(join(projectDir, 'noop.js'))
   let resolve
   try {

@@ -71,27 +71,47 @@ function projectView(host, root) {
   }
 }
 
+// What pnpm matches packages' `libc` against (as deptree's host.libc takes it).
+const LIBCS = new Set(['glibc', 'musl', 'unknown'])
+
 // pnpm's libc, detect-libc's familySync, by its check of Node's report alone (it reads
 // /usr/bin/ldd first): unknown where that can't tell, which pnpm then installs everything for.
 // The report leaves out the network, whose reverse DNS can stall.
-let libc
+let machineLibc
 function currentLibc() {
-  if (libc !== undefined) return libc
-  libc = 'unknown'
-  if (process.platform !== 'linux' || !process.report) return libc
+  if (machineLibc !== undefined) return machineLibc
+  machineLibc = 'unknown'
+  if (process.platform !== 'linux' || !process.report) return machineLibc
   const { excludeNetwork } = process.report
   try {
     process.report.excludeNetwork = true
     const report = process.report.getReport()
-    if (report.header?.glibcVersionRuntime) libc = 'glibc'
-    else if (report.sharedObjects?.some((file) => file.includes('libc.musl-') || file.includes('ld-musl-'))) libc = 'musl'
+    if (report.header?.glibcVersionRuntime) machineLibc = 'glibc'
+    else if (report.sharedObjects?.some((file) => file.includes('libc.musl-') || file.includes('ld-musl-'))) machineLibc = 'musl'
   } catch { /* unknown */ } finally {
     process.report.excludeNetwork = excludeNetwork
   }
-  return libc
+  return machineLibc
 }
 
 const machine = () => ({ node: process.versions.node, os: process.platform, cpu: process.arch })
+
+// The machine a tree is laid out for: this one, but for the `os`, `cpu` and `libc` given. A libc is
+// detected only for this machine's os; for another, unless given, pnpm matches none ('unknown').
+const target = ({ os, cpu, libc } = {}) => {
+  const here = machine()
+  const forOs = os ?? here.os
+  return { node: here.node, os: forOs, cpu: cpu ?? here.cpu, libc: libc ?? (forOs === here.os ? currentLibc() : 'unknown') }
+}
+
+// `os` and `cpu` as Node names them (process.platform, process.arch); `libc` is pnpm's alone, and
+// Soldeer takes `os` alone: what a package manager matches nothing against changes nothing.
+export function checkTarget(name, { os, cpu, libc }) {
+  for (const [key, value] of Object.entries({ os, cpu })) {
+    if (value !== undefined && (typeof value !== 'string' || value === '')) throw new TypeError(`${name}: ${key} must be a non-empty string`)
+  }
+  if (libc !== undefined && !LIBCS.has(libc)) throw new TypeError(`${name}: libc must be one of 'glibc', 'musl', 'unknown'`)
+}
 
 // yarn installs a workspace from the root that declares it, whatever yarn.lock is nearer, and any
 // other package from the nearest yarn.lock.
@@ -123,7 +143,7 @@ const PACKAGE_MANAGERS = {
     alone: async (names, above) => !(await above()).some((dir) => dir.includes('pnpm-workspace.yaml')),
     projects: (view, pnpm) => findPnpmProjects({ project: view, host: { pnpm } }),
     installs: 'node_modules',
-    build: (view, pnpm) => buildPnpmTree({ project: view, host: { pnpm, ...machine(), libc: currentLibc() } }),
+    build: (view, pnpm, _file, given) => buildPnpmTree({ project: view, host: { pnpm, ...target(given) } }),
   },
   yarn1: {
     kind: 'js',
@@ -135,7 +155,10 @@ const PACKAGE_MANAGERS = {
     alone: async (names, above) => !(await above()).some((dir) => dir.includes('package.json')),
     projects: (view) => findYarn1Workspaces({ project: view }),
     installs: 'node_modules',
-    build: (view, yarn, file) => naming(file, buildYarn1Tree({ project: view, host: { yarn, ...machine() } })),
+    build: (view, yarn, file, given) => {
+      const { libc: _, ...host } = target({ ...given, libc: 'unknown' }) // yarn 1 matches no libc
+      return naming(file, buildYarn1Tree({ project: view, host: { yarn, ...host } }))
+    },
   },
   soldeer: {
     kind: 'sol',
@@ -148,8 +171,8 @@ const PACKAGE_MANAGERS = {
     projects: () => ['.'],
     installs: 'dependencies',
     hides: 'node_modules',
-    async build(view, soldeer, file) {
-      const tree = await naming(file, buildSoldeerTree({ project: view, host: { soldeer, os: process.platform } }))
+    async build(view, soldeer, file, given) {
+      const tree = await naming(file, buildSoldeerTree({ project: view, host: { soldeer, os: given?.os ?? process.platform } }))
       settleSoldeer(view, tree.vfs, dirname(file))
       return tree
     },
@@ -201,7 +224,7 @@ export function checkVfs(name, vfs) {
 // there; deptree's counts; and the version reproduced, `packageManagerVersion` if given, else the one
 // the root package.json's packageManager pins, else the default. deptree reads the project through a
 // view of `project`, which nothing is written through.
-async function layOutTree({ project, packageManager, cwd, packageManagerVersion }) {
+async function layOutTree({ project, packageManager, cwd, packageManagerVersion, os, cpu, libc }) {
   const pm = PACKAGE_MANAGERS[packageManager]
   const found = pm.root(project, cwd)
   if (found === null) throw new Error(`no ${pm.lockfile} found in ${cwd} or any parent directory`)
@@ -214,7 +237,7 @@ async function layOutTree({ project, packageManager, cwd, packageManagerVersion 
   const projects = new Set(pm.projects(view, version))
   const other = pm.kind === 'js' ? outsider(project, found, cwd, projects) : null
   if (other !== null) throw new Error(`${file} does not install ${other}: it is none of the lockfile's projects`)
-  const { vfs, stats } = await pm.build(view, version, file)
+  const { vfs, stats } = await pm.build(view, version, file, { os, cpu, libc })
   return {
     root: project.realpath(found),
     vfs,

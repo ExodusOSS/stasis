@@ -783,7 +783,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     // metro-resolver derives default/require|import/platform conditions itself, so it takes only the
     // extra `react-native` condition (browser comes from its per-platform map, keyed on `web`).
     const resolver = metroResolver
-      ? createMetroResolver({ projectDir: baseDir, platform, sourceExts, mainFields, conditionNames: ['react-native'] })
+      ? createMetroResolver({ projectDir: baseDir, platform, sourceExts, mainFields, conditionNames: ['react-native'], host })
       : createFieldResolver({
           mainFields,
           platform,
@@ -1123,26 +1123,32 @@ async function buildJs({ mainFields, platforms, metro, metroResolver, ...options
   return { bundle: state.sourceBundle.withReason('bundle'), lockfile: () => state.lockfile, stateBuilt: true }
 }
 
+// buildVfsBundle's options for the package manager `pm`, checked before anything is fetched (`host`
+// the project's): its kind alone, and no metro-resolver, which reads the disk.
+export function checkVfsOptions(name, pm, packageManager, options) {
+  if (classifyEntries(name, options) !== pm.kind) throw new Error(`${name}: only ${pm.kind === 'sol' ? 'Solidity' : 'JS'} bundles are built with ${packageManager}`)
+  if (options.metroResolver) throw new Error(`${name}: metroResolver is not supported`)
+}
+
 // A bundle from the lockfile of the project held in `vfs` alone (@exodus/stasis/vfs-bundle), `cwd` a
 // path there: buildBundle's JS options, resolved through the node_modules 'pnpm' or 'yarn1' would
 // install, or its Solidity options, through the dependencies folder 'soldeer' would install; with
 // nothing read from disk but tarballs and zips. No EXODUS_STASIS_* setting is read; `env` supplies
 // a Solidity bundle's FOUNDRY_PROFILE and FOUNDRY_REMAPPINGS alone. `repo`, the informational
 // `{ github, directory | root, commit }`, is the Bundle's, over what is detected in the Vfs as
-// `stasis bundle` detects it on disk.
+// `stasis bundle` detects it on disk. `os`, `cpu` and `libc` are loadNodeModules'.
 // -> { bundle: Bundle, lockfile: Lockfile (of a JS bundle), stats }
-export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, repo, env = {}, ...options } = {}) {
-  const { checkVfs, loadTree, packageManagerOf, vfsHost } = await import('../vfs-bundle/tree.js')
+export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, os, cpu, libc, repo, env = {}, ...options } = {}) {
+  const { checkTarget, checkVfs, loadTree, packageManagerOf, vfsHost } = await import('../vfs-bundle/tree.js')
   const pm = packageManagerOf('buildVfsBundle', packageManager)
   checkVfs('buildVfsBundle', vfs)
+  checkTarget('buildVfsBundle', { os, cpu, libc })
   // Checked as the Bundle checks it, before anything is fetched.
   if (repo !== undefined) repo = new Bundle({ repo }).repo
   const project = vfsHost(vfs)
   // A real path, as every file the scan reaches is.
   cwd = project.realpath(posix.resolve('/', cwd))
-  if (classifyEntries('buildVfsBundle', { cwd, ...options, host: project }) !== pm.kind) throw new Error(`buildVfsBundle: only ${pm.kind === 'sol' ? 'Solidity' : 'JS'} bundles are built with ${packageManager}`)
-  // The project's metro-resolver resolves against the node_modules on disk.
-  if (options.metroResolver) throw new Error('buildVfsBundle: metroResolver is not supported')
+  checkVfsOptions('buildVfsBundle', pm, packageManager, { ...options, cwd, host: project })
   // Checked before anything is fetched: an entry out of what the tree installs is in the project
   // already. (A Solidity entry that is no .sol file is a directory, skipped where it is missing.)
   for (const entry of options.entries) {
@@ -1150,7 +1156,7 @@ export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageMa
     if (pm.kind === 'sol' && !abs.endsWith('.sol')) continue
     if (!posix.relative(cwd, abs).split('/').includes(pm.installs) && project.stat(abs) === null) throw new Error(`entry not found: ${abs}`)
   }
-  const { host, stats } = await loadTree({ project, packageManager, cwd, packageManagerVersion })
+  const { host, stats } = await loadTree({ project, packageManager, cwd, packageManagerVersion, os, cpu, libc })
   const { bundle, lockfile, stateBuilt } = pm.kind === 'sol'
     ? { bundle: await buildSolidityBundle({ ...options, cwd, env, host }) }
     : await buildJs({ ...options, cwd, host, env: {} })

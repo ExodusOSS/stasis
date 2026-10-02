@@ -1,7 +1,7 @@
 import { posix } from 'node:path'
 
 import { Vfs } from '@preventive/vfs'
-import { checkVfs, loadTree, packageManagerOf, vfsHost } from './vfs-bundle/tree.js'
+import { checkTarget, checkVfs, loadTree, packageManagerOf, vfsHost } from './vfs-bundle/tree.js'
 
 // @exodus/stasis/vfs-bundle: static bundles from a project's lockfile alone, through the
 // dependencies its package manager would install (`packageManager`: 'pnpm', pnpm 10, 11 or 12;
@@ -32,8 +32,11 @@ export function createVfsHost(vfs) {
 // reproduced, at `packageManagerVersion` if given, else the one the root package.json's
 // packageManager pins, else pnpm 10.33.4 or yarn 1.22.22. The host caches what it reads, of the
 // project's Vfs too, so neither is to change while it is used.
-export async function loadNodeModules({ vfs, packageManager, cwd = '/', packageManagerVersion } = {}) {
+// `os`, `cpu` and `libc` ('glibc', 'musl' or 'unknown', pnpm's alone) are the machine packages are
+// matched against: this one's but for what is given (for another os, libc defaults to 'unknown').
+export async function loadNodeModules({ vfs, packageManager, cwd = '/', packageManagerVersion, os, cpu, libc } = {}) {
   packageManagerOf('loadNodeModules', packageManager, ['pnpm', 'yarn1'])
   checkVfs('loadNodeModules', vfs)
-  return loadTree({ project: vfsHost(vfs), packageManager, cwd: posix.resolve('/', cwd), packageManagerVersion })
+  checkTarget('loadNodeModules', { os, cpu, libc })
+  return loadTree({ project: vfsHost(vfs), packageManager, cwd: posix.resolve('/', cwd), packageManagerVersion, os, cpu, libc })
 }
