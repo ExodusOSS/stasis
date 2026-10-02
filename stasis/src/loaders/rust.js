@@ -401,8 +401,10 @@ export function parseUseTree(body) {
 //   invocations:  the names of the macros invoked by bare name (`ready!(…)`) outside `macro_rules!`
 //                 templates -- for an edge to the file of a `macro_rules!` defined elsewhere in
 //                 the crate; `calls` has each name's invocation offsets, in order (textual scope
-//                 is decided at the call); a template's own bare calls are its definition's
-//                 `calls`, made wherever it is invoked;
+//                 is decided at the call), and `callSites` each name's invocations by bare name
+//                 or by path (`crate::m!()`, by its last segment), `{ offset, inlinePath,
+//                 inlineDirs }`, for where what its template declares is made; a template's own
+//                 calls are its definition's `calls` and `pathCalls`, made wherever it is invoked;
 //   includes:     `include!` / `include_str!` / `include_bytes!` invocations outside macro
 //                 definitions, `{ kind, path, base, conditional }` -- a file to carry, named
 //                 relative to this one (`base` `file`) or to the package root (`manifest`, for
@@ -426,8 +428,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   const macros = []
   const invocations = new Set()
   const calls = new Map() // macro name → the offsets of its bare invocations, in order
-  const pathInvocations = new Set() // the macros invoked by path (`crate::m!()`), by their last segment
-  const callSites = new Map() // macro name → each invocation, bare or by path: `{ offset, inlinePath, inlineDirs }`
+  const callSites = new Map() // macro name → each invocation, bare or by path (`crate::m!()`, by its last segment): `{ offset, inlinePath, inlineDirs }`
   const includes = []
   const defined = []
   const skipped = new Set() // the template macros whose bodies were skipped
@@ -654,7 +655,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         const attr = parseAttr(code.slice(open + 1, close), masked.slice(open + 1, close))
         // (An inner attribute inside a macro invocation's body is the macro's business.)
         if (attr.cfg !== null && verdict(attr.cfg) === false && i >= macroUntil) {
-          if (depth === 0) return { mods: [], refs: [], externCrates: [], bindings: new Set(), imports: [], macros: [], invocations: new Set(), calls: new Map(), pathInvocations: new Set(), callSites: new Map(), includes: [], unfollowed: 0, defined: [], inlineModules: [], inlineModuleVis: new Map(), skipped }
+          if (depth === 0) return { mods: [], refs: [], externCrates: [], bindings: new Set(), imports: [], macros: [], invocations: new Set(), calls: new Map(), callSites: new Map(), includes: [], unfollowed: 0, defined: [], inlineModules: [], inlineModuleVis: new Map(), skipped }
           const top = stack.at(-1)
           if (top !== undefined && top.depth === depth) {
             const end = matchClose(masked, top.start - 1)
@@ -773,12 +774,11 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
           // `m!(…)` is no invocation of this file's.
           // A call by path (`crate::m!()`, `$crate::m!()`, `dep::m!()`) is no name to resolve in
           // scope, but an invocation of a macro of that name all the same, for where what its
-          // template declares and includes is made (`pathInvocations`, `pathCalls`); each call
-          // outside templates is also kept with the inline modules around it (`callSites`).
+          // template declares and includes is made (`callSites`, with the inline modules around
+          // each call outside templates; `pathCalls`).
           if (inTemplate(i) && templateMacro !== null) (pathQualified ? innermostDef(i).pathCalls : innermostDef(i).calls).add(word)
           else {
-            if (pathQualified) pathInvocations.add(word)
-            else {
+            if (!pathQualified) {
               invocations.add(word)
               ;(calls.get(word) ?? calls.set(word, []).get(word)).push(i)
             }
@@ -984,7 +984,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   const inlineModuleVis = new Map()
   for (const s of spans) if (!inlineModuleVis.has(s.path.join('::'))) inlineModuleVis.set(s.path.join('::'), s.vis)
   const inlineModules = [...inlineModuleVis.keys()].map((p) => p.split('::'))
-  return { mods, refs: [...refs.values()], externCrates, bindings, imports, macros, invocations, calls, pathInvocations, callSites, includes, unfollowed, defined, inlineModules, inlineModuleVis, skipped }
+  return { mods, refs: [...refs.values()], externCrates, bindings, imports, macros, invocations, calls, callSites, includes, unfollowed, defined, inlineModules, inlineModuleVis, skipped }
 }
 
 // Whether a `use` import binds a name that is not the crate of that name: `use std::io;` binds
@@ -1759,22 +1759,18 @@ function pick(candidates, root, ctx, asker, ns = null) {
 // macro by name (`cfg_x!`); a `mod` variant's leaf by the key of the variant (its cfg, or its
 // macro), and only when nothing else tells the candidates apart. Null for no leaves.
 const leafText = (l) => {
-  if (l.alts !== undefined) return `any(${l.alts.map((alt) => cfgTextOf(alt) ?? '*').join(', ')})`
+  if (l.alts !== undefined) return anyText(l.alts)
   const plain = l.many !== undefined ? manyText(l) : (l.value === null ? l.key : `${l.key} = "${l.value}"`)
   return l.neg ? `not(${plain})` : plain
 }
+const anyText = (alts) => `any(${alts.map((alt) => cfgTextOf(alt) ?? '*').join(', ')})`
 // An undecided leaf's text (see UNDECIDED_KEY): the `any(…)` of its alternatives, kept per leaf, or
 // its count when that runs long (undecided leaves within undecided leaves).
 const manyTexts = new WeakMap()
-const manyText = (l) => {
-  let text = manyTexts.get(l)
-  if (text === undefined) {
-    text = `any(${l.many.map((alt) => cfgTextOf(alt) ?? '*').join(', ')})`
-    if (text.length > 4096) text = `any(${l.many.length} alternatives)`
-    manyTexts.set(l, text)
-  }
-  return text
-}
+const manyText = (l) => cached(manyTexts, l, () => {
+  const text = anyText(l.many)
+  return text.length > 4096 ? `any(${l.many.length} alternatives)` : text
+})
 function cfgTextOf(leaves) {
   const own = leaves.filter((l) => l.key !== 'variant')
   // What a variant is, rather than all it isn't: its positive leaves (a `cfg_if!` branch's own
@@ -1806,9 +1802,7 @@ function withAlternatives(found, asker) {
     // Kept per asker set (the text leaves out what the asker holds itself).
     const textOf = () => cfgTextOf(leaves.leaves.filter((l) => asker === undefined || !asker.keys.has(leafKey(l))))
     const base = cfgKey(asker === undefined ? textOf() : cached(asker.texts, leaves.key, textOf))
-    let key = base
-    for (let k = 2; keyed.has(key); k++) key = `${base}#${k}`
-    keyed.set(key, answer)
+    keyed.set(uniqueKey(keyed, base), answer)
   }
   if (first.answer.kind === 'module') return { ...first.answer, branches: keyed }
   return { ...first.answer, alternatives: new Map([...keyed].filter(([, answer]) => answer.file !== undefined).map(([key, answer]) => [key, answer.file])) }
@@ -2200,10 +2194,7 @@ function throughBranches(r, branches, root, from, ctx, options) {
   const note = (key, answer) => {
     for (const [k, f] of answer.alternatives ?? [[null, answer.file]]) {
       if (f === undefined || [...alternatives.values()].includes(f)) continue
-      const base = k === null ? key : `${key}, ${k}`
-      let unique = base
-      for (let n = 2; alternatives.has(unique); n++) unique = `${base}#${n}`
-      alternatives.set(unique, f)
+      alternatives.set(uniqueKey(alternatives, k === null ? key : `${key}, ${k}`), f)
     }
   }
   const [{ keyed: firstKeyed }] = branches
@@ -2219,7 +2210,7 @@ function throughBranches(r, branches, root, from, ctx, options) {
   }
   return alternatives.size > 1 ? { ...r, alternatives } : r
 }
-function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, branches = []) {
+function walkOnce(segments, root, from, ctx, { ns = null, file, asker }, branches) {
   const tree = ctx.trees.get(root)
   const head = segments[0]
   // A segment with more after it names a module or type-namespace item: a `fn log` doesn't lead
@@ -2231,6 +2222,17 @@ function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, br
   let cur = from.split('::')
   let i = 0
   let via
+  // Where a segment's answer `p` leaves the path: at its end -- an item, or a crate the rest of
+  // the path names something in (`rest`, see followImport) -- or, for null, at a module to go on
+  // through from segment `next`, the other modules it may be noted as branches (throughBranches).
+  const stepInto = (p, next) => {
+    if (p.kind === 'crate') return { ...p, via, rest: segments.slice(next) }
+    if (p.kind !== 'module') return { ...p, via }
+    if (p.branches !== undefined) branches.push({ keyed: p.branches, rest: segments.slice(next) })
+    cur = p.modulePath.split('::')
+    i = next
+    return null
+  }
   if (head === 'crate') {
     cur = ['crate']
     i = 1
@@ -2247,11 +2249,8 @@ function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, br
       return segments.length === 1 && file !== undefined && ctx.fileMacros.get(file)?.has(head) === true ? { kind: 'item', file } : null
     }
     via = { modulePath: from, consumed: 0, through: p.through }
-    if (p.kind === 'crate') return { ...p, via, rest: segments.slice(1) } // what the path names in that crate (followImport)
-    if (p.kind !== 'module') return { ...p, via }
-    if (p.branches !== undefined) branches.push({ keyed: p.branches, rest: segments.slice(1) })
-    cur = p.modulePath.split('::')
-    i = 1
+    const end = stepInto(p, 1)
+    if (end !== null) return end
   }
   while (segments[i] === 'super') {
     cur.pop()
@@ -2278,7 +2277,7 @@ function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, br
       // with a variant the build compiles (`#[cfg_attr(loom, path = "loom.rs")] mod imp;` falls
       // back to imp.rs) is there, and shadows the glob.
       const sets = ctx.moduleSets.get(root).get(child)
-      const away = sets.length > 0 && sets.every((set) => deadFor(asker, set) || doubtful(asker, set))
+      const away = sets.every((set) => deadFor(asker, set) || doubtful(asker, set))
       p = away ? lookup(at, name, want) : null
       if (p === null || p === VALUE_ONLY) {
         // One file there only under cfgs the asker doesn't hold (`#[cfg(not(unix))] mod sys;`
@@ -2312,11 +2311,8 @@ function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, br
       return { kind: 'item', file: tree.get(at), via }
     }
     via ??= { modulePath: at, consumed: i, through: p.through }
-    if (p.kind === 'crate') return { ...p, via, rest: segments.slice(i + 1) }
-    if (p.kind !== 'module') return { ...p, via }
-    if (p.branches !== undefined) branches.push({ keyed: p.branches, rest: segments.slice(i + 1) })
-    cur = p.modulePath.split('::')
-    i++
+    const end = stepInto(p, i + 1)
+    if (end !== null) return end
   }
   const modulePath = cur.join('::')
   return { kind: 'module', modulePath, file: tree.get(modulePath), via }
@@ -2447,6 +2443,14 @@ const note = (map, root, name, module) => {
 
 // Bundle import keys can't contain '/'; a cfg predicate practically never does, but fail safe.
 const cfgKey = (cfg) => (cfg ?? '*').replaceAll('/', '|')
+// The first of `base`, `base#2`, `base#3`, … that `map` holds nothing under -- or holds `value`
+// under, when one is given: two candidates under one cfg text each keep a key.
+function uniqueKey(map, base, value) {
+  const taken = (key) => map.has(key) && map.get(key) !== value // (no entry holds undefined)
+  let key = base
+  for (let k = 2; taken(key); k++) key = `${base}#${k}`
+  return key
+}
 
 // Whether `rel` is compiled with `cfg(test)`: a file of a test/bench target (`tests/*.rs`,
 // `benches/*.rs` and their modules), judged against its package dir when a Cargo context knows it.
@@ -2482,8 +2486,8 @@ function effectiveInvokers(name, invokers, templateCalls, memo) {
 // name: a `$crate::m!` resolves where the macro is invoked as surely as `m!`), and what its
 // `macro_rules!` templates call, for effectiveInvokers.
 function noteMacroCalls(invokers, templateCalls, path, items) {
-  for (const name of [...items.invocations, ...items.pathInvocations ?? []]) (invokers.get(name) ?? invokers.set(name, new Set()).get(name)).add(path)
-  for (const m of items.macros) for (const name of [...m.calls, ...m.pathCalls ?? []]) (templateCalls.get(m.name) ?? templateCalls.set(m.name, new Set()).get(m.name)).add(name)
+  for (const name of items.callSites.keys()) (invokers.get(name) ?? invokers.set(name, new Set()).get(name)).add(path)
+  for (const m of items.macros) for (const name of [...m.calls, ...m.pathCalls]) (templateCalls.get(m.name) ?? templateCalls.set(m.name, new Set()).get(m.name)).add(name)
 }
 // The files in effect invoking its macro where template `mod` `decl` (written in `from`) is
 // declared: those of `from`'s package (`packageOf`: file → package) -- a macro of the same name
@@ -2494,11 +2498,11 @@ const hostsOf = (decl, from, invokers, templateCalls, packageOf, memo) => [...ef
 // macro whose template calls it (callersOf), from -- the `mod` in that module, inside the inline
 // modules the body itself opens -- at that invocation (`offset`, for textual macro scope).
 function hostedCopies(decl, items, templateCalls, memo) {
-  const sites = [...callersOf(decl.template, templateCalls, memo)].flatMap((n) => items.callSites?.get(n) ?? []).toSorted((a, b) => a.offset - b.offset)
+  const sites = [...callersOf(decl.template, templateCalls, memo)].flatMap((n) => items.callSites.get(n) ?? []).toSorted((a, b) => a.offset - b.offset)
   const byModule = new Map()
   for (const site of sites) if (!byModule.has(site.inlinePath.join('::'))) byModule.set(site.inlinePath.join('::'), site)
   if (byModule.size === 0) byModule.set('', { offset: Infinity, inlinePath: [], inlineDirs: [] })
-  const own = (list) => list.slice(decl.templateDepth ?? 0)
+  const own = (list) => list.slice(decl.templateDepth)
   return [...byModule.values()].map((site) => ({ ...decl, inlinePath: [...site.inlinePath, ...own(decl.inlinePath)], inlineDirs: [...site.inlineDirs, ...own(decl.inlineDirs)], offset: site.offset }))
 }
 // TEMPLATE_MACROS less the ones a package defines itself (`own`), one object per set of them.
@@ -2717,9 +2721,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
       const byFile = cfgsHere.get(spec) ?? cfgsHere.set(spec, new Map()).get(spec)
       for (const t of targets) {
         const cfg = t.cfg ?? decl.cfg ?? null
-        const base = cfgKey(cfg ?? (decl.macro === null ? null : `${decl.macro}!`))
-        let key = base
-        for (let k = 2; keyed.has(key) && keyed.get(key) !== t.file; k++) key = `${base}#${k}`
+        const key = uniqueKey(keyed, cfgKey(cfg ?? (decl.macro === null ? null : `${decl.macro}!`)), t.file)
         if (!keyed.has(key)) keyed.set(key, t.file)
         const via = decl.definedIn === undefined ? undefined : [...cfgsHere.values()].flatMap((m) => m.get(decl.definedIn) ?? [])
         ;(byFile.get(t.file) ?? byFile.set(t.file, []).get(t.file)).push({ cfg, macro: decl.macro, via })
