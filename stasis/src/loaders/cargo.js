@@ -477,20 +477,23 @@ function rustflagsCfgsOf(configs, env = process.env) {
 }
 // What a build script prints as `cargo:rustc-cfg=<name>` (or `cargo::`), among the texts of its
 // files: the names it may set, and whether it may set one the loader can't read (a name it
-// formats, `autocfg`'s probes).
-const RUSTC_CFG_RE = /cargo::?rustc-cfg=((?:r#)?[A-Za-z_]\w*)?/gu
+// formats, whole -- `rustc-cfg={}` -- or in part -- `rustc-cfg=os_{}` -- and `autocfg`'s probes).
+const RUSTC_CFG_RE = /cargo::?rustc-cfg=((?:r#)?[A-Za-z_]\w*)?(\{)?/gu
 function cfgsPrinted(texts) {
   const names = new Set()
   let any = false
   for (const text of texts) {
     for (const m of text.matchAll(RUSTC_CFG_RE)) {
-      if (m[1] === undefined) any = true
+      if (m[1] === undefined || m[2] !== undefined) any = true
       else names.add(cfgName(m[1]))
     }
     if (/\bautocfg\b/u.test(text)) any = true
   }
   return { names, any }
 }
+// Whether a crate's code (`texts`) may print a cfg for a build script calling it -- cfg_aliases'
+// `cfg_aliases!`, build-rs's `rustc_cfg` -- by what it writes outside full-line comments.
+const mayPrintCfgs = (texts) => texts.some((text) => /rustc[-_]cfg|\bautocfg\b/u.test(text.replaceAll(/^[ \t]*\/\/.*$/gmu, '')))
 
 // Whether a JSON value is a plain object (not an array, not null).
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -1358,16 +1361,18 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
 
   // Both resolutions, per (context, package dir): `sure` without the undecided tables, `all` with
   // them -- the exact resolution's where there is one, the replay's otherwise. `--cargo`: cargo
-  // metadata's features, the same in either context. `lacking` (the replay's): the active
-  // dependency tables no package in-tree answers, `dir key kind` → `{ m, d, r }` (see
-  // lackingDependencies).
+  // metadata gives one feature set per package, the union over everything cargo would build for
+  // the workspace (dev and build dependencies, every platform), so a feature in it is on only maybe
+  // in either context -- code a `cfg(not(feature = "x"))` keeps in some build is never dropped --
+  // and one outside it is off. `lacking` (the replay's): the active dependency tables no package
+  // in-tree answers, `dir key kind` → `{ m, d, r }` (see lackingDependencies).
   let resolved = null
   let lacking = null
   const ensureResolved = () => {
     if (resolved !== null) return resolved
     if (metadata) {
       const byNode = new Map([...metadata.enabled].flatMap(([dir, set]) => [[nodeKey('target', dir), set], [nodeKey('host', dir), set]]))
-      resolved = { sure: byNode, all: byNode }
+      resolved = { sure: new Map(), all: byNode }
     } else {
       resolved = exact()?.resolved ?? null
       if (resolved === null) {
@@ -1395,9 +1400,9 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // --- cfgs a build may set
   let rustflagCfgs = null
   const cfgsSetMemo = new Map()
-  // A build script's text and that of the modules it declares (`mod probe;`, beside it), a few
-  // levels down: where its `cargo:rustc-cfg=` lines are.
-  const buildScriptTexts = (script) => {
+  // A crate root's text -- a build script's, a lib's -- and that of the modules it declares (`mod
+  // probe;`, beside it), a few levels down: where its `cargo:rustc-cfg=` lines are.
+  const crateTexts = (script) => {
     const texts = []
     const queue = [[script, 0]]
     const seen = new Set()
@@ -1416,6 +1421,36 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       }
     }
     return texts
+  }
+
+  // Whether the build script of package `m` may print cfgs through a build-dependency it calls
+  // (cfg_aliases' `cfg_aliases!` prints the names its input gives): one of its
+  // build-dependencies (libMayPrint) for the host, or one the bundle root lacks, which may for all
+  // the loader knows. Asked once per package (cfgsSetFor).
+  const helpersMayPrint = (m) => [...m.deps.values()].some((d) => [...d.kinds.values()].some((r) => {
+    if (r.kind !== 'build' || tableOn(r.target, 'host') === 'no') return false
+    const t = resolveDep(m, d, r)
+    return t === null || libMayPrint(t)
+  }))
+  // Whether package `t`'s lib, or what it depends on in turn for the host, may print a cfg for a
+  // build script calling it (mayPrintCfgs), or depends on a crate the bundle root lacks;
+  // memoized per package.
+  const printsMemo = new Map()
+  const libMayPrint = (t) => {
+    if (!printsMemo.has(t.dir)) {
+      printsMemo.set(t.dir, false) // a cycle adds nothing
+      const lib = libPath(t)
+      let may = lib !== null && mayPrintCfgs(crateTexts(lib))
+      for (const d of t.deps.values()) {
+        for (const r of d.kinds.values()) {
+          if (may || r.kind !== 'normal' || tableOn(r.target, 'host') === 'no') continue
+          const u = resolveDep(t, d, r)
+          may = u === null || libMayPrint(u)
+        }
+      }
+      printsMemo.set(t.dir, may)
+    }
+    return printsMemo.get(t.dir)
   }
 
   // The in-tree crate roots a name resolves to from package `m` (null: no owning package), leaving
@@ -1666,9 +1701,10 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       if (!cfgsSetMemo.has(memo)) {
         rustflagCfgs ??= rustflagsCfgsOf(configs)
         const script = m ? buildScript(m) : null
-        const printed = script === null ? { names: new Set(), any: false } : cfgsPrinted(buildScriptTexts(script))
+        const printed = script === null ? { names: new Set(), any: false } : cfgsPrinted(crateTexts(script))
+        const any = printed.any || (script !== null && helpersMayPrint(m))
         const names = new Set([...rustflagCfgs, ...printed.names])
-        cfgsSetMemo.set(memo, names.size === 0 && !printed.any ? NO_CFGS_SET : { names, any: printed.any })
+        cfgsSetMemo.set(memo, names.size === 0 && !any ? NO_CFGS_SET : { names, any })
       }
       return cfgsSetMemo.get(memo)
     },

@@ -609,8 +609,11 @@ set it: a name its build script prints as `cargo:rustc-cfg=…`, or that a
 rustflags `--cfg` sets (the `build`/`target.<…>` `rustflags` of each cargo
 config the build reads, see above, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
 `CARGO_BUILD_RUSTFLAGS`), is neither presumed off nor on, and a build script
-that formats a name or uses `autocfg` makes every custom cfg of its package so.
-A child module the build rules out,
+that formats a name, whole or in part (`cargo::rustc-cfg=os_{}`), or uses
+`autocfg` makes every custom cfg of its package so -- as does one with a
+build-dependency that may print cfgs for it (cfg_aliases' `cfg_aliases!`): one
+whose code, or that of what it depends on, writes `rustc-cfg` outside comments,
+or one the bundle root lacks. A child module the build rules out,
 or one under a custom cfg it presumably lacks, gives way to whatever else its
 module has of the name, as such a candidate does to any other: serde's
 docsrs-only `mod de` to the `pub use serde_core::de` of every other build, a
@@ -868,10 +871,13 @@ cargo read from `~/.cargo/registry` is matched to its vendored copy by name and
 version. Note what it reports: `cargo metadata`
 resolves the whole workspace with dev-dependencies and all targets, and gives one
 feature set per package — the union across normal, dev and build dependency kinds
-and across platforms (resolver-1-style unification). So `--cargo` describes
-everything cargo would ever compile for the workspace, tests included, and can
-enable features (and so bundle modules) that a plain `cargo build` of the entries'
-packages leaves off; the loader's own resolution describes that build. Set
+and across platforms (resolver-1-style unification). So `--cargo` takes each of
+those features as on only *maybe*, in the target's build and the host's alike:
+code under it, or under its negation (`cfg(not(feature = "x"))`, which a build
+without `x` compiles), is kept, and only a feature outside the union is off.
+It describes everything cargo would ever compile for the workspace, tests
+included; the loader's own resolution describes the `cargo build` of the
+entries' packages. Set
 `EXODUS_STASIS_DEBUG=1` to have `stasis bundle` print the resolved features per
 package and context (target, host), and which resolution they come from.
 

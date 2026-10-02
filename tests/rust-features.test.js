@@ -486,8 +486,9 @@ test('createCargoContext({ cargo: true }) takes the resolution from a real `carg
   try {
     cpSync(join(fixtures, 'workspace'), tmp, { recursive: true })
     const cargo = createCargoContext(tmp, { entries: ['crates/app/src/main.rs'], cargo: true })
-    const enabled = enabledOf(cargo)
-    t.assert.deepEqual(Object.keys(enabled).toSorted(), ['crates/app', 'crates/tools', 'crates/util'])
+    t.assert.deepEqual([...cargo.featureResolution().keys()].toSorted(), ['crates/app', 'crates/tools', 'crates/util'])
+    // metadata's one feature set per package is every build's union: each feature in it on only maybe
+    t.assert.deepEqual(enabledOf(cargo), {})
     t.assert.equal(cargo.resolveCrate('util', 'crates/app/src/main.rs'), 'crates/util/src/util_lib.rs')
     t.assert.equal(cargo.resolveCrate('tools', 'crates/app/src/main.rs'), 'crates/tools/src/lib.rs')
   } finally {
@@ -1955,4 +1956,45 @@ test('buildRustBundle reports every dependency the build links that the bundle l
     t.assert.equal(await lacking({ cargoTarget: LINUX, cargoManifests: true }), '[stasis] 3 crates referenced but not in the bundle: cc (a dependency of app 0.1.0), md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0)')
     t.assert.equal(await lacking({}), '[stasis] 3 crates referenced but not in the bundle: md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0), winonly (a dependency of app 0.1.0)')
   })
+})
+
+test('createCargoContext({ cargo: true }) keeps what any build compiles: metadata\'s feature union is only maybe', { skip: hasCargo ? false : 'cargo not on PATH' }, async (t) => {
+  // shared is a dependency with `t` and a build-dependency with `h`: cargo's target build compiles
+  // lib.rs, t.rs and noth.rs, its host build lib.rs and h.rs; metadata reports `h` and `t` on.
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nshared = { path = "shared", features = ["t"] }\n[build-dependencies]\nshared = { path = "shared", features = ["h"] }\n',
+    'build.rs': 'fn main() { shared::f(); }\n',
+    'src/lib.rs': 'pub use shared::f;\n',
+    'shared/Cargo.toml': '[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2021"\n[features]\nt = []\nh = []\n',
+    'shared/src/lib.rs': '#[cfg(feature = "t")]\nmod t;\n#[cfg(feature = "h")]\nmod h;\n#[cfg(not(feature = "h"))]\nmod noth;\n#[cfg(feature = "other")]\nmod other;\npub fn f() {}\n',
+    'shared/src/t.rs': '', 'shared/src/h.rs': '', 'shared/src/noth.rs': '', 'shared/src/other.rs': '',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargo: true, cargoManifests: true })
+    t.assert.deepEqual([...bundle.sources.keys()].filter((p) => p.startsWith('shared/src/')).toSorted(), ['shared/src/h.rs', 'shared/src/lib.rs', 'shared/src/noth.rs', 'shared/src/t.rs'])
+  })
+})
+
+test('buildRustBundle does not presume off a cfg a build-dependency may print, or one the build script formats part of', async (t) => {
+  const project = (extra) => ({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[build-dependencies]\nhelper = { path = "helper" }\n',
+    'src/lib.rs': 'mod fast;\nmod slow;\nmod user;\n#[cfg(fast)] pub use fast::F;\n#[cfg(not(fast))] pub use slow::F;\n',
+    'src/fast.rs': 'pub struct F;\n', 'src/slow.rs': 'pub struct F;\n', 'src/user.rs': 'fn f() { crate::F; }\n',
+    'helper/Cargo.toml': '[package]\nname = "helper"\nversion = "0.1.0"\n',
+    'helper/src/lib.rs': '/// Does nothing: no `cargo:rustc-cfg=` here, but in this comment.\npub fn noop() {}\n',
+    'build.rs': 'fn main() { helper::noop(); }\n',
+    ...extra,
+  })
+  const target = async (extra) => withProjectAsync(project(extra), async (tmp) => (await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'] })).imports.get('rust').get('src/user.rs').get('crate::F'))
+  const either = new Map([['fast', 'src/fast.rs'], ['not(fast)', 'src/slow.rs']])
+  // a build-dependency printing nothing leaves `fast` presumed off
+  t.assert.equal(await target({}), 'src/slow.rs')
+  // cfg_aliases' way: the helper prints the names its macro's input gives (`cfg_aliases! { fast: … }`)
+  t.assert.deepEqual(await target({
+    'helper/src/lib.rs': '#[macro_export]\nmacro_rules! alias {\n    ($name:ident) => { println!("cargo:rustc-cfg={}", stringify!($name)); };\n}\n',
+    'build.rs': 'use helper::alias;\nfn main() { alias!(fast); }\n',
+  }), either)
+  // a build-dependency the bundle lacks may print one too
+  t.assert.deepEqual(await target({ 'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[build-dependencies]\nhelper = "1"\n' }), either)
+  // a name the build script formats in part: `os_{}` may be `os_linux`, and so may `fast` be anything
+  t.assert.deepEqual(await target({ 'build.rs': 'fn main() { let os = "linux"; println!("cargo::rustc-cfg=os_{}", os); }\n' }), either)
 })
