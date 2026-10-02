@@ -82,10 +82,10 @@ test('parseRemappings handles one-per-line entries and refuses an invalid line, 
     { context: null, prefix: '@a/', target: 'lib/a/' },
     { context: null, prefix: '@b/', target: 'lib/b/' },
   ])
-  t.assert.throws(() => parseRemappings('@a/=lib/a/\ngarbage line\n'), { message: 'remappings:2: invalid remapping "garbage line"' })
+  t.assert.throws(() => parseRemappings('@a/=lib/a/\ngarbage line\n'), { message: 'remappings:2: invalid remapping, expected [context:]prefix=target' })
   // Lines are trimmed as Rust trims them: a byte-order mark isn't whitespace, and stays.
   t.assert.deepEqual(parseRemappings('\uFEFFx/=a/\n'), [{ context: null, prefix: '\uFEFFx/', target: 'a/' }])
-  t.assert.throws(() => parseRemappings('\n=empty-prefix\n'), { message: 'remappings:2: invalid remapping "=empty-prefix"' })
+  t.assert.throws(() => parseRemappings('\n=empty-prefix\n'), { message: 'remappings:2: invalid remapping, expected [context:]prefix=target' })
 })
 
 test('parseRemappings reads a `context:` before the prefix', (t) => {
@@ -839,11 +839,11 @@ test('an invalid remapping in a foundry.toml or remappings variable is an error,
   'num/foundry.toml': '[profile.default]\nremappings = [1]\n',
   'ok/foundry.toml': '[profile.default]\n',
 }, (t, dir) => {
-  t.assert.throws(() => foundryProject(dir, { env: {} }), { message: 'foundry.toml: `remappings`: invalid remapping "nope"' })
+  t.assert.throws(() => foundryProject(dir, { env: {} }), { message: 'foundry.toml: `remappings` entry 2: invalid remapping, expected [context:]prefix=target' })
   t.assert.throws(() => foundryProject(join(dir, 'list'), { env: {} }), { message: 'foundry.toml: `remappings` is not an array of strings' })
-  t.assert.throws(() => foundryProject(join(dir, 'num'), { env: {} }), { message: 'foundry.toml: `remappings`: invalid remapping 1' })
-  t.assert.throws(() => foundryProject(join(dir, 'ok'), { env: { FOUNDRY_REMAPPINGS: 'x/=y/\nbad' } }), { message: 'FOUNDRY_REMAPPINGS:2: invalid remapping "bad"' })
-  t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["=x/"]\n'), { message: '`remappings`: invalid remapping "=x/"' })
+  t.assert.throws(() => foundryProject(join(dir, 'num'), { env: {} }), { message: 'foundry.toml: `remappings` entry 1 is not a string' })
+  t.assert.throws(() => foundryProject(join(dir, 'ok'), { env: { FOUNDRY_REMAPPINGS: 'x/=y/\nbad' } }), { message: 'FOUNDRY_REMAPPINGS:2: invalid remapping, expected [context:]prefix=target' })
+  t.assert.throws(() => foundryTomlRemappings('[profile.default]\nremappings = ["=x/"]\n'), { message: '`remappings` entry 1: invalid remapping, expected [context:]prefix=target' })
 }))
 
 test('a legacy [default] table\'s `extends` is ignored, as forge ignores it', withProject({

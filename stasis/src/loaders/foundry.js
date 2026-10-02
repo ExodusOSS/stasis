@@ -134,6 +134,10 @@ export function parseRemapping(entry, { emptyPath = false } = {}) {
   return { context, name, path }
 }
 
+// What an invalid remapping should have been; errors name where one is, never its text, which may
+// be anything (a file named as a mapping by mistake, a secret included).
+const REMAPPING_FORM = 'expected [context:]prefix=target'
+
 // A remappings.txt / env var body: one remapping per non-blank (trimmed) line. A line that isn't
 // one throws, naming `label` (the file or variable) and the line, as forge and solc refuse the
 // file. `emptyPath`: see parseRemapping.
@@ -143,20 +147,21 @@ export function parseRemappingLines(text, { label = 'remappings', emptyPath = fa
     const line = rustTrim(raw)
     if (line === '') return
     const r = parseRemapping(line, { emptyPath })
-    if (r === null) throw new Error(`${label}:${i + 1}: invalid remapping ${JSON.stringify(line)}`)
+    if (r === null) throw new Error(`${label}:${i + 1}: invalid remapping, ${REMAPPING_FORM}`)
     out.push(r)
   })
   return out
 }
 
 // A foundry.toml's `remappings` value, parsed. One forge rejects -- not an array of strings, or an
-// entry that isn't `[context:]name=path` -- throws, naming `file` when given.
+// entry that isn't `[context:]name=path` -- throws, naming `file` when given and the entry (from 1).
 function configRemappings(value, file) {
   const where = `${file === null ? '' : `${file}: `}\`remappings\``
   if (!Array.isArray(value)) throw new Error(`${where} is not an array of strings`)
-  return value.map((entry) => {
-    const r = typeof entry === 'string' ? parseRemapping(entry) : null
-    if (r === null) throw new Error(`${where}: invalid remapping ${typeof entry === 'string' ? JSON.stringify(entry) : String(entry)}`)
+  return value.map((entry, i) => {
+    if (typeof entry !== 'string') throw new Error(`${where} entry ${i + 1} is not a string`)
+    const r = parseRemapping(entry)
+    if (r === null) throw new Error(`${where} entry ${i + 1}: invalid remapping, ${REMAPPING_FORM}`)
     return r
   })
 }

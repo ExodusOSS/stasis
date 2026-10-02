@@ -2,7 +2,7 @@ import Module, { isBuiltin } from 'node:module'
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { packageJSONText } from '@exodus/stasis-core/bundle-util'
+import { packageJSONStat, packageJSONText } from '@exodus/stasis-core/bundle-util'
 
 // Node's CommonJS resolution (`createRequire(parent).resolve(spec, { conditions })`) over a
 // `host` (@exodus/stasis-core/host), mirroring lib/internal/modules/cjs/loader.js and
@@ -88,9 +88,16 @@ function parsePackageName(specifier, base) {
 }
 
 export function createNodeResolver(host) {
-  // package.json reads, memoized per path; a malformed manifest throws ERR_INVALID_PACKAGE_CONFIG on every access.
+  // package.json reads, memoized per path; a malformed manifest, or one there that can't be read,
+  // throws ERR_INVALID_PACKAGE_CONFIG on every access.
   const parsePackage = (pjsonPath) => {
-    if (!host.stat(pjsonPath)?.isFile()) return { exists: false }
+    let stat
+    try {
+      stat = packageJSONStat(host, pjsonPath)
+    } catch (err) {
+      return err
+    }
+    if (!stat?.isFile()) return { exists: false }
     let data
     try {
       data = JSON.parse(packageJSONText(host.readFile(pjsonPath)))

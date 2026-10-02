@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -205,6 +206,44 @@ test('a tsconfig extends a base in node_modules through the tree, never the one 
   t.assert.deepEqual(paths.matchPaths('@installed/a'), [])
   t.assert.deepEqual(loadTsconfigPaths('/p/tsconfig.json', createVfsHost(vfs)).matchPaths('@installed/a'), ['/p/node_modules/base/installed/a'], 'the project\'s Vfs alone holds the installed one')
 })
+
+test('a package.json that is there but can\'t be read is refused as Node refuses it, and one that leads nowhere is none, on disk and in a Vfs', withTmp((t, tmp) => {
+  const conditions = new Set(['require'])
+  const outcome = (f) => {
+    try {
+      return f()
+    } catch (err) {
+      return err.code
+    }
+  }
+  // On disk, beside Node's own resolver: a link loop, a loop through directories, a link to nothing.
+  writeFileSync(join(tmp, 'package.json'), '{"name":"outer"}')
+  writeFileSync(join(tmp, 'main.js'), '')
+  for (const dir of ['loop', 'dirloop', 'dangling']) {
+    mkdirSync(join(tmp, dir))
+    writeFileSync(join(tmp, dir, 'index.js'), '')
+  }
+  symlinkSync('package.json', join(tmp, 'loop/package.json'))
+  symlinkSync('b', join(tmp, 'dirloop/a'))
+  symlinkSync('a', join(tmp, 'dirloop/b'))
+  symlinkSync('a/x.json', join(tmp, 'dirloop/package.json'))
+  symlinkSync('gone.json', join(tmp, 'dangling/package.json'))
+  const ours = createNodeResolver(diskHost)
+  const node = createRequire(join(tmp, 'main.js'))
+  for (const dir of ['loop', 'dirloop', 'dangling']) {
+    t.assert.equal(outcome(() => ours.resolve(join(tmp, 'main.js'), `./${dir}`, conditions)), outcome(() => node.resolve(`./${dir}`)), dir)
+  }
+  t.assert.equal(outcome(() => ours.resolve(join(tmp, 'main.js'), './loop', conditions)), 'ERR_INVALID_PACKAGE_CONFIG')
+  // In a Vfs, as on disk.
+  const vfs = write(new Vfs(), { '/package.json': '{"name":"outer"}', '/main.js': '', '/loop/index.js': '', '/dangling/index.js': '' })
+  vfs.symlink('package.json', '/loop/package.json')
+  vfs.symlink('gone.json', '/dangling/package.json')
+  const host = createVfsHost(vfs)
+  t.assert.throws(() => host.findPackageJSON('/loop/index.js'), { code: 'ERR_INVALID_PACKAGE_CONFIG' })
+  t.assert.throws(() => host.resolve('/main.js', './loop', conditions), { code: 'ERR_INVALID_PACKAGE_CONFIG' })
+  t.assert.equal(host.findPackageJSON('/dangling/index.js'), '/package.json')
+  t.assert.equal(host.resolve('/main.js', './dangling', conditions), '/dangling/index.js')
+}))
 
 test('the disk host resolves exactly like require.resolve, including through symlinks', withTmp((t, tmp) => {
   mkdirSync(join(tmp, 'real'))

@@ -108,7 +108,7 @@ export async function buildGitHubBundle({ github, sha, directory, client, packag
   if (options.entries === undefined && pm.kind !== 'js') throw new Error(`buildGitHubBundle: entries are required with ${packageManager}`)
   // buildVfsBundle's checks, over an empty tree: what the tree is never decides them. Without
   // entries, over a JS one, as each suggested one is.
-  checkVfsOptions('buildGitHubBundle', pm, packageManager, { ...options, entries: options.entries ?? ['index.js'], cwd: '/', host: vfsHost(new Vfs()) })
+  checkVfsOptions('buildGitHubBundle', pm, packageManager, { ...options, entries: options.entries ?? ['index.js'], cwd: '/', host: vfsHost(new Vfs()), fetched: false })
   checkRepo('buildGitHubBundle', { github, sha, directory })
   client ??= createClient({ token: null })
   sha ??= (await client.getRepoHead({ repo: github })).oid
