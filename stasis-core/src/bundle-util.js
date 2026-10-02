@@ -24,24 +24,81 @@ export function packageType(file, host = diskHost) {
 // Nearest package.json (walking up) that identifies a bucket; pkgDir is relative to baseDir ("."
 // at the root). Inside node_modules both name and version are required; a workspace package
 // outside node_modules may omit version (the name alone claims the bucket, matching
-// State#locateModule). Null if none.
-export function findPackageMetadata(baseDir, fileRelPath, host = diskHost) {
+// State#locateModule). Null if none. A malformed one is walked past, or with `strict` throws
+// (its files would otherwise land in the parent package); `check`, `host`: see readPackageJson.
+export function findPackageMetadata(baseDir, fileRelPath, { strict = false, check, host = diskHost } = {}) {
   let dir = dirname(fileRelPath)
   while (true) {
-    const pkgPath = join(baseDir, dir, 'package.json')
-    if (host.stat(pkgPath)?.isFile()) {
-      try {
-        const pkg = JSON.parse(packageJSONText(host.readFile(pkgPath)))
-        if (pkg.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
-          // `?? undefined` folds a literal `"version": null` into the one absent-version spelling.
-          return { pkgDir: dir, name: pkg.name, version: pkg.version ?? undefined }
-        }
-      } catch { /* malformed -- keep walking */ }
+    const pkg = readPackageJson(baseDir, toPosix(join(dir, 'package.json')), { strict, check, host })
+    if (pkg?.name && (pkg.version || !hasNodeModulesSegment(toPosix(dir)))) {
+      // `?? undefined` folds a literal `"version": null` into the one absent-version spelling.
+      return { pkgDir: dir, name: pkg.name, version: pkg.version ?? undefined }
     }
     if (dir === '.' || dir === '/' || dir === '') return null
     const parent = dirname(dir)
     if (parent === dir) return null
     dir = parent
+  }
+}
+
+// The error codes that mean nothing is at a path.
+export const NO_ENTRY = new Set(['ENOENT', 'ENOTDIR'])
+
+// `file`'s bytes, read through `host`, or null when there's no file (a directory counts as none).
+// It's read only when it's a regular file: a FIFO, a socket, a device or a link to one
+// (`/dev/stdin`) throws, naming it `label`, rather than stalling or reading the process's input.
+// What can't be stat'ed is read to say why: only a path with nothing there is no file, and a loop
+// or a directory that may not be searched throws.
+export function readRegularFileOrNull(file, label, host = diskHost) {
+  const stat = host.stat(file)
+  if (stat === null) {
+    try {
+      host.readFile(file)
+    } catch (err) {
+      if (NO_ENTRY.has(err.code)) return null
+      throw err
+    }
+    throw new Error(`${label}: not a regular file`)
+  }
+  if (stat.isDirectory()) return null
+  if (!stat.isFile()) throw new Error(`${label}: not a regular file`)
+  return host.readFile(file)
+}
+
+// The package.json at `rel` (under `baseDir`), parsed (a leading byte-order mark skipped, as npm
+// and Node skip it), read through `host`; null when there's none (a directory counts as none), or
+// when it doesn't parse or isn't a regular file -- unless `strict`, then that throws, saying where
+// with the parser's line and column but never its message, which quotes the text (a file that isn't
+// JSON may be anything, a secret included). `check(rel)`, when given, sees the path before it is
+// read, and may throw to refuse it.
+export function readPackageJson(baseDir, rel, { strict = false, check, host = diskHost } = {}) {
+  const file = join(baseDir, rel)
+  const stat = host.stat(file)
+  if (stat === null || stat.isDirectory()) return null
+  check?.(rel)
+  try {
+    // A FIFO, a socket or a device (or a link to one) is never read: it could stall the bundle.
+    if (!stat.isFile()) throw new Error(`${rel}: not a regular file`)
+    const bytes = host.readFile(file)
+    // Strict, it's read as the file's own text or not at all; lenient lookups decode it as they always
+    // have (a stray byte as U+FFFD).
+    if (strict && !isUtf8(bytes)) throw new Error(`${rel}: not valid UTF-8`)
+    return parseJson(packageJSONText(bytes), rel)
+  } catch (err) {
+    if (strict) throw err
+    return null
+  }
+}
+
+// JSON.parse, throwing where the text breaks (the parser's line and column) but never the parser's
+// message, which quotes the text.
+function parseJson(text, rel) {
+  try {
+    return JSON.parse(text)
+  } catch (err) {
+    const at = /\(line \d+ column \d+\)/u.exec(err.message)?.[0]
+    // eslint-disable-next-line preserve-caught-error -- the parser's error quotes the file
+    throw new Error(`${rel} is not valid JSON${at ? ` ${at}` : ''}`)
   }
 }
 

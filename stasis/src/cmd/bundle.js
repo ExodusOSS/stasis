@@ -13,8 +13,8 @@ import { createMetroResolver } from '../metro-resolver.js'
 import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
-import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest, readText } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest, readPackageJson, readRegularFileOrNull } from '@exodus/stasis-core/bundle-util'
+import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isDotEnvFile, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, posixPathEscapes, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import { diskHost } from '@exodus/stasis-core/host'
 import {
   SOLIDITY_PACKAGE_MANIFESTS,
@@ -24,6 +24,7 @@ import {
   discoverSolidityConfig,
   expandSolidityEntries,
 } from '../loaders/solidity.js'
+import { decodeUtf8 } from '../loaders/solidity-ownership.js'
 import { buildBashTree, collectBashFilesFromDisk } from '../loaders/bash.js'
 import { buildRustTree, collectRustFilesFromDisk } from '../loaders/rust.js'
 import { VENDOR_DIR as CARGO_VENDOR_DIR, createCargoContext } from '../loaders/cargo.js'
@@ -86,42 +87,24 @@ function githubSlug(url) {
   return m ? `${m[1]}/${m[2]}` : null
 }
 
-// Parse `.gitmodules` (git-config INI) into Map<submodulePath, { name, branch }>,
-// github.com submodules only.
-function parseGithubSubmodules(baseDir, host) {
+// The github.com ones of `submodules` (readGitmodules), as Map<submodulePath, { name, branch }>.
+function githubSubmodules(submodules) {
   const byPath = new Map()
-  const text = readText(host, join(baseDir, '.gitmodules'))
-  if (!text) return byPath
-  let cur = null
-  const flush = () => {
-    if (cur?.path && cur?.url) {
-      const name = githubSlug(cur.url)
-      if (name) byPath.set(cur.path.replace(/\/+$/u, ''), { name, branch: cur.branch })
-    }
-    cur = null
+  for (const { path, url, branch } of submodules) {
+    const name = url && githubSlug(url)
+    if (name) byPath.set(path, { name, branch })
   }
-  for (const raw of text.split('\n')) {
-    const line = raw.trim()
-    if (line.startsWith('[')) {
-      flush()
-      cur = line.startsWith('[submodule') ? {} : null
-      continue
-    }
-    if (!cur) continue
-    const eq = line.indexOf('=')
-    if (eq === -1) continue
-    const key = line.slice(0, eq).trim()
-    if (key === 'path' || key === 'url' || key === 'branch') cur[key] = line.slice(eq + 1).trim()
-  }
-  flush()
   return byPath
 }
 
 // Classify a Solidity file's dep bucket: Soldeer (`dependencies/<name>-<version>/`) or a
-// github submodule (`lib/`, via `.gitmodules`), else null to defer to the node_modules/
-// workspace logic.
-function makeSolidityClassifier(baseDir, host) {
-  const submodules = parseGithubSubmodules(baseDir, host)
+// github submodule (`lib/`, via the `.gitmodules` `ownership` read), else null to defer to the
+// node_modules/workspace logic. `ownership.assert` vets a package.json path before it is read
+// through `host`.
+function makeSolidityClassifier(baseDir, ownership, host) {
+  const submodules = githubSubmodules(ownership.submodules)
+  const check = ownership.assert
+  const versions = new Map() // a submodule's package.json version, read once
   return (path) => {
     if (path.startsWith('dependencies/')) {
       const seg = path.slice('dependencies/'.length).split('/')[0]
@@ -132,8 +115,8 @@ function makeSolidityClassifier(baseDir, host) {
     }
     for (const [sub, { name, branch }] of submodules) {
       if (path === sub || path.startsWith(`${sub}/`)) {
-        const pkg = readJson(join(baseDir, sub, 'package.json'), host)
-        return { bucketDir: sub, name, version: pkg?.version ?? branch ?? '0.0.0', ecosystem: 'github' }
+        if (!versions.has(sub)) versions.set(sub, readPackageJson(baseDir, moduleFileKey(sub, 'package.json'), { strict: true, check, host })?.version)
+        return { bucketDir: sub, name, version: versions.get(sub) ?? branch ?? '0.0.0', ecosystem: 'github' }
       }
     }
     return null
@@ -170,12 +153,14 @@ function executableSources(baseDir, sources, host) {
 // Assemble a full-scope code Bundle shared by the non-JS bundlers. Files are bucketed by
 // nearest package.json (node_modules -> `npm`-tagged bucket, workspace -> its dir, none ->
 // "." with the placeholder identity); a node_modules file whose nearest package.json is the
-// workspace root is rejected, not mislabeled. `classifyDep(path)` optionally places a file
-// directly (non-node_modules ecosystems like Soldeer/github); null defers. `format` tags
+// workspace root is rejected, not mislabeled; `packageOf(path)` finds that package.json
+// (packageLookup by default, which walks past a malformed one). `classifyDep(path)` optionally
+// places a file directly (non-node_modules ecosystems like Soldeer/github); null defers. `format` tags
 // every file; `formats` (Map<path,format>) overrides it per file. `resolutions` values are
 // a flat target string or a Map<platform,target>; both round-trip untouched.
 function assembleCodeBundle({
   baseDir, entries, sources, resolutions, workspaceName, workspaceVersion, format, formats, conditionKey, classifyDep, host,
+  packageOf = packageLookup(baseDir, { host }),
 }) {
   const modules = new Map()
   const ensureBucket = (dir, name, version, bucketEcosystem) => {
@@ -193,7 +178,7 @@ function assembleCodeBundle({
       ensureBucket(dep.bucketDir, dep.name, dep.version, dep.ecosystem).files[fileInBucket(dep.bucketDir, path)] = content
       continue
     }
-    const meta = findPackageMetadata(baseDir, path, host)
+    const meta = packageOf(path)
     const inNodeModules = splitNodeModulesPath(path) !== null
     if (meta) {
       if (inNodeModules && !meta.pkgDir.includes('node_modules')) {
@@ -229,44 +214,86 @@ function assembleCodeBundle({
   }).withReason('bundle')
 }
 
-// The build-description files of a Solidity bundle (--manifests), as Map<path, text>: `configFiles`
-// (what discoverSolidityConfig read, when named `*.toml`/`*.txt`) plus the SOLIDITY_*_MANIFESTS
-// that exist, for the root and for each package dir `classifyDep`/package.json places a bundled
-// source in. Files inside the root only, carried as written: whatever they hold (an RPC URL with
-// its API key, an Etherscan key, a URL's credentials) is in the bundle too, as with --package-json.
-function solidityManifests(baseDir, sources, configFiles, classifyDep, host) {
-  const wanted = new Set([...configFiles.filter((f) => f.endsWith('.toml') || f.endsWith('.txt')), ...SOLIDITY_ROOT_MANIFESTS])
-  const dirs = new Set()
-  for (const path of sources.keys()) {
-    const dep = classifyDep(path)
-    if (dep) dirs.add(dep.bucketDir)
-    const meta = findPackageMetadata(baseDir, path, host)
-    if (meta) dirs.add(meta.pkgDir)
+// Files never carried, whatever reads them: `.env` files, and Hardhat's config, which is code
+// (both however they're cased).
+const neverCarried = (rel) => isDotEnvFile(rel) || posix.basename(rel).toLowerCase().startsWith('hardhat.config.')
+
+// findPackageMetadata (with `options`) once per directory, the only thing its answer depends on.
+function packageLookup(baseDir, options) {
+  const byDir = new Map()
+  return (path) => {
+    const dir = posix.dirname(path)
+    if (!byDir.has(dir)) byDir.set(dir, findPackageMetadata(baseDir, path, options))
+    return byDir.get(dir)
   }
-  for (const dir of dirs) {
-    for (const name of SOLIDITY_PACKAGE_MANIFESTS) wanted.add(moduleFileKey(dir, name))
-  }
+}
+
+// The build-description files of a Solidity bundle (--manifests), as Map<path, text>, sorted:
+// `configFiles` (what discoverSolidityConfig read, whatever they're called), each of which must be
+// carried -- one outside the root, neverCarried, refused or gone is an error, as the bundle
+// couldn't reproduce the resolution without it -- plus the SOLIDITY_*_MANIFESTS that exist, for the
+// root and for each package dir `classifyDep`/`packageOf` places a bundled source in, but none
+// whose path `ownership` refuses (see solidityOwnership). Carried as written: whatever they hold
+// (an RPC URL with its API key, an Etherscan key, a URL's credentials) is in the bundle too, as
+// with --package-json. Read through `host`.
+function solidityManifests(baseDir, sources, configFiles, { classifyDep, packageOf, ownership, host }) {
   const realBase = host.realpath(baseDir)
-  const out = new Map()
-  for (const rel of [...wanted].toSorted()) {
-    if (sources.has(rel) || posix.isAbsolute(rel) || rel.startsWith('../')) continue
-    let buf
-    try {
-      assertRealPathWithinBase(realBase, baseDir, rel, host)
-      buf = host.readFile(join(baseDir, rel))
-    } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'EISDIR') continue
-      throw err
-    }
-    if (!isUtf8(buf)) throw new Error(`Solidity manifest is not valid UTF-8: ${rel}`)
-    out.set(rel, buf.toString('utf8'))
+  // `{ text }`, or `{ why }` it can't be carried (null: nothing is there). Read by the real path
+  // `ownership` resolved `rel` to, so what's carried is the file it vouched for.
+  const carry = (rel) => {
+    const { reason, real, outside } = ownership.of(rel)
+    if (reason) return { why: reason }
+    if (real === null) return { why: null }
+    if (outside) throw new Error(`Refusing to follow symlink escaping bundle root: ${rel} -> ${resolve(realBase, real)}`)
+    const buf = readRegularFileOrNull(join(realBase, real), rel, host)
+    if (buf === null) return { why: null } // a directory
+    return { text: decodeUtf8(buf, rel) }
   }
-  return out
+  const unreproducible = (rel, why) => new Error(`--manifests can't carry ${rel}, which the Solidity resolution read: ${why}`)
+  const out = new Map()
+  for (const rel of configFiles) {
+    // Absolute: the OS couldn't give its real path (see projectRelative).
+    if (posix.isAbsolute(rel)) throw unreproducible(rel, "its real path can't be resolved")
+    if (posixPathEscapes(rel)) throw unreproducible(rel, 'it lies outside the bundle root')
+    if (neverCarried(rel)) throw unreproducible(rel, '.env files and hardhat.config.* are never carried')
+    if (sources.has(rel)) continue
+    const { text, why } = carry(rel)
+    if (text === undefined) throw unreproducible(rel, why ?? 'it is gone')
+    out.set(rel, text)
+  }
+  const optional = new Set(SOLIDITY_ROOT_MANIFESTS)
+  for (const path of sources.keys()) {
+    const dirs = [classifyDep(path)?.bucketDir, packageOf(path)?.pkgDir].filter((d) => d !== undefined)
+    for (const dir of dirs) for (const name of SOLIDITY_PACKAGE_MANIFESTS) optional.add(moduleFileKey(dir, name))
+  }
+  for (const rel of optional) {
+    if (sources.has(rel) || out.has(rel)) continue
+    const { text, why } = carry(rel)
+    if (why) console.warn(`[stasis] Not carrying ${rel}: ${why}`)
+    if (text !== undefined) out.set(rel, text)
+  }
+  return new Map([...out.keys()].toSorted().map((rel) => [rel, out.get(rel)]))
 }
 
 // An entry `stasis bundle` takes for a directory: one that is, or an extensionless path that
 // doesn't exist (a project without `script/` still bundles with `src test script`).
-const isDirEntry = (abs, host = diskHost) => isDir(abs, host) || (extname(abs) === '' && host.stat(abs) === null)
+export const isDirEntry = (abs, host = diskHost) => isDir(abs, host) || (extname(abs) === '' && host.stat(abs) === null)
+
+// Whether `entry` (resolved against `cwd`) is a Solidity bundle's: a .sol file or a directory entry.
+export const isSolidityEntry = (entry, cwd = process.cwd(), host = diskHost) => entry.endsWith('.sol') || isDirEntry(resolve(cwd, entry), host)
+
+// What's wrong with `entries`' directory entries (resolved against `cwd`), or null: a directory
+// entry stands for the .sol files under it, so it goes with Solidity entries only; and entries
+// that are all missing extensionless paths are a mistyped file, not a project without those dirs.
+export function directoryEntryError(entries, cwd = process.cwd(), host = diskHost) {
+  const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e), host))
+  const absent = dirs.filter((e) => host.stat(resolve(cwd, e)) === null)
+  if (absent.length === entries.length) return `no such file or directory: ${absent[0]}`
+  if (dirs.length === 0 || entries.every((e) => e.endsWith('.sol') || dirs.includes(e))) return null
+  return absent.length > 0
+    ? `no such file or directory: ${absent[0]}`
+    : `a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirs[0]}`
+}
 
 // Build an in-memory Bundle from entry .sol files and directories (a directory stands for the .sol
 // files under it, as forge's src/test/script dirs and Hardhat's contracts dir do; a missing or
@@ -285,15 +312,15 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
   const baseDir = resolve(cwd)
   const normalized = normalizeEntries(entries, cwd)
   for (const e of normalized) {
-    if (!e.endsWith('.sol') && !isDirEntry(join(baseDir, e), host)) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
+    if (!isSolidityEntry(e, baseDir, host)) throw new Error(`buildSolidityBundle: not a .sol file or directory: ${e}`)
   }
   const expanded = expandSolidityEntries(baseDir, normalized, host)
 
-  const { remappings, libs, dependencyDirs, files: configFiles, envUsed } = discoverSolidityConfig(baseDir, { mappingFile, env, host })
+  const { remappings, libs, ownership, files: configFiles, envUsed } = discoverSolidityConfig(baseDir, { mappingFile, env, host })
   // The bundle doesn't record the environment, so say when it shaped the resolution.
   if (envUsed.length > 0) console.warn(`[stasis] Solidity imports resolved with ${envUsed.join(', ')} from the environment`)
-  const sources = collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs, dependencyDirs, host })
-  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs, dependencyDirs, host })
+  const sources = collectSolidityFilesFromDisk(baseDir, expanded, remappings, { libs, ownership, host })
+  const { resolutions, missing } = buildSolidityTree(sources, { remappings, baseDir, libs, ownership, host })
 
   // Bundles must be self-contained: fail on a missing entry or unresolved import.
   const issues = []
@@ -307,13 +334,14 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     throw new Error(`Solidity bundle has unresolved imports:\n${issues.map((s) => `  ${s}`).join('\n')}`)
   }
 
-  const classifyDep = makeSolidityClassifier(baseDir, host)
+  const classifyDep = makeSolidityClassifier(baseDir, ownership, host)
+  const packageOf = packageLookup(baseDir, { strict: true, check: ownership.assert, host })
   const bundled = new Map(sources)
   const formats = new Map()
   if (manifests) {
-    for (const [path, text] of solidityManifests(baseDir, sources, configFiles, classifyDep, host)) {
+    for (const [path, text] of solidityManifests(baseDir, sources, configFiles, { classifyDep, packageOf, ownership, host })) {
       bundled.set(path, text)
-      formats.set(path, path.endsWith('.json') ? 'json' : 'resource')
+      formats.set(path, posix.basename(path) === 'package.json' ? 'json' : 'resource')
     }
   }
 
@@ -328,6 +356,7 @@ export async function buildSolidityBundle({ cwd = process.cwd(), entries, mappin
     formats,
     conditionKey: 'solidity',
     classifyDep,
+    packageOf,
     host,
   })
 }
@@ -929,19 +958,18 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   }
 
   // --package-json: fold each bundled module's package.json into `sources` (and its integrity into
-  // the companion lockfile) even when the scan never reached it. Buckets are the same ones
-  // assembleCodeBundle derives (findPackageMetadata -> pkgDir, else the '.' workspace bucket);
-  // findPackageMetadata is memoized per directory so a package's many files don't each re-walk to the
-  // same manifest. readModuleManifest applies the read/validate rules shared with the State path
-  // (containment, UTF-8-aborts); no identity check here -- these buckets are all fresh from disk.
+  // the companion lockfile) even when the scan never reached it. Buckets are the ones
+  // assembleCodeBundle derives, from the same `packageOf` (findPackageMetadata -> pkgDir, else the
+  // '.' workspace bucket; packageLookup memoizes it per directory so a package's many files don't
+  // each re-walk to the same manifest). readModuleManifest applies the read/validate rules shared
+  // with the State path (containment, UTF-8-aborts); no identity check here -- these buckets are
+  // all fresh from disk.
+  const packageOf = packageLookup(baseDir, { host })
   if (packageJSON) {
-    const metaByDir = new Map()
     const pkgDirs = new Set()
     for (const abs of reached) {
       const rel = toRel(abs)
-      const dir = dirname(rel)
-      if (!metaByDir.has(dir)) metaByDir.set(dir, findPackageMetadata(baseDir, rel, host))
-      const meta = metaByDir.get(dir)
+      const meta = packageOf(rel)
       if (meta) pkgDirs.add(meta.pkgDir)
       else if (!splitNodeModulesPath(rel)) pkgDirs.add('.')
     }
@@ -982,6 +1010,7 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
     workspaceVersion: rootPkg.version ?? '0.0.0',
     conditionKey: '*',
     host,
+    packageOf,
   })
 
   // The companion lockfile mirrors the bundle, swapping file content for its integrity.
@@ -1010,15 +1039,11 @@ function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, mani
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
-  const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e), host))
-  const files = entries.filter((e) => !dirs.includes(e))
+  const dirError = directoryEntryError(entries, cwd, host)
+  if (dirError !== null) throw new Error(`${name}: ${dirError}`)
   let kind
-  if (files.every((e) => e.endsWith('.sol'))) kind = 'sol'
-  else if (dirs.length > 0) {
-    const missing = dirs.find((e) => host.stat(resolve(cwd, e)) === null)
-    if (missing !== undefined) throw new Error(`${name}: no such file or directory: ${missing}`)
-    throw new Error(`${name}: a directory entry is only supported for Solidity bundles (it stands for the .sol files under it): ${dirs[0]}`)
-  } else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
+  if (entries.every((e) => isSolidityEntry(e, cwd, host))) kind = 'sol'
+  else if (entries.every((e) => e.endsWith('.php'))) kind = 'php'
   else if (entries.every((e) => JS_EXTS.has(extname(e)))) kind = 'js'
   else if (entries.every((e) => BASH_EXTS.has(extname(e)))) kind = 'bash'
   else if (entries.every((e) => RUST_EXTS.has(extname(e)))) kind = 'rust'
