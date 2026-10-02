@@ -527,9 +527,15 @@ that crate's root in: the package's own lib target (`use my_app::…` from
 `main.rs`), a Cargo `path` dependency (incl. `workspace = true` ones and
 `package = …` renames, honouring `[lib] path`), or a `cargo vendor`ed crate under
 `vendor/` (or the `directory` of the source the cargo config replaces crates.io
-with, through any chain of `replace-with`s, whatever its name -- the config
-nearest the entries', so a nested workspace's own, relative to the directory
-holding its `.cargo`). Which of a package's dependency tables a name means is the
+with, through any chain of `replace-with`s, whatever its name, relative to the
+directory holding the `.cargo` of the config writing it). The cargo config is
+what cargo reads when run in the directory of the package the first entry
+belongs to (its workspace root found from there): the config of that directory
+and of each one above it -- above the bundle root too, read but never bundled;
+not `$CARGO_HOME`'s -- merged key by key, the nearest first, as cargo merges
+them (a nested workspace's `[source.vendored-sources] directory = "third"`
+beside the bundle root's `replace-with`). The vendor directory, the `[patch]`
+tables and the rustflags all come from that one reading. Which of a package's dependency tables a name means is the
 asking code's, as cargo links them: a build script's, and its modules' -- a file
 it shares with the lib through `#[path]` too -- the `[build-dependencies]`, a
 test, bench or example's the `[dependencies]` and `[dev-dependencies]`, other
@@ -594,10 +600,11 @@ says nothing. A positive cfg that neither rustc nor cargo sets (`loom`,
 build lacks, so a candidate under one is taken only after those, and one under
 its negation (`not(loom)`) counts as certain -- unless the package's build may
 set it: a name its build script prints as `cargo:rustc-cfg=…`, or that a
-rustflags `--cfg` sets (the cargo config's `build`/`target.<…>` `rustflags`,
-`RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`), is neither
-presumed off nor on, and a build script that formats a name or uses `autocfg`
-makes every custom cfg of its package so. A child module the build rules out,
+rustflags `--cfg` sets (the `build`/`target.<…>` `rustflags` of each cargo
+config the build reads, see above, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+`CARGO_BUILD_RUSTFLAGS`), is neither presumed off nor on, and a build script
+that formats a name or uses `autocfg` makes every custom cfg of its package so.
+A child module the build rules out,
 or one under a custom cfg it presumably lacks, gives way to whatever else its
 module has of the name, as such a candidate does to any other: serde's
 docsrs-only `mod de` to the `pub use serde_core::de` of every other build, a
@@ -771,10 +778,10 @@ test code reaches for. Two kinds of cfg are decided:
     the requirement, as when there is no lock entry: the one vendored version
     the requirement allows. Requirements are read by the semver crate's rules
     (`@preventive/lockfile`'s `rust-semver.js`): `1` takes no prerelease, `=2.0.0-rc.1`
-    takes that one. A `[patch]` -- in the root manifest, or in the cargo config
-    of a directory from the package's up to the bundle root (nearest first,
-    ahead of the manifest's, its `path` relative to the directory holding
-    `.cargo`) -- replaces a crate of its table's source only (`[patch.crates-io]`
+    takes that one. A `[patch]` -- in the workspace root's manifest (one above
+    the bundle root too), or in the cargo config the build reads (see above:
+    nearest first, ahead of the manifest's, its `path` relative to the
+    directory holding `.cargo`) -- replaces a crate of its table's source only (`[patch.crates-io]`
     crates.io's, `[patch."https://github.com/…"]` that repository's), and only
     where its version fits the dependent's requirement, as cargo applies it; one
     that doesn't is reported and not used.
@@ -786,10 +793,13 @@ test code reaches for. Two kinds of cfg are decided:
   A package the resolved build doesn't pull in has unknown features, and its
   gated code is kept. A member bundled from its own directory, its workspace's
   root above the bundle root, takes what it inherits (`edition.workspace = true`,
-  `dep = { workspace = true }`) and the resolver from that root, as cargo does:
-  the loader reads that manifest for those -- never bundling it, nor reading the
-  lockfile beside it -- when its `members` take the package and its `exclude`
-  doesn't.
+  `dep = { workspace = true }`), the resolver and the `[patch]` from that root,
+  as cargo does: the loader reads that manifest for those -- never bundling it,
+  nor reading the lockfile beside it, nor a stale one beside the member, so
+  cargo's resolver doesn't run -- unless its `exclude` takes the package (cargo
+  then looks further up). A [workspace] whose `members` don't list the package
+  is still its own, as it is to cargo: the package is a member there as a
+  member's path dependency, or cargo refuses to build it.
 
 - With `--cargo-target=<triple|host>`, **target cfgs** are decided too: the
   loader asks `rustc --print cfg --target <triple>` (`host`: the running
@@ -862,11 +872,12 @@ package and context (target, host), and which resolution they come from.
 `stasis bundle --cargo-manifests` also carries what describes each bundled
 package's build, the way `--package-json` carries npm manifests. For a package
 of the project (the root package, a workspace member, a path dependency): its
-`Cargo.toml` and the workspace `Cargo.toml` above it, that workspace's -- or,
-for a package outside any, its own -- `Cargo.lock`, and the cargo config of
-every directory from the package's up to the bundle root, each of which cargo
-reads when run there (`.cargo/config` before `.cargo/config.toml`), those that
-lie inside the bundle root (a workspace's may sit above). For a vendored crate:
+`Cargo.toml` and the workspace `Cargo.toml` above it, and the build's
+`Cargo.lock` and cargo configs: the lockfile of the entries' workspace (or of
+their package, outside any) and the configs cargo reads when run in the
+entries' package's directory (see above; `.cargo/config` before
+`.cargo/config.toml`), those that lie inside the bundle root -- not a path
+dependency's own lockfile or config, which no build of the entries reads. For a vendored crate:
 its `Cargo.toml` and the `.cargo-checksum.json` cargo checks its files against
 -- the lock and config it was published with play no part in a build that
 depends on it. A vendored file the bundle reads is checked against that list

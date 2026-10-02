@@ -1712,8 +1712,13 @@ test('createCargoContext reads the workspace a member bundled from its own direc
     // dev-dependency's feature out of the build, which resolver 1 of the member's edition wouldn't
     t.assert.deepEqual(files, ['dep/src/lib.rs', 'dep/src/plain.rs', 'src/fast.rs', 'src/lib.rs'])
     t.assert.equal(createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs').version, '0.3.0')
-    // a [workspace] above that doesn't take the package is none of its
+    // a [workspace] above whose `members` don't list the package is still its own (cargo refuses
+    // the build: "current package believes it's in a workspace when it's not"), and what the
+    // package inherits but the workspace lacks stops the bundle
     writeFileSync(join(tmp, 'ws', 'Cargo.toml'), '[workspace]\nmembers = ["other"]\n[workspace.package]\nversion = "0.3.0"\nedition = "2015"\n')
+    t.assert.throws(() => createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs'), { name: 'LockfileError', message: /"dep" is not in \[workspace\.dependencies\]/u })
+    // one that excludes it isn't: it is outside any workspace
+    writeFileSync(join(tmp, 'ws', 'Cargo.toml'), '[workspace]\nmembers = ["crates/*"]\nexclude = ["crates/app"]\n[workspace.package]\nversion = "0.3.0"\nedition = "2015"\n')
     t.assert.throws(() => createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs'), { name: 'LockfileError', message: /no workspace root is given/u })
   })
 })
@@ -1838,5 +1843,81 @@ test('collectRustBundle warns once of a crate root it refuses, however often the
     symlinkSync('../../../secret.rs', join(tmp, 'vendor/foo/src/lib.rs'))
     const { warnings } = await captureWarningsAsync(() => crateEdges(tmp, ['src/lib.rs']))
     t.assert.deepEqual(warnings.filter((w) => w.includes('Refusing file outside its package')), ['[loader.rust] Refusing file outside its package: vendor/foo/src/lib.rs (a link out of vendor/foo)'])
+  })
+})
+
+// --- eleventh round: one directory cargo runs in, workspaces above, vendored manifests, what the build lacks ---
+
+const VENDORED_SOURCES = '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n'
+
+test('createCargoContext reads every cargo config setting from the configs cargo reads in the entries\' package directory', async (t) => {
+  // A member's own config: cargo, run there, takes its [source], its [patch] and its rustflags --
+  // all of them, never one without the others (`cargo build` in app/ compiles fork/src/lib.rs).
+  const files = {
+    'Cargo.toml': '[workspace]\nmembers = ["app"]\nresolver = "2"\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'app/src/lib.rs': 'pub use foo::one;\nmod fast;\nmod slow;\nmod user;\n#[cfg(fast)] pub use fast::F;\n#[cfg(not(fast))] pub use slow::F;\n',
+    'app/src/fast.rs': 'pub struct F;\n', 'app/src/slow.rs': 'pub struct F;\n', 'app/src/user.rs': 'fn f() { crate::F; }\n',
+    'app/.cargo/config.toml': '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "../third"\n[patch.crates-io]\nfoo = { path = "../fork" }\n[build]\nrustflags = ["--cfg", "fast"]\n',
+    'third/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'third/foo/src/lib.rs': 'pub fn one() {}\n',
+    'fork/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'fork/src/lib.rs': 'pub fn one() {}\n',
+  }
+  await withProjectAsync(files, async (tmp) => {
+    const { edges, tree } = await crateEdges(tmp, ['app/src/lib.rs'])
+    t.assert.equal(edges['app/src/lib.rs']['use foo'], 'fork/src/lib.rs')
+    t.assert.deepEqual([...tree.resolutions.get('app/src/user.rs').get('crate::F')], [['fast', 'app/src/fast.rs'], ['not(fast)', 'app/src/slow.rs']])
+    const cargo = createCargoContext(tmp, { entries: ['app/src/lib.rs'] })
+    t.assert.equal(cargo.vendorDir, 'third')
+    t.assert.deepEqual(cargo.buildFilesFor('app/src/lib.rs').map((f) => f.path), ['app/Cargo.toml', 'Cargo.toml', 'app/.cargo/config.toml'])
+  })
+})
+
+test('createCargoContext merges the [source] tables of the cargo configs key by key, the nearest first, as cargo does', async (t) => {
+  // The bundle root's config replaces crates.io; the nested workspace's names the directory, its
+  // own: `cargo build` in ws/ compiles ws/third/foo (1.0.0), not vendor/foo (1.5.0).
+  await withProjectAsync({
+    '.cargo/config.toml': VENDORED_SOURCES,
+    'vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.5.0"\n', 'vendor/foo/src/lib.rs': '',
+    'ws/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'ws/src/lib.rs': 'pub use foo::one;\n',
+    'ws/.cargo/config.toml': '[source.vendored-sources]\ndirectory = "third"\n',
+    'ws/third/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'ws/third/foo/src/lib.rs': '',
+  }, async (tmp) => {
+    t.assert.equal(createCargoContext(tmp, { entries: ['ws/src/lib.rs'] }).vendorDir, 'ws/third')
+    t.assert.deepEqual((await crateEdges(tmp, ['ws/src/lib.rs'])).files, ['ws/src/lib.rs', 'ws/third/foo/src/lib.rs'])
+  })
+})
+
+test('createCargoContext takes the workspace above the bundle root of a member only a member\'s path dependency makes, and its [patch]', async (t) => {
+  // lib2 is a member as app's path dependency: `cargo build` in lib2/ takes the virtual
+  // workspace's resolver 1, which unifies the dev-dependency's feature (foo/src/dev.rs).
+  await withProjectAsync({
+    'Cargo.toml': '[workspace]\nmembers = ["app"]\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlib2 = { path = "../lib2" }\n',
+    'app/src/lib.rs': '',
+    'lib2/Cargo.toml': '[package]\nname = "lib2"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = { path = "foo" }\n[dev-dependencies]\nfoo = { path = "foo", features = ["dev"] }\n',
+    'lib2/src/lib.rs': 'pub use foo::f;\n',
+    'lib2/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n[features]\ndev = []\n',
+    'lib2/foo/src/lib.rs': '#[cfg(feature = "dev")]\nmod dev;\n#[cfg(not(feature = "dev"))]\nmod nodev;\npub fn f() {}\n',
+    'lib2/foo/src/dev.rs': '', 'lib2/foo/src/nodev.rs': '',
+  }, async (tmp) => {
+    t.assert.deepEqual((await crateEdges(join(tmp, 'lib2'), ['src/lib.rs'])).files, ['foo/src/dev.rs', 'foo/src/lib.rs', 'src/lib.rs'])
+  })
+  // The workspace root's [patch] applies when cargo builds the member from its own directory
+  // (`cargo build` in app/ compiles app/fork/src/lib.rs), and its lockfile is cargo's, not one beside the member.
+  await withProjectAsync({
+    'Cargo.toml': '[workspace]\nmembers = ["app"]\nresolver = "2"\n[patch.crates-io]\nfoo = { path = "app/fork" }\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'app/Cargo.lock': 'version = 4\n', // stale, from before the workspace: cargo never reads it
+    'app/src/lib.rs': 'pub use foo::one;\n',
+    'app/.cargo/config.toml': VENDORED_SOURCES,
+    'app/vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'app/vendor/foo/src/lib.rs': 'pub fn one() {}\n',
+    'app/fork/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'app/fork/src/lib.rs': 'pub fn one() {}\n',
+  }, async (tmp) => {
+    const root = join(tmp, 'app')
+    t.assert.equal((await crateEdges(root, ['src/lib.rs'])).edges['src/lib.rs']['use foo'], 'fork/src/lib.rs')
+    const cargo = createCargoContext(root, { entries: ['src/lib.rs'], target: LINUX })
+    t.assert.deepEqual(cargo.resolution(), { mode: 'replay', why: 'the workspace root lies above the bundle root' })
+    t.assert.deepEqual(cargo.buildFilesFor('src/lib.rs').map((f) => f.path), ['Cargo.toml', '.cargo/config.toml'])
   })
 })
