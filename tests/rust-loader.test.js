@@ -2376,10 +2376,10 @@ test('buildRustTree resolves through a dense cycle of cfg-gated globs in time: e
 
 const MANY_OSES = ['macos', 'ios', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'solaris', 'illumos', 'haiku', 'aix', 'hurd', 'redox', 'fuchsia', 'android', 'emscripten', 'nto', 'vxworks']
 
-test('buildRustTree keeps every candidate under an any(…) of more alternatives than it tells apart: none is certain', (t) => {
+test('buildRustTree keeps every candidate under a cfg of a score of platforms, and of more glob paths than it tells apart: none is certain', (t) => {
   const any = `any(${MANY_OSES.map((os) => `target_os = "${os}"`).join(', ')})`
   const files = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
-  // 17 platforms one way, every other the other: linux builds a.rs
+  // 17 platforms one way, every other the other: linux builds a.rs, and no target says it is linux
   const listed = new Map([
     ['src/lib.rs', `mod a;\nmod b;\n#[cfg(${any})]\npub use b::T;\n#[cfg(not(${any}))]\npub use a::T;\nmod user;\n`],
     ['src/a.rs', 'pub struct T;\n'],

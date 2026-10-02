@@ -1304,34 +1304,29 @@ function cfgLeaves(pred) {
   if (m[1] === 'any') return anyOf(parts)
   return parts.length === 1 ? negated(parts[0]) : []
 }
-// The leaves holding when any of `alts` (conjunctions) does: the one alternative when there is
-// one (the same twice counts once, and one holding whenever another does adds nothing: `a ∨ (a ∧
-// b)` is `a`), an `any` leaf of them, nothing when one decides nothing -- or, for more than
-// MAX_ALTERNATIVES (a module reached along every path of a dense glob cycle, a cfg listing a
-// score of platforms) or one undecided already, the undecided leaf: too many to tell apart along
-// every path, and never to be taken for holding (see UNDECIDED_KEY).
-const MAX_ALTERNATIVES = 16
-const anyOf = (alts) => {
+// The alternatives of an `any` of `alts` (conjunctions) that tell something apart: the same one
+// twice counts once, and one holding whenever another does adds nothing (`a ∨ (a ∧ b)` is `a`);
+// none when one decides nothing.
+function distinctAlternatives(alts) {
   const uniq = new Map()
   for (const alt of alts) {
     if (alt.length === 0) return []
     uniq.set(alt.map(leafKey).toSorted().join('&'), alt)
   }
-  let list = [...uniq.values()]
-  if (list.length > 1) {
-    const keys = list.map((alt) => new Set(alt.map(leafKey)))
-    list = list.filter((_, i) => !keys.some((other, j) => j !== i && other.size < keys[i].size && other.isSubsetOf(keys[i])))
-  }
-  if (list.length > 1 && (list.length > MAX_ALTERNATIVES || list.some((alt) => alt.some((l) => l.many !== undefined)))) return [{ key: UNDECIDED_KEY, value: null, neg: false, many: list }]
-  if (list.length <= 1) return list[0] ?? []
-  return [{ key: 'any', value: null, neg: false, alts: list }]
+  const list = [...uniq.values()]
+  if (list.length <= 1) return list
+  const keys = list.map((alt) => new Set(alt.map(leafKey)))
+  return list.filter((_, i) => !keys.some((other, j) => j !== i && other.size < keys[i].size && other.isSubsetOf(keys[i])))
 }
-// The key of the leaf an `any` the loader doesn't follow is kept as (`many`: its alternatives,
-// for its cfg text, see leafText): one no build decides (leafFalse), no asker holds -- itself
-// under one included (holds) -- that is no custom cfg (doubtful) and never exclusive with
+// The leaves holding when any of `alts` (conjunctions) does: the one alternative when there is
+// one, an `any` leaf of them, nothing when one decides nothing (distinctAlternatives).
+const anyOf = (alts) => anyLeaves(distinctAlternatives(alts))
+const anyLeaves = (list) => (list.length <= 1 ? list[0] ?? [] : [{ key: 'any', value: null, neg: false, alts: list }])
+// The key of the leaf a module many glob paths reach is under (`many`: their alternatives, for
+// its cfg text, see leafText; eitherLeaves): one no build decides (leafFalse), no asker holds --
+// itself under one included (holds) -- that is no custom cfg (doubtful) and never exclusive with
 // anything (prepared), its negation too. So a candidate under it is only maybe the answer, beside
-// the others (withAlternatives), and never certain; and an `any` with one among its alternatives
-// is undecided too, which keeps the sets along a dense glob cycle few.
+// the others (withAlternatives), and never certain.
 const UNDECIDED_KEY = 'any(…)!'
 // The leaves of a conjunction's negation: one leaf flips, an `any` leaf's negation is every
 // alternative's, several leaves negate to any of their negations.
@@ -1472,12 +1467,18 @@ const unionLeaves = (a, b, sets) => {
   return unions.get(b.key) ?? unions.set(b.key, leafSet([...a.leaves, ...b.leaves], sets)).get(b.key)
 }
 // The leaves holding when either of two sets does (a module two glob paths reach): an `any` of
-// the two -- of their alternatives, when one is an `any` leaf already.
+// the two -- of their alternatives, when one is an `any` leaf already. Past MAX_ALTERNATIVES of
+// them (a module reached along every path of a dense cycle of cfg-gated globs), or with one
+// undecided already, the undecided leaf (see UNDECIDED_KEY): too many paths to tell apart, and
+// once one is, everything reached further along is -- which keeps the sets along such a cycle few.
+const MAX_ALTERNATIVES = 16
 const eitherLeaves = (a, b, sets) => {
   if (a.key === b.key) return a
   if (a.key === '' || b.key === '') return NO_LEAVES
   const altsOf = (s) => (s.leaves.length === 1 && s.leaves[0].alts !== undefined ? s.leaves[0].alts : [s.leaves])
-  return leafSet(anyOf([...altsOf(a), ...altsOf(b)]), sets)
+  const list = distinctAlternatives([...altsOf(a), ...altsOf(b)])
+  const undecided = list.length > MAX_ALTERNATIVES || (list.length > 1 && list.some((alt) => alt.some((l) => l.many !== undefined)))
+  return leafSet(undecided ? [{ key: UNDECIDED_KEY, value: null, neg: false, many: list }] : anyLeaves(list), sets)
 }
 
 // The leaf set of an `asker` -- `{ file, set, keys, compat, sure, doubt }`, the file a path was

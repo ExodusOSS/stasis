@@ -2051,3 +2051,20 @@ test('buildRustBundle resolves a file the target rules out as it would where it 
     t.assert.equal(bundle.imports.get('rust').get('src/as_mutex/static_macro.rs').get('super::AtomicU64'), 'src/as_mutex.rs')
   })
 })
+
+test('buildRustBundle decides a cfg listing a score of platforms under the target', async (t) => {
+  // 17 platforms one way, every other the other, each through a gate macro: linux compiles a.rs
+  const oses = ['macos', 'ios', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'solaris', 'illumos', 'haiku', 'aix', 'hurd', 'redox', 'fuchsia', 'android', 'emscripten', 'nto', 'vxworks']
+  const any = `any(${oses.map((os) => `target_os = "${os}"`).join(', ')})`
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': `macro_rules! cfg_many { ($($i:item)*) => { $( #[cfg(${any})] $i )* } }\nmacro_rules! cfg_not_many { ($($i:item)*) => { $( #[cfg(not(${any}))] $i )* } }\nmod a;\nmod b;\ncfg_many! { pub use b::T; }\ncfg_not_many! { pub use a::T; }\nmod user;\n`,
+    'src/a.rs': 'pub struct T;\n',
+    'src/b.rs': 'pub struct T;\n',
+    'src/user.rs': 'fn f(_: crate::T) {}\n',
+  }, async (tmp) => {
+    const user = async (cargoTarget) => (await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargoTarget })).imports.get('rust').get('src/user.rs').get('crate::T')
+    t.assert.equal(await user(LINUX), 'src/a.rs')
+    t.assert.deepEqual([...(await user(null)).values()].toSorted(), ['src/a.rs', 'src/b.rs']) // without one, either
+  })
+})
