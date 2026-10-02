@@ -75,7 +75,15 @@ async function* chunked(buf, size) {
 
 const collect = () => {
   const files = []
-  return { files, onFile: (file, contents) => void files.push([file, contents]) }
+  const formats = new Map()
+  return {
+    files,
+    formats,
+    onFile(file, contents, { format }) {
+      files.push([file, contents])
+      formats.set(file, format)
+    },
+  }
 }
 
 const minimal = (sourceFiles, extra = {}) => ({
@@ -168,11 +176,31 @@ test('readBundle streams files wherever the bundle puts them: after the metadata
     const buf = compressed(json)
     const whole = parseWhole(buf)
     t.assert.equal((await readBundle(chunked(buf, 1000))).serialize(), whole.serialize(), label)
-    const { files, onFile } = collect()
+    const { files, formats, onFile } = collect()
     const bundle = await readBundle(chunked(buf, 1000), { onFile })
     t.assert.deepStrictEqual(new Map(files), whole.sources, label)
     for (const field of ['formats', 'imports', 'executable', 'reason']) t.assert.deepStrictEqual(bundle[field], whole[field], `${label}: ${field}`)
+    // A file's format is known only once `formats` has streamed by.
+    const known = label === 'files last'
+    for (const file of whole.sources.keys()) t.assert.equal(formats.get(file), known ? whole.formats.get(file) : undefined, `${label}: ${file}`)
   }
+})
+
+test('readBundle with onFile rejects a bundle whose final formats disagree with one it passed', async (t) => {
+  // JSON keeps the last of a repeated key, so a second `formats` after the files replaces the one onFile saw.
+  const files = String.raw`"sources":{".":{"name":"app","version":"1","files":{"a.js":"A"}}}`
+  const head = String.raw`"version":1,"config":{"scope":"full"},"entries":[],"imports":{}`
+  const buf = compressed(`{${head},"formats":{"a.js":"module"},${files},"formats":{"a.js":"commonjs"}}`)
+  t.assert.equal(parseWhole(buf).formats.get('a.js'), 'commonjs')
+  t.assert.equal((await readBundle(buf)).formats.get('a.js'), 'commonjs')
+  const seen = collect()
+  await t.assert.rejects(readBundle(buf, seen), /bundle file 'a\.js' changed format after onFile got it/)
+  t.assert.deepStrictEqual([...seen.formats], [['a.js', 'module']])
+
+  // The root listing's format may be keyed '' (older writers) as well as '.'.
+  const listing = collect()
+  await readBundle(compressed(`{${head},"formats":{"":"directory"},"sources":{".":{"name":"app","version":"1","files":{"":"[]"}}}}`), listing)
+  t.assert.deepStrictEqual([...listing.formats], [['.', 'directory']])
 })
 
 test('readBundle awaits onFile one file at a time, and stops on its failure', async (t) => {
