@@ -636,7 +636,11 @@ differ or write no cfg, two definitions that differ) is a gate it can't see
 into, whose items are never certainly compiled nor ruled out; a
 file mounted by several declarations is under any of their cfgs; a module
 reached by several glob paths is under either's, and so is everything its own
-globs reach. A glob
+globs reach. An `any(…)` of more than 16 alternatives (a module reached along
+every path of a dense cycle of cfg-gated globs, a cfg listing a score of
+platforms) is undecided: never certain, never ruled out, exclusive with
+nothing, so whatever stands under it is one candidate of the cfg-keyed map,
+beside the others. A glob
 into the sysroot or into another crate brings in nothing the loader can see, so
 it claims nothing -- and since a glob into a crate that isn't in-tree may well
 provide a name, an unresolved lead in a file with such a glob (`use syn::*; …

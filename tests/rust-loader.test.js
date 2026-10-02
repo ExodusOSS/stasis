@@ -2368,3 +2368,30 @@ test('buildRustTree resolves through a dense cycle of cfg-gated globs in time: e
   t.assert.ok(performance.now() - started < 10_000, `${Math.round(performance.now() - started)} ms`)
   t.assert.equal(resolutions.get('src/lib.rs').get('crate::m0::item0'), 'src/m0.rs')
 })
+
+// --- resolver fixes: undecided cfgs, modules beside globs, other crates' macros ---
+
+const MANY_OSES = ['macos', 'ios', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'solaris', 'illumos', 'haiku', 'aix', 'hurd', 'redox', 'fuchsia', 'android', 'emscripten', 'nto', 'vxworks']
+
+test('buildRustTree keeps every candidate under an any(…) of more alternatives than it tells apart: none is certain', (t) => {
+  const any = `any(${MANY_OSES.map((os) => `target_os = "${os}"`).join(', ')})`
+  const files = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
+  // 17 platforms one way, every other the other: linux builds a.rs
+  const listed = new Map([
+    ['src/lib.rs', `mod a;\nmod b;\n#[cfg(${any})]\npub use b::T;\n#[cfg(not(${any}))]\npub use a::T;\nmod user;\n`],
+    ['src/a.rs', 'pub struct T;\n'],
+    ['src/b.rs', 'pub struct T;\n'],
+    ['src/user.rs', 'fn f(_: crate::T) {}\n'],
+  ])
+  t.assert.deepEqual(files(buildRustTree(listed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/a.rs', 'src/b.rs'])
+  // a module 17 cfg-gated glob paths reach, beside the named import linux builds
+  const globbed = new Map([
+    ['src/lib.rs', `mod common;\nmod lin;\n${MANY_OSES.map((os, k) => `mod v${k};\n#[cfg(target_os = "${os}")]\npub use crate::v${k}::*;\n`).join('')}#[cfg(target_os = "linux")]\npub use lin::T;\nmod user;\n`],
+    ['src/common.rs', 'pub struct T;\n'],
+    ['src/lin.rs', 'pub struct T;\n'],
+    ['src/user.rs', 'fn f(_: crate::T) {}\n'],
+    ...MANY_OSES.map((_, k) => [`src/v${k}.rs`, 'pub use crate::common::*;\n']),
+  ])
+  t.assert.deepEqual(files(buildRustTree(globbed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/common.rs', 'src/lin.rs'])
+})
+

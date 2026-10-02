@@ -1296,9 +1296,10 @@ function cfgLeaves(pred) {
 }
 // The leaves holding when any of `alts` (conjunctions) does: the one alternative when there is
 // one (the same twice counts once, and one holding whenever another does adds nothing: `a ∨ (a ∧
-// b)` is `a`), an `any` leaf of them, nothing when one decides nothing -- or when there are more
-// than MAX_ALTERNATIVES, which a module reached along every path of a dense glob cycle may be:
-// that many decide too little to be worth telling apart.
+// b)` is `a`), an `any` leaf of them, nothing when one decides nothing -- or, for more than
+// MAX_ALTERNATIVES (a module reached along every path of a dense glob cycle, a cfg listing a
+// score of platforms) or one undecided already, the undecided leaf: too many to tell apart along
+// every path, and never to be taken for holding (see UNDECIDED_KEY).
 const MAX_ALTERNATIVES = 16
 const anyOf = (alts) => {
   const uniq = new Map()
@@ -1311,10 +1312,17 @@ const anyOf = (alts) => {
     const keys = list.map((alt) => new Set(alt.map(leafKey)))
     list = list.filter((_, i) => !keys.some((other, j) => j !== i && other.size < keys[i].size && other.isSubsetOf(keys[i])))
   }
-  if (list.length > MAX_ALTERNATIVES) return []
+  if (list.length > 1 && (list.length > MAX_ALTERNATIVES || list.some((alt) => alt.some((l) => l.many !== undefined)))) return [{ key: UNDECIDED_KEY, value: null, neg: false, many: list }]
   if (list.length <= 1) return list[0] ?? []
   return [{ key: 'any', value: null, neg: false, alts: list }]
 }
+// The key of the leaf an `any` the loader doesn't follow is kept as (`many`: its alternatives,
+// for its cfg text, see leafText): one no build decides (leafFalse), no asker holds -- itself
+// under one included (holds) -- that is no custom cfg (doubtful) and never exclusive with
+// anything (prepared), its negation too. So a candidate under it is only maybe the answer, beside
+// the others (withAlternatives), and never certain; and an `any` with one among its alternatives
+// is undecided too, which keeps the sets along a dense glob cycle few.
+const UNDECIDED_KEY = 'any(…)!'
 // The leaves of a conjunction's negation: one leaf flips, an `any` leaf's negation is every
 // alternative's, several leaves negate to any of their negations.
 const negated = (leaves) => {
@@ -1402,6 +1410,7 @@ function prepared(leaves) {
       prep.anys.push(l)
       continue
     }
+    if (l.many !== undefined) continue // undecided: exclusive with nothing
     const k = leafKey(l)
     prep.keys.add(k)
     prep.negKeys.push(l.neg ? k.slice(1) : `!${k}`)
@@ -1499,7 +1508,7 @@ const deadFor = (asker, set) => asker !== undefined && !asker.deadHere && set.ke
 // of a custom cfg (`not(loom)`: presumably off, see doubtful). An asker under no cfg holds nothing
 // else: for it, candidates under cfgs of their own are each only maybe the answer, and all of
 // them are (see withAlternatives), not the first in written order.
-const holds = (l, keys, custom) => keys.has(leafKey(l)) || (l.alts === undefined ? l.neg && custom(l.key) : l.alts.some((alt) => alt.every((m) => holds(m, keys, custom))))
+const holds = (l, keys, custom) => l.many === undefined && (keys.has(leafKey(l)) || (l.alts === undefined ? l.neg && custom(l.key) : l.alts.some((alt) => alt.every((m) => holds(m, keys, custom)))))
 const entailed = (asker, set) => asker === undefined || set.key === '' || cached(asker.sure, set.key, () => set.leaves.every((l) => holds(l, asker.keys, asker.custom)))
 // The cfgs rustc and cargo set: anything else in a positive leaf is a custom `--cfg` (`loom`,
 // `docsrs`, `tokio_unstable`, mio's `mio_unsupported_force_poll_poll`), off in a default build
@@ -1731,8 +1740,20 @@ function pick(candidates, root, ctx, asker, ns = null) {
 // macro), and only when nothing else tells the candidates apart. Null for no leaves.
 const leafText = (l) => {
   if (l.alts !== undefined) return `any(${l.alts.map((alt) => cfgTextOf(alt) ?? '*').join(', ')})`
-  const plain = l.value === null ? l.key : `${l.key} = "${l.value}"`
+  const plain = l.many !== undefined ? manyText(l) : (l.value === null ? l.key : `${l.key} = "${l.value}"`)
   return l.neg ? `not(${plain})` : plain
+}
+// An undecided leaf's text (see UNDECIDED_KEY): the `any(…)` of its alternatives, kept per leaf, or
+// its count when that runs long (undecided leaves within undecided leaves).
+const manyTexts = new WeakMap()
+const manyText = (l) => {
+  let text = manyTexts.get(l)
+  if (text === undefined) {
+    text = `any(${l.many.map((alt) => cfgTextOf(alt) ?? '*').join(', ')})`
+    if (text.length > 4096) text = `any(${l.many.length} alternatives)`
+    manyTexts.set(l, text)
+  }
+  return text
 }
 function cfgTextOf(leaves) {
   const own = leaves.filter((l) => l.key !== 'variant')
