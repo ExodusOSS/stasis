@@ -796,21 +796,33 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     }
     return m
   }
-  // The build's workspace root: that of the first entry's package that isn't vendored (else the
-  // package itself, outside any workspace), else the bundle root's manifest; its Cargo.lock is the
-  // build's, as cargo finds it. A vendored crate's own published lock plays no part.
-  const buildRoot = () => {
-    const pkg = entries.map(packageFor).find((m) => m && !isVendoredDir(m.dir))
-    return pkg ? (workspaceFor(pkg.dir) ?? pkg) : readManifest('.')
+  // The package the build is of: the first entry's package that isn't vendored -- the one cargo is
+  // run in (runDir), taken now that the vendor directory is known; null when no entry has one.
+  // Memoized.
+  let buildPkg
+  const buildPackage = () => {
+    if (buildPkg === undefined) buildPkg = entries.map(packageFor).find((m) => m && !isVendoredDir(m.dir)) ?? null
+    return buildPkg
   }
-  // Whether the build's workspace root lies above the bundle root: its Cargo.lock is cargo's, never
-  // read, and one beside the package isn't the build's.
-  const rootOutside = () => buildWorkspaceRoot()?.outside !== undefined
-  // The build's Cargo.lock, read by @preventive/lockfile (`version = 3` or `4`; an older one, or a
-  // lock that isn't what cargo writes or could be read two ways, stops the build), as `{ file,
-  // text, lock, byId }` (`byId`: `name version` → the keys of that version's packages); null when
-  // there is none in the bundle root.
-  const buildLockPath = () => (rootOutside() ? null : posix.join(buildRoot()?.dir ?? '.', 'Cargo.lock'))
+  // The workspace root of the build: its package's (rootManifestOf), inside the bundle root or
+  // above it (`outside`: read, never bundled), the package itself outside any workspace; the bundle
+  // root's manifest when no entry has a package. Its Cargo.lock is the build's, and its resolver
+  // and `[patch]` apply to every package of the build.
+  const buildWorkspaceRoot = () => {
+    const pkg = buildPackage()
+    return pkg === null ? readManifest('.') : rootManifestOf(pkg)
+  }
+  // The build's Cargo.lock, project-relative: beside its workspace root, as cargo finds it -- a
+  // vendored crate's own published lock plays no part; null when that root lies above the bundle
+  // root (its lockfile is cargo's, never read, and one beside the package isn't the build's).
+  const buildLockPath = () => {
+    const root = buildWorkspaceRoot()
+    return root?.outside === undefined ? posix.join(root?.dir ?? '.', 'Cargo.lock') : null
+  }
+  // The build's Cargo.lock (buildLockPath), read by @preventive/lockfile (`version = 3` or `4`; an
+  // older one, or a lock that isn't what cargo writes or could be read two ways, stops the build),
+  // as `{ file, text, lock, byId }` (`byId`: `name version` → the keys of that version's
+  // packages); null when there is none in the bundle root.
   let lock
   const lockfile = () => {
     if (lock === undefined) {
@@ -837,13 +849,6 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
         locate: (name, ver) => (typeof name === 'string' ? vendored().byName.get(normName(name))?.find((c) => c.version === ver)?.dir ?? null : null),
       })
     : null
-  // The workspace root of the build: the entries' package's (the first not vendored), inside the
-  // bundle root or above it -- read, never bundled -- else that package itself; the bundle root's
-  // manifest when no entry has one. Its manifest's `[patch]` applies to every package of the build.
-  const buildWorkspaceRoot = () => {
-    const pkg = entries.map(packageFor).find((m) => m && !isVendoredDir(m.dir))
-    return pkg ? rootManifestOf(pkg) : readManifest('.')
-  }
   // Where the build takes its `[patch]` tables from, in the order they apply: the cargo configs'
   // (`configs`, nearest first), as @preventive/lockfile reads them, then the workspace root
   // manifest's (buildWorkspaceRoot), as `{ patch, at, from }`: `at(path)` the directory a patch's
@@ -987,14 +992,14 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // Cargo's feature resolver: v2 (edition 2021+, or `resolver = "2"`/`"3"`) leaves dev-dependencies
   // out of a normal build's unification, resolves what is built for the host apart from what is
   // built for the target, and ignores the tables of platforms not being built; v1 unifies them all.
-  // It is the workspace's setting: its root manifest's `resolver`, else its edition -- the
-  // workspace of the entries' package (the package itself outside any), else the bundle root's.
+  // It is the workspace's setting: the build's workspace root's (buildWorkspaceRoot) `resolver`,
+  // else its edition -- never that of a vendored crate an entry is in, where cargo isn't run.
   let resolverMemo = null
   const resolverVersion = () => {
-    if (resolverMemo !== null) return resolverMemo
-    const pkg = entries.map(packageFor).find(Boolean)
-    const root = (pkg ? rootManifestOf(pkg) : null) ?? readManifest('.')
-    resolverMemo = root?.resolver ?? (Number(root?.package?.edition ?? 0) >= 2021 ? 2 : 1)
+    if (resolverMemo === null) {
+      const root = buildWorkspaceRoot()
+      resolverMemo = root?.resolver ?? (Number(root?.package?.edition ?? 0) >= 2021 ? 2 : 1)
+    }
     return resolverMemo
   }
   // The feature context a unit's code sees (resolver 2 keeps the host's apart; resolver 1 has one).
@@ -1258,13 +1263,14 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   const exactUncached = () => {
     if (metadata) return null
     if (targetInfo === null) return notExact('no --cargo-target')
+    const lockPath = buildLockPath()
+    if (lockPath === null) return notExact('the workspace root lies above the bundle root')
     const lk = lockfile()
-    const root = buildRoot()
-    if (rootOutside()) return notExact('the workspace root lies above the bundle root')
-    if (lk === null) return notExact(`no ${posix.join(root?.dir ?? '.', 'Cargo.lock')}`)
+    if (lk === null) return notExact(`no ${lockPath}`)
+    const root = buildWorkspaceRoot()
     if (root === null) return notExact('no package owns the entries')
     const memberDirs = membersOf(root)
-    if (memberDirs === null) return notExact(`a members pattern of ${posix.join(root.dir, 'Cargo.toml')} leaves the bundle root`)
+    if (memberDirs === null) return notExact(`a members pattern of ${root.file} leaves the bundle root`)
     // The path packages: the members, the path dependencies of each, the path [patch]es.
     const keyOf = new Map() // dir -> package key
     const dirOf = new Map() // package key -> dir
@@ -1327,10 +1333,9 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     if (entryKeys.some((k) => !memberKeys.includes(k))) return notExact('an entry\'s package isn\'t a member of the workspace')
     const config = readNamed(configs[0]?.file ?? null, () => parseCargoConfig(configs.map((c) => c.text)))
     const graph = readNamed(lk.file, () => linkCargo(lk.lock, manifestsByKey, { workspace: root.cargo, members: memberKeys, config }))
-    const rootFile = posix.join(root.dir, 'Cargo.toml')
     const build = { packages: entryKeys, features, allFeatures, noDefaultFeatures, dev: entries.some((e) => linksDevDeps(e)) }
     const platform = (info, marks = []) => ({ name: info.triple, cfg: [...info.cfgs, ...marks] })
-    const featuresOf = (g, platforms) => readNamed(rootFile, () => resolveCargoFeatures(g, { ...build, ...platforms }))
+    const featuresOf = (g, platforms) => readNamed(root.file, () => resolveCargoFeatures(g, { ...build, ...platforms }))
     let sure
     let all
     if (hostInfo === null) {

@@ -332,6 +332,17 @@ test('createCargoContext picks the feature resolver from a workspace-inherited e
   withProject(files('2018'), (tmp) => t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': [], 'vendor/devdep': [] }))
 })
 
+test('createCargoContext takes the feature resolver from the build\'s workspace, never from a vendored crate an entry is in', (t) => {
+  // cargo runs in app/ (edition 2021: resolver 2), whatever the edition of the vendored crate the
+  // first entry is in (2015: resolver 1): the root's dev-dependencies stay out of a normal build
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nold = "1"\n[dev-dependencies]\ndevdep = "1"\n',
+    'src/main.rs': '',
+    'vendor/old/Cargo.toml': '[package]\nname = "old"\nversion = "1.0.0"\nedition = "2015"\n', 'vendor/old/src/lib.rs': '',
+    'vendor/devdep/Cargo.toml': '[package]\nname = "devdep"\nversion = "1.0.0"\n', 'vendor/devdep/src/lib.rs': '',
+  }, (tmp) => t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['vendor/old/src/lib.rs', 'src/main.rs'] })), { '.': [], 'vendor/old': [] }))
+})
+
 test('createCargoContext applies a weak `dep?/feat` once the dependency is active, whichever table activates it', (t) => {
   const files = (deps) => ({
     'Cargo.toml': ['[package]', 'name = "app"', 'version = "0.1.0"', 'edition = "2021"',
