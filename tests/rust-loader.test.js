@@ -2407,3 +2407,34 @@ test('buildRustTree lets a local module give way to a glob of its name only when
   t.assert.equal(r(new Map([...sources, ['src/lib.rs', 'mod other;\nuse crate::other::*;\n#[cfg(loom)]\nmod imp;\nfn f() { imp::X::real() }\n']])), 'src/other.rs')
 })
 
+test('buildRustTree finds another crate\'s macro as that crate\'s root does: under its files\' cfgs, through its re-exports', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'mod a;\nmod b;\nuse dep::m;\nm!();\nfn f() { dep::m!(); }\n'],
+    ['src/a.rs', 'use dep::{dep, mk};\nmk!();\ndep!();\n'],
+    ['src/b.rs', 'fn f() { dep::plat!(); }\n'],
+    // serde: a docsrs-only copy of serde_core's macros beside the re-export of every other build
+    ['vendor/dep/src/lib.rs', '#[cfg(docsrs)]\n#[macro_use]\n#[path = "alt.rs"]\nmod alt;\n#[cfg(not(docsrs))]\npub use inner::m;\n#[macro_use]\nmod mac;\n#[cfg(unix)]\n#[macro_use]\nmod unix;\n#[cfg(windows)]\n#[macro_use]\nmod windows;\n'],
+    ['vendor/dep/src/alt.rs', '#[macro_export]\nmacro_rules! m { () => {} }\n'],
+    ['vendor/dep/src/mac.rs', '#[macro_export]\nmacro_rules! mk { () => {} }\n#[macro_export]\nmacro_rules! dep { () => {} }\n'],
+    ['vendor/dep/src/unix.rs', '#[macro_export]\nmacro_rules! plat { () => {} }\n'],
+    ['vendor/dep/src/windows.rs', '#[macro_export]\nmacro_rules! plat { () => {} }\n'],
+    ['vendor/inner/src/lib.rs', '#[macro_use]\nmod macros;\n'],
+    ['vendor/inner/src/macros.rs', '#[macro_export]\nmacro_rules! m { () => {} }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.equal(resolutions.get('src/lib.rs').get('m!'), 'vendor/inner/src/macros.rs')
+  t.assert.equal(resolutions.get('src/lib.rs').get('dep::m!'), 'vendor/inner/src/macros.rs')
+  // `use dep::{dep, mk}`: the lead of `dep::mk` is the crate, not the macro `dep` beside it
+  t.assert.equal(resolutions.get('src/a.rs').get('mk!'), 'vendor/dep/src/mac.rs')
+  t.assert.equal(resolutions.get('src/a.rs').get('dep!'), 'vendor/dep/src/mac.rs')
+  // one definition per platform, neither certain: both
+  t.assert.deepEqual(edges(resolutions.get('src/b.rs'))['dep::plat!'], { unix: 'vendor/dep/src/unix.rs', windows: 'vendor/dep/src/windows.rs' })
+  // the root's `pub use util::helper;` of a fn is no `helper!`: the exported macro is
+  const own = new Map([
+    ['src/lib.rs', 'mod util;\n#[macro_use]\nmod macros;\nmod user;\npub use util::helper;\n'],
+    ['src/util.rs', 'pub fn helper() {}\n'],
+    ['src/macros.rs', '#[macro_export]\nmacro_rules! helper { () => {} }\n'],
+    ['src/user.rs', 'fn f() { crate::helper(); crate::helper!(); }\n'],
+  ])
+  t.assert.deepEqual(edges(buildRustTree(own, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs')), { 'crate::helper': 'src/util.rs', 'crate::helper!': 'src/macros.rs' })
+})

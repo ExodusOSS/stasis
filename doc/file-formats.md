@@ -660,11 +660,14 @@ itself there (syn's `use syn::parse::ParseStream` in syn is syn's own
 parse.rs). At the crate root the final segment may be a
 `#[macro_export]` macro (`$crate::name!`), which lives in the file defining it:
 an invocation (`crate::helper!()`, recorded as `crate::helper!`) names the
-macro before an import or module of that name, an ordinary path
+macro -- each definition under its file's cfgs, ranked with an import of the
+name that leads to a macro (a `pub use inner::m;` of the builds a `#[cfg(docsrs)]`
+copy isn't in) -- before a module of that name, an ordinary path
 (`crate::helper()`) the other way round. An invocation is looked up among
-macros throughout: an item a module defines (`fn m`), a module, or an import
-of a module or crate is no `m!`, so a `fn m` beside `use crate::macros::*` leaves
-the glob's `m!` in place. A one-segment path written at the
+macros throughout: an item a module defines (`fn m`), a module, an import of
+a module or crate, or one leading to a file that defines no macro of the
+name (`pub use util::helper;` of a `fn helper`) is no `m!`, so a `fn m` beside
+`use crate::macros::*` leaves the glob's `m!` in place. A one-segment path written at the
 crate root names it when no crate has the name (anyhow's `pub use anyhow as
 format_err;` in lib.rs; a child module's `use x;` does not reach it). The
 answers are the same whatever order the files are listed in: each module's
@@ -979,7 +982,13 @@ super::*` from the root), into another crate too (`use dep::mac;` or an alias
 of it, a prelude's `pub use dep::mac;` behind a glob, the macro in the file
 defining it); a crate root's `#[macro_use] extern crate dep;` brings dep's
 exported macros to every module; `dep::mac!(…)` has an edge to that file
-beside the crate's. A `macro_rules!` in a sibling file is out of scope
+beside the crate's. Another crate's macro is the one its root names, as a path
+there is resolved: each definition under its file's cfgs, judged by that
+crate's own build (serde's docsrs-only copies of serde_core's macros give way
+to its `pub use serde_core::forward_to_deserialize_any`, followed on into
+serde_core), per-platform definitions a cfg-keyed map; and a path's lead is
+the crate though the module imports a macro of the same name (`use
+helper::{helper, mk}`: `mk!` is helper's). A `macro_rules!` in a sibling file is out of scope
 otherwise. A file whose inner
 `#![cfg(…)]` can never hold is carried but compiled empty, so nothing in it is
 followed (a `#![cfg]` inside a macro invocation's body gates nothing). A `mod`
