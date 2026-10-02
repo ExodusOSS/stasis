@@ -682,7 +682,9 @@ copy isn't in) -- before a module of that name, an ordinary path
 macros throughout: an item a module defines (`fn m`), a module, an import of
 a module or crate, or one leading to a file that defines no macro of the
 name (`pub use util::helper;` of a `fn helper`) is no `m!`, so a `fn m` beside
-`use crate::macros::*` leaves the glob's `m!` in place. A one-segment path written at the
+`use crate::macros::*` leaves the glob's `m!` in place; and a glob brings the
+root's `#[macro_export]` macros in as macros only, so a `macro_rules! log` that
+`use super::*;` brings in leaves `log::info!` to the log crate. A one-segment path written at the
 crate root names it when no crate has the name (anyhow's `pub use anyhow as
 format_err;` in lib.rs; a child module's `use x;` does not reach it). The
 answers are the same whatever order the files are listed in: each module's
@@ -990,9 +992,10 @@ after a call doesn't reach it), a `macro_rules!` a macro's body declares
 standing where that macro is first invoked in the file, and a `mod` it
 declares at the invocation in each file hosting it (see above: serde's
 `crate_root!`, declared in core/crate_root.rs and invoked in lib.rs after
-`#[macro_use] mod macros;`, so `de` sees `forward_to_deserialize_any!`), and, in the crate
-root's file, whose items they are, the `#[macro_export]`ed ones -- or by path,
-through the module's imports (`use crate::combinator::dispatch;`, a `use
+`#[macro_use] mod macros;`, so `de` sees `forward_to_deserialize_any!`) -- or by
+path: at the crate root, whose items they are, the `#[macro_export]`ed ones,
+each under its file's cfgs as `crate::m!` has them; through the module's
+imports (`use crate::combinator::dispatch;`, a `use
 super::*` from the root), into another crate too (`use dep::mac;` or an alias
 of it, a prelude's `pub use dep::mac;` behind a glob, the macro in the file
 defining it); a crate root's `#[macro_use] extern crate dep;` brings dep's

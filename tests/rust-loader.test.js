@@ -2442,6 +2442,26 @@ test('buildRustTree finds another crate\'s macro as that crate\'s root does: und
   t.assert.deepEqual(edges(buildRustTree(own, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs')), { 'crate::helper': 'src/util.rs', 'crate::helper!': 'src/macros.rs' })
 })
 
+test('buildRustTree binds the root\'s exported macros in the macro namespace only, each under its cfgs', (t) => {
+  // a bare `m!()` at the root names the exported macro of either platform, as `crate::m!` does
+  const sources = new Map([
+    ['src/lib.rs', '#[cfg(unix)]\nmod a;\n#[cfg(windows)]\nmod b;\nfn f() { m!(); }\nmod user;\n'],
+    ['src/a.rs', '#[macro_export]\nmacro_rules! m { () => {} }\n'],
+    ['src/b.rs', '#[macro_export]\nmacro_rules! m { () => {} }\n'],
+    ['src/user.rs', 'fn g() { crate::m!(); }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual(edges(resolutions.get('src/lib.rs'))['m!'], { unix: 'src/a.rs', windows: 'src/b.rs' })
+  t.assert.deepEqual(edges(resolutions.get('src/user.rs'))['crate::m!'], { unix: 'src/a.rs', windows: 'src/b.rs' })
+  // the root's `log!`, brought in by `use super::*;`, leads no path: `log::` is the crate
+  const glob = new Map([
+    ['src/lib.rs', '#[macro_export]\nmacro_rules! log { () => {} }\nmod sub;\n'],
+    ['src/sub.rs', 'use super::*;\nfn f() { log::info!("x"); let _ = log::Level::Info; }\n'],
+    ['vendor/log/src/lib.rs', '#[macro_export]\nmacro_rules! info { ($($t:tt)*) => {} }\npub enum Level { Info }\n'],
+  ])
+  t.assert.deepEqual(edges(buildRustTree(glob, { roots: ['src/lib.rs'] }).resolutions.get('src/sub.rs')), { 'super': 'src/lib.rs', 'use log': 'vendor/log/src/lib.rs', 'log::info!': 'vendor/log/src/lib.rs' })
+})
+
 test('buildRustTree declares a template\'s mod and include where the macro is invoked by path, and in the inline module invoking it', (t) => {
   const r = (sources) => buildRustTree(new Map(sources), { roots: ['src/lib.rs'] }).resolutions
   // `crate::decl!()` from src/sub.rs: rustc looks for src/sub/inner.rs (src/inner.rs a decoy)

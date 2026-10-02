@@ -1715,8 +1715,6 @@ function pick(candidates, root, ctx, asker, ns = null) {
         const depth = ctx.walking++
         im.following = depth
         r = followImport(im, root, ctx, asker, ns)
-        // The name a macro an import leads to is defined by: the import's (`use dep::mac as m;`).
-        if (ns === 'macro' && r?.kind === 'item' && r.macroName === undefined && im.segments.length > 0) r = { ...r, macroName: im.segments.at(-1) }
         im.following = undefined
         ctx.walking--
         ctx.hits.delete(depth)
@@ -1724,8 +1722,12 @@ function pick(candidates, root, ctx, asker, ns = null) {
       }
       // Followed as a macro to a file defining no macro of the name (`pub use util::helper;` of
       // a `fn helper` beside the root's `#[macro_export] macro_rules! helper`), it binds no macro:
-      // what it imports lives in another namespace.
-      if (ns === 'macro' && r?.kind === 'item' && ctx.fileMacros.get(r.file)?.has(r.macroName) !== true) continue
+      // what it imports lives in another namespace. The name it is defined by is the import's
+      // (`use dep::mac as m;`), see macroAnswer.
+      if (ns === 'macro' && r?.kind === 'item') {
+        r = macroAnswer(r, im.segments.at(-1), ctx)
+        if (r === null) continue
+      }
       // An import leading out of the bundle (`pub(crate) use std::sync::atomic::AtomicU64;`, a
       // crate that isn't vendored) binds the name all the same: an item of its own file, as far
       // as the bundle knows, under its cfgs. One naming a crate outright (`use serde;`) answers
@@ -1831,7 +1833,7 @@ function providedAll(root, at, name, seeing, ctx) {
       // At the crate root, a `#[macro_export]` macro is a binding of the name too, in the macro
       // namespace (`ns`): a `pub use inner::m;` of another build beside it (serde's docsrs-only
       // copy of serde_core's macros) is ranked against it by their cfgs.
-      if (at === 'crate') for (const m of ctx.exportedMacros?.get(root)?.get(name) ?? NONE) yield { answer: { kind: 'item', file: m.file }, leaves: m.leaves, ns: 'macro' }
+      if (at === 'crate') yield* ctx.exportedMacros.get(root)?.get(name) ?? NONE
       // The module's own items rank with its named imports -- two explicit bindings of one name
       // are rustc's error unless their cfgs differ (tokio's `imp` re-exports std's `AtomicU64` in
       // one variant file and defines its own in the other) -- ahead of what globs bring in, which
@@ -1917,7 +1919,7 @@ function hasAll(root, at, name, seeing, ctx) {
   // Asked for every module a closure reaches, most of which have nothing of the name.
   const child = ctx.children.get(root)?.get(at)?.has(name) === true
   const defs = ctx.defined.get(root)?.get(at)?.get(name)
-  const macros = at === 'crate' ? ctx.exportedMacros?.get(root)?.get(name) : undefined
+  const macros = at === 'crate' ? ctx.exportedMacros.get(root)?.get(name) : undefined
   const imports = importsOf(root, at, name, seeing, ctx)
   if (!child && defs === undefined && macros === undefined && imports.length === 0) return NONE
   const out = []
@@ -1930,8 +1932,7 @@ function hasAll(root, at, name, seeing, ctx) {
     for (const d of defs) if (d.scopeDepth <= seeing && d.file === own) out.push({ answer: { kind: 'item', file: d.file }, leaves: d.leaves, ns: d.ns })
     for (const d of defs) if (d.scopeDepth <= seeing && d.file !== own) out.push({ answer: { kind: 'item', file: d.file }, leaves: d.leaves, ns: d.ns })
   }
-  for (const m of macros ?? NONE) out.push({ answer: { kind: 'item', file: m.file }, leaves: m.leaves })
-  out.push(...imports)
+  out.push(...macros ?? NONE, ...imports)
   return out
 }
 const NONE = Object.freeze([])
@@ -2126,25 +2127,33 @@ function followImport(im, root, ctx, asker, ns = null) {
 // path) -- a crate's every bare call of a std macro asks each `#[macro_use] extern crate` --
 // unless the answer came out of an import cycle still being resolved.
 function macroOfCrate(target, rest, ctx) {
-  if (!ctx.trees.has(target)) {
-    const file = rest.length === 1 ? ctx.macros.get(target)?.get(rest[0]) : undefined
-    return file === undefined ? null : { kind: 'item', file, macroName: rest[0] }
-  }
+  if (!ctx.trees.has(target)) return null
   const key = `${target}\0${rest.join('::')}`
   const known = ctx.cratesMacros.get(key)
   if (known !== undefined) return known
   const depth = ctx.walking++
-  const r = walkPath(['crate', ...rest], target, 'crate', ctx, { ns: 'macro', file: target, asker: ctx.files.get(target)?.asker })
+  const macro = macroAnswer(walkPath(['crate', ...rest], target, 'crate', ctx, { ns: 'macro', file: target, asker: ctx.files.get(target)?.asker }), rest.at(-1), ctx)
   ctx.walking--
-  const macroName = r?.macroName ?? rest.at(-1)
-  let macro = null
-  if (r !== null && r !== VALUE_ONLY && r.kind === 'item' && ctx.fileMacros.get(r.file)?.has(macroName) === true) {
-    const alternatives = r.alternatives === undefined ? undefined : new Map([...r.alternatives].filter(([, f]) => ctx.fileMacros.get(f)?.has(macroName) === true))
-    macro = { kind: 'item', file: r.file, macroName, ...(alternatives?.size > 1 ? { alternatives } : {}) }
-  }
   if (minHit(ctx) >= depth) ctx.cratesMacros.set(key, macro)
   return macro
 }
+
+// `r`, what a path walked in the macro namespace answers, as the macro `name` it names: `{ kind:
+// 'item', file, macroName, alternatives? }`, the file defining it by the name it is defined
+// under (`r`'s, when an import renamed it: `use dep::mac as m;`), and those of its alternatives
+// that define it too, when more than one does; null when its file defines no macro of the name
+// (a `fn write` beside `write!`).
+function macroAnswer(r, name, ctx) {
+  if (r === null || r === VALUE_ONLY || r.kind !== 'item') return null
+  const macroName = r.macroName ?? name
+  const defines = (f) => ctx.fileMacros.get(f)?.has(macroName) === true
+  if (!defines(r.file)) return null
+  const alternatives = r.alternatives === undefined ? undefined : new Map([...r.alternatives].filter(([, f]) => defines(f)))
+  return { kind: 'item', file: r.file, macroName, ...(alternatives?.size > 1 ? { alternatives } : {}) }
+}
+
+// The first file (in tree order) defining the `#[macro_export]` macro `name` of `root`'s crate.
+const exportedFile = (root, name, ctx) => ctx.exportedMacros.get(root)?.get(name)?.[0].answer.file
 
 // An item answer for what definedIn found.
 const itemAt = (def) => (typeof def === 'string' ? { kind: 'item', file: def } : { kind: 'item', file: def.file, alternatives: def.alternatives })
@@ -2252,7 +2261,7 @@ function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, br
     const last = i === segments.length - 1
     // (A macro is looked up as any name is: the crate root's `#[macro_export]` definitions are
     // among its bindings, each under its cfgs -- see providedAll.)
-    const macro = at === 'crate' && last && ns !== 'macro' ? ctx.macros.get(root)?.get(name) : undefined
+    const macro = at === 'crate' && last && ns !== 'macro' ? exportedFile(root, name, ctx) : undefined
     const child = `${at}::${name}`
     const want = nsOf(last)
     let p
@@ -2410,7 +2419,7 @@ function resolvePathRef(ref, file, bindings, ctx) {
   const target = ctx.resolveCrate(name, file)
   // `dep::mac!(…)`: the crate, and the macro it names there (macroOfCrate).
   if (target) return { kind: 'crate', name, file: target, alternatives: ctx.crateAlternatives?.(name, file), macro: ref.macroCall && segments.length > 1 ? macroOfCrate(target, segments.slice(1), ctx) ?? undefined : undefined }
-  const macro = segments.length === 1 && from === 'crate' ? ctx.macros.get(here.root)?.get(lead) : undefined
+  const macro = segments.length === 1 && from === 'crate' ? exportedFile(here.root, lead, ctx) : undefined
   if (macro !== undefined) return { kind: 'item', file: macro }
   // A glob into a crate that isn't in-tree (`use serde::*;`) may bring the lead in -- unless the
   // package declares a dependency of that name, which the lead then is (see declaresCrate): one
@@ -2786,16 +2795,16 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   // its file's plus its own cfg's), the items each module defines (`defined`: module → name →
   // [{ file, scopeDepth, ns, leaves }], `ns` the namespace: `value` for a fn/const/static, which no
   // path continues past, `type` for the rest), how far each module's own visibility reaches (`modScope`:
-  // module → scopeDepth, for what a glob may bring in) and the `#[macro_export]` macros (by name →
-  // the first file; `exportedMacros`: name → each definition, `{ file, leaves }`, its file's leaves
-  // and its own cfg's -- serde's docsrs-only copies of serde_core's macros, a crate's per-platform
-  // ones). `fileMacros` is file → the `macro_rules!` names it defines. `externPrelude` (root →
-  // alias → crate) holds the root's `extern crate x as y;`, in scope crate-wide.
+  // module → scopeDepth, for what a glob may bring in) and the `#[macro_export]` macros
+  // (`exportedMacros`: name → each definition, in tree order, as a candidate binding of the root's
+  // macro namespace -- `{ answer, leaves, ns }`, see pick -- under its file's leaves and its own
+  // cfg's: serde's docsrs-only copies of serde_core's macros, a crate's per-platform ones).
+  // `fileMacros` is file → the `macro_rules!` names it defines. `externPrelude` (root → alias →
+  // crate) holds the root's `extern crate x as y;`, in scope crate-wide.
   const imports = new Map()
   const defined = new Map()
   const modScope = new Map()
-  const macros = new Map()
-  const exportedMacros = new Map() // root -> name -> every `#[macro_export]` definition, `{ file, leaves }`
+  const exportedMacros = new Map()
   const fileMacros = new Map()
   const externPrelude = new Map()
   const perRoot = (map, root) => map.get(root) ?? map.set(root, new Map()).get(root)
@@ -2860,10 +2869,8 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
     fileMacros.set(path, new Set(items.macros.map((m) => m.name)))
     for (const m of items.macros) {
       if (!m.exported) continue
-      const byName = perRoot(macros, here.root)
-      if (!byName.has(m.name)) byName.set(m.name, path)
       const defs = perRoot(exportedMacros, here.root)
-      ;(defs.get(m.name) ?? defs.set(m.name, []).get(m.name)).push({ file: path, leaves: itemLeaves(here, m, path) })
+      ;(defs.get(m.name) ?? defs.set(m.name, []).get(m.name)).push({ answer: { kind: 'item', file: path }, leaves: itemLeaves(here, m, path), ns: 'macro' })
     }
     if (here.modulePath === 'crate') {
       const prelude = perRoot(externPrelude, here.root)
@@ -2971,9 +2978,9 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [root, byParent] of children) for (const [parent, names] of byParent) for (const name of names) note(having, root, name, parent)
   for (const [root, byModule] of defined) for (const [module, names] of byModule) for (const name of names.keys()) note(having, root, name, module)
   for (const [root, byModule] of imports) for (const [module, of] of byModule) for (const name of of.named.keys()) note(having, root, name, module)
-  for (const [root, byName] of macros) for (const name of byName.keys()) note(having, root, name, 'crate')
+  for (const [root, byName] of exportedMacros) for (const name of byName.keys()) note(having, root, name, 'crate')
   const declaresCrate = (name, from) => ctx?.declaresCrate?.(name, from) === true
-  const pathCtx = { trees, children, moduleFiles, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, macros, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), cratesMacros: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
+  const pathCtx = { trees, children, moduleFiles, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), cratesMacros: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
   // Every path of every file, on top of the `mod` / include edges (`resolutions`): once, and once
   // more when the first pass left glob closures short of an import cycle (stabilizeClosures).
   const resolveAll = () => {
@@ -3055,35 +3062,25 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
     // A macro invoked by bare name and defined by `macro_rules!` in textual scope (see mounts):
     // this file's own, what the files above hand down (bytes' `fmt_impl!`, from fmt/mod.rs in
     // fmt/debug.rs), what a `#[macro_use] mod` of this file brings in (tokio's `ready!`, from
-    // macros/ready.rs), and -- in the crate root's file, whose items they are -- the exported ones;
-    // else one the module's imports bring in by path (`use crate::combinator::dispatch;`, a `use
-    // super::*` from the root). (A `macro_rules! vec` in some sibling file of the crate is not
-    // what `vec!` names.)
+    // macros/ready.rs); else one the module binds by path -- what its imports bring in (`use
+    // crate::combinator::dispatch;`, a `use super::*` from the root) and, at the crate root, the
+    // exported ones, whose items they are, each under its cfgs as `crate::m!` has them. (A
+    // `macro_rules! vec` in some sibling file of the crate is not what `vec!` names.)
     if (here !== undefined) {
       const above = inherited(path)
-      const exported = here.modulePath === 'crate' ? macros.get(here.root) : undefined
-      // The macro a bare call of `name` at `offset` names, `{ file, name }` (the file defining it,
-      // by the name it defines it under): one in textual scope; else one an import brings in --
-      // a file that defines a macro of that name, not a `fn write` beside `write!` -- or a
-      // `#[macro_use] extern crate` of the crate root does. Those are the same at every call
-      // of the name, and asked once (`imported`, null for none): a crate calls `format!` by
-      // the thousand.
+      // The macro a bare call of `name` at `offset` names, `{ file, macroName, alternatives? }`
+      // (see macroAnswer): one in textual scope; else one the module binds by path, or a
+      // `#[macro_use] extern crate` of the crate root brings in. Those are the same at every call
+      // of the name, and asked once (`imported`, null for none): a crate calls `format!` by the
+      // thousand.
       const imported = new Map()
       const macroFileAt = (name, offset) => {
-        const inScope = macroAt(path, name, offset, offset, above) ?? exported?.get(name)
-        if (inScope !== undefined) return { file: inScope, name }
+        const inScope = macroAt(path, name, offset, offset, above)
+        if (inScope !== undefined) return { file: inScope, macroName: name }
         return cached(imported, name, () => {
-          const byPath = walkPath([name], here.root, here.modulePath, pathCtx, { ns: 'macro', file: path, asker: here.asker })
-          const as = byPath?.macroName ?? name
-          if (byPath?.file !== undefined && fileMacros.get(byPath.file)?.has(as) === true) {
-            const alternatives = byPath.alternatives === undefined ? undefined : new Map([...byPath.alternatives].filter(([, f]) => fileMacros.get(f)?.has(as) === true))
-            return { file: byPath.file, name: as, alternatives: alternatives?.size > 1 ? alternatives : undefined }
-          }
-          for (const crate of macroUseCrates(here.root)) {
-            const macro = macroOfCrate(crate, [name], pathCtx)
-            if (macro !== null) return { file: macro.file, name: macro.macroName, alternatives: macro.alternatives }
-          }
-          return null
+          let macro = macroAnswer(walkPath([name], here.root, here.modulePath, pathCtx, { ns: 'macro', file: path, asker: here.asker }), name, pathCtx)
+          for (const crate of macroUseCrates(here.root)) macro ??= macroOfCrate(crate, [name], pathCtx)
+          return macro
         }) ?? undefined
       }
       for (const [name, offsets] of items.calls) {
@@ -3100,7 +3097,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
             const macro = macroFileAt(called, offset)
             if (macro === undefined) return
             found.set(`${called}!\0${macro.file}`, macro.alternatives)
-            for (const m of scanned.get(macro.file)?.macros ?? []) if (m.name === macro.name) for (const inner of m.calls) expand(inner)
+            for (const m of scanned.get(macro.file)?.macros ?? []) if (m.name === macro.macroName) for (const inner of m.calls) expand(inner)
           }
           expand(name)
         }
