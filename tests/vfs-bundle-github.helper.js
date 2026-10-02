@@ -9,6 +9,9 @@ export const lockfile = (...importers) => ["lockfileVersion: '9.0'", '', 'settin
 
 export const json = (value) => `${JSON.stringify(value)}\n`
 
+// The commit the fake client's default branch is at.
+export const HEAD = 'b'.repeat(40)
+
 const encoder = new TextEncoder()
 
 // A gzipped tarball of `files` under `dir`, as GitHub's: one top directory named for the tree. A
@@ -28,6 +31,10 @@ export const fakeClient = (files) => {
   const calls = []
   return {
     calls,
+    async getRepoHead({ repo, branch }) {
+      calls.push(['getRepoHead', repo, branch])
+      return { branch: branch ?? 'main', oid: HEAD }
+    },
     async listRepoDir({ repo, sha, path }) {
       calls.push(['listRepoDir', repo, sha, path])
       const prefix = path === undefined ? '' : `${path}/`
@@ -38,6 +45,7 @@ export const fakeClient = (files) => {
     },
     async getRepoTreeId({ repo, sha, path }) {
       calls.push(['getRepoTreeId', repo, sha, path])
+      if (!Object.keys(files).some((f) => f.startsWith(`${path}/`))) throw new Error(`getRepoTreeId: ${repo}@${sha} has no directory at ${path}`)
       return `tree:${path}`
     },
     async getRepoTreeTarball({ repo, tree }) {

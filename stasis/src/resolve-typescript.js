@@ -225,6 +225,17 @@ function manifestTargets(map, subpathKey, conditions) {
   return resolveMapKey(byKey, subpathKey, conditions).filter((t) => validRelativeTarget(t))
 }
 
+// tsc's mapping of `key` ('.' or './sub') through the `exports` of the package in `pkgDir`: the
+// targets `conditions` select, substitution only (Node requires exports targets to name exact
+// files), the first on disk; or null.
+export function typescriptExportsTarget(pkgDir, exports, key, { conditions = new Set(), tsx = false, host = diskHost } = {}) {
+  for (const target of manifestTargets(exports, key, conditions)) {
+    const hit = probeTypescriptTarget(resolvePath(pkgDir, target), { tsx, completion: false, dir: false, host })
+    if (hit) return hit
+  }
+  return null
+}
+
 // --- tsconfig `compilerOptions.paths` ---
 
 // tsconfig.json is JSONC: strip // and /* */ comments and trailing commas (never inside string
@@ -411,12 +422,7 @@ export function resolveTypescriptFallback(parentFile, spec, { conditions = new S
   const pkg = readJson(join(loc.pkgDir, 'package.json'), host) ?? {}
   if (pkg.exports != null) {
     // `exports` fully governs a bare import (main is not a fallback); targets name exact files.
-    const key = loc.subpath === '' ? '.' : `./${loc.subpath}`
-    for (const target of manifestTargets(pkg.exports, key, conditions)) {
-      const hit = probeTypescriptTarget(resolvePath(loc.pkgDir, target), { tsx, completion: false, dir: false, host })
-      if (hit) return hit
-    }
-    return null
+    return typescriptExportsTarget(loc.pkgDir, pkg.exports, loc.subpath === '' ? '.' : `./${loc.subpath}`, { conditions, tsx, host })
   }
   if (loc.subpath === '') {
     // Bare package root: LOAD_AS_DIRECTORY only (never `node_modules/dep.ts`).

@@ -741,6 +741,32 @@ function nativeModuleFiles(pkgAbs, host) {
   return [...new Set(out)]
 }
 
+// The built-in field/suffix resolver (resolve-fields.js) the legacy-field build resolves with on
+// `platform` (null for --mainFields), its `mainFields` (Metro's under --metro), and the conditions
+// it adds to Node's: --metro asserts the RN conditions (+ browser on web); --mainFields carries the
+// user's --conditions.
+export function fieldResolverFor(platform, { mainFields, metro = false, conditions = [], jsx = false, typescript = false, typescriptPaths = null, host = diskHost }) {
+  const extras = metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : conditions
+  const fields = metro ? METRO_MAIN_FIELDS : mainFields
+  const resolver = createFieldResolver({
+    mainFields: fields,
+    platform,
+    preferNative: platform !== null && platform !== 'web',
+    // Under --jsx the resolver probes .jsx/.tsx too, matching scan's jsx-widened carryable set.
+    sourceExts: jsx ? SOURCE_EXTS_JSX : SOURCE_EXTS,
+    conditions: resolveConditions('commonjs', extras),
+    // Opt into Metro's package-entry browser-field quirks only on the --metro path.
+    metro,
+    // --typescript: tsc's mapping, inside the field resolver (the scanner's own fallback
+    // only backs the built-in resolver). Unreachable under --metro-resolver
+    // (classifyEntries rejects the combination -- metro-resolver can't substitute).
+    typescript,
+    typescriptPaths,
+    host,
+  })
+  return { extras, mainFields: fields, resolver }
+}
+
 // Build a JS/TS Bundle + companion Lockfile via the legacy-field resolver (`--mainFields`/
 // `--metro`). Scanned once per platform; each edge is recorded flat when the platforms that
 // have it agree, or as a `{ platform: target }` map where they diverge. Returns { bundle, lockfile }.
@@ -776,29 +802,15 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
   let usesEmpty = false
 
   for (const platform of platforms) {
-    // --metro asserts the RN conditions (+ browser on web); --mainFields (platform null) carries the user's --conditions.
-    const extras = metro ? ['react-native', ...(platform === 'web' ? ['browser'] : [])] : scanConditions
+    const field = fieldResolverFor(platform, { mainFields, metro, conditions: scanConditions, jsx, typescript, typescriptPaths, host })
+    const { extras } = field
     // --metro --metro-resolver delegates to the project's own metro-resolver for byte-for-byte Metro
-    // fidelity; otherwise the built-in field/suffix resolver (resolve-fields.js) reproduces it.
-    // metro-resolver derives default/require|import/platform conditions itself, so it takes only the
-    // extra `react-native` condition (browser comes from its per-platform map, keyed on `web`).
+    // fidelity; otherwise the built-in field/suffix resolver reproduces it. metro-resolver derives
+    // default/require|import/platform conditions itself, so it takes only the extra `react-native`
+    // condition (browser comes from its per-platform map, keyed on `web`).
     const resolver = metroResolver
       ? createMetroResolver({ projectDir: baseDir, platform, sourceExts, mainFields, conditionNames: ['react-native'], host })
-      : createFieldResolver({
-          mainFields,
-          platform,
-          preferNative: platform !== null && platform !== 'web',
-          sourceExts,
-          conditions: resolveConditions('commonjs', extras),
-          // Opt into Metro's package-entry browser-field quirks only on the --metro path.
-          metro,
-          // --typescript: tsc's mapping, inside the field resolver (the scanner's own fallback
-          // only backs the built-in resolver). Unreachable under --metro-resolver
-          // (classifyEntries rejects the combination -- metro-resolver can't substitute).
-          typescript,
-          typescriptPaths,
-          host,
-        })
+      : field.resolver
     const scanner = scan(absEntries, { conditions: extras, resolve: resolver, jsx, flow, resources: resourceSet, host })
     reportScanIssues(analyzeScanner(scanner, { baseDir }), { baseDir, label: platform ?? 'mainFields' })
 

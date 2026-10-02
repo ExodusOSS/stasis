@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { brotliDecompressSync } from 'node:zlib'
 
@@ -13,8 +13,8 @@ import { pack } from '@preventive/archive/tar.js'
 import { Bundle } from '@exodus/stasis-core/bundle'
 import { Lockfile } from '@exodus/stasis-core/lockfile'
 import { githubBundleCommand } from '../stasis/src/cmd/github-bundle.js'
-import { buildGitHubBundle } from '../stasis/src/vfs-bundle.js'
-import { fakeClient, json, lockfile } from './vfs-bundle-github.helper.js'
+import { Vfs, buildGitHubBundle, suggestedEntries } from '../stasis/src/vfs-bundle.js'
+import { HEAD, fakeClient, json, lockfile } from './vfs-bundle-github.helper.js'
 
 // @exodus/stasis/vfs-bundle's buildGitHubBundle over a fake @preventive/upstream/github.js client
 // serving a repo held in memory: nothing is fetched, and every lockfile here locks no registry package.
@@ -24,6 +24,7 @@ const SHA = 'a'.repeat(40)
 const here = dirname(fileURLToPath(import.meta.url))
 
 const build = (options) => buildGitHubBundle({ github: GITHUB, sha: SHA, packageManager: 'pnpm', ...options })
+const methods = (client) => client.calls.map(([method]) => method)
 
 test('buildGitHubBundle builds a repo at a commit and stamps `repo` itself', async (t) => {
   const client = fakeClient({ 'package.json': json({ name: 'p', version: '1.0.0' }), 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': 'module.exports = 1\n' })
@@ -32,6 +33,228 @@ test('buildGitHubBundle builds a repo at a commit and stamps `repo` itself', asy
   t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, root: true, commit: SHA })
   t.assert.doesNotMatch(lock.serialize(), /ExodusOSS/u)
   t.assert.deepEqual(client.calls, [['getRepoTarball', GITHUB, SHA]])
+})
+
+test("buildGitHubBundle builds the default branch's head without a commit", async (t) => {
+  const client = fakeClient({ 'package.json': json({ name: 'p', version: '1.0.0' }), 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': 'module.exports = 1\n' })
+  const { bundle } = await build({ client, sha: undefined, entries: ['src/a.js'] })
+  t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, root: true, commit: HEAD })
+  t.assert.deepEqual(client.calls, [['getRepoHead', GITHUB, undefined], ['getRepoTarball', GITHUB, HEAD]])
+})
+
+// A package whose package.json names entry points in every way it can, and some it can't be built from.
+const namingEntries = {
+  'package.json': json({
+    name: 'p',
+    version: '1.0.0',
+    main: 'lib/index.js',
+    exports: {
+      '.': { import: './esm/index.mjs', require: './lib/index.js' },
+      './util': { custom: './lib/custom.js', default: './lib/util.js' },
+      './feature/*': './lib/feature/*.js',
+      './dir/': './lib/dir/',
+      './data': './data.json',
+      './gone': './lib/gone.js',
+      './package.json': './package.json',
+    },
+    bin: { p: 'bin/p.js', q: 'bin/q' },
+  }),
+  'pnpm-lock.yaml': lockfile('.'),
+  'lib/index.js': 'module.exports = 1\n',
+  'esm/index.mjs': 'export default 1\n',
+  'lib/util.js': 'module.exports = 2\n',
+  'lib/custom.js': 'module.exports = 3\n',
+  'lib/feature/x.js': '',
+  'lib/dir/y.js': '',
+  'data.json': '{}\n',
+  'bin/p.js': "require('../lib/index.js')\n",
+  'bin/q': '#!/bin/sh\n',
+}
+
+test('buildGitHubBundle takes the JS entry points the package.json names without entries', async (t) => {
+  const { bundle } = await build({ client: fakeClient(namingEntries) })
+  t.assert.deepEqual([...bundle.entries], ['lib/index.js', 'esm/index.mjs', 'lib/util.js', 'bin/p.js'], 'main, each exports subpath for require() and import, and each bin')
+  const { bundle: custom } = await build({ client: fakeClient(namingEntries), conditions: ['custom'] })
+  t.assert.deepEqual([...custom.entries], ['lib/index.js', 'esm/index.mjs', 'lib/custom.js', 'bin/p.js'], 'as the conditions resolve them')
+  const { bundle: index } = await build({ client: fakeClient({ 'package.json': json({ name: 'p', version: '1.0.0' }), 'pnpm-lock.yaml': lockfile('.'), 'index.js': '' }) })
+  t.assert.deepEqual([...index.entries], ['index.js'], "index.js, as require('./') takes it")
+})
+
+test("buildGitHubBundle takes the entry points of the directory's package.json, and only there", async (t) => {
+  const client = fakeClient({
+    'package.json': json({ name: 'root', version: '1.0.0', private: true, main: 'root.js' }),
+    'pnpm-workspace.yaml': 'packages:\n  - packages/*\n',
+    'pnpm-lock.yaml': lockfile('.', 'packages/p'),
+    'root.js': '',
+    'shared.js': '',
+    'packages/p/package.json': json({ name: 'p', version: '1.0.0', main: '../../shared.js', bin: { p: './cli.js' } }),
+    'packages/p/cli.js': '',
+  })
+  const { bundle } = await build({ client, directory: 'packages/p' })
+  t.assert.deepEqual([...bundle.entries], ['packages/p/cli.js'])
+})
+
+// A Vfs holding `files` as fakeClient serves them.
+const vfsOf = (files) => {
+  const vfs = new Vfs()
+  for (const [path, value] of Object.entries(files)) {
+    vfs.mkdir(posix.dirname(`/${path}`), { recursive: true })
+    if (typeof value === 'string') vfs.writeFile(`/${path}`, value)
+    else vfs.symlink(value.symlink, `/${path}`)
+  }
+  return vfs
+}
+
+test('suggestedEntries suggests the entries buildGitHubBundle takes without any, of a repo or a Vfs', async (t) => {
+  const named = ['lib/index.js', 'esm/index.mjs', 'lib/util.js', 'bin/p.js']
+  const client = fakeClient(namingEntries)
+  t.assert.deepEqual(await suggestedEntries({ github: GITHUB, sha: SHA, client }), named)
+  t.assert.deepEqual(client.calls, [['getRepoTarball', GITHUB, SHA]])
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(namingEntries) }), named)
+  const custom = ['lib/index.js', 'esm/index.mjs', 'lib/custom.js', 'bin/p.js']
+  t.assert.deepEqual(await suggestedEntries({ github: GITHUB, sha: SHA, client, conditions: ['custom'] }), custom)
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(namingEntries), conditions: ['custom'] }), custom)
+  // At the default branch's head without a commit.
+  const head = fakeClient(namingEntries)
+  t.assert.deepEqual(await suggestedEntries({ github: GITHUB, client: head }), named)
+  t.assert.deepEqual(head.calls, [['getRepoHead', GITHUB, undefined], ['getRepoTarball', GITHUB, HEAD]])
+  // None without a package.json.
+  t.assert.deepEqual(await suggestedEntries({ github: GITHUB, sha: SHA, client: fakeClient({ 'a.js': '' }) }), [])
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf({ 'a.js': '' }) }), [])
+})
+
+// A React Native package: its own entry by each main field, with a platform's file, and `exports`
+// by the RN and browser conditions, the browser one first.
+const reactNative = {
+  'package.json': json({
+    name: 'lib',
+    version: '1.0.0',
+    'react-native': 'rn',
+    browser: 'browser.js',
+    main: 'main.js',
+    exports: { '.': { browser: './exp-browser.js', 'react-native': './exp-rn.js', default: './exp.js' } },
+  }),
+  'pnpm-lock.yaml': lockfile('.'),
+  'rn.ios.js': '',
+  'rn.js': '',
+  'browser.js': '',
+  'main.js': '',
+  'exp-browser.js': '',
+  'exp-rn.js': '',
+  'exp.js': '',
+}
+
+test('suggestedEntries resolves the entries as the build does with metro, platforms and mainFields', async (t) => {
+  const cases = [
+    [{}, ['main.js', 'exp.js']],
+    [{ conditions: ['browser'] }, ['main.js', 'exp-browser.js']],
+    [{ metro: true, platforms: ['ios', 'android'] }, ['rn.ios.js', 'rn.js', 'exp-rn.js']],
+    [{ metro: true, platforms: ['web'] }, ['rn.js', 'exp-browser.js']],
+    [{ mainFields: ['browser', 'main'] }, ['browser.js', 'exp.js']],
+  ]
+  await Promise.all(cases.map(async ([options, expected]) => {
+    const what = JSON.stringify(options)
+    t.assert.deepEqual(await suggestedEntries({ github: GITHUB, sha: SHA, client: fakeClient(reactNative), ...options }), expected, what)
+    t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(reactNative), ...options }), expected, `${what} in a Vfs`)
+    const { bundle } = await build({ client: fakeClient(reactNative), ...options })
+    t.assert.deepEqual([...bundle.entries], expected, `${what}: buildGitHubBundle's default`)
+  }))
+  // An index by platform, as an RN app's.
+  const app = { 'package.json': json({ name: 'app', version: '1.0.0' }), 'index.ios.js': '', 'index.android.js': '', 'index.js': '' }
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(app), metro: true, platforms: ['ios', 'android', 'web'] }), ['index.ios.js', 'index.android.js', 'index.js'])
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(app) }), ['index.js'])
+  // Checked as the build checks them.
+  await t.assert.rejects(suggestedEntries({ vfs: vfsOf(app), metro: true }), /^Error: suggestedEntries: --metro requires --platforms \(e\.g\. --platforms=ios,android\)$/u)
+  await t.assert.rejects(suggestedEntries({ vfs: vfsOf(app), platforms: ['ios'] }), /^Error: suggestedEntries: --platforms is only valid with --metro$/u)
+  await t.assert.rejects(suggestedEntries({ vfs: vfsOf(app), metro: true, platforms: ['ios'], conditions: ['x'] }), /^Error: suggestedEntries: --conditions can't be combined with --metro/u)
+  await t.assert.rejects(suggestedEntries({ github: GITHUB, sha: SHA, client: fakeClient(app), metro: true, platforms: ['a/b'] }), /^Error: suggestedEntries: invalid platform 'a\/b'/u)
+})
+
+test('suggestedEntries maps what resolution misses to its TS source under typescript, as the build does', async (t) => {
+  // Entry points named by their compiled outputs, of which only the TS sources are in the tree.
+  const named = {
+    'package.json': json({ name: 'ts', version: '1.0.0', main: 'lib/index.js', exports: { '.': './lib/index.js', './util': { import: './lib/util.mjs', default: './lib/util.js' } } }),
+    'pnpm-lock.yaml': lockfile('.'),
+    'lib/index.ts': 'export const x: number = 1\n',
+    'lib/util.ts': 'export const y: number = 2\n',
+    'lib/util.mts': 'export const z: number = 3\n',
+  }
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(named) }), [])
+  const mapped = ['lib/index.ts', 'lib/util.ts', 'lib/util.mts']
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(named), typescript: true }), mapped)
+  t.assert.deepEqual(await suggestedEntries({ github: GITHUB, sha: SHA, client: fakeClient(named), typescript: true }), mapped)
+  const { bundle } = await build({ client: fakeClient(named), typescript: true })
+  t.assert.deepEqual([...bundle.entries], mapped, "buildGitHubBundle's default")
+  // An extensionless main, completed; a compiled file on disk wins over its source.
+  const completed = { 'package.json': json({ name: 'c', version: '1.0.0', main: 'src/index' }), 'src/index.ts': '', 'src/index.d.ts': '' }
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(completed), typescript: true }), ['src/index.ts'])
+  const both = { 'package.json': json({ name: 'b', version: '1.0.0', main: 'index.js' }), 'index.js': '', 'index.ts': '' }
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(both), typescript: true }), ['index.js'])
+  // Through the field resolver, as under metro.
+  const app = { 'package.json': json({ name: 'app', version: '1.0.0', main: 'lib/index.js' }), 'lib/index.ts': '' }
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(app), metro: true, platforms: ['ios'] }), [])
+  t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(app), metro: true, platforms: ['ios'], typescript: true }), ['lib/index.ts'])
+})
+
+test("suggestedEntries downloads a directory alone where it stands alone, and names nothing out of it", async (t) => {
+  const files = {
+    'README.md': 'x\n',
+    'apps/x.js': '',
+    'apps/shared.js': '',
+    // Its bin out of it would be its own x.js were the subtree's root taken for the filesystem's.
+    'apps/p/package.json': json({ name: 'p', version: '1.0.0', bin: { x: '../x.js', p: 'index.js' } }),
+    'apps/p/index.js': '',
+    'apps/p/x.js': '',
+    'apps/q/package.json': json({ name: 'q', version: '1.0.0', main: '../x.js', 'react-native': '../x.js' }),
+    'apps/q/index.js': '',
+    'apps/q/x.js': '',
+    'apps/r/package.json': json({ name: 'r', version: '1.0.0', main: 'lib.js', bin: 'cli.js' }),
+    'apps/r/lib.js': { symlink: '../shared.js' },
+    'apps/r/cli.js': '',
+    'pkg': { symlink: 'apps/p' },
+  }
+  const cases = [
+    ['apps/p', ['index.js'], ['getRepoTreeId', 'getRepoTreeTarball']],
+    ['apps/q', [], ['getRepoTreeId', 'getRepoTreeTarball']],
+    // A symlink out of it: the whole repo, where it resolves out of the directory.
+    ['apps/r', ['cli.js'], ['getRepoTreeId', 'getRepoTreeTarball', 'getRepoTarball']],
+    // No directory in git: the whole repo, through the symlink.
+    ['pkg', ['index.js'], ['getRepoTreeId', 'getRepoTarball']],
+  ]
+  await Promise.all(cases.map(async ([directory, expected, called]) => {
+    const client = fakeClient(files)
+    t.assert.deepEqual(await suggestedEntries({ github: GITHUB, sha: SHA, directory, client }), expected, directory)
+    t.assert.deepEqual(methods(client), called, directory)
+    t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(files), cwd: directory }), expected, `${directory} in a Vfs`)
+    // Through the main fields too.
+    const metro = { metro: true, platforms: ['ios'] }
+    t.assert.deepEqual(await suggestedEntries({ github: GITHUB, sha: SHA, directory, client: fakeClient(files), ...metro }), expected, `${directory} with metro`)
+    t.assert.deepEqual(await suggestedEntries({ vfs: vfsOf(files), cwd: directory, ...metro }), expected, `${directory} in a Vfs with metro`)
+  }))
+})
+
+test('suggestedEntries checks its arguments before anything is fetched', async (t) => {
+  const client = fakeClient({})
+  await t.assert.rejects(suggestedEntries({}), /^Error: suggestedEntries: a vfs or a github repo is required$/u)
+  await t.assert.rejects(suggestedEntries({ vfs: new Vfs(), github: GITHUB }), /^Error: suggestedEntries: takes a vfs or a github repo, not both$/u)
+  await t.assert.rejects(suggestedEntries({ vfs: {} }), /suggestedEntries/u)
+  await t.assert.rejects(suggestedEntries({ github: GITHUB, sha: 'abc123', client }), /^Error: suggestedEntries: invalid commit: "abc123"$/u)
+  await t.assert.rejects(suggestedEntries({ github: GITHUB, directory: '../up', client }), /^Error: suggestedEntries: invalid directory: "\.\.\/up"$/u)
+  t.assert.deepEqual(client.calls, [])
+})
+
+test('buildGitHubBundle refuses to build without entries where no package.json names one', async (t) => {
+  const cases = {
+    'no package.json': {},
+    'a package.json naming none': { 'package.json': json({ name: 'p', version: '1.0.0' }) },
+    'a package.json naming no JS file': { 'package.json': json({ name: 'p', version: '1.0.0', main: 'data.json' }), 'data.json': '{}\n' },
+  }
+  await Promise.all(Object.entries(cases).map(async ([what, files]) => {
+    const client = fakeClient({ 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': '', ...files })
+    await t.assert.rejects(build({ client }), new RegExp(`^Error: buildGitHubBundle: ${GITHUB}@${SHA}: no entries given, and the repo root has no package\\.json naming a JS entry point there$`, 'u'), what)
+  }))
+  const client = fakeClient({ 'apps/p/pnpm-lock.yaml': lockfile('.'), 'apps/p/src/a.js': '' })
+  await t.assert.rejects(build({ client, directory: 'apps/p' }), /: no entries given, and apps\/p has no package\.json naming a JS entry point there$/u)
 })
 
 test('buildGitHubBundle downloads a directory alone when its lockfile is there', async (t) => {
@@ -82,7 +305,8 @@ test('buildGitHubBundle checks its arguments before anything is fetched', async 
   await t.assert.rejects(build({ client, github: 'not a repo', entries: ['a.js'] }), /invalid github: "not a repo"/u)
   await t.assert.rejects(build({ client, directory: 'a b', entries: ['a.js'] }), /invalid directory: "a b"/u)
   await t.assert.rejects(build({ client, directory: '../up', entries: ['a.js'] }), /invalid directory: "\.\.\/up"/u)
-  await t.assert.rejects(build({ client, github: undefined, entries: ['a.js'] }), /github and sha are required/u)
+  await t.assert.rejects(build({ client, github: undefined, entries: ['a.js'] }), /github is required/u)
+  await t.assert.rejects(build({ client, packageManager: 'soldeer' }), /entries are required with soldeer/u)
   await t.assert.rejects(build({ client, packageManager: 'npm', entries: ['a.js'] }), /packageManager must be one of/u)
   await t.assert.rejects(build({ client, libc: 'bionic', entries: ['a.js'] }), /^TypeError: buildGitHubBundle: libc must be one of/u)
   await t.assert.rejects(build({ client, os: '', entries: ['a.js'] }), /^TypeError: buildGitHubBundle: os must be a non-empty string/u)
@@ -90,6 +314,9 @@ test('buildGitHubBundle checks its arguments before anything is fetched', async 
   await t.assert.rejects(build({ client, entries: ['a.js'], metro: true, metroResolver: true, platforms: ['ios'] }), /^Error: buildGitHubBundle: metroResolver is not supported/u)
   await t.assert.rejects(build({ client, entries: [] }), /^Error: buildGitHubBundle: at least one entry file is required/u)
   await t.assert.rejects(build({ client, entries: ['a.js'], scope: 'node_modules', metro: true, platforms: ['ios'] }), /^Error: buildGitHubBundle: --scope is not supported with --mainFields or --metro/u)
+  // Without entries, as for the JS ones suggested.
+  await t.assert.rejects(build({ client, mappingFile: 'remappings.txt' }), /^Error: buildGitHubBundle: --mapping is only valid for \.sol bundles$/u)
+  await t.assert.rejects(build({ client, metro: true, metroResolver: true, platforms: ['ios'] }), /^Error: buildGitHubBundle: metroResolver is not supported$/u)
   t.assert.deepEqual(client.calls, [])
 })
 
@@ -106,7 +333,6 @@ const appWithLockfile = (extra = {}) => ({
   'apps/p/src/b.js': 'module.exports = 1\n',
   ...extra,
 })
-const methods = (client) => client.calls.map(([method]) => method)
 
 test('buildGitHubBundle falls back to the whole repo when the subtree does not stand alone', async (t) => {
   const cases = {
@@ -192,6 +418,8 @@ const workspaceRepo = {
 const workspaceBuilds = {
   typescript: { directory: 'packages/app', entries: ['src/entry.ts'], typescript: true, packageJSON: true },
   mainFields: { entries: ['packages/app/src/main.js'], mainFields: ['main'], packageJSON: true },
+  defaults: { directory: 'packages/p' },
+  metroDefaults: { directory: 'packages/p', metro: true, platforms: ['ios', 'android'] },
 }
 // Entries of every other language `stasis bundle` takes, and a directory (Solidity's), refused.
 const otherLanguages = ['src/a.sol', 'src/a.rs', 'src/a.php', 'src/a.sh', 'src']
@@ -252,6 +480,8 @@ test('buildGitHubBundle reads nothing from disk: the repo, its tree and every fi
   t.assert.deepEqual(built.typescript.repo, { github: GITHUB, root: true, commit: SHA })
   t.assert.deepEqual(built.mainFields.sources.toSorted(), ['packages/app/node_modules/p/index.js', 'packages/app/node_modules/p/package.json', 'packages/app/package.json', 'packages/app/src/main.js'], 'the tree is read in place')
   t.assert.deepEqual(built.mainFields.repo, { github: GITHUB, root: true, commit: SHA })
+  t.assert.deepEqual(built.defaults.sources, ['packages/p/index.js'], "the entries the package.json names")
+  t.assert.deepEqual(built.metroDefaults.sources, ['index.js'], 'as the field resolver resolves them, from the directory')
   for (const entry of otherLanguages) t.assert.match(refused[entry] ?? '', /only JS bundles are built with pnpm$/u, entry)
 })
 
@@ -268,12 +498,19 @@ test('stasis github-bundle writes the bundle and lockfile of the repo at the com
     const none = fakeClient({})
     await t.assert.rejects(githubBundleCommand({ cwd: tmp, github: GITHUB, sha: SHA, packageManager: 'soldeer', client: none, entries: ['src'], lockfile: 'x.json' }), /^Error: github-bundle: --lockfile is only valid for JS bundles$/u)
     t.assert.deepEqual(none.calls, [])
+    // Without a commit or entries, the default branch's head and what its package.json names.
+    const warn = t.mock.method(console, 'warn', () => {})
+    await githubBundleCommand({ cwd: tmp, github: GITHUB, packageManager: 'pnpm', client: fakeClient({ 'package.json': json({ name: 'p', version: '1.0.0', main: 'src/a.js' }), 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': '' }), output: 'out/c.br' })
+    const head = Bundle.parse(brotliDecompressSync(await readFile(join(tmp, 'out', 'c.br'))).toString('utf8'))
+    t.assert.deepEqual([...head.entries], ['src/a.js'])
+    t.assert.equal(head.repo.commit, HEAD)
+    t.assert.match(warn.mock.calls.at(-1).arguments[0], new RegExp(`from ${GITHUB}@${HEAD} to out/c\\.br$`, 'u'))
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }
 })
 
-test('stasis github-bundle requires --github, --sha and --package-manager', async (t) => {
+test('stasis github-bundle requires --github and --package-manager', async (t) => {
   const usage = async (args) => {
     const child = spawn(process.execPath, [join(here, '..', 'stasis', 'bin', 'stasis.js'), 'github-bundle', ...args, 'a.js'])
     const stderr = []
@@ -283,7 +520,6 @@ test('stasis github-bundle requires --github, --sha and --package-manager', asyn
   }
   const cases = [
     [[`--sha=${SHA}`, '--package-manager=pnpm'], 'Error: github-bundle requires --github=owner/name, the repo to bundle'],
-    [[`--github=${GITHUB}`, '--package-manager=pnpm'], 'Error: github-bundle requires --sha, the commit to bundle'],
     [[`--github=${GITHUB}`, `--sha=${SHA}`], 'Error: github-bundle requires --package-manager=(pnpm|yarn1|soldeer)'],
   ]
   const results = await Promise.all(cases.map(([args]) => usage(args)))
