@@ -306,6 +306,50 @@ leaves a symbol in its place, and calls
 do `sources`, `serialize()` and `merge()`. That is enough for metadata-only
 consumers such as the `@exodus/stasis/sbom` API.
 
+### Streaming reader (`@exodus/stasis/bundle-reader`)
+
+The built-in readers decompress a bundle whole and `Bundle.parse` its full JSON
+text, so their peak memory is several times the decompressed size. `readBundle`
+is an opt-in alternative that decompresses and parses chunk by chunk, so the
+decompressed bytes and the JSON text are never held at once. The stasis
+commands themselves still use the one-shot path.
+
+```js
+import { readBundle } from '@exodus/stasis/bundle-reader'
+
+// The same Bundle as Bundle.parse(brotliDecompressSync(bytes).toString('utf8')).
+const bundle = await readBundle('app.stasis.code.br')
+
+// Or take each file as it streams, and keep only the metadata (a contents-free Bundle).
+const meta = await readBundle('app.stasis.code.br', {
+  onFile: async (file, contents, { signal }) => { /* ... */ },
+})
+```
+
+- `source` is a path or file `URL` object, the compressed bytes (any
+  `ArrayBuffer` or view), or an (async) iterable of compressed chunks, such as a
+  `Readable`. Bytes after the end of the brotli stream are ignored, as
+  `brotliDecompressSync` ignores them.
+- `signal` aborts the read at once, including any `onFile` calls still queued.
+  `onFile` gets it as `{ signal }`, so it can stop its own work.
+- Without `onFile`, it accepts exactly what `Bundle.parse` accepts and builds the
+  same `Bundle`, running the same validation on an equivalent parse.
+- With `onFile`, each file's stored contents (a `resource:base64` file stays
+  base64) are passed to `await onFile(file, contents, { signal })`. Calls are
+  one at a time, in stream order, keyed like `bundle.sources`, and the contents
+  are then dropped. It resolves to a contents-free `Bundle` (see above). Files
+  stream wherever the bundle puts them: newer bundles write `sources` and
+  `modules` after the metadata, older ones before it.
+- `onFile` runs before the bundle as a whole is validated, so treat what it
+  receives as provisional until the promise resolves, and discard it if the
+  promise rejects. A non-canonical or escaping path is never passed to
+  `onFile`, and no file is passed twice.
+  This mode rejects a few bundles `Bundle.parse` accepts, because a streamed
+  payload can't be taken back:
+  - a repeated JSON key that carries file contents
+  - a v0 bundle with `modules`
+  - a non-string content value, or a `files` array instead of an object
+
 ### Source-language bundles (Solidity / PHP / Bash / Rust)
 
 `stasis bundle` dispatches on the entry file extension (no mixing within one

@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 
 import { Bundle } from '@exodus/stasis/bundle'
+import { readBundle } from '@exodus/stasis/bundle-reader'
 import { buildBundle, bundleCommand } from '@exodus/stasis/cmd/bundle'
 import { buildCommand, bundleFromLockfile } from '@exodus/stasis/cmd/build'
 import { diffArtifacts, formatDiffStat, hasDifferences, normalizeArtifact } from '@exodus/stasis/diff'
@@ -21,6 +22,10 @@ import * as pluginsMetroTransformer from '@exodus/stasis-plugins/metro-transform
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
   t.assert.equal(Bundle.VERSION, 1)
+})
+
+test('@exodus/stasis/bundle-reader exports the streaming readBundle', (t) => {
+  t.assert.equal(typeof readBundle, 'function')
 })
 
 test('@exodus/stasis/{esbuild,webpack,rollup,metro} re-export the stasis-plugins plugins', (t) => {
