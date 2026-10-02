@@ -337,7 +337,9 @@ const meta = await readBundle('app.stasis.code.br', {
 - With `onFile`, each file's stored contents (a `resource:base64` file stays
   base64) are passed to `await onFile(file, contents, { signal })`. Calls are
   one at a time, in stream order, keyed like `bundle.sources`, and the contents
-  are then dropped. It resolves to a contents-free `Bundle` (see above).
+  are then dropped. It resolves to a contents-free `Bundle` (see above). Files
+  stream wherever the bundle puts them: newer bundles write `sources` and
+  `modules` after the metadata, older ones before it.
 - `onFile` runs before the bundle as a whole is validated, so treat what it
   receives as provisional until the promise resolves, and discard it if the
   promise rejects. A non-canonical or escaping path is never passed to

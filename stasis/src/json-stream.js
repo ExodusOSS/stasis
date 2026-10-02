@@ -1,12 +1,7 @@
-// Incremental JSON parser over UTF-8 bytes: write() chunks as they arrive, end() returns the value.
-// The contract is exact equivalence with JSON.parse(Buffer.concat(chunks).toString('utf8')) -- the
-// same accepted inputs and the same value (key order, a repeated key's last value at its first
-// position, `__proto__` as an own data property, U+FFFD for invalid UTF-8) -- so an artifact read
-// in a stream can't parse differently from one read whole (json-stream.test.js checks this
-// differentially). One known V8 bug is not mirrored: Node 24+'s JSON.parse can return a stale short
-// escaped key cached by an earlier call (`{"a\\":1}`, then `{"a\"":1}` yields `a\`); this parser
-// decodes each key on its own and follows the spec. Only the value under construction and the one
-// token in flight are held, never the whole text. Pure: no Node builtins.
+// Incremental JSON parser over UTF-8 bytes, holding only the value being built and one token in flight.
+// Exactly JSON.parse(Buffer.concat(chunks).toString('utf8')) for any chunking (json-stream.test.js checks it),
+// so a bundle read in a stream can't parse differently from one read whole. Pure: no Node builtins.
+// Not mirrored: Node 24+'s JSON.parse can return a stale escaped key cached by an earlier call (a V8 bug).
 
 const QUOTE = 0x22
 const BACKSLASH = 0x5c
@@ -28,7 +23,7 @@ const NUMBER_RE = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/u
 const LITERALS = new Map([['true', true], ['false', false], ['null', null]])
 
 const isWhitespace = (b) => b === 0x20 || b === 0x0a || b === 0x0d || b === 0x09
-// The bytes a number token can span; NUMBER_RE judges its grammar once it ends.
+// The bytes a number can span; NUMBER_RE checks its grammar once it ends.
 const isNumberByte = (b) => (b >= 0x30 && b <= 0x39) || b === 0x2d || b === 0x2b || b === 0x2e || b === 0x65 || b === 0x45
 const isLetter = (b) => b >= 0x61 && b <= 0x7a
 
@@ -37,7 +32,6 @@ const hasControlByte = (bytes) => {
   return false
 }
 
-// The index of `byte` at or after `from`, or bytes.length when there is none.
 const indexOrEnd = (bytes, byte, from) => {
   const at = bytes.indexOf(byte, from)
   return at === -1 ? bytes.length : at
@@ -56,8 +50,7 @@ const concat = (parts) => {
 }
 
 export class JsonStreamParser {
-  // ignoreBOM keeps a string's leading U+FEFF, as Buffer#toString does; each decode() is one whole
-  // string, which is exact: a string's bounds are ASCII quotes, and no UTF-8 sequence spans one.
+  // ignoreBOM keeps a leading U+FEFF, as Buffer#toString does; no UTF-8 sequence spans a quote, so per-string decoding is exact.
   #decoder = new TextDecoder('utf-8', { ignoreBOM: true })
   #onString
   #state = VALUE
@@ -66,11 +59,9 @@ export class JsonStreamParser {
   #result
   #offset = 0 // bytes consumed by earlier writes, for error positions
   #closed = false
-  // Next quote/backslash at or after the scan position in the current chunk (-1: not searched yet;
-  // the chunk's length: none left).
+  // Cached indexOf results in the current chunk (-1: not searched yet; its length: none left).
   #nextQuote = -1
   #nextBackslash = -1
-  // The token in flight.
   #tokenStart = 0
   #isKey = false
   #parts = [] // copied bytes of a string straddling chunks
@@ -78,20 +69,17 @@ export class JsonStreamParser {
   #pendingEscape = false // a chunk ended on a string's backslash
   #word = '' // a number or literal straddling chunks
 
-  // onString(value, path) sees each string VALUE (never a key) as it completes, and its return
-  // value is stored instead -- so a consumer can take a large string out of the tree as it streams.
-  // `path` is the live key/index path to the value: read it, never keep or mutate it.
+  // onString(value, path) sees each string value (never a key) and its return is stored instead.
+  // `path` is the live key/index path: read it, never keep or mutate it.
   constructor({ onString } = {}) {
     this.#onString = onString
   }
 
-  // `bytes` is a Uint8Array (or another ArrayBuffer view). Chunks may be reused once write()
-  // returns: the bytes of a token left open are copied.
+  // A chunk may be reused once write() returns: the bytes of a token left open are copied.
   write(bytes) {
     if (this.#closed) throw new Error('JsonStreamParser: write after end or failure')
     if (!ArrayBuffer.isView(bytes)) throw new TypeError('JsonStreamParser: write() takes a Uint8Array')
-    // Scan a plain Uint8Array view: a Buffer's slice() is a view, not the copy kept below, and its
-    // indexOf/subarray are slower.
+    // A plain Uint8Array view: a Buffer's slice() doesn't copy, and its indexOf/subarray are slower.
     const view = bytes.constructor === Uint8Array ? bytes : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     try {
       this.#consume(view)
@@ -135,11 +123,9 @@ export class JsonStreamParser {
     }
   }
 
-  // One significant byte outside a token; returns where scanning resumes.
   #structural(b, i) {
     const state = this.#state
     const isArray = Array.isArray(this.#stack.at(-1))
-    // The innermost container's own closer ends it, after a member or right away (when empty).
     if ((state === AFTER || state === ARRAY_FIRST || state === OBJECT_FIRST) && b === (isArray ? 0x5d : 0x7d)) {
       this.#close()
       return i + 1
@@ -190,7 +176,6 @@ export class JsonStreamParser {
     this.#tokenStart = this.#offset + i
   }
 
-  // Scan string bytes from `start` for the closing quote, skipping each escaped byte.
   #string(bytes, start) {
     const n = bytes.length
     let i = start
@@ -230,7 +215,7 @@ export class JsonStreamParser {
     }
     let value = this.#decoder.decode(bytes)
     if (this.#escaped) {
-      // Escapes (and the raw control bytes JSON forbids) are left to JSON.parse itself.
+      // JSON.parse handles the escapes, and rejects raw control bytes.
       this.#escaped = false
       try {
         value = JSON.parse(`"${value}"`)
@@ -253,7 +238,6 @@ export class JsonStreamParser {
     const isNumber = this.#state === NUMBER
     let j = i
     while (j < n && (isNumber ? isNumberByte(bytes[j]) : isLetter(bytes[j]))) j += 1
-    // Number and literal bytes are ASCII, so decoding them is exact.
     this.#word += this.#decoder.decode(bytes.subarray(i, j))
     if (j === n) return n
     this.#finishWord()

@@ -157,6 +157,24 @@ test('readBundle with onFile hands over every file in stream order and returns a
   t.assert.deepStrictEqual(collectComponents([bundle]), collectComponents([whole]))
 })
 
+test('readBundle streams files wherever the bundle puts them: after the metadata (newer bundles) or before it', async (t) => {
+  const { sources, modules, ...meta } = JSON.parse(sampleBundle().serialize())
+  const orders = {
+    'files last': { ...meta, sources, modules },
+    'files first': { version: meta.version, config: meta.config, sources, modules, ...meta },
+  }
+  t.assert.notDeepStrictEqual(Object.keys(orders['files last']), Object.keys(orders['files first']))
+  for (const [label, json] of Object.entries(orders)) {
+    const buf = compressed(json)
+    const whole = parseWhole(buf)
+    t.assert.equal((await readBundle(chunked(buf, 1000))).serialize(), whole.serialize(), label)
+    const { files, onFile } = collect()
+    const bundle = await readBundle(chunked(buf, 1000), { onFile })
+    t.assert.deepStrictEqual(new Map(files), whole.sources, label)
+    for (const field of ['formats', 'imports', 'executable', 'reason']) t.assert.deepStrictEqual(bundle[field], whole[field], `${label}: ${field}`)
+  }
+})
+
 test('readBundle awaits onFile one file at a time, and stops on its failure', async (t) => {
   const buf = compressed(sampleBundle().serialize())
   let inFlight = 0
