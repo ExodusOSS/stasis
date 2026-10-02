@@ -18,7 +18,7 @@ import {
   resolveVendoredCrate,
   scanRustItems,
 } from '../stasis/src/loaders/rust.js'
-import { rustFixture } from './rust-fixtures.helper.js'
+import { ATOMIC64_GATES, rustFixture } from './rust-fixtures.helper.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 
@@ -36,6 +36,8 @@ const captureWarnings = (fn) => {
 const modNames = (content) => scanRustItems(content).mods.map((m) => m.name)
 const refSpecs = (content) => scanRustItems(content).refs.map((r) => r.spec)
 const edges = (specMap) => Object.fromEntries([...specMap].map(([s, t]) => [s, t instanceof Map ? Object.fromEntries(t) : t]))
+// What a path resolves to, as a sorted list of files: a cfg-keyed map's, or the one.
+const values = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
 
 // --- lexing ---
 
@@ -2378,7 +2380,6 @@ const MANY_OSES = ['macos', 'ios', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 
 
 test('buildRustTree keeps every candidate under a cfg of a score of platforms, and of more glob paths than it tells apart: none is certain', (t) => {
   const any = `any(${MANY_OSES.map((os) => `target_os = "${os}"`).join(', ')})`
-  const files = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
   // 17 platforms one way, every other the other: linux builds a.rs, and no target says it is linux
   const listed = new Map([
     ['src/lib.rs', `mod a;\nmod b;\n#[cfg(${any})]\npub use b::T;\n#[cfg(not(${any}))]\npub use a::T;\nmod user;\n`],
@@ -2386,7 +2387,7 @@ test('buildRustTree keeps every candidate under a cfg of a score of platforms, a
     ['src/b.rs', 'pub struct T;\n'],
     ['src/user.rs', 'fn f(_: crate::T) {}\n'],
   ])
-  t.assert.deepEqual(files(buildRustTree(listed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/a.rs', 'src/b.rs'])
+  t.assert.deepEqual(values(buildRustTree(listed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/a.rs', 'src/b.rs'])
   // a module 17 cfg-gated glob paths reach, beside the named import linux builds
   const globbed = new Map([
     ['src/lib.rs', `mod common;\nmod lin;\n${MANY_OSES.map((os, k) => `mod v${k};\n#[cfg(target_os = "${os}")]\npub use crate::v${k}::*;\n`).join('')}#[cfg(target_os = "linux")]\npub use lin::T;\nmod user;\n`],
@@ -2395,7 +2396,7 @@ test('buildRustTree keeps every candidate under a cfg of a score of platforms, a
     ['src/user.rs', 'fn f(_: crate::T) {}\n'],
     ...MANY_OSES.map((_, k) => [`src/v${k}.rs`, 'pub use crate::common::*;\n']),
   ])
-  t.assert.deepEqual(files(buildRustTree(globbed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/common.rs', 'src/lin.rs'])
+  t.assert.deepEqual(values(buildRustTree(globbed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/common.rs', 'src/lin.rs'])
 })
 
 test('buildRustTree lets a local module give way to a glob of its name only when none of its files may be there', (t) => {
@@ -2514,7 +2515,6 @@ test('buildRustTree declares and calls what a nested macro_rules! body holds whe
 })
 
 test('buildRustTree follows a path through every module a segment may name: aliases, glob-reached modules, a module beside an alias', (t) => {
-  const values = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
   const sources = new Map([
     ['src/lib.rs', '#[cfg(windows)]\nmod windows;\n#[cfg(unix)]\nmod unix;\n#[cfg(windows)]\nuse windows as imp;\n#[cfg(unix)]\nuse unix as imp;\nmod sys;\nmod user;\n'],
     ['src/sys.rs', '#[cfg(windows)]\npub use crate::windows::*;\n#[cfg(unix)]\npub use crate::unix::*;\n'],
@@ -2536,10 +2536,9 @@ test('buildRustTree follows a path through every module a segment may name: alia
 
 test('buildRustTree resolves a file no build compiles -- its own cfgs contradict each other -- to every candidate', (t) => {
   // tokio's atomic_u64_static_once_cell.rs: under `not(all(test, loom))` (its `mod std`) and `all(loom, test)` both
-  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\nmacro_rules! cfg_loom_test { ($($i:item)*) => { $( #[cfg(all(loom, test))] $i )* } }\n'
   const sources = new Map([
     ['src/lib.rs', '#[macro_use]\nmod macros;\n#[cfg(not(all(test, loom)))]\nmod atomic;\n'],
-    ['src/macros.rs', gates],
+    ['src/macros.rs', `${ATOMIC64_GATES}macro_rules! cfg_loom_test { ($($i:item)*) => { $( #[cfg(all(loom, test))] $i )* } }\n`],
     ['src/atomic.rs', 'cfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\n'],
     ['src/native.rs', 'pub(crate) use std::sync::atomic::AtomicU64;\n'],
     ['src/as_mutex.rs', 'cfg_loom_test! { mod once_cell; }\npub(crate) struct AtomicU64;\n'],
@@ -2547,5 +2546,5 @@ test('buildRustTree resolves a file no build compiles -- its own cfgs contradict
   ])
   const target = buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/once_cell.rs').get('super::AtomicU64')
   t.assert.ok(target instanceof Map)
-  t.assert.deepEqual([...target.values()].toSorted(), ['src/as_mutex.rs', 'src/native.rs'])
+  t.assert.deepEqual(values(target), ['src/as_mutex.rs', 'src/native.rs'])
 })

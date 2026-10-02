@@ -26,6 +26,10 @@ const write = (dir, files) => {
   }
 }
 
+// tokio's `cfg_has_atomic_u64!` / `cfg_not_has_atomic_u64!` gate macros, as source: each wraps
+// the items of its body in its cfg.
+export const ATOMIC64_GATES = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\n'
+
 // The directory holding fixture project `name`, written out once per process (and removed when it
 // exits) for the tests to read; never to be written to.
 let projects = null

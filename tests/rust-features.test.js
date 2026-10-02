@@ -19,7 +19,7 @@ import {
 } from '../stasis/src/loaders/cargo.js'
 import { buildRustBundle } from '../stasis/src/cmd/bundle.js'
 import { buildRustTree, collectRustBundle, collectRustFilesFromDisk } from '../stasis/src/loaders/rust.js'
-import { rustFixture } from './rust-fixtures.helper.js'
+import { ATOMIC64_GATES, rustFixture } from './rust-fixtures.helper.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 const featuresFixture = join(fixtures, 'features')
@@ -2023,10 +2023,9 @@ test('buildRustBundle does not presume off a cfg a build-dependency may print, o
 
 test('buildRustBundle keeps a module whose first variant the target rules out ahead of a glob of its name', async (t) => {
   // tokio's `cfg_has_atomic_u64! { #[path = "…native.rs"] mod imp; }` and its `cfg_not_…!` twin, beside a glob bringing an `imp` in
-  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\n'
   await withProjectAsync({
     'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
-    'src/lib.rs': `${gates}mod other;\nuse crate::other::*;\ncfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\nfn f() { imp::X::real() }\n`,
+    'src/lib.rs': `${ATOMIC64_GATES}mod other;\nuse crate::other::*;\ncfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\nfn f() { imp::X::real() }\n`,
     'src/other.rs': 'pub mod imp { pub struct X; }\n',
     'src/native.rs': 'pub struct X;\n',
     'src/as_mutex.rs': 'pub struct X;\n',
@@ -2038,10 +2037,9 @@ test('buildRustBundle keeps a module whose first variant the target rules out ah
 
 test('buildRustBundle resolves a file the target rules out as it would where it is compiled', async (t) => {
   // tokio's atomic_u64_as_mutex.rs and its static_*.rs under a 64-bit target: their `super` is as_mutex's module
-  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\n'
   await withProjectAsync({
     'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
-    'src/lib.rs': `${gates}cfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\n`,
+    'src/lib.rs': `${ATOMIC64_GATES}cfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\n`,
     'src/native.rs': 'pub(crate) use std::sync::atomic::AtomicU64;\n',
     'src/as_mutex.rs': 'mod static_macro;\npub(crate) struct AtomicU64;\n',
     'src/as_mutex/static_macro.rs': 'use super::AtomicU64;\n',
