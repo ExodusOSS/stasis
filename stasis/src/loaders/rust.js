@@ -1586,9 +1586,9 @@ function memoized(memo, key, ctx, compute, { empty }) {
 // Recompute the glob closures that were computed short of a cycle (memoized), each against the
 // others as they now stand, until none grows: with every entry complete, a closure is the union
 // of its globs' targets and their settled closures, whatever the order the queries came in. The
-// lookups made meanwhile (glob sources, imports' answers, candidate lists, crates' macros) are
-// dropped first, as they may rest on the short closures. True when anything changed -- the paths
-// resolved so far must be resolved again.
+// lookups made meanwhile (glob sources, imports' answers, candidate lists, crates' macros, what
+// modules bind beside a child module of the name) are dropped first, as they may rest on the
+// short closures. True when anything changed -- the paths resolved so far must be resolved again.
 function stabilizeClosures(ctx) {
   const cyclic = []
   for (const memo of ctx.closures.values()) for (const entry of memo.values()) if (entry.cyclic === true) cyclic.push(entry)
@@ -1596,6 +1596,7 @@ function stabilizeClosures(ctx) {
   const reset = () => {
     ctx.provided.clear()
     ctx.cratesMacros.clear()
+    ctx.besideModule.clear()
     ctx.opaque.clear()
     ctx.opaqueGlobs.clear()
     for (const byModule of ctx.imports.values()) {
@@ -2286,7 +2287,16 @@ function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, br
         // variants is taken to be there in every build: one of them, a `path` fallback's; and one
         // under a custom cfg the build may set is there, as above.)
         if (!away && sets.length === 1 && !entailed(asker, sets[0]) && !hasCustom(sets[0].leaves, customKey)) {
-          const other = lookup(at, name, want)
+          // Asked of each path through the module, the same for every asker of one set and build
+          // (`asker.key`) -- unless the answer came out of an import cycle still being resolved.
+          const key = `${asker.key}\0${root}\0${child}\0${want}\0${at === from && file !== undefined ? file : commonDepth(from, at)}`
+          let other = ctx.besideModule.get(key)
+          if (other === undefined) {
+            const depth = ctx.walking++
+            other = lookup(at, name, want)
+            ctx.walking--
+            if (minHit(ctx) >= depth) ctx.besideModule.set(key, other)
+          }
           if (other !== null && other !== VALUE_ONLY && !(other.kind === 'module' && other.modulePath === child)) branches.push({ keyed: new Map([[cfgKey(cfgTextOf(sets[0].leaves)), { kind: 'module', modulePath: child, file: tree.get(child) }], ['*', other]]), rest: segments.slice(i + 1) })
         }
         cur.push(name)
@@ -2777,7 +2787,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
     const build = buildOf(path, ctx, units)
     const settable = ctx?.cfgsSetFor(path) ?? null
     const sharedKey = `${set.key}\0${idOf(build)}\0${settable === null ? '' : idOf(settable)}`
-    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), texts: new Map(), build, deadHere: deadUnder(set.leaves, build), contradictory: cfgExclusive(set.leaves, set.leaves), custom: customFor(settable) }).get(sharedKey)
+    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { key: sharedKey, keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), texts: new Map(), build, deadHere: deadUnder(set.leaves, build), contradictory: cfgExclusive(set.leaves, set.leaves), custom: customFor(settable) }).get(sharedKey)
     f.asker = { file: path, set, ...shared }
   }
   // Per crate root, each module's child modules by name (every module's parent is in its tree).
@@ -3003,7 +3013,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [root, byModule] of imports) for (const [module, of] of byModule) for (const name of of.named.keys()) note(having, root, name, module)
   for (const [root, byName] of exportedMacros) for (const name of byName.keys()) note(having, root, name, 'crate')
   const declaresCrate = (name, from) => ctx?.declaresCrate?.(name, from) === true
-  const pathCtx = { trees, children, moduleSets, moduleLeaves, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), cratesMacros: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
+  const pathCtx = { trees, children, moduleSets, moduleLeaves, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), cratesMacros: new Map(), besideModule: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
   // Every path of every file, on top of the `mod` / include edges (`resolutions`): once, and once
   // more when the first pass left glob closures short of an import cycle (stabilizeClosures).
   const resolveAll = () => {
