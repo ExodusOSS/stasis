@@ -2477,3 +2477,24 @@ test('buildRustTree declares and calls what a nested macro_rules! body holds whe
   t.assert.equal(resolutions.get('src/lib.rs').get('mod x'), undefined)
   t.assert.equal(resolutions.get('src/lib.rs').get('include_str data.txt'), undefined)
 })
+
+test('buildRustTree follows a path through every module a segment may name: aliases, glob-reached modules, a module beside an alias', (t) => {
+  const values = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
+  const sources = new Map([
+    ['src/lib.rs', '#[cfg(windows)]\nmod windows;\n#[cfg(unix)]\nmod unix;\n#[cfg(windows)]\nuse windows as imp;\n#[cfg(unix)]\nuse unix as imp;\nmod sys;\nmod user;\n'],
+    ['src/sys.rs', '#[cfg(windows)]\npub use crate::windows::*;\n#[cfg(unix)]\npub use crate::unix::*;\n'],
+    ['src/unix.rs', 'pub mod net { pub struct X; }\npub struct X;\n'],
+    ['src/windows.rs', 'pub mod net { pub struct X; }\npub struct X;\n'],
+    ['src/user.rs', 'fn f(_: crate::imp::X, _: crate::sys::net::X) {}\n'],
+  ])
+  const user = buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs')
+  t.assert.deepEqual(values(user.get('crate::imp::X')), ['src/unix.rs', 'src/windows.rs'])
+  t.assert.deepEqual(values(user.get('crate::sys::net::X')), ['src/unix.rs', 'src/windows.rs'])
+  // `#[cfg(not(unix))] mod sys;` beside `#[cfg(unix)] use fallback as sys;`: a unix build takes the alias
+  const beside = new Map([
+    ['src/lib.rs', '#[cfg(not(unix))]\nmod sys;\nmod fallback;\n#[cfg(unix)]\nuse fallback as sys;\nfn g() { sys::X::f() }\n'],
+    ['src/sys.rs', 'pub struct X;\n'],
+    ['src/fallback.rs', 'pub struct X;\n'],
+  ])
+  t.assert.deepEqual(values(buildRustTree(beside, { roots: ['src/lib.rs'] }).resolutions.get('src/lib.rs').get('sys::X::f')), ['src/fallback.rs', 'src/sys.rs'])
+})

@@ -1783,25 +1783,29 @@ function cfgTextOf(leaves) {
 // applies under cfgs of its own -- a file under no platform cfg asking libc's `crate::sockaddr`,
 // defined per platform -- so the first in written order is no answer. The first, carrying
 // `alternatives`: cfg key → file, each distinct file under the leaves of its first candidate
-// that the asker doesn't hold itself (a module a path goes on through takes the first; only a
-// path's target is recorded as the lot). One file, or a module first: that answer alone.
+// that the asker doesn't hold itself. A module first -- one a path may go on through -- carries
+// `branches` instead, cfg key → each distinct answer (its own included), for walkPath to follow
+// the rest of the path through each (`use unix as imp;` beside `use windows as imp;`). One file
+// or module: that answer alone.
 function withAlternatives(found, asker) {
   const [first] = found
-  const files = new Set(found.map((f) => f.answer.file).filter((f) => f !== undefined))
-  if (found.length === 1 || files.size < 2 || first.answer.kind === 'module') return first.answer
-  const alternatives = new Map()
+  const idOf = (answer) => (answer.kind === 'module' ? `mod ${answer.modulePath}` : answer.file)
+  if (found.length === 1 || new Set(found.map((f) => idOf(f.answer)).filter((id) => id !== undefined)).size < 2) return first.answer
+  const keyed = new Map()
   const seen = new Set()
   for (const { answer, leaves } of found) {
-    if (answer.file === undefined || seen.has(answer.file)) continue
-    seen.add(answer.file)
+    const id = idOf(answer)
+    if (id === undefined || seen.has(id)) continue
+    seen.add(id)
     // Kept per asker set (the text leaves out what the asker holds itself).
     const textOf = () => cfgTextOf(leaves.leaves.filter((l) => asker === undefined || !asker.keys.has(leafKey(l))))
     const base = cfgKey(asker === undefined ? textOf() : cached(asker.texts, leaves.key, textOf))
     let key = base
-    for (let k = 2; alternatives.has(key); k++) key = `${base}#${k}`
-    alternatives.set(key, answer.file)
+    for (let k = 2; keyed.has(key); k++) key = `${base}#${k}`
+    keyed.set(key, answer)
   }
-  return { ...first.answer, alternatives }
+  if (first.answer.kind === 'module') return { ...first.answer, branches: keyed }
+  return { ...first.answer, alternatives: new Map([...keyed].filter(([, answer]) => answer.file !== undefined).map(([key, answer]) => [key, answer.file])) }
 }
 
 // Every candidate module `at`'s imports offer for `name` as seen `seeing` levels into it, in
@@ -2158,7 +2162,40 @@ const onlyValues = (root, at, name, ctx) => {
 // written in, `file`'s own imports come first: the module's other files, if any, are cfg variants
 // (providedFrom). `asker` (see cfg compatibility) rules out what can't be compiled together with
 // the path.
-function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
+function walkPath(segments, root, from, ctx, options = {}) {
+  const branches = []
+  const r = walkOnce(segments, root, from, ctx, options, branches)
+  return branches.length === 0 || r === null || r === VALUE_ONLY || r.file === undefined ? r : throughBranches(r, branches, root, from, ctx, options)
+}
+// The rest of a path through each module a segment may name (`branches`, see withAlternatives:
+// `{ keyed, rest }`, the segments after it): `r`, the answer through the first, with the files the
+// others lead to as its `alternatives` -- each module's walked on from the crate root, an item's
+// the item's file -- under the key of the module they go through.
+function throughBranches(r, branches, root, from, ctx, options) {
+  const alternatives = new Map()
+  const note = (key, answer) => {
+    for (const [k, f] of answer.alternatives ?? [[null, answer.file]]) {
+      if (f === undefined || [...alternatives.values()].includes(f)) continue
+      const base = k === null ? key : `${key}, ${k}`
+      let unique = base
+      for (let n = 2; alternatives.has(unique); n++) unique = `${base}#${n}`
+      alternatives.set(unique, f)
+    }
+  }
+  const [{ keyed: firstKeyed }] = branches
+  note([...firstKeyed.keys()][0], r)
+  for (const { keyed, rest } of branches) {
+    for (const [key, answer] of [...keyed].slice(1)) {
+      if (answer.kind !== 'module') note(key, answer)
+      else {
+        const there = walkPath(['crate', ...answer.modulePath.split('::').slice(1), ...rest], root, from, ctx, options)
+        if (there !== null && there !== VALUE_ONLY) note(key, there)
+      }
+    }
+  }
+  return alternatives.size > 1 ? { ...r, alternatives } : r
+}
+function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, branches = []) {
   const tree = ctx.trees.get(root)
   const head = segments[0]
   // A segment with more after it names a module or type-namespace item: a `fn log` doesn't lead
@@ -2188,6 +2225,7 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
     via = { modulePath: from, consumed: 0, through: p.through }
     if (p.kind === 'crate') return { ...p, via, rest: segments.slice(1) } // what the path names in that crate (followImport)
     if (p.kind !== 'module') return { ...p, via }
+    if (p.branches !== undefined) branches.push({ keyed: p.branches, rest: segments.slice(1) })
     cur = p.modulePath.split('::')
     i = 1
   }
@@ -2216,8 +2254,18 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
       // with a variant the build compiles (`#[cfg_attr(loom, path = "loom.rs")] mod imp;` falls
       // back to imp.rs) is there, and shadows the glob.
       const sets = (ctx.moduleFiles?.get(root)?.get(child) ?? [tree.get(child)]).map((f) => ctx.files.get(f)?.leaves).filter((set) => set !== undefined)
-      p = sets.length > 0 && sets.every((set) => deadFor(asker, set) || doubtful(asker, set)) ? lookup(at, name, want) : null
+      const away = sets.length > 0 && sets.every((set) => deadFor(asker, set) || doubtful(asker, set))
+      p = away ? lookup(at, name, want) : null
       if (p === null || p === VALUE_ONLY) {
+        // One file there only under cfgs the asker doesn't hold (`#[cfg(not(unix))] mod sys;`
+        // beside `#[cfg(unix)] use fallback as sys;`): what else the module binds the name to is a
+        // branch of the path too (see throughBranches), under no key of its own. (A `mod` with cfg
+        // variants is taken to be there in every build: one of them, a `path` fallback's; and one
+        // under a custom cfg the build may set is there, as above.)
+        if (!away && sets.length === 1 && !entailed(asker, sets[0]) && !hasCustom(sets[0].leaves, customKey)) {
+          const other = lookup(at, name, want)
+          if (other !== null && other !== VALUE_ONLY && !(other.kind === 'module' && other.modulePath === child)) branches.push({ keyed: new Map([[cfgKey(cfgTextOf(sets[0].leaves)), { kind: 'module', modulePath: child, file: tree.get(child) }], ['*', other]]), rest: segments.slice(i + 1) })
+        }
         cur.push(name)
         i++
         continue
@@ -2233,6 +2281,7 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
     via ??= { modulePath: at, consumed: i, through: p.through }
     if (p.kind === 'crate') return { ...p, via, rest: segments.slice(i + 1) }
     if (p.kind !== 'module') return { ...p, via }
+    if (p.branches !== undefined) branches.push({ keyed: p.branches, rest: segments.slice(i + 1) })
     cur = p.modulePath.split('::')
     i++
   }

@@ -601,7 +601,12 @@ compatible one under no custom cfg is the answer under its own cfgs, and the
 edge is a cfg-keyed map of their files, the shape of a `mod`'s variants below
 (a file under no platform cfg asking libc's `crate::sockaddr`, defined per
 platform, maps each platform's file, not the first written) -- or that file,
-when they agree; else the first under a custom cfg; and a candidate under a cfg
+when they agree. So does a path through such a module, the rest of it walked
+through each (`use unix as imp;` beside `use windows as imp;`, a module two
+cfg-gated globs bring in: `crate::imp::X` maps unix.rs and windows.rs), and
+through a module there under a cfg the file doesn't hold beside another
+binding of its name (`#[cfg(not(unix))] mod sys;` and `#[cfg(unix)] use
+fallback as sys;`). Else the first under a custom cfg; and a candidate under a cfg
 the build rules out (a feature that is off, another target) only when nothing
 else fits -- unless the asking file is itself under such a cfg, when the build
 says nothing. A positive cfg that neither rustc nor cargo sets (`loom`,
