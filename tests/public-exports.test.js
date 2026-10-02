@@ -12,11 +12,13 @@ import { StasisWebpack } from '@exodus/stasis/webpack'
 import { StasisRollup } from '@exodus/stasis/rollup'
 import { StasisMetro } from '@exodus/stasis/metro'
 import * as metroTransformer from '@exodus/stasis/metro-transformer'
+import * as metroResolveRequest from '@exodus/stasis/metro-resolve-request'
 import { StasisEsbuild as PluginsEsbuild } from '@exodus/stasis-plugins/esbuild'
 import { StasisWebpack as PluginsWebpack } from '@exodus/stasis-plugins/webpack'
 import { StasisRollup as PluginsRollup } from '@exodus/stasis-plugins/rollup'
 import { StasisMetro as PluginsMetro } from '@exodus/stasis-plugins/metro'
 import * as pluginsMetroTransformer from '@exodus/stasis-plugins/metro-transformer'
+import * as pluginsMetroResolveRequest from '@exodus/stasis-plugins/metro-resolve-request'
 
 test('@exodus/stasis/bundle exports Bundle class', (t) => {
   t.assert.equal(typeof Bundle, 'function')
@@ -39,6 +41,15 @@ test('@exodus/stasis/metro-transformer re-exports the stasis-plugins worker tran
   t.assert.equal(typeof metroTransformer.getCacheKey, 'function')
   t.assert.equal(metroTransformer.transform, pluginsMetroTransformer.transform)
   t.assert.equal(metroTransformer.getCacheKey, pluginsMetroTransformer.getCacheKey)
+})
+
+test('@exodus/stasis/metro-resolve-request re-exports the stasis-plugins resolveRequest plugin', (t) => {
+  t.assert.equal(typeof metroResolveRequest.resolveRequest, 'function')
+  t.assert.equal(typeof metroResolveRequest.createResolveRequest, 'function')
+  t.assert.equal(metroResolveRequest.resolveRequest, pluginsMetroResolveRequest.resolveRequest)
+  t.assert.equal(metroResolveRequest.createResolveRequest, pluginsMetroResolveRequest.createResolveRequest)
+  // createResolveRequest validates its optional base up front.
+  t.assert.throws(() => metroResolveRequest.createResolveRequest('nope'), /base must be a function or omitted/)
 })
 
 test('@exodus/stasis/cmd/bundle exports the bundle command and its in-memory API', (t) => {

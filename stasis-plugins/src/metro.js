@@ -112,8 +112,10 @@ function metroDefaultSerializer() {
 // Stasis capture plugin for Metro (React Native). Hooks Metro's serializer, which runs ONCE in
 // the MAIN process with the full module graph -- a per-worker transformer's process-local State
 // could never be merged. This is the CAPTURE half; the LOAD half is the companion
-// ./metro-transformer.js. Wire both permanently (withStasis + transformerPath); the mode picks
-// the active one, and under bundle=load this serializer is a transparent pass-through.
+// ./metro-transformer.js (bytes) plus ./metro-resolve-request.js (recorded resolution edges, wired as
+// resolver.resolveRequest). Wire all of them permanently (withStasis + transformerPath +
+// resolveRequest); the mode picks the active ones, and under bundle=load this serializer is a
+// transparent pass-through.
 // Capture is one-shot (dev-server rebuilds refused, see #run) and REQUIRES --child-process so the
 // worker-side toolchain (babel, RN preset) is attested (enforced in the constructor). withStasis
 // wires the stable customSerializer -- the only surface that receives preModules; serializerHook

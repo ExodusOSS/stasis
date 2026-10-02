@@ -14,7 +14,7 @@ import { State } from '@exodus/stasis-core/state'
 import { brotliOptions } from '@exodus/stasis-core/brotli'
 import { sha512integrity } from '@exodus/stasis-core/state-util'
 import { detectRepo, findPackageMetadata, normalizeEntries, packageType, readJson, readModuleManifest, readPackageJson, readRegularFileOrNull } from '@exodus/stasis-core/bundle-util'
-import { RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isDotEnvFile, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, posixPathEscapes, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
+import { EMPTY_MODULE_PATH, RN_CORE_INCLUDE_FILES, assertRealPathWithinBase, classifyNativeCapture, isDotEnvFile, isExcludedNativeDir, isExecutableFile, isNativeArtifact, isNativeManifest, isPodspec, isSkippedNativeWalkDir, moduleFileKey, parseResourcesOption, posixPathEscapes, refineNativeCapture, splitNodeModulesPath } from '@exodus/stasis-core/util'
 import { diskHost } from '@exodus/stasis-core/host'
 import {
   SOLIDITY_PACKAGE_MANIFESTS,
@@ -768,9 +768,6 @@ const SOURCE_EXTS = ['js', 'json', 'ts']
 const SOURCE_EXTS_JSX = ['js', 'jsx', 'json', 'ts', 'tsx']
 // React Native preset mainFields for `--metro` (which also sets the RN conditions + platform suffixes).
 const METRO_MAIN_FIELDS = ['react-native', 'browser', 'main']
-// Synthetic path for the empty module a browser/react-native `false` redirect resolves to,
-// carried as a real empty CJS file so the edge points at attestable bytes.
-const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
 
 // Recursively collect files under a native ios/android dir, skipping build output and symlinks
 // (cycle/escape hazard). Absolute paths into `out`.

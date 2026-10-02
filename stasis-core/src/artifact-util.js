@@ -24,6 +24,11 @@ export const KNOWN_FORMATS = new Set([
   ...STAT_FORMATS,
 ])
 
+// The reserved path of the empty module a browser/react-native `false` redirect resolves to in a
+// `stasis bundle --mainFields/--metro` artifact (carried as a real empty CJS file); shared by the
+// writer and readers that map it back to their own notion of empty (metro-resolve-request).
+export const EMPTY_MODULE_PATH = '.stasis/empty-module.js'
+
 // Payload-free stat records: attest a path's KIND, no content, and yield to a real format.
 export const isStatFormat = (format) => STAT_FORMATS.has(format)
 

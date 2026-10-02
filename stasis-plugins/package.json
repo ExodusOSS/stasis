@@ -8,12 +8,14 @@
     "./esbuild": "./src/esbuild.js",
     "./rollup": "./src/rollup.js",
     "./metro": "./src/metro.js",
-    "./metro-transformer": "./src/metro-transformer.js"
+    "./metro-transformer": "./src/metro-transformer.js",
+    "./metro-resolve-request": "./src/metro-resolve-request.js"
   },
   "files": [
     "src/esbuild.js",
     "src/metro.js",
     "src/metro-transformer.js",
+    "src/metro-resolve-request.js",
     "src/plugins.js",
     "src/rollup.js",
     "src/webpack.js"

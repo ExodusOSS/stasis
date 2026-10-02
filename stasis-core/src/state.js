@@ -1306,19 +1306,20 @@ export class State {
   // Resolve a CJS require() target to a bundled absolute path, or undefined to defer to Node (the
   // hooks.js CJS shim needs this: registerHooks can't intercept Module._resolveFilename). Matches
   // under ANY conditions bucket, since native require gives none; divergent buckets -> defer.
-  resolveBundled(parentURL, specifier) {
+  // A per-platform { platform: file } Map (--metro) resolves only for a caller passing `platform`
+  // (the metro-resolve-request plugin); platform-less callers defer to native.
+  resolveBundled(parentURL, specifier, { platform } = {}) {
     let parent
     try { parent = this.#canonicalFile(parentURL) } catch { return undefined }
     const spec = this.#canonicalSpecifier(parentURL, specifier)
     const matches = new Set()
     for (const [, byParent] of this.imports) {
-      const file = byParent.get(parent)?.get(spec)
+      let file = byParent.get(parent)?.get(spec)
+      if (file instanceof Map) file = typeof platform === 'string' ? file.get(platform) : undefined
       if (file !== undefined) matches.add(file)
     }
     if (matches.size !== 1) return undefined
     const [only] = matches
-    // Per-platform { platform: file } Map (--metro) has no single path: defer to native, not resolve()'s TypeError.
-    if (typeof only !== 'string') return undefined
     return resolve(this.root, only)
   }
 
