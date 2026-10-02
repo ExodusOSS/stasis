@@ -18,6 +18,7 @@ import {
   resolveVendoredCrate,
   scanRustItems,
 } from '../stasis/src/loaders/rust.js'
+import { rustFixture } from './rust-fixtures.helper.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 
@@ -1102,7 +1103,7 @@ test('buildRustTree records include edges and edges to the file defining a macro
 })
 
 test('collectRustFilesFromDisk follows include!, carries include_str!/include_bytes! assets with their format, and leaves a dead include alone', async (t) => {
-  const baseDir = join(fixtures, 'includes')
+  const baseDir = rustFixture('includes')
   const formats = new Map()
   const sources = await collectRustFilesFromDisk(baseDir, ['src/lib.rs'], { formats })
   t.assert.deepEqual([...sources.keys()].toSorted(), ['README.md', 'data/blob.bin', 'data/table.txt', 'src/gated.rs', 'src/generated/consts.rs', 'src/lib.rs', 'src/macros.rs'])

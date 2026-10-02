@@ -1,3 +1,0 @@
-# inc
-
-A fixture crate.

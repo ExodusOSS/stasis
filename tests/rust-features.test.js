@@ -19,6 +19,7 @@ import {
 } from '../stasis/src/loaders/cargo.js'
 import { buildRustBundle } from '../stasis/src/cmd/bundle.js'
 import { buildRustTree, collectRustBundle, collectRustFilesFromDisk } from '../stasis/src/loaders/rust.js'
+import { rustFixture } from './rust-fixtures.helper.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'rust-bundle')
 const featuresFixture = join(fixtures, 'features')
@@ -1106,7 +1107,7 @@ test('createCargoContext finds vendored crates in the directory .cargo/config.to
 // --- bundling ---
 
 test('buildRustBundle carries include!d source and include_str!/include_bytes! assets as resources', async (t) => {
-  const bundle = await buildRustBundle({ cwd: join(fixtures, 'includes'), entries: ['src/lib.rs'] })
+  const bundle = await buildRustBundle({ cwd: rustFixture('includes'), entries: ['src/lib.rs'] })
   t.assert.deepEqual(sorted(bundle.sources.keys()), ['README.md', 'data/blob.bin', 'data/table.txt', 'src/gated.rs', 'src/generated/consts.rs', 'src/lib.rs', 'src/macros.rs'])
   t.assert.deepEqual([bundle.formats.get('src/generated/consts.rs'), bundle.formats.get('data/table.txt'), bundle.formats.get('data/blob.bin')], ['rust', 'resource', 'resource:base64'])
   t.assert.equal(bundle.sources.get('data/blob.bin'), Buffer.from([0, 0xff, 0xfe, 1]).toString('base64'))
@@ -1374,7 +1375,7 @@ test('buildRustBundle ends when a crate root it wants is refused, and reports ev
 // resolver 1 and 2, null where cargo refused one, and the targets' `rustc --print cfg`. It is
 // @preventive/lockfile's fixture (PreventiveMeasures/libraries#56, MIT), recorded there by
 // lockfile/scripts/record-cargo.js.
-const cargoRecorded = join(fixtures, 'cargo-recorded')
+const cargoRecorded = rustFixture('cargo-recorded')
 const recordedProject = (resolver) => {
   const tmp = mkdtempSync(join(tmpdir(), 'stasis-recorded-'))
   cpSync(cargoRecorded, tmp, { recursive: true })

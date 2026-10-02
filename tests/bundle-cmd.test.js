@@ -19,6 +19,7 @@ import {
   outermostDir,
 } from '../stasis/src/cmd/bundle.js'
 import { diffCommand } from '../stasis/src/cmd/diff.js'
+import { rustFixture } from './rust-fixtures.helper.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
@@ -3970,7 +3971,7 @@ test('buildBundle rejects --cargo-target and --cargo-manifests for a non-Rust bu
 
 test('CLI: bundle --cargo-manifests adds the package manifest, lockfile and build script to a Rust bundle', withTmp((t, tmp) => {
   const outPath = join(tmp, 'out.stasis.code.br')
-  const cwd = join(rustFixtures, 'includes')
+  const cwd = rustFixture('includes')
   const plain = runCli(['bundle', '-o', outPath, 'src/lib.rs'], { cwd })
   t.assert.equal(plain.status, 0, plain.stderr)
   t.assert.match(plain.stderr, /Bundled 7 files in 1 package/u)
