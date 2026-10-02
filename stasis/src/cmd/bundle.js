@@ -1215,25 +1215,27 @@ async function buildJs({ mainFields, platforms, metro, metroResolver, ...options
   return { bundle: state.sourceBundle.withReason('bundle'), lockfile: () => state.lockfile, stateBuilt: true }
 }
 
-// buildVfsBundle's options for the package manager `pm`, checked before anything is fetched (`host`
-// the project's, or an empty tree's with `fetched: false`, before the project is fetched): its kind
-// alone, and no metro-resolver, which reads the disk.
-export function checkVfsOptions(name, pm, packageManager, options) {
-  if (classifyEntries(name, options) !== pm.kind) throw new Error(`${name}: only ${pm.kind === 'sol' ? 'Solidity' : 'JS'} bundles are built with ${packageManager}`)
+// buildVfsBundle's checks of `options`, which hold before anything is fetched (`host` the
+// project's, or an empty tree's with `fetched: false`): no metro-resolver, which reads the disk.
+// -> the kind of bundle its entries make
+export function checkVfsOptions(name, options) {
+  const kind = classifyEntries(name, options)
   if (options.metroResolver) throw new Error(`${name}: metroResolver is not supported`)
+  return kind
 }
 
 // A bundle from the lockfile of the project held in `vfs` alone (@exodus/stasis/vfs-bundle), `cwd` a
 // path there: buildBundle's JS options, resolved through the node_modules 'pnpm' or 'yarn1' would
 // install, or its Solidity options, through the dependencies folder 'soldeer' would install; with
-// nothing read from disk but tarballs and zips. No EXODUS_STASIS_* setting is read; `env` supplies
-// a Solidity bundle's FOUNDRY_PROFILE and FOUNDRY_REMAPPINGS alone. `repo`, the informational
-// `{ github, directory | root, commit }`, is the Bundle's, over what is detected in the Vfs as
-// `stasis bundle` detects it on disk. `os`, `cpu` and `libc` are loadNodeModules'.
-// -> { bundle: Bundle, lockfile: Lockfile (of a JS bundle), stats }
-export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, os, cpu, libc, repo, env = {}, ...options } = {}) {
-  const { checkTarget, checkVfs, loadTree, packageManagerOf, vfsHost } = await import('../vfs-bundle/tree.js')
-  const pm = packageManagerOf('buildVfsBundle', packageManager)
+// nothing read from disk but tarballs and zips, nor from the environment: a Solidity bundle is
+// built with foundry.toml's default profile, whatever FOUNDRY_PROFILE or remappings one sets, and no
+// EXODUS_STASIS_* setting is read. `repo`, the informational `{ github, directory | root, commit }`,
+// is the Bundle's, over what is detected in the Vfs as `stasis bundle` detects it on disk. `os`,
+// `cpu` and `libc` are loadNodeModules'. Without a `packageManager`, it is the one whose lockfile
+// installs cwd, where only one's does.
+// -> { bundle: Bundle, lockfile: Lockfile (of a JS bundle), stats, packageManager }
+export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageManagerVersion, os, cpu, libc, repo, ...options } = {}) {
+  const { checkKind, checkTarget, checkVfs, loadTree, packageManagerFor, packageManagerOf, vfsHost } = await import('../vfs-bundle/tree.js')
   checkVfs('buildVfsBundle', vfs)
   checkTarget('buildVfsBundle', { os, cpu, libc })
   // Checked as the Bundle checks it, before anything is fetched.
@@ -1241,7 +1243,9 @@ export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageMa
   const project = vfsHost(vfs)
   // A real path, as every file the scan reaches is.
   cwd = project.realpath(posix.resolve('/', cwd))
-  checkVfsOptions('buildVfsBundle', pm, packageManager, { ...options, cwd, host: project })
+  packageManager = packageManagerFor('buildVfsBundle', project, cwd, { packageManager, packageManagerVersion })
+  const pm = packageManagerOf('buildVfsBundle', packageManager)
+  checkKind('buildVfsBundle', checkVfsOptions('buildVfsBundle', { ...options, cwd, host: project }), [packageManager])
   // Checked before anything is fetched: an entry out of what the tree installs is in the project
   // already. (A Solidity entry that is no .sol file is a directory, skipped where it is missing.)
   for (const entry of options.entries) {
@@ -1250,13 +1254,12 @@ export async function buildVfsBundle({ vfs, packageManager, cwd = '/', packageMa
     if (!posix.relative(cwd, abs).split('/').includes(pm.installs) && project.stat(abs) === null) throw new Error(`entry not found: ${abs}`)
   }
   const { host, stats } = await loadTree({ project, packageManager, cwd, packageManagerVersion, os, cpu, libc })
-  const { bundle, lockfile, stateBuilt } = pm.kind === 'sol'
-    ? { bundle: await buildSolidityBundle({ ...options, cwd, env, host }) }
-    : await buildJs({ ...options, cwd, host, env: {} })
+  const args = { ...options, cwd, host, env: {} }
+  const { bundle, lockfile, stateBuilt } = pm.kind === 'sol' ? { bundle: await buildSolidityBundle(args) } : await buildJs(args)
   if (repo !== undefined) bundle.repo = repo
   // Rooted at cwd, where `stasis bundle` detects its repo.
   else if (!stateBuilt) bundle.repo ??= detectRepo(cwd, host)
-  return { bundle, lockfile: lockfile?.(), stats }
+  return { bundle, lockfile: lockfile?.(), stats, packageManager }
 }
 
 // Programmatic equivalent of `stasis bundle`: build and return an in-memory Bundle without

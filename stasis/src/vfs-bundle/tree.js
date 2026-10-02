@@ -196,13 +196,68 @@ export const lockfileOf = (packageManager) => PACKAGE_MANAGERS[packageManager].l
 // the names in it and, from `above()`, the names in each directory above it.
 export const installedAlone = (packageManager, names, above) => PACKAGE_MANAGERS[packageManager].alone(names, above)
 
-// The real path of the directory the project `vfs` holds at `cwd` is installed from, which holds the
-// lockfile and which a bundle's paths are relative to; null without one.
-export function lockfileRoot(vfs, packageManager, cwd) {
-  const host = vfsHost(vfs)
-  const pm = PACKAGE_MANAGERS[packageManager]
-  const found = pm.root(host, host.realpath(cwd))
+// The real path of the directory `host` holds `cwd` (a real path) installed from by `pm`, where it
+// holds the lockfile; else null. That directory is cwd or above it, so none is without a lockfile there.
+function rootOf(host, pm, cwd) {
+  if (nearest(cwd, holding(host, pm.lockfile)) === null) return null
+  const found = pm.root(host, cwd)
   return found !== null && isFile(join(found, pm.lockfile), host) ? host.realpath(found) : null
+}
+
+// The real path of the directory the project `host` reads holds at `cwd` is installed from, which
+// holds the lockfile and which a bundle's paths are relative to; null without one.
+export const lockfileRoot = (host, packageManager, cwd) => rootOf(host, PACKAGE_MANAGERS[packageManager], host.realpath(cwd))
+
+// The package managers that install node_modules.
+export const NODE_MODULES_MANAGERS = Object.keys(PACKAGE_MANAGERS).filter((name) => PACKAGE_MANAGERS[name].installs === 'node_modules')
+
+// The one of the package managers `names` that installs `cwd` in the project `host` reads from a
+// directory holding its lockfile, as lockfileRoot finds it: refused where none or more than one does.
+export function detectPackageManager(name, host, cwd, names = Object.keys(PACKAGE_MANAGERS)) {
+  const real = host.realpath(cwd)
+  const found = names.flatMap((pm) => {
+    const root = rootOf(host, PACKAGE_MANAGERS[pm], real)
+    return root === null ? [] : [[pm, join(root, PACKAGE_MANAGERS[pm].lockfile)]]
+  })
+  if (found.length === 1) return found[0][0]
+  if (found.length === 0) throw noLockfile(name, real, names)
+  throw new Error(`${name}: no packageManager given, and more than one lockfile installs ${real}: ${found.map(([pm, file]) => `${file} (${pm})`).join(', ')}`)
+}
+
+// That none of the lockfiles of `names` installs `place`.
+export const noLockfile = (name, place, names = Object.keys(PACKAGE_MANAGERS)) => new Error(`${name}: no packageManager given, and none of ${names.map((pm) => PACKAGE_MANAGERS[pm].lockfile).join(', ')} installs ${place}`)
+
+// Whether a directory's listing (listRepoDir's) holds `packageManager`'s lockfile.
+const listsLockfile = (listing, packageManager) => listing.some((entry) => entry.path === PACKAGE_MANAGERS[packageManager].lockfile && entry.type === 'blob')
+
+// The package managers whose lockfile `listings` (a directory's and those above it) hold, which are
+// the only ones that may install that directory.
+export const lockfilesListed = (listings) => Object.keys(PACKAGE_MANAGERS).filter((pm) => listings.some((listing) => listsLockfile(listing, pm)))
+
+// A `packageManagerVersion` is one of the package manager given, never of one detected.
+export function checkVersion(name, { packageManager, packageManagerVersion }) {
+  if (packageManagerVersion !== undefined && packageManager === undefined) throw new TypeError(`${name}: packageManagerVersion is only valid with packageManager`)
+}
+
+// The package manager of `names` the project `host` reads is built with at `cwd`: `packageManager`
+// if given, else the one detected.
+export function packageManagerFor(name, host, cwd, { packageManager, packageManagerVersion }, names = Object.keys(PACKAGE_MANAGERS)) {
+  checkVersion(name, { packageManager, packageManagerVersion })
+  if (packageManager === undefined) return detectPackageManager(name, host, cwd, names)
+  packageManagerOf(name, packageManager, names)
+  return packageManager
+}
+
+const KIND_LABELS = { js: 'JS', sol: 'Solidity' }
+
+// Refused where no package manager of `names` builds bundles of `kind`.
+export function checkKind(name, kind, names = Object.keys(PACKAGE_MANAGERS)) {
+  if (names.some((pm) => PACKAGE_MANAGERS[pm].kind === kind)) return
+  const kinds = [...new Set(names.map((pm) => PACKAGE_MANAGERS[pm].kind))]
+  const builders = (of) => names.filter((pm) => PACKAGE_MANAGERS[pm].kind === of).join(', ')
+  throw new Error(names.length === 1
+    ? `${name}: only ${KIND_LABELS[kinds[0]]} bundles are built with ${names[0]}`
+    : `${name}: only ${kinds.map((of) => `${KIND_LABELS[of]} bundles (${builders(of)})`).join(' and ')} are built`)
 }
 
 // The PACKAGE_MANAGERS entry of `packageManager`, which has to be one of `names`.

@@ -2,8 +2,12 @@ import { join, normalize, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { readJson } from '@exodus/stasis-core/bundle-util'
-import { fieldResolverFor } from '../cmd/bundle.js'
+import { isAutoExcludedDir } from '@exodus/stasis-core/util'
+import { Vfs } from '@preventive/vfs'
+import { checkVfsOptions, fieldResolverFor } from '../cmd/bundle.js'
+import { foundrySourceDir } from '../loaders/foundry.js'
 import { resolveTypescriptFallback, typescriptExportsTarget } from '../resolve-typescript.js'
+import { checkKind, checkVersion, packageManagerOf, vfsHost } from './tree.js'
 
 const JS = /\.[cm]?[jt]s$/u
 // A path out of the package's directory, which may be the root of a subtree held alone.
@@ -69,4 +73,70 @@ export function packageEntries(host, dir, { conditions = [], mainFields, metro =
     if (typeof bin === 'string' && !outward(bin) && host.stat(join(real, bin))?.isFile()) add(host.realpath(join(real, bin)))
   }
   return [...found]
+}
+
+// Directories whose .sol files are none of a project's entry points: its tests, scripts and mocks,
+// what it depends on or builds, and what no walk descends into.
+const SKIPPED_DIRS = new Set(['test', 'tests', 'script', 'scripts', 'mock', 'mocks', 'lib', 'node_modules', 'dependencies', 'out', 'cache', 'artifacts', 'build'])
+const isSkippedDir = (name) => SKIPPED_DIRS.has(name.toLowerCase()) || isAutoExcludedDir(name)
+// A .sol file but a test or script by its name.
+const isEntrySol = (entry) => entry.isFile() && entry.name.endsWith('.sol') && !/\.(?:t|s|test|spec)\.sol$/u.test(entry.name)
+
+// The .sol files under the directory `rel` of `real` that are entry points by name, but those in a
+// skipped directory; sorted. Links are not followed.
+function solidityFiles(host, real, rel) {
+  const out = []
+  const walk = (sub) => {
+    for (const entry of host.readdir(join(real, sub))) {
+      const path = sub === '.' ? entry.name : `${sub}/${entry.name}`
+      if (entry.isDirectory()) {
+        if (!isSkippedDir(entry.name)) walk(path)
+      } else if (isEntrySol(entry)) {
+        out.push(path)
+      }
+    }
+  }
+  walk(rel)
+  return out.toSorted()
+}
+
+// The entry points of the Soldeer project in `dir`, by name and layout, as paths from `dir`: its
+// .sol files directly in it, then those under contracts/, then those under its source directory
+// (its foundry.toml's default profile's `src`, else `src`); none of its tests, scripts or mocks,
+// nor any in what it depends on or builds. A link to a directory is none.
+export function solidityEntries(host, dir) {
+  const real = host.realpath(dir)
+  const isDirectory = (rel) => !outward(rel) && host.stat(join(real, rel))?.isDirectory() && host.readlink(join(real, rel)) === null
+  const under = (rel) => (isDirectory(rel) ? solidityFiles(host, real, rel) : [])
+  const src = normalize(foundrySourceDir(real, { host })).replace(/\/+$/u, '')
+  const own = host.readdir(real).filter(isEntrySol).map((entry) => entry.name).toSorted()
+  return [...new Set([...own, ...under('contracts'), ...(src === 'contracts' ? [] : under(src))])]
+}
+
+// By the kind of bundle a package manager builds: an entry its options are checked over before
+// there are any, the entries the build takes where none are given, and what having none says.
+export const KINDS = {
+  js: { standIn: 'index.js', entries: packageEntries, none: 'has no package.json naming a JS entry point there' },
+  sol: { standIn: 'index.sol', entries: solidityEntries, none: 'has no .sol entry point directly in it, under contracts/, or under its source directory' },
+}
+
+const EMPTY = vfsHost(new Vfs())
+
+// The build's checks of `options` before anything is fetched, over an empty tree, which never
+// decides them: for the package manager given, else for any; over the entries given, else over one
+// of the kind the default ones are. -> the PACKAGE_MANAGERS entry of the one given
+export function checkAhead(name, packageManager, options) {
+  checkVersion(name, { packageManager, ...options })
+  const pm = packageManager === undefined ? undefined : packageManagerOf(name, packageManager)
+  const refusal = (entries) => {
+    try {
+      checkKind(name, checkVfsOptions(name, { ...options, entries, cwd: '/', host: EMPTY, fetched: false }), packageManager === undefined ? undefined : [packageManager])
+      return null
+    } catch (error) {
+      return error
+    }
+  }
+  const refusals = options.entries === undefined ? (pm === undefined ? Object.values(KINDS) : [KINDS[pm.kind]]).map(({ standIn }) => refusal([standIn])) : [refusal(options.entries)]
+  if (!refusals.includes(null)) throw refusals[0]
+  return pm
 }
