@@ -1921,3 +1921,21 @@ test('createCargoContext takes the workspace above the bundle root of a member o
     t.assert.deepEqual(cargo.buildFilesFor('src/lib.rs').map((f) => f.path), ['Cargo.toml', '.cargo/config.toml'])
   })
 })
+
+test('createCargoContext stops the build where a vendored Cargo.toml it resolves with isn\'t the one .cargo-checksum.json lists', async (t) => {
+  const manifest = '[package]\nname = "foo"\nversion = "1.0.0"\n'
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'src/main.rs': 'fn main() { foo::f() }\n',
+    'vendor/foo/Cargo.toml': manifest,
+    'vendor/foo/.cargo-checksum.json': JSON.stringify({ files: { 'Cargo.toml': createHash('sha256').update(manifest).digest('hex') }, package: sha('a') }),
+    'vendor/foo/src/lib.rs': '#[cfg(feature = "x")]\nmod x;\npub fn f() {}\n', 'vendor/foo/src/x.rs': '',
+  }
+  await withProjectAsync(files, async (tmp) => {
+    t.assert.ok(!(await buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] })).sources.has('vendor/foo/src/x.rs'))
+    // edited after `cargo vendor` (cargo: "the listed checksum of … Cargo.toml has changed"): what
+    // it says would turn `x` on, and the bundle stops before it does -- --cargo-manifests or not
+    writeFileSync(join(tmp, 'vendor/foo/Cargo.toml'), `${manifest}[features]\ndefault = ["x"]\nx = []\n`)
+    await t.assert.rejects(buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }), { message: /^vendor\/foo\/Cargo\.toml isn't the file vendor\/foo\/\.cargo-checksum\.json lists/u })
+  })
+})

@@ -767,6 +767,26 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     }
     return checksums.get(dir)
   }
+  // Throws when `fileRel`, a file of vendored package `m`, isn't byte for byte (`buf`) the file its
+  // `.cargo-checksum.json` lists -- edited after `cargo vendor`: cargo refuses to build the
+  // package, and so the bundle does. A file the list doesn't name, or a package without one, passes.
+  const checkVendored = (m, fileRel, buf) => {
+    const listed = checksumOf(m.dir)?.files[fileRel.slice(m.dir.length + 1)]
+    if (typeof listed !== 'string') return
+    const actual = createHash('sha256').update(buf).digest('hex')
+    if (actual !== listed) throw new Error(`${fileRel} isn't the file ${m.dir}/.cargo-checksum.json lists (sha256 ${actual}, listed ${listed}): changed since \`cargo vendor\`, which cargo refuses to build`)
+  }
+  // Package `m` as the build takes it in: a vendored one's Cargo.toml checked (checkVendored)
+  // before what it says -- features, dependencies -- decides anything, once per package.
+  const checkedCopies = new Set()
+  const usedCopy = (m) => {
+    if (m !== null && isVendoredDir(m.dir) && !checkedCopies.has(m.dir)) {
+      checkedCopies.add(m.dir)
+      const file = posix.join(m.dir, 'Cargo.toml')
+      checkVendored(m, file, readFileSync(join(baseDir, file)))
+    }
+    return m
+  }
   // The build's workspace root: that of the first entry's package that isn't vendored (else the
   // package itself, outside any workspace), else the bundle root's manifest; its Cargo.lock is the
   // build's, as cargo finds it. A vendored crate's own published lock plays no part.
@@ -894,7 +914,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   const resolveDepUncached = (m, dep, request) => {
     const asPackage = (dir) => {
       const t = dir === null ? null : readManifest(dir)
-      return t?.package ? t : null
+      return t?.package ? usedCopy(t) : null
     }
     // cargo metadata knows exactly which package each dependency edge points at.
     const known = metadata?.deps.get(m.dir)?.get(dep.key)
@@ -942,13 +962,13 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       if (want === null && pins.length > 0) console.warn(`[loader.cargo] ${lk.file} pins ${who} to ${crate} ${pins.join(', ')}, which ${req} doesn't allow: the lock is out of date`)
       if (want !== null) {
         const hit = candidates.find((c) => c.version === want)
-        if (hit) return readManifest(hit.dir)
+        if (hit) return usedCopy(readManifest(hit.dir))
         console.warn(`[loader.cargo] ${who} is locked to ${crate} ${want}, which isn't vendored (vendored: ${vendoredList})`)
         return null
       }
     }
     const fitting = candidates.filter((c) => fits(c.version))
-    if (fitting.length === 1) return readManifest(fitting[0].dir)
+    if (fitting.length === 1) return usedCopy(readManifest(fitting[0].dir))
     if (fitting.length === 0) console.warn(`[loader.cargo] No vendored version of ${crate} satisfies ${who}'s requirement ${req} (vendored: ${vendoredList})`)
     else console.warn(`[loader.cargo] Several vendored versions of ${crate} satisfy ${who}'s requirement ${req ?? '*'} (${fitting.map((c) => c.version).join(', ')}) and no Cargo.lock says which`)
     return null
@@ -1287,7 +1307,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       const dir = `${vendorDir}/${directory}`
       keyOf.set(dir, key)
       dirOf.set(key, dir)
-      manifestsByKey[key] = readManifest(dir).cargo
+      manifestsByKey[key] = usedCopy(readManifest(dir)).cargo
     }
     const memberKeys = memberDirs.map((dir) => keyOf.get(dir))
     const entryKeys = [...new Set(entries.map(packageFor).filter(Boolean).map((m) => keyOf.get(m.dir)))]
@@ -1478,7 +1498,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       console.warn(`[loader.cargo] Several vendored crates are named ${norm} (${[...found].join(', ')}) and no manifest says which`)
       return []
     }
-    return asRoots([...found].map((dir) => ({ t: readManifest(dir), key: '*' })))
+    return asRoots([...found].map((dir) => ({ t: usedCopy(readManifest(dir)), key: '*' })))
   }
 
   const crateCandidates = (name, fromFile, { roots = null, units = null } = {}) => {
@@ -1573,11 +1593,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     // so the bundle does. A file the list doesn't name, or a package without one, passes.
     checkVendoredFile(fileRel, buf) {
       const m = packageFor(fileRel)
-      if (m === null || !isVendoredDir(m.dir)) return
-      const listed = checksumOf(m.dir)?.files[fileRel.slice(m.dir.length + 1)]
-      if (typeof listed !== 'string') return
-      const actual = createHash('sha256').update(buf).digest('hex')
-      if (actual !== listed) throw new Error(`${fileRel} isn't the file ${m.dir}/.cargo-checksum.json lists (sha256 ${actual}, listed ${listed}): changed since \`cargo vendor\`, which cargo refuses to build`)
+      if (m !== null && isVendoredDir(m.dir)) checkVendored(m, fileRel, buf)
     },
     // Whether `fileRel` belongs to a vendored package (a registry crate `cargo vendor` copied in).
     isVendored(fileRel) {
