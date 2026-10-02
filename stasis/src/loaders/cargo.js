@@ -326,14 +326,15 @@ function runCargoMetadata(dir, { features = [], noDefaultFeatures = false, allFe
 }
 
 // `cargo metadata` JSON → `{ enabled: Map<dir, Set<feature>>, deps: Map<dir, Map<useName, dir>>,
-// lacking: Map<dir, [{ name, kinds }]> }` over the packages the bundle can carry: those whose
+// lacking: [{ dir, key, name, kinds }] }` over the packages the bundle can carry: those whose
 // manifest lies inside the bundle root, plus registry packages cargo read from `~/.cargo/registry`
 // (no `.cargo/config.toml` redirecting crates.io to `vendor/`) that `locate(name, version)` finds
 // vendored in-tree -- `cargo vendor` copies exactly the lockfile's versions, so name + version
 // identify the dir. Anything else (an unvendored registry crate, a path dep outside the root)
-// can't be bundled: it is in `lacking`, under each package depending on it, with the kinds of the
-// tables naming it (`normal`, `dev`, `build`). `deps` maps each package's dependencies by the name
-// code refers to them with (renames applied, `-` → `_`).
+// can't be bundled: it is in `lacking`, once per package depending on it (`dir`), by its package
+// name (`name`; `key` with `-` → `_`), with the kinds of the tables naming it (`normal`, `dev`,
+// `build`). `deps` maps each package's dependencies by the name code refers to them with (renames
+// applied, `-` → `_`).
 export function resolutionFromMetadata(metadata, baseDir, { locate = null } = {}) {
   let realBase = baseDir
   try {
@@ -357,7 +358,7 @@ export function resolutionFromMetadata(metadata, baseDir, { locate = null } = {}
   const nameOf = new Map((metadata.packages ?? []).map((p) => [p.id, p.name]))
   const enabled = new Map()
   const deps = new Map()
-  const lacking = new Map()
+  const lacking = []
   for (const node of metadata.resolve?.nodes ?? []) {
     const dir = dirOf.get(node.id)
     if (dir === undefined) continue
@@ -367,8 +368,8 @@ export function resolutionFromMetadata(metadata, baseDir, { locate = null } = {}
       const target = dirOf.get(d.pkg)
       if (target !== undefined && typeof d.name === 'string') byName.set(normName(d.name), target)
       else if (target === undefined) {
-        const kinds = new Set((Array.isArray(d.dep_kinds) ? d.dep_kinds : [{ kind: null }]).map((k) => k?.kind ?? 'normal'))
-        ;(lacking.get(dir) ?? lacking.set(dir, []).get(dir)).push({ name: nameOf.get(d.pkg) ?? d.name, kinds })
+        const name = nameOf.get(d.pkg) ?? d.name
+        lacking.push({ dir, key: normName(name), name, kinds: new Set((Array.isArray(d.dep_kinds) ? d.dep_kinds : [{ kind: null }]).map((k) => k?.kind ?? 'normal')) })
       }
     }
     deps.set(dir, byName)
@@ -702,6 +703,10 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // Whether `fileRel` belongs to a target built with the dev-dependencies (tests, benches,
   // examples).
   const linksDevDeps = (fileRel) => linksDevDepsPath(packageFor(fileRel)?.dir ?? '.', fileRel)
+  // The packages an entry is a test, bench or example target of: their dev-dependencies are
+  // linked (that build is `cargo test`'s). Memoized.
+  let devRoots = null
+  const devRootDirs = () => (devRoots ??= new Set(entries.filter((e) => linksDevDeps(e)).map((e) => packageFor(e)?.dir)))
   const version = (m) => m.package.version
 
   // --- dependency resolution
@@ -1046,7 +1051,8 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // code off -- `#[cfg(not(feature = "std"))]` -- so counting a table that may not apply is no
   // safe over-approximation). Dev-dependencies: a dependency's own are never built by anyone, so
   // they never count; the root packages' count under resolver 1, and for a test/bench entry.
-  // `lacking`, when given, collects the active tables no package in-tree answers (see ensureResolved).
+  // `lacking`, when given, collects the active dependencies no package in-tree answers, with the
+  // kinds of their tables (see ensureResolved).
   const resolveFeatures = (includeMaybe, lacking = null) => {
     const enabled = new Map()
     // The entries' packages (manifests are memoized per dir, so identity dedupes them).
@@ -1078,8 +1084,8 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     }
     const rootDirs = new Set(roots.map((r) => r.dir))
     // Dev-dependencies count for a root package under resolver 1, and for one whose entries include a
-    // test/bench target (that build is `cargo test`'s, which links them).
-    const testRootDirs = new Set(entries.filter((e) => linksDevDeps(e)).map((e) => packageFor(e)?.dir))
+    // test, bench or example target (devRootDirs).
+    const testRootDirs = devRootDirs()
     const kindApplies = (m, r) => r.kind !== 'dev' || (rootDirs.has(m.dir) && (resolver === 1 || testRootDirs.has(m.dir)))
     const applies = (r, c) => {
       const a = tableApplies(r, c)
@@ -1162,7 +1168,11 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
           for (const r of activeRequests(c, m, d)) {
             const t = resolveDep(m, d, r)
             if (!t) {
-              lacking?.set(`${m.dir}\0${d.key}\0${r.kind}`, { m, d, r })
+              if (lacking !== null) {
+                const id = `${m.dir}\0${d.key}`
+                if (!lacking.has(id)) lacking.set(id, { dir: m.dir, key: d.key, name: d.name, kinds: new Set() })
+                lacking.get(id).kinds.add(r.kind)
+              }
               continue
             }
             const dc = depCtx(c, r, t)
@@ -1366,8 +1376,9 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // metadata gives one feature set per package, the union over everything cargo would build for
   // the workspace (dev and build dependencies, every platform), so a feature in it is on only maybe
   // in either context -- code a `cfg(not(feature = "x"))` keeps in some build is never dropped --
-  // and one outside it is off. `lacking` (the replay's): the active dependency tables no package
-  // in-tree answers, `dir key kind` → `{ m, d, r }` (see lackingDependencies).
+  // and one outside it is off. `lacking` (the replay's): the dependencies no package in-tree
+  // answers, `dir key` → `{ dir, key, name, kinds }` -- the kinds of its active tables -- as
+  // `cargo metadata`'s (see lackingDependencies).
   let resolved = null
   let lacking = null
   const ensureResolved = () => {
@@ -1632,21 +1643,15 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     // resolver needs every locked package in-tree, so it has none.
     lackingDependencies(dirs, { buildScripts = false } = {}) {
       ensureResolved()
-      const devDirs = new Set(entries.filter((e) => linksDevDeps(e)).map((e) => packageFor(e)?.dir))
-      const counts = (kind, dir) => (kind === 'dev' ? devDirs.has(dir) : (kind !== 'build' || (buildScripts && buildScript(readManifest(dir)) !== null)))
+      const counts = (kind, dir) => (kind === 'dev' ? devRootDirs().has(dir) : (kind !== 'build' || (buildScripts && buildScript(readManifest(dir)) !== null)))
       const out = []
       const seen = new Set()
-      const note = (key, name, from) => {
-        if (seen.has(`${from}\0${key}`)) return
+      for (const { dir, key, name, kinds } of [...(lacking?.values() ?? []), ...(metadata?.lacking ?? [])]) {
+        const m = dirs.has(dir) ? readManifest(dir) : null
+        const from = m?.package ? `${m.package.name} ${version(m)}` : null
+        if (from === null || seen.has(`${from}\0${key}`) || ![...kinds].some((k) => counts(k, dir))) continue
         seen.add(`${from}\0${key}`)
         out.push({ key, name, from })
-      }
-      for (const { m, d, r } of lacking?.values() ?? []) {
-        if (dirs.has(m.dir) && counts(r.kind, m.dir)) note(d.key, d.name, `${m.package.name} ${version(m)}`)
-      }
-      for (const [dir, list] of metadata?.lacking ?? []) {
-        const m = dirs.has(dir) ? readManifest(dir) : null
-        if (m?.package) for (const { name, kinds } of list) if ([...kinds].some((k) => counts(k, dir))) note(normName(name), name, `${m.package.name} ${version(m)}`)
       }
       return out
     },
