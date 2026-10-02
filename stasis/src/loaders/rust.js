@@ -1584,15 +1584,16 @@ function memoized(memo, key, ctx, compute, { empty }) {
 // Recompute the glob closures that were computed short of a cycle (memoized), each against the
 // others as they now stand, until none grows: with every entry complete, a closure is the union
 // of its globs' targets and their settled closures, whatever the order the queries came in. The
-// lookups made meanwhile (glob sources, imports' answers, candidate lists) are dropped first, as
-// they may rest on the short closures. True when anything changed -- the paths resolved so far must be resolved
-// again.
+// lookups made meanwhile (glob sources, imports' answers, candidate lists, crates' macros) are
+// dropped first, as they may rest on the short closures. True when anything changed -- the paths
+// resolved so far must be resolved again.
 function stabilizeClosures(ctx) {
   const cyclic = []
   for (const memo of ctx.closures.values()) for (const entry of memo.values()) if (entry.cyclic === true) cyclic.push(entry)
   if (cyclic.length === 0) return false
   const reset = () => {
     ctx.provided.clear()
+    ctx.cratesMacros.clear()
     ctx.opaque.clear()
     ctx.opaqueGlobs.clear()
     for (const byModule of ctx.imports.values()) {
@@ -2120,18 +2121,28 @@ function followImport(im, root, ctx, asker, ns = null) {
 // there is, in the macro namespace -- each `#[macro_export]` definition under its file's cfgs
 // (serde's docsrs-only copies), a `pub use inner::mac;` followed on into `inner` -- the cfgs
 // judged by that root's own build. `{ kind: 'item', file, macroName, alternatives? }`, the file
-// defining it by the name it defines it under, or null when none does.
+// defining it by the name it defines it under, or null when none does. Asked once per (crate,
+// path) -- a crate's every bare call of a std macro asks each `#[macro_use] extern crate` --
+// unless the answer came out of an import cycle still being resolved.
 function macroOfCrate(target, rest, ctx) {
   if (!ctx.trees.has(target)) {
     const file = rest.length === 1 ? ctx.macros.get(target)?.get(rest[0]) : undefined
     return file === undefined ? null : { kind: 'item', file, macroName: rest[0] }
   }
+  const key = `${target}\0${rest.join('::')}`
+  const known = ctx.cratesMacros.get(key)
+  if (known !== undefined) return known
+  const depth = ctx.walking++
   const r = walkPath(['crate', ...rest], target, 'crate', ctx, { ns: 'macro', file: target, asker: ctx.files.get(target)?.asker })
-  if (r === null || r === VALUE_ONLY || r.kind !== 'item') return null
-  const macroName = r.macroName ?? rest.at(-1)
-  if (ctx.fileMacros.get(r.file)?.has(macroName) !== true) return null
-  const alternatives = r.alternatives === undefined ? undefined : new Map([...r.alternatives].filter(([, f]) => ctx.fileMacros.get(f)?.has(macroName) === true))
-  return { kind: 'item', file: r.file, macroName, ...(alternatives?.size > 1 ? { alternatives } : {}) }
+  ctx.walking--
+  const macroName = r?.macroName ?? rest.at(-1)
+  let macro = null
+  if (r !== null && r !== VALUE_ONLY && r.kind === 'item' && ctx.fileMacros.get(r.file)?.has(macroName) === true) {
+    const alternatives = r.alternatives === undefined ? undefined : new Map([...r.alternatives].filter(([, f]) => ctx.fileMacros.get(f)?.has(macroName) === true))
+    macro = { kind: 'item', file: r.file, macroName, ...(alternatives?.size > 1 ? { alternatives } : {}) }
+  }
+  if (minHit(ctx) >= depth) ctx.cratesMacros.set(key, macro)
+  return macro
 }
 
 // An item answer for what definedIn found.
@@ -2961,7 +2972,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [root, byModule] of imports) for (const [module, of] of byModule) for (const name of of.named.keys()) note(having, root, name, module)
   for (const [root, byName] of macros) for (const name of byName.keys()) note(having, root, name, 'crate')
   const declaresCrate = (name, from) => ctx?.declaresCrate?.(name, from) === true
-  const pathCtx = { trees, children, moduleFiles, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, macros, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
+  const pathCtx = { trees, children, moduleFiles, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, macros, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), cratesMacros: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
   // Every path of every file, on top of the `mod` / include edges (`resolutions`): once, and once
   // more when the first pass left glob closures short of an import cycle (stabilizeClosures).
   const resolveAll = () => {
@@ -3053,21 +3064,26 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
       // The macro a bare call of `name` at `offset` names, `{ file, name }` (the file defining it,
       // by the name it defines it under): one in textual scope; else one an import brings in --
       // a file that defines a macro of that name, not a `fn write` beside `write!` -- or a
-      // `#[macro_use] extern crate` of the crate root does.
+      // `#[macro_use] extern crate` of the crate root does. Those are the same at every call
+      // of the name, and asked once (`imported`, null for none): a crate calls `format!` by
+      // the thousand.
+      const imported = new Map()
       const macroFileAt = (name, offset) => {
         const inScope = macroAt(path, name, offset, offset, above) ?? exported?.get(name)
         if (inScope !== undefined) return { file: inScope, name }
-        const byPath = walkPath([name], here.root, here.modulePath, pathCtx, { ns: 'macro', file: path, asker: here.asker })
-        const as = byPath?.macroName ?? name
-        if (byPath?.file !== undefined && fileMacros.get(byPath.file)?.has(as) === true) {
-          const alternatives = byPath.alternatives === undefined ? undefined : new Map([...byPath.alternatives].filter(([, f]) => fileMacros.get(f)?.has(as) === true))
-          return { file: byPath.file, name: as, alternatives: alternatives?.size > 1 ? alternatives : undefined }
-        }
-        for (const crate of macroUseCrates(here.root)) {
-          const macro = macroOfCrate(crate, [name], pathCtx)
-          if (macro !== null) return { file: macro.file, name: macro.macroName, alternatives: macro.alternatives }
-        }
-        return undefined
+        return cached(imported, name, () => {
+          const byPath = walkPath([name], here.root, here.modulePath, pathCtx, { ns: 'macro', file: path, asker: here.asker })
+          const as = byPath?.macroName ?? name
+          if (byPath?.file !== undefined && fileMacros.get(byPath.file)?.has(as) === true) {
+            const alternatives = byPath.alternatives === undefined ? undefined : new Map([...byPath.alternatives].filter(([, f]) => fileMacros.get(f)?.has(as) === true))
+            return { file: byPath.file, name: as, alternatives: alternatives?.size > 1 ? alternatives : undefined }
+          }
+          for (const crate of macroUseCrates(here.root)) {
+            const macro = macroOfCrate(crate, [name], pathCtx)
+            if (macro !== null) return { file: macro.file, name: macro.macroName, alternatives: macro.alternatives }
+          }
+          return null
+        }) ?? undefined
       }
       for (const [name, offsets] of items.calls) {
         // Scope is decided at each call: a `macro_rules!` later in the file doesn't shadow what an
