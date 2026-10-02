@@ -2004,6 +2004,15 @@ test('buildRustBundle does not presume off a cfg a build-dependency may print, o
     'helper/src/lib.rs': '#[macro_export]\nmacro_rules! alias {\n    ($name:ident) => { println!("cargo:rustc-cfg={}", stringify!($name)); };\n}\n',
     'build.rs': 'use helper::alias;\nfn main() { alias!(fast); }\n',
   }), either)
+  // build-rs's way: the directive written apart from the name it is given
+  t.assert.deepEqual(await target({
+    'helper/src/lib.rs': 'pub fn rustc_cfg(key: &str) { emit("rustc-cfg", key) }\nfn emit(directive: &str, value: &str) { println!("cargo::{directive}={value}") }\n',
+    'build.rs': 'fn main() { helper::rustc_cfg("fast"); }\n',
+  }), either)
+  // a helper printing one name it writes out sets that one only
+  const fixed = (name) => ({ 'helper/src/lib.rs': `pub fn go() { println!("cargo:rustc-cfg=${name}"); }\n`, 'build.rs': 'fn main() { helper::go(); }\n' })
+  t.assert.equal(await target(fixed('other')), 'src/slow.rs')
+  t.assert.deepEqual(await target(fixed('fast')), either)
   // a build-dependency the bundle lacks may print one too
   t.assert.deepEqual(await target({ 'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[build-dependencies]\nhelper = "1"\n' }), either)
   // a name the build script formats in part: `os_{}` may be `os_linux`, and so may `fast` be anything

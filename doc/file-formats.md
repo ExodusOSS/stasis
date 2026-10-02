@@ -618,15 +618,16 @@ other, compiled nowhere, maps every candidate. A positive cfg that neither rustc
 `any(…)` of such and of alternatives the file rules out) is a `--cfg` a default
 build lacks, so a candidate under one is taken only after those, and one under
 its negation (`not(loom)`) counts as certain -- unless the package's build may
-set it: a name its build script prints as `cargo:rustc-cfg=…`, or that a
-rustflags `--cfg` sets (the `build`/`target.<…>` `rustflags` of each cargo
-config the build reads, see above, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
-`CARGO_BUILD_RUSTFLAGS`), is neither presumed off nor on, and a build script
-that formats a name, whole or in part (`cargo::rustc-cfg=os_{}`), or uses
-`autocfg` makes every custom cfg of its package so -- as does one with a
-build-dependency that may print cfgs for it (cfg_aliases' `cfg_aliases!`): one
-whose code, or that of what it depends on, writes `rustc-cfg` outside comments,
-or one the bundle root lacks. A child module the build rules out,
+set it: a name its build script prints as `cargo:rustc-cfg=…` -- itself or
+through a build-dependency it calls (that crate's code, and that of what it
+depends on) -- or that a rustflags `--cfg` sets (the `build`/`target.<…>`
+`rustflags` of each cargo config the build reads, see above, `RUSTFLAGS`,
+`CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`), is neither presumed off
+nor on, and code there that formats a name, whole or in part
+(`cargo::rustc-cfg=os_{}`, cfg_aliases' `cfg_aliases!`), writes the directive
+apart from the name (build-rs's `rustc_cfg`) or uses `autocfg` makes every
+custom cfg of its package so -- as does a build-dependency the bundle root
+lacks. What full-line comments say counts for nothing. A child module the build rules out,
 or one under a custom cfg it presumably lacks, gives way to whatever else its
 module has of the name, as such a candidate does to any other: serde's
 docsrs-only `mod de` to the `pub use serde_core::de` of every other build, a
