@@ -344,8 +344,11 @@ const invalidPackageConfig = (path, cause) => Object.assign(new Error(`Invalid p
 // the package manager lays out there: each of the paths it `installs` (from `root`) is served from
 // the Vfs only, whatever `outside` holds there; a directory named `hides` anywhere, and any
 // node_modules out of `root`, is none; and everything else comes from `outside`. Symlinks cross
-// between the two both ways, so realpaths are walked here one link at a time. A relative path is
-// from `/`. What it reads is cached, as for a tree that holds still, unless `cache` is false.
+// between the two both ways, so realpaths are walked here one link at a time, and a path is read as
+// the OS reads one: a `..` after a link leads up from where the link leads, never textually (Node's
+// own resolution, `findPackageJSON` and `resolve`, normalizes its paths first, as Node does). A
+// relative path is from `/`. What it reads is cached, as for a tree that holds still, unless `cache`
+// is false.
 export function vfsHost(vfs, { root, outside, installs = [], hides, cache = true } = {}) {
   if (sep !== '/') throw new Error('The Vfs host is POSIX-only')
   const disk = outside ?? null
@@ -372,7 +375,9 @@ export function vfsHost(vfs, { root, outside, installs = [], hides, cache = true
   }
   // A path in the tree, as the Vfs spells it.
   const inVfs = disk === null ? (p) => p : (p) => `/${p.slice(prefix.length)}`
-  const abs = (p) => resolve('/', p)
+  // `p` from `/`, as spelled: realpath resolves its `..` after the link before it.
+  const abs = (p) => (p.startsWith('/') ? p : `/${p}`)
+  const normal = (p) => resolve('/', p)
   const memo = () => (cache ? new Map() : { get() {}, set() {} })
 
   // `p` is a real path but for its last name; null when it exists and isn't a link.
@@ -396,13 +401,21 @@ export function vfsHost(vfs, { root, outside, installs = [], hides, cache = true
     let result
     try {
       const parentReal = realpath(dirname(p), hops)
-      const candidate = join(parentReal, basename(p))
+      const name = basename(p)
+      // A `.` or `..` is taken in the real dir before it, which must be one.
+      if (name === '.' || name === '..') {
+        if (statOf(parentReal)?.isDirectory() !== true) throw new VfsError('ENOTDIR', p)
+        result = name === '.' ? parentReal : dirname(parentReal)
+        realCache.set(p, result)
+        return result
+      }
+      const candidate = join(parentReal, name)
       const link = readlink(candidate)
       if (link === null) {
         result = candidate
       } else {
         if (hops >= 40) throw new VfsError('ELOOP', p)
-        result = realpath(resolve(dirname(candidate), link), hops + 1)
+        result = realpath(link.startsWith('/') ? link : `${dirname(candidate)}/${link}`, hops + 1)
       }
     } catch (err) {
       if (hops === 0 && (err.code === 'ENOENT' || err.code === 'ELOOP')) realCache.set(p, err)
@@ -492,15 +505,22 @@ export function vfsHost(vfs, { root, outside, installs = [], hides, cache = true
         return null
       }
       p = abs(p)
+      // A `..` names a directory, as lstat takes it.
+      if (basename(p) === '..') {
+        realpath(p)
+        return null
+      }
       return readlink(join(realpath(dirname(p)), basename(p)))
     },
     realpath(p) {
-      return realpath(abs(p))
+      const real = realpath(abs(p))
+      checkDir(p, real)
+      return real
     },
     // As Node's: the nearest package.json above a file's real path, never out of a node_modules dir;
     // one there that can't be read is refused (packageJSONStat).
     findPackageJSON(p) {
-      let from = abs(p)
+      let from = normal(p)
       if (host.stat(from)?.isFile()) from = realpath(from)
       for (let dir = dirname(from); basename(dir) !== 'node_modules'; dir = dirname(dir)) {
         const candidate = join(dir, 'package.json')
@@ -513,7 +533,7 @@ export function vfsHost(vfs, { root, outside, installs = [], hides, cache = true
       return undefined
     },
     resolve(parentFile, specifier, conditions) {
-      return (resolver ?? createNodeResolver(host)).resolve(abs(parentFile), specifier, conditions)
+      return (resolver ?? createNodeResolver(host)).resolve(normal(parentFile), specifier, conditions)
     },
   }
   const resolver = cache ? createNodeResolver(host) : undefined

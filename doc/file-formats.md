@@ -453,7 +453,9 @@ one the OS can't resolve at all (a real path past `PATH_MAX`, a link whose end i
 can't name: `/proc/self/fd/0` or `/dev/stdin` on a pipe), is refused, not
 trusted; only a path with nothing there counts as missing. An `extends` path is
 joined as forge joins it and resolved by the OS, so a `..` after a symlink leads
-where forge's does, in the project's config and a dependency's alike. Whoever's import, entry or
+where forge's does, in the project's config and a dependency's alike, and so
+does a bundle built from a Vfs (`stasis github-bundle`, `buildVfsBundle`), whose
+host reads a path as the OS does. Whoever's import, entry or
 manifest the path is, the import is refused, the entry rejected, the manifest
 not carried, and a dependency's own `foundry.toml`, `extends` base or
 `remappings.txt` skipped with a warning (one that is another dependency's file

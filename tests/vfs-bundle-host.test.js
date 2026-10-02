@@ -1,5 +1,5 @@
 import { test } from 'node:test'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -250,6 +250,72 @@ test('a package.json that is there but can\'t be read is refused as Node refuses
   t.assert.equal(host.findPackageJSON('/dangling/index.js'), '/package.json')
   t.assert.equal(host.resolve('/main.js', './dangling', conditions), '/dangling/index.js')
 }))
+
+test('a Vfs host reads a path as the OS does: a `..` after a link leads up from where the link leads', withTmp((t, tmp) => {
+  // One tree on disk and in a Vfs: `sub` leads to real/in, so sub/../base.toml is real/base.toml, not
+  // the base.toml beside sub.
+  const files = { 'base.toml': 'textual', 'real/base.toml': 'physical', 'real/in/f': 'f', 'other/x/y': 'y', 'other/base.toml': 'other', file: 'file' }
+  const links = { sub: 'real/in', chain: 'sub', 'real/up': '../other/x', 'via': 'sub/../base.toml', loop: 'loop', dangling: 'gone' }
+  const vfs = write(new Vfs(), Object.fromEntries(Object.entries(files).map(([p, text]) => [`/${p}`, text])))
+  for (const [p, text] of Object.entries(files)) {
+    mkdirSync(join(tmp, p, '..'), { recursive: true })
+    writeFileSync(join(tmp, p), text)
+  }
+  for (const [p, target] of Object.entries(links)) {
+    symlinkSync(target, join(tmp, p))
+    vfs.symlink(target, `/${p}`)
+  }
+  const host = createVfsHost(vfs)
+  const real = realpathSync.native(tmp)
+  const outcome = (f) => {
+    try {
+      const r = f()
+      if (r === null || typeof r === 'string') return r?.replace(real, '') || r
+      if (Array.isArray(r)) return r.map((d) => d.name).join()
+      return Buffer.isBuffer(r) ? r.toString() : r.isDirectory() ? 'dir' : 'file'
+    } catch (err) {
+      return err.code
+    }
+  }
+  // On disk, realpath is realpath(3)'s: the OS's answer, which the Solidity loader takes.
+  const disk = { ...diskHost, realpath: realpathSync.native }
+  for (const p of ['sub/../base.toml', 'chain/../base.toml', 'via', 'real/up/../base.toml', 'sub/./f', 'sub/f/', 'sub/f/..', 'sub/..', 'sub/../', 'file/..', 'dangling/..', 'loop/../base.toml', 'gone/../base.toml']) {
+    for (const op of ['stat', 'readFile', 'readlink', 'readdir', 'realpath']) {
+      // (Joined as spelled: path.join would take the `..` textually.)
+      t.assert.equal(outcome(() => host[op](`/${p}`)), outcome(() => disk[op](`${real}/${p}`)), `${op}(${p})`)
+    }
+  }
+}))
+
+test('a Solidity bundle read through a Vfs host reads an extends past a link as forge does', async (t) => {
+  const { buildSolidityBundle } = await import('../stasis/src/cmd/bundle.js')
+  // cfg/link leads to other/deep: forge reads cfg/link/../base.toml as other/base.toml. And a
+  // dependency's extends through its own link reads where it leads, as on disk.
+  const vfs = write(new Vfs(), {
+    '/foundry.toml': '[profile.default]\nextends = "cfg/link/../base.toml"\n',
+    '/cfg/base.toml': '[profile.default]\nremappings = ["x/=va/"]\n',
+    '/other/base.toml': '[profile.default]\nremappings = ["x/=vb/"]\n',
+    '/other/deep/.keep': '',
+    '/va/X.sol': 'contract X {}\n',
+    '/vb/X.sol': 'contract X {}\n',
+    '/src/A.sol': 'import "x/X.sol";\nimport "dep/D.sol";\nimport "y/Y.sol";\n',
+    '/lib/dep/src/D.sol': 'contract D {}\n',
+    '/lib/dep/foundry.toml': '[profile.default]\nextends = "sub/../base.toml"\n',
+    '/lib/dep/base.toml': '[profile.default]\nremappings = ["y/=textual/"]\n',
+    '/lib/dep/real/base.toml': '[profile.default]\nremappings = ["y/=physical/"]\n',
+    '/lib/dep/real/in/.keep': '',
+    '/lib/dep/physical/Y.sol': 'contract Y {}\n',
+    '/lib/dep/textual/Y.sol': 'contract Y {}\n',
+  })
+  vfs.symlink('../other/deep', '/cfg/link')
+  vfs.symlink('real/in', '/lib/dep/sub')
+  const bundle = await buildSolidityBundle({ cwd: '/', entries: ['src'], manifests: true, env: {}, host: createVfsHost(vfs) })
+  const imports = bundle.imports.get('solidity').get('src/A.sol')
+  t.assert.equal(imports.get('x/X.sol'), 'vb/X.sol')
+  t.assert.equal(imports.get('y/Y.sol'), 'lib/dep/physical/Y.sol')
+  t.assert.ok(bundle.sources.has('other/base.toml') && !bundle.sources.has('cfg/base.toml'))
+  t.assert.ok(bundle.sources.has('lib/dep/real/base.toml') && !bundle.sources.has('lib/dep/base.toml'))
+})
 
 test('the disk host resolves exactly like require.resolve, including through symlinks', withTmp((t, tmp) => {
   mkdirSync(join(tmp, 'real'))
