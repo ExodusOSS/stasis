@@ -146,9 +146,19 @@ export function extractCommand({ cwd = process.cwd(), bundleFile, output, logLab
   }
   mkdirSync(outDir, { recursive: true }) // for an empty bundle, where no write created it
   if (withLockfile) writeFileSync(lockAbs, lockText)
+  // State's root discovery refuses a dir holding stasis.lock.json without a package.json, so give a
+  // tree whose bundle attests no root manifest (a capture without --package-json) a minimal one from
+  // the workspace bucket's attested identity. Never overwrites an extracted or pre-existing one.
+  const pkgAbs = join(outDir, 'package.json')
+  const syntheticPkg = withLockfile && !existsSync(pkgAbs)
+  if (syntheticPkg) {
+    const workspace = bundle.modules.get('.')
+    writeFileSync(pkgAbs, `${JSON.stringify({ name: workspace?.name ?? 'stasis-extracted', version: workspace?.version ?? '0.0.0' }, null, 2)}\n`)
+  }
 
   const execNote = executables > 0 ? ` (${executables} executable)` : ''
   console.warn(`[${logLabel}] Extracted ${writes.length} file(s)${execNote}${withLockfile ? ` and ${FILE_LOCK}` : ''} to ${outDir}`)
+  if (syntheticPkg) console.warn(`[${logLabel}] Bundle carries no root package.json; wrote a minimal one so the tree roots correctly`)
   if (chmodFailures > 0) {
     console.warn(`[${logLabel}] Warning: could not set file modes on ${chmodFailures} file(s) (the filesystem may not support them); contents were written`)
   }

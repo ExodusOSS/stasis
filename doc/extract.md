@@ -30,6 +30,11 @@ across verbatim. The extracted tree validates out of the box — `stasis prune`
 works directly against it; `stasis run --lock=frozen` additionally needs the
 project's `package.json` files, present only if the bundle recorded them.
 
+When the bundle attests no root `package.json` (a bundler-plugin capture without
+`--package-json`), a minimal `{ name, version }` one is synthesized from the workspace
+bucket's identity so the tree can root a `stasis run`; an extracted or pre-existing
+`package.json` is never overwritten.
+
 Legacy `version: 0` bundles record no `name`/`version`, so no lockfile can be
 restored: sources are still extracted, the lockfile is skipped with a warning.
 

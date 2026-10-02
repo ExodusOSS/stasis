@@ -13,7 +13,8 @@ import { State } from '@exodus/stasis-core/state'
 // bundle's hash-verified bytes (fail-closed; out-of-scope files pass their disk bytes through).
 // KNOWN LIMITATION: does NOT build with sources absent from disk -- Metro reads + hashes each file
 // before this runs, so the guarantee is "build attested bytes, fail closed on disk drift."
-// Recorded resolution edges are served by the companion ./metro-resolve-request.js.
+// Recorded resolution edges are served by the companion ./metro-resolve-request.js; to start from
+// no source tree, `stasis extract` the artifact and build there (see that file).
 
 const require = createRequire(import.meta.url)
 
