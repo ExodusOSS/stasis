@@ -395,14 +395,16 @@ function cargoConfigs(baseDir, from) {
     const text = found === null ? null : readFileOrNull(found)
     if (text !== null) {
       const file = toPosix(relative(baseAbs, found))
-      out.push({ dir: normalizeRel('.', toPosix(relative(baseAbs, abs))), abs, file, text, doc: readToml(text, file) })
+      out.push({ dir: projectRel(baseAbs, abs), abs, file, text, doc: readToml(text, file) })
     }
     if (dirname(abs) === abs) return out
   }
 }
-// A path cargo config `config` (see cargoConfigs) writes, project-relative: relative to the
-// directory holding its `.cargo`, as cargo takes it; null outside the bundle root.
-const configPath = (baseDir, config, path) => normalizeRel('.', toPosix(relative(resolve(baseDir), resolve(config.abs, path))))
+// A path a cargo config or a manifest in absolute directory `absDir` writes (`.`: that directory),
+// as cargo takes it -- relative to that directory, an absolute one as it is -- project-relative
+// from the bundle root `baseAbs`; null outside it. A config's paths are relative to the directory
+// holding its `.cargo` (cargoConfigs' `abs`).
+const projectRel = (baseAbs, absDir, path = '.') => normalizeRel('.', toPosix(relative(baseAbs, resolve(absDir, path))))
 
 // The directory `cargo vendor` filled, as cargo configs `configs` (cargoConfigs) say: their
 // `[source]` tables merged as cargo merges them, each source's each key from the nearest config
@@ -435,7 +437,7 @@ function vendorDirOf(baseDir, configs, { quiet = false } = {}) {
   const replaced = new Set([...sources.values()].map((s) => (s.replaceWith === null ? null : follow(s.replaceWith))).filter((d) => d !== null))
   const found = follow('crates-io') ?? (replaced.size === 1 ? [...replaced][0] : null)
   if (found === null) return VENDOR_DIR
-  const norm = configPath(baseDir, found.config, found.path)?.replace(/\/+$/u, '') || null
+  const norm = projectRel(resolve(baseDir), found.config.abs, found.path)?.replace(/\/+$/u, '') || null
   if (norm === null) {
     if (!quiet) console.warn(`[loader.cargo] ${found.config.file} names a vendored source directory outside the bundle root: ${found.path}`)
     return VENDOR_DIR
@@ -601,8 +603,8 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   }
   // The workspace root at absolute `abs`, above the bundle root: the manifest there with a
   // [workspace], read for what members inherit, the resolver it sets and its `[patch]` -- never
-  // bundled, nor its lockfile read -- as `{ dir: null, outside: abs, doc, … }` (see readManifest);
-  // undefined for no [workspace] there.
+  // bundled, nor its lockfile read -- as `{ dir: null, outside: abs, file, doc, … }` (see
+  // readManifest; `file` its path from the bundle root); undefined for no [workspace] there.
   const baseAbs = resolve(baseDir)
   const outer = new Map()
   const outerWorkspace = (abs) => {
@@ -611,34 +613,30 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       const text = readFileOrNull(file)
       const label = toPosix(relative(baseAbs, file))
       const doc = text === null ? null : readToml(text, label)
-      outer.set(abs, isTomlTable(doc?.workspace) ? { dir: null, outside: abs, doc, ...manifestOf(text, doc, label, null) } : undefined)
+      outer.set(abs, isTomlTable(doc?.workspace) ? { dir: null, outside: abs, file: label, doc, ...manifestOf(text, doc, label, null) } : undefined)
     }
     return outer.get(abs)
   }
-  // A manifest as parseCargoManifest reads it, with each path dependency's directory, project-
-  // relative, on its entry (`dir`; null outside the bundle root): an inherited one's path is the
-  // workspace root's.
+  // A manifest as parseCargoManifest reads it, at `file` (`dir`'s Cargo.toml), with each path
+  // dependency's directory, project-relative, on its entry (`dir`; null outside the bundle root):
+  // an inherited one's path is the workspace root's.
   // `workspaceRoot` is the manifest of the workspace root it inherits from (rootOf), or null.
   const readManifest = (dir) => {
     if (!manifests.has(dir)) {
       const raw = tableOf(dir)
       const root = raw === null ? null : rootOf(dir, raw.doc)
       const ws = root === null ? null : (typeof root === 'string' ? readManifest(root) : root)
-      const m = raw === null ? null : { dir, ...manifestOf(raw.text, raw.doc, raw.file, ws), workspaceRoot: ws }
-      // A path relative to the workspace root above the bundle root: project-relative, or null
-      // outside it.
-      const fromOutside = (path) => normalizeRel('.', toPosix(relative(baseAbs, join(ws.outside, path))))
+      const m = raw === null ? null : { dir, file: raw.file, ...manifestOf(raw.text, raw.doc, raw.file, ws), workspaceRoot: ws }
       for (const d of m?.deps.values() ?? []) {
-        for (const r of d.kinds.values()) {
-          if (r.path === null) r.dir = null
-          else if (!r.inherited || ws === null) r.dir = normalizeRel(dir, r.path)
-          else r.dir = ws.outside === undefined ? normalizeRel(ws.dir, r.path) : fromOutside(r.path)
-        }
+        for (const r of d.kinds.values()) r.dir = r.path === null ? null : manifestPath(r.inherited && ws !== null ? ws : m, r.path)
       }
       manifests.set(dir, m)
     }
     return manifests.get(dir)
   }
+  // The directory a path manifest `m` writes names, project-relative (null outside the bundle
+  // root): relative to its directory, inside the bundle root or above it (`outside`).
+  const manifestPath = (m, path) => (m.outside === undefined ? normalizeRel(m.dir, path) : projectRel(baseAbs, m.outside, path))
   // Manifests at or above `dir`, nearest first, up to the bundle root.
   const manifestsAbove = function* (dir) {
     for (;;) {
@@ -856,10 +854,9 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   const patchSources = () => {
     if (patchMemo === null) {
       const root = buildWorkspaceRoot()
-      const atRoot = (path) => (root.outside === undefined ? normalizeRel(root.dir, path) : normalizeRel('.', toPosix(relative(baseAbs, resolve(root.outside, path)))))
       patchMemo = [
-        ...configs.map((c) => ({ patch: readNamed(c.file, () => parseCargoConfig([c.text])).patch, at: (path) => configPath(baseDir, c, path), from: c.file })),
-        ...(root ? [{ patch: root.cargo.patch, at: atRoot, from: root.outside === undefined ? posix.join(root.dir, 'Cargo.toml') : toPosix(relative(baseAbs, join(root.outside, 'Cargo.toml'))) }] : []),
+        ...configs.map((c) => ({ patch: readNamed(c.file, () => parseCargoConfig([c.text])).patch, at: (path) => projectRel(baseAbs, c.abs, path), from: c.file })),
+        ...(root ? [{ patch: root.cargo.patch, at: (path) => manifestPath(root, path), from: root.file }] : []),
       ]
     }
     return patchMemo
