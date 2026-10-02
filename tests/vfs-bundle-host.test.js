@@ -230,10 +230,16 @@ test('a package.json that is there but can\'t be read is refused as Node refuses
   symlinkSync('gone.json', join(tmp, 'dangling/package.json'))
   const ours = createNodeResolver(diskHost)
   const node = createRequire(join(tmp, 'main.js'))
-  for (const dir of ['loop', 'dirloop', 'dangling']) {
-    t.assert.equal(outcome(() => ours.resolve(join(tmp, 'main.js'), `./${dir}`, conditions)), outcome(() => node.resolve(`./${dir}`)), dir)
-  }
-  t.assert.equal(outcome(() => ours.resolve(join(tmp, 'main.js'), './loop', conditions)), 'ERR_INVALID_PACKAGE_CONFIG')
+  const resolve = (dir) => outcome(() => ours.resolve(join(tmp, 'main.js'), `./${dir}`, conditions))
+  // Node refuses a package.json it can't read since 24.21 and 26.8 (nodejs/node#65223); before, it
+  // took one for none and resolved past it. Ours refuses it on every Node. A link to nothing is none
+  // to each.
+  const theirs = Object.fromEntries(['loop', 'dirloop', 'dangling'].map((dir) => [dir, outcome(() => node.resolve(`./${dir}`))]))
+  const unreadable = theirs.loop === 'ERR_INVALID_PACKAGE_CONFIG' ? () => 'ERR_INVALID_PACKAGE_CONFIG' : (dir) => join(tmp, dir, 'index.js')
+  t.assert.deepEqual(theirs, { loop: unreadable('loop'), dirloop: unreadable('dirloop'), dangling: join(tmp, 'dangling', 'index.js') }, `Node ${process.version}`)
+  t.assert.equal(resolve('loop'), 'ERR_INVALID_PACKAGE_CONFIG')
+  t.assert.equal(resolve('dirloop'), 'ERR_INVALID_PACKAGE_CONFIG')
+  t.assert.equal(resolve('dangling'), theirs.dangling)
   // In a Vfs, as on disk.
   const vfs = write(new Vfs(), { '/package.json': '{"name":"outer"}', '/main.js': '', '/loop/index.js': '', '/dangling/index.js': '' })
   vfs.symlink('package.json', '/loop/package.json')
