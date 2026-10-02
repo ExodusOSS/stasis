@@ -1485,7 +1485,7 @@ const eitherLeaves = (a, b, sets) => {
 // target's cfgs (`unix`, `target_os = "linux"`, …: what every file of the build is compiled
 // under) -- against a candidate's: exclusive candidates are skipped; no asker (an internal query)
 // skips nothing. The verdict is kept per pair of sets in `compat`, shared by the askers of one set.
-const compatible = (asker, set) => asker === undefined || set.key === '' || cached(asker.compat, set.key, () => !cfgExclusive(asker.set.leaves, set.leaves))
+const compatible = (asker, set) => asker === undefined || set.key === '' || asker.contradictory || cached(asker.compat, set.key, () => !cfgExclusive(asker.set.leaves, set.leaves))
 // `map`'s value for `key`, computed on the first ask (the verdicts per pair of leaf sets here).
 function cached(map, key, compute) {
   let value = map.get(key)
@@ -1519,7 +1519,7 @@ const deadFor = (asker, set) => asker !== undefined && !asker.deadHere && set.ke
 // else: for it, candidates under cfgs of their own are each only maybe the answer, and all of
 // them are (see withAlternatives), not the first in written order.
 const holds = (l, keys, custom) => l.many === undefined && (keys.has(leafKey(l)) || (l.alts === undefined ? l.neg && custom(l.key) : l.alts.some((alt) => alt.every((m) => holds(m, keys, custom)))))
-const entailed = (asker, set) => asker === undefined || set.key === '' || cached(asker.sure, set.key, () => set.leaves.every((l) => holds(l, asker.keys, asker.custom)))
+const entailed = (asker, set) => asker === undefined || set.key === '' || (!asker.contradictory && cached(asker.sure, set.key, () => set.leaves.every((l) => holds(l, asker.keys, asker.custom))))
 // The cfgs rustc and cargo set: anything else in a positive leaf is a custom `--cfg` (`loom`,
 // `docsrs`, `tokio_unstable`, mio's `mio_unsupported_force_poll_poll`), off in a default build
 // unless a build script or the rustflags set it -- so a candidate under one is `doubtful`: taken
@@ -2734,12 +2734,18 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [path, f] of files) {
     f.leaves = leafSet(f.leaves, leafSets)
     const cfgs = platformCfgsOf(path)
-    const set = cfgs === null ? f.leaves : unionLeaves(f.leaves, leavesOfCfgs(cfgs), leafSets)
+    const joined = cfgs === null ? f.leaves : unionLeaves(f.leaves, leavesOfCfgs(cfgs), leafSets)
+    // A file the target rules out (tokio's atomic_u64_as_mutex.rs and its submodules under a
+    // 64-bit target) asks as it would where it is compiled: under its own cfgs, which the target's
+    // contradict. One whose own contradict each other (under `not(all(test, loom))` and `all(loom,
+    // test)` both) is compiled nowhere: every candidate is compatible with it, none certain
+    // (`contradictory`), so its paths map all of them.
+    const set = joined !== f.leaves && cfgExclusive(joined.leaves, joined.leaves) && !cfgExclusive(f.leaves.leaves, f.leaves.leaves) ? f.leaves : joined
     // What the askers of one leaf set, build and settable cfgs share (one object each).
     const build = buildOf(path, ctx, units)
     const settable = ctx?.cfgsSetFor(path) ?? null
     const sharedKey = `${set.key}\0${idOf(build)}\0${settable === null ? '' : idOf(settable)}`
-    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), texts: new Map(), build, deadHere: deadUnder(set.leaves, build), custom: customFor(settable) }).get(sharedKey)
+    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), texts: new Map(), build, deadHere: deadUnder(set.leaves, build), contradictory: cfgExclusive(set.leaves, set.leaves), custom: customFor(settable) }).get(sharedKey)
     f.asker = { file: path, set, ...shared }
   }
   // Per crate root, each module's child modules by name (every module's parent is in its tree).

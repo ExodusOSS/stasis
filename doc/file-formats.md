@@ -609,7 +609,11 @@ binding of its name (`#[cfg(not(unix))] mod sys;` and `#[cfg(unix)] use
 fallback as sys;`). Else the first under a custom cfg; and a candidate under a cfg
 the build rules out (a feature that is off, another target) only when nothing
 else fits -- unless the asking file is itself under such a cfg, when the build
-says nothing. A positive cfg that neither rustc nor cargo sets (`loom`,
+says nothing: a file the target rules out asks as it would where it is
+compiled, under its own cfgs rather than the target's (tokio's
+atomic_u64_as_mutex.rs submodules' `super::AtomicU64` is as_mutex's, not the
+native one, under a 64-bit target), and one whose own cfgs contradict each
+other, compiled nowhere, maps every candidate. A positive cfg that neither rustc nor cargo sets (`loom`,
 `docsrs`, `tokio_unstable`, mio's `mio_unsupported_force_poll_poll`, an
 `any(…)` of such and of alternatives the file rules out) is a `--cfg` a default
 build lacks, so a candidate under one is taken only after those, and one under

@@ -2013,3 +2013,19 @@ test('buildRustBundle keeps a module whose first variant the target rules out ah
     t.assert.equal(bundle.imports.get('rust').get('src/lib.rs').get('imp::X::real'), 'src/as_mutex.rs')
   })
 })
+
+test('buildRustBundle resolves a file the target rules out as it would where it is compiled', async (t) => {
+  // tokio's atomic_u64_as_mutex.rs and its static_*.rs under a 64-bit target: their `super` is as_mutex's module
+  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\n'
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': `${gates}cfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\n`,
+    'src/native.rs': 'pub(crate) use std::sync::atomic::AtomicU64;\n',
+    'src/as_mutex.rs': 'mod static_macro;\npub(crate) struct AtomicU64;\n',
+    'src/as_mutex/static_macro.rs': 'use super::AtomicU64;\n',
+  }, async (tmp) => {
+    const target = { ...LINUX, cfgs: new Set([...LINUX.cfgs, 'target_has_atomic="64"']) }
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargoTarget: target })
+    t.assert.equal(bundle.imports.get('rust').get('src/as_mutex/static_macro.rs').get('super::AtomicU64'), 'src/as_mutex.rs')
+  })
+})

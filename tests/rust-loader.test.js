@@ -2498,3 +2498,19 @@ test('buildRustTree follows a path through every module a segment may name: alia
   ])
   t.assert.deepEqual(values(buildRustTree(beside, { roots: ['src/lib.rs'] }).resolutions.get('src/lib.rs').get('sys::X::f')), ['src/fallback.rs', 'src/sys.rs'])
 })
+
+test('buildRustTree resolves a file no build compiles -- its own cfgs contradict each other -- to every candidate', (t) => {
+  // tokio's atomic_u64_static_once_cell.rs: under `not(all(test, loom))` (its `mod std`) and `all(loom, test)` both
+  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\nmacro_rules! cfg_loom_test { ($($i:item)*) => { $( #[cfg(all(loom, test))] $i )* } }\n'
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod macros;\n#[cfg(not(all(test, loom)))]\nmod atomic;\n'],
+    ['src/macros.rs', gates],
+    ['src/atomic.rs', 'cfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\n'],
+    ['src/native.rs', 'pub(crate) use std::sync::atomic::AtomicU64;\n'],
+    ['src/as_mutex.rs', 'cfg_loom_test! { mod once_cell; }\npub(crate) struct AtomicU64;\n'],
+    ['src/once_cell.rs', 'use super::AtomicU64;\n'],
+  ])
+  const target = buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/once_cell.rs').get('super::AtomicU64')
+  t.assert.ok(target instanceof Map)
+  t.assert.deepEqual([...target.values()].toSorted(), ['src/as_mutex.rs', 'src/native.rs'])
+})
