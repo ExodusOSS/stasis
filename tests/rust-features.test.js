@@ -1949,6 +1949,8 @@ test('createCargoContext stops the build where a vendored Cargo.toml it resolves
     // it says would turn `x` on, and the bundle stops before it does -- --cargo-manifests or not
     writeFileSync(join(tmp, 'vendor/foo/Cargo.toml'), `${manifest}[features]\ndefault = ["x"]\nx = []\n`)
     await t.assert.rejects(buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }), { message: /^vendor\/foo\/Cargo\.toml isn't the file vendor\/foo\/\.cargo-checksum\.json lists/u })
+    // and so does an entry of its own: whatever reads the copy's manifest checks it first
+    await t.assert.rejects(buildRustBundle({ cwd: tmp, entries: ['vendor/foo/src/lib.rs'] }), { message: /^vendor\/foo\/Cargo\.toml isn't the file/u })
   })
 })
 

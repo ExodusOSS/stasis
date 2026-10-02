@@ -32,9 +32,10 @@ export function isFile(path) {
   }
 }
 
-function readFileOrNull(file) {
+// The file's text (its bytes with `encoding: null`), or null when it can't be read.
+function readFileOrNull(file, encoding = 'utf8') {
   try {
-    return readFileSync(file, 'utf8')
+    return readFileSync(file, encoding)
   } catch {
     return null
   }
@@ -566,12 +567,15 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   const targetInfo = target === null ? null : (typeof target === 'string' ? rustcTargetCfgs(target, baseDir) : target)
   const hostInfo = target === 'host' ? targetInfo : host
   const manifests = new Map()
-  const tables = new Map() // dir -> the manifest's table tree, or null (rootOf's look for [workspace])
+  // dir -> the manifest as `{ file, text, buf, doc }` (its bytes, and its table tree), or null
+  // (rootOf's look for [workspace])
+  const tables = new Map()
   const tableOf = (dir) => {
     if (!tables.has(dir)) {
       const file = posix.join(dir, 'Cargo.toml')
-      const text = readFileOrNull(join(baseDir, file))
-      tables.set(dir, text === null ? null : { file, text, doc: readToml(text, file) })
+      const buf = readFileOrNull(join(baseDir, file), null)
+      const text = buf === null ? null : buf.toString('utf8')
+      tables.set(dir, text === null ? null : { file, text, buf, doc: readToml(text, file) })
     }
     return tables.get(dir)
   }
@@ -625,18 +629,31 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // dependency's directory, project-relative, on its entry (`dir`; null outside the bundle root):
   // an inherited one's path is the workspace root's.
   // `workspaceRoot` is the manifest of the workspace root it inherits from (rootOf), or null.
-  const readManifest = (dir) => {
+  // A vendored package's is as the vendor directory lists it, not yet checked (see readManifest).
+  const manifestAt = (dir) => {
     if (!manifests.has(dir)) {
       const raw = tableOf(dir)
       const root = raw === null ? null : rootOf(dir, raw.doc)
       const ws = root === null ? null : (typeof root === 'string' ? readManifest(root) : root)
-      const m = raw === null ? null : { dir, file: raw.file, ...manifestOf(raw.text, raw.doc, raw.file, ws), workspaceRoot: ws }
+      const m = raw === null ? null : { dir, file: raw.file, ...manifestOf(raw.text, raw.doc, raw.file, ws), workspaceRoot: ws, unchecked: isVendoredDir(dir) }
       for (const d of m?.deps.values() ?? []) {
         for (const r of d.kinds.values()) r.dir = r.path === null ? null : manifestPath(r.inherited && ws !== null ? ws : m, r.path)
       }
       manifests.set(dir, m)
     }
     return manifests.get(dir)
+  }
+  // The manifest at `dir` as the build takes it in (manifestAt): a vendored package's checked
+  // against its `.cargo-checksum.json` (checkVendored), the bytes read, before what it says --
+  // features, dependencies -- decides anything. Only a listing of the vendor directory reads a copy
+  // unchecked: cargo checks the files of a copy it builds, not of every copy there.
+  const readManifest = (dir) => {
+    const m = manifestAt(dir)
+    if (m?.unchecked) {
+      checkVendored(dir, m.file, tableOf(dir).buf)
+      m.unchecked = false
+    }
+    return m
   }
   // The directory a path manifest `m` writes names, project-relative (null outside the bundle
   // root): relative to its directory, inside the bundle root or above it (`outside`).
@@ -752,7 +769,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       } catch { /* no vendor dir */ }
       for (const d of dirs) {
         if (d.startsWith('.')) continue // a directory source reads none of these
-        const m = readManifest(`${vendorDir}/${d}`)
+        const m = manifestAt(`${vendorDir}/${d}`)
         if (!m?.package) continue
         const sums = checksumOf(m.dir)
         const entry = { version: version(m), dir: m.dir, git: sums?.git ?? null }
@@ -784,25 +801,19 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     }
     return checksums.get(dir)
   }
-  // Throws when `fileRel`, a file of vendored package `m`, isn't byte for byte (`buf`) the file its
-  // `.cargo-checksum.json` lists -- edited after `cargo vendor`: cargo refuses to build the
-  // package, and so the bundle does. A file the list doesn't name, or a package without one, passes.
-  const checkVendored = (m, fileRel, buf) => {
-    const listed = checksumOf(m.dir)?.files[fileRel.slice(m.dir.length + 1)]
-    if (typeof listed !== 'string') return
-    const actual = createHash('sha256').update(buf).digest('hex')
-    if (actual !== listed) throw new Error(`${fileRel} isn't the file ${m.dir}/.cargo-checksum.json lists (sha256 ${actual}, listed ${listed}): changed since \`cargo vendor\`, which cargo refuses to build`)
-  }
-  // Package `m` as the build takes it in: a vendored one's Cargo.toml checked (checkVendored)
-  // before what it says -- features, dependencies -- decides anything, once per package.
-  const checkedCopies = new Set()
-  const usedCopy = (m) => {
-    if (m !== null && isVendoredDir(m.dir) && !checkedCopies.has(m.dir)) {
-      checkedCopies.add(m.dir)
-      const file = posix.join(m.dir, 'Cargo.toml')
-      checkVendored(m, file, readFileSync(join(baseDir, file)))
+  // Throws when `fileRel`, a file of the vendored package at `dir`, isn't byte for byte (`buf`) the
+  // file its `.cargo-checksum.json` lists -- edited after `cargo vendor`: cargo refuses to build
+  // the package, and so the bundle does. A file the list doesn't name, or a package without one,
+  // passes. Once per file (`verified`): what passed isn't hashed again.
+  const verified = new Set()
+  const checkVendored = (dir, fileRel, buf) => {
+    if (verified.has(fileRel)) return
+    const listed = checksumOf(dir)?.files[fileRel.slice(dir.length + 1)]
+    if (typeof listed === 'string') {
+      const actual = createHash('sha256').update(buf).digest('hex')
+      if (actual !== listed) throw new Error(`${fileRel} isn't the file ${dir}/.cargo-checksum.json lists (sha256 ${actual}, listed ${listed}): changed since \`cargo vendor\`, which cargo refuses to build`)
     }
-    return m
+    verified.add(fileRel)
   }
   // The package the build is of: the first entry's package that isn't vendored -- the one cargo is
   // run in (runDir), taken now that the vendor directory is known; null when no entry has one.
@@ -935,7 +946,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   const resolveDepUncached = (m, dep, request) => {
     const asPackage = (dir) => {
       const t = dir === null ? null : readManifest(dir)
-      return t?.package ? usedCopy(t) : null
+      return t?.package ? t : null
     }
     // cargo metadata knows exactly which package each dependency edge points at.
     const known = metadata?.deps.get(m.dir)?.get(dep.key)
@@ -983,13 +994,13 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       if (want === null && pins.length > 0) console.warn(`[loader.cargo] ${lk.file} pins ${who} to ${crate} ${pins.join(', ')}, which ${req} doesn't allow: the lock is out of date`)
       if (want !== null) {
         const hit = candidates.find((c) => c.version === want)
-        if (hit) return usedCopy(readManifest(hit.dir))
+        if (hit) return readManifest(hit.dir)
         console.warn(`[loader.cargo] ${who} is locked to ${crate} ${want}, which isn't vendored (vendored: ${vendoredList})`)
         return null
       }
     }
     const fitting = candidates.filter((c) => fits(c.version))
-    if (fitting.length === 1) return usedCopy(readManifest(fitting[0].dir))
+    if (fitting.length === 1) return readManifest(fitting[0].dir)
     if (fitting.length === 0) console.warn(`[loader.cargo] No vendored version of ${crate} satisfies ${who}'s requirement ${req} (vendored: ${vendoredList})`)
     else console.warn(`[loader.cargo] Several vendored versions of ${crate} satisfy ${who}'s requirement ${req ?? '*'} (${fitting.map((c) => c.version).join(', ')}) and no Cargo.lock says which`)
     return null
@@ -1319,7 +1330,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     const held = new Map() // `name version` -> whether its copy has its checksums
     for (const sub of subdirs(vendorDir)) {
       const name = posix.basename(sub)
-      const m = name.startsWith('.') ? null : readManifest(sub)
+      const m = name.startsWith('.') ? null : manifestAt(sub)
       if (!m?.package) continue
       const sums = checksumOf(sub)
       const id = `${m.package.name} ${m.package.version}`
@@ -1338,7 +1349,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       const dir = `${vendorDir}/${directory}`
       keyOf.set(dir, key)
       dirOf.set(key, dir)
-      manifestsByKey[key] = usedCopy(readManifest(dir)).cargo
+      manifestsByKey[key] = readManifest(dir).cargo
     }
     const memberKeys = memberDirs.map((dir) => keyOf.get(dir))
     const entryKeys = [...new Set(entries.map(packageFor).filter(Boolean).map((m) => keyOf.get(m.dir)))]
@@ -1576,7 +1587,7 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       console.warn(`[loader.cargo] Several vendored crates are named ${norm} (${[...found].join(', ')}) and no manifest says which`)
       return []
     }
-    return asRoots([...found].map((dir) => ({ t: usedCopy(readManifest(dir)), key: '*' })))
+    return asRoots([...found].map((dir) => ({ t: readManifest(dir), key: '*' })))
   }
 
   const crateCandidates = (name, fromFile, { roots = null, units = null } = {}) => {
@@ -1692,10 +1703,11 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
     },
     // Throws when `fileRel` is a vendored package's file whose bytes (`buf`) aren't the ones its
     // `.cargo-checksum.json` lists -- edited after `cargo vendor`: cargo refuses to build it, and
-    // so the bundle does. A file the list doesn't name, or a package without one, passes.
+    // so the bundle does. A file the list doesn't name, or a package without one, passes; one
+    // checked already -- a vendored Cargo.toml, as its package was read -- isn't hashed again.
     checkVendoredFile(fileRel, buf) {
       const m = packageFor(fileRel)
-      if (m !== null && isVendoredDir(m.dir)) checkVendored(m, fileRel, buf)
+      if (m !== null && isVendoredDir(m.dir)) checkVendored(m.dir, fileRel, buf)
     },
     // Whether `fileRel` belongs to a vendored package (a registry crate `cargo vendor` copied in).
     isVendored(fileRel) {

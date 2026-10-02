@@ -916,8 +916,8 @@ dependency's own lockfile or config, which no build of the entries reads. For a 
 its `Cargo.toml` and the `.cargo-checksum.json` cargo checks its files against
 -- the lock and config it was published with play no part in a build that
 depends on it. A vendored file the bundle reads is checked against that list
-in any case, and so is the `Cargo.toml` of every vendored crate the resolution
-takes in, whose features and dependencies it reads: one changed since `cargo
+in any case, and so is the `Cargo.toml` of every vendored crate the bundle or
+its resolution takes in, whose features and dependencies it reads: one changed since `cargo
 vendor` stops the bundle, as cargo refuses to build it. All are `resource` files in their package's bucket, or the
 workspace bucket for the root-level ones. They are carried as written, as `--package-json` carries `package.json`:
 stasis doesn't edit them, so whatever they hold -- a `[registries]` token or
