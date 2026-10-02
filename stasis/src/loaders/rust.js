@@ -425,6 +425,8 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   const macros = []
   const invocations = new Set()
   const calls = new Map() // macro name → the offsets of its bare invocations, in order
+  const pathInvocations = new Set() // the macros invoked by path (`crate::m!()`), by their last segment
+  const callSites = new Map() // macro name → each invocation, bare or by path: `{ offset, inlinePath, inlineDirs }`
   const includes = []
   const defined = []
   const skipped = new Set() // the template macros whose bodies were skipped
@@ -523,14 +525,16 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   // such a `mod` takes the offset of the macro's first bare invocation in this file (`calls`).
   let templateName = null
   let templateMacro = null // the top-level `macro_rules!` whose body the scan is in: what its body calls is its own, nested definitions' too
-  // The `macro_rules!` bodies the scan is in, outermost first, `{ macro, end }`: an include in a
-  // nested one's is that one's, resolved where it is invoked (which may be another directory than
-  // where the outer one is).
+  // The `macro_rules!` bodies the scan is in, outermost first, `{ macro, end, depth }`: what a
+  // nested one's body calls, includes and declares is that one's, made where it is invoked (which
+  // may be another directory than where the outer one is); `depth`, the inline modules around
+  // its definition, which a `mod` its body declares is not in where it is invoked.
   const defs = []
-  const innermostDef = (at) => {
+  const innermostEntry = (at) => {
     while (defs.length > 0 && defs.at(-1).end < at) defs.pop()
-    return defs.at(-1)?.macro ?? templateMacro
+    return defs.at(-1)
   }
+  const innermostDef = (at) => innermostEntry(at)?.macro ?? templateMacro
 
   // Whether the token at `at` sits in a `macro_rules!` body: a template, expanded where the
   // macro is invoked.
@@ -649,7 +653,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         const attr = parseAttr(code.slice(open + 1, close), masked.slice(open + 1, close))
         // (An inner attribute inside a macro invocation's body is the macro's business.)
         if (attr.cfg !== null && verdict(attr.cfg) === false && i >= macroUntil) {
-          if (depth === 0) return { mods: [], refs: [], externCrates: [], bindings: new Set(), imports: [], macros: [], invocations: new Set(), calls: new Map(), includes: [], unfollowed: 0, defined: [], inlineModules: [], inlineModuleVis: new Map(), skipped }
+          if (depth === 0) return { mods: [], refs: [], externCrates: [], bindings: new Set(), imports: [], macros: [], invocations: new Set(), calls: new Map(), pathInvocations: new Set(), callSites: new Map(), includes: [], unfollowed: 0, defined: [], inlineModules: [], inlineModuleVis: new Map(), skipped }
           const top = stack.at(-1)
           if (top !== undefined && top.depth === depth) {
             const end = matchClose(masked, top.start - 1)
@@ -734,7 +738,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         if (name !== null) {
           open = skipWs(open + name.length)
           const gate = GATE_MACRO_RE.test(name) && masked[open] === '{' ? gatePredicate(code, masked, open, matchClose(masked, open)) : undefined
-          macros.push({ name, exported: pending.some((a) => a.macroExport === true), includes: [], calls: new Set(), offset: i, at: i, template: inTemplate(i) ? templateName : null, gate, cfg, macro: i < macroUntil ? macroName : null })
+          macros.push({ name, exported: pending.some((a) => a.macroExport === true), includes: [], calls: new Set(), pathCalls: new Set(), offset: i, at: i, template: inTemplate(i) ? templateName : null, gate, cfg, macro: i < macroUntil ? macroName : null })
           definition = macros.at(-1)
           if (i >= macroUntil) {
             templateName = name
@@ -746,7 +750,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         const close = matchClose(masked, open)
         if (definition !== null) {
           innermostDef(i)
-          defs.push({ macro: definition, end: close })
+          defs.push({ macro: definition, end: close, depth: stack.length })
         }
         if (templates.has(word) && !localMacros.has(word)) {
           // serde_derive's `quote! { use #path as _serde; … _serde::__private::Ok(…) }`, bare or as
@@ -766,12 +770,18 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
           // `macro_rules!` template is the template's (`calls` on the definition): rustc resolves
           // it where the macro is invoked, not where it is written -- and a recursive arm's
           // `m!(…)` is no invocation of this file's.
-          if (!pathQualified) {
-            if (inTemplate(i) && templateMacro !== null) templateMacro.calls.add(word)
+          // A call by path (`crate::m!()`, `$crate::m!()`, `dep::m!()`) is no name to resolve in
+          // scope, but an invocation of a macro of that name all the same, for where what its
+          // template declares and includes is made (`pathInvocations`, `pathCalls`); each call
+          // outside templates is also kept with the inline modules around it (`callSites`).
+          if (inTemplate(i) && templateMacro !== null) (pathQualified ? innermostDef(i).pathCalls : innermostDef(i).calls).add(word)
+          else {
+            if (pathQualified) pathInvocations.add(word)
             else {
               invocations.add(word)
               ;(calls.get(word) ?? calls.set(word, []).get(word)).push(i)
             }
+            ;(callSites.get(word) ?? callSites.set(word, []).get(word)).push({ offset: i, inlinePath: inlinePath(), inlineDirs: stack.map((s) => s.dir) })
           }
           if (INCLUDE_MACROS.has(word)) {
             const text = code.slice(open + 1, close)
@@ -851,7 +861,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         mods.push({
           name, inlinePath: inlinePath(), inlineDirs: stack.map((s) => s.dir), cfg, conditional, paths, noDefault: applies !== -1, vis,
           macroUse: attrs.some((a) => a.macroUse === true), macro: i < macroUntil ? macroName : null, offset: i, at: i,
-          template: inTemplate(i) ? templateName : null,
+          template: inTemplate(i) ? innermostDef(i).name : null, templateDepth: inTemplate(i) ? innermostEntry(i)?.depth ?? 0 : 0,
         })
         i = k + 1
         continue
@@ -973,7 +983,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   const inlineModuleVis = new Map()
   for (const s of spans) if (!inlineModuleVis.has(s.path.join('::'))) inlineModuleVis.set(s.path.join('::'), s.vis)
   const inlineModules = [...inlineModuleVis.keys()].map((p) => p.split('::'))
-  return { mods, refs: [...refs.values()], externCrates, bindings, imports, macros, invocations, calls, includes, unfollowed, defined, inlineModules, inlineModuleVis, skipped }
+  return { mods, refs: [...refs.values()], externCrates, bindings, imports, macros, invocations, calls, pathInvocations, callSites, includes, unfollowed, defined, inlineModules, inlineModuleVis, skipped }
 }
 
 // Whether a `use` import binds a name that is not the crate of that name: `use std::io;` binds
@@ -2372,16 +2382,34 @@ function effectiveInvokers(name, invokers, templateCalls, seen = new Set()) {
   for (const [caller, called] of templateCalls) if (called.has(name)) for (const f of effectiveInvokers(caller, invokers, templateCalls, seen)) out.add(f)
   return out
 }
-// Note what file `path`'s scan (`items`) invokes by bare name, and what its `macro_rules!`
-// templates call, for effectiveInvokers.
+// Note what file `path`'s scan (`items`) invokes, by bare name or by path (`crate::m!()`, matched by
+// name: a `$crate::m!` resolves where the macro is invoked as surely as `m!`), and what its
+// `macro_rules!` templates call, for effectiveInvokers.
 function noteMacroCalls(invokers, templateCalls, path, items) {
-  for (const name of items.invocations) (invokers.get(name) ?? invokers.set(name, new Set()).get(name)).add(path)
-  for (const m of items.macros) for (const name of m.calls) (templateCalls.get(m.name) ?? templateCalls.set(m.name, new Set()).get(m.name)).add(name)
+  for (const name of [...items.invocations, ...items.pathInvocations ?? []]) (invokers.get(name) ?? invokers.set(name, new Set()).get(name)).add(path)
+  for (const m of items.macros) for (const name of [...m.calls, ...m.pathCalls ?? []]) (templateCalls.get(m.name) ?? templateCalls.set(m.name, new Set()).get(m.name)).add(name)
 }
-// The files of `from`'s package in effect invoking macro `name` (`packageOf`: file → package):
-// where a `mod` its template declares is declared -- a macro of the same name elsewhere is likely
-// another (see buildRustTree).
-const hostsOf = (name, from, invokers, templateCalls, packageOf) => [...effectiveInvokers(name, invokers, templateCalls)].filter((f) => packageOf(f) === packageOf(from))
+// The files in effect invoking macro `name` where a `mod` its template declares is declared: of
+// `from`'s package (`packageOf`: file → package) -- a macro of the same name elsewhere is likely
+// another -- or, for a `#[macro_export]` one (`packageOf` null), of any (see buildRustTree).
+const hostsOf = (name, from, invokers, templateCalls, packageOf) => [...effectiveInvokers(name, invokers, templateCalls)].filter((f) => packageOf === null || packageOf(f) === packageOf(from))
+// The copies of template `mod` `decl` (written in a `macro_rules!` body, see scanRustItems) a file
+// invoking the macro declares (`items`: its scan): one per inline module it invokes the macro, or a
+// macro whose template calls it, from -- the `mod` in that module, inside the inline modules the
+// body itself opens -- at that invocation (`offset`, for textual macro scope).
+function hostedCopies(decl, items, templateCalls) {
+  const names = new Set([decl.template])
+  for (let grew = true; grew;) {
+    grew = false
+    for (const [caller, called] of templateCalls) if (!names.has(caller) && [...called].some((n) => names.has(n))) grew = names.add(caller)
+  }
+  const sites = [...names].flatMap((n) => items.callSites?.get(n) ?? []).toSorted((a, b) => a.offset - b.offset)
+  const byModule = new Map()
+  for (const site of sites) if (!byModule.has(site.inlinePath.join('::'))) byModule.set(site.inlinePath.join('::'), site)
+  if (byModule.size === 0) byModule.set('', { offset: Infinity, inlinePath: [], inlineDirs: [] })
+  const own = (list) => list.slice(decl.templateDepth ?? 0)
+  return [...byModule.values()].map((site) => ({ ...decl, inlinePath: [...site.inlinePath, ...own(decl.inlinePath)], inlineDirs: [...site.inlineDirs, ...own(decl.inlineDirs)], offset: site.offset }))
+}
 // TEMPLATE_MACROS less the ones a package defines itself (`own`), one object per set of them.
 const templatesLessMemo = new Map()
 const templatesLess = (own) => {
@@ -2508,10 +2536,11 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [path, items] of scanned) noteMacroCalls(invokers, templateCalls, path, items)
   // A `mod` a `macro_rules!` template declares is declared in each module invoking the macro, and
   // its file found from there (serde_core's src/crate_root.rs holds `crate_root! { … pub mod de;
-  // … }`, which lib.rs invokes: src/de/mod.rs). Only its own package's invocations count -- a
-  // macro of the same name elsewhere is likely another -- and one nothing there invokes by bare
-  // name (`crate::m!()` only) stays beside its definition. A hosted `mod` stands at the host's
-  // first invocation (`offset`), for textual macro scope, and keeps the file defining it
+  // … }`, which lib.rs invokes: src/de/mod.rs), in the inline module the invocation is in, by
+  // bare name or by path (`crate::m!()`, `$crate::m!()` in another template). Only its own
+  // package's invocations count -- a macro of the same name elsewhere is likely another -- unless
+  // the macro is `#[macro_export]`ed, and one nothing invokes stays beside its definition. A
+  // hosted `mod` stands at the host's invocation (`offset`), for textual macro scope, and keeps the file defining it
   // (`definedIn`): the host's cfgs on mounting that file are its own too (serde's lib.rs mounts
   // core/crate_root.rs under `#[cfg(docsrs)]`).
   const hosted = new Map() // file → the template `mod`s it declares by invoking their macros
@@ -2519,10 +2548,11 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [path, items] of scanned) {
     for (const decl of items.mods) {
       if (decl.template === null) continue
-      const hosts = hostsOf(decl.template, path, invokers, templateCalls, packageOf)
+      const exported = items.macros.some((m) => m.name === decl.template && m.exported)
+      const hosts = hostsOf(decl.template, path, invokers, templateCalls, exported ? null : packageOf)
       if (hosts.length === 0) continue
       hostedAway.add(decl)
-      for (const f of hosts) (hosted.get(f) ?? hosted.set(f, []).get(f)).push({ ...decl, offset: scanned.get(f).calls.get(decl.template)?.[0] ?? Infinity, definedIn: path })
+      for (const f of hosts) for (const copy of hostedCopies(decl, scanned.get(f), templateCalls)) (hosted.get(f) ?? hosted.set(f, []).get(f)).push({ ...copy, definedIn: path })
     }
   }
   const modsOf = (path) => [...scanned.get(path).mods.filter((d) => !hostedAway.has(d)), ...(hosted.get(path) ?? [])]
@@ -3056,7 +3086,8 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
   const templateIncludes = new Map() // macro name → its bodies' includes
   const templateMods = new Map() // macro name → its bodies' `mod`s, each `{ decl, from }` (see buildRustTree)
   const templateCalls = new Map() // macro name → the names its bodies call by bare name
-  const invokers = new Map() // macro name → the files invoking it by bare name
+  const invokers = new Map() // macro name → the files invoking it, by bare name or by path
+  const scansOf = new Map() // file → its scan, for where it invokes what (hostedCopies)
   // A package defining a `macro_rules!` of a template macro's name (its own `quote!`) invokes that
   // one everywhere in the package (see buildRustTree): its files are scanned without the name in
   // the template set -- again, for the ones scanned before the definition was met.
@@ -3121,7 +3152,9 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
     for (const [name, incs] of templateIncludes) {
       for (const f of effectiveInvokers(name, invokers, templateCalls)) for (const inc of incs) includeFrom(inc, f)
     }
-    for (const [name, decls] of templateMods) for (const { decl, from } of decls.values()) for (const f of hostsOf(name, from, invokers, templateCalls, packageOf)) modFrom(decl, f)
+    for (const [name, decls] of templateMods) {
+      for (const { decl, from, exported } of decls.values()) for (const f of hostsOf(name, from, invokers, templateCalls, exported ? null : packageOf)) for (const copy of hostedCopies(decl, scansOf.get(f), templateCalls)) modFrom(copy, f)
+    }
   }
 
   // A template's `mod`s that nothing in its package invokes by bare name stand beside its
@@ -3129,8 +3162,8 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
   const placed = new Set()
   const placeUninvoked = () => {
     for (const [name, decls] of templateMods) {
-      for (const { decl, from } of decls.values()) {
-        if (placed.has(decl) || hostsOf(name, from, invokers, templateCalls, packageOf).length > 0) continue
+      for (const { decl, from, exported } of decls.values()) {
+        if (placed.has(decl) || hostsOf(name, from, invokers, templateCalls, exported ? null : packageOf).length > 0) continue
         placed.add(decl)
         modFrom(decl, from)
       }
@@ -3195,7 +3228,7 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
       // A template's `mod`s wait for the files invoking it (expandTemplates).
       for (const decl of mods) {
         if (decl.template === null) modFrom(decl, relPath)
-        else (templateMods.get(decl.template) ?? templateMods.set(decl.template, new Map()).get(decl.template)).set(`${relPath}\0${decl.at}`, { decl, from: relPath })
+        else (templateMods.get(decl.template) ?? templateMods.set(decl.template, new Map()).get(decl.template)).set(`${relPath}\0${decl.at}`, { decl, from: relPath, exported: macros.some((m) => m.name === decl.template && m.exported) })
       }
       // `include!("x.rs")` splices Rust source (scanned next wave, under this module); the asset
       // macros name a file to carry as it is. A build-output path (`concat!(env!("OUT_DIR"), …)`)
@@ -3208,6 +3241,7 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
         for (const inc of m.includes) if (!list.some((x) => x.kind === inc.kind && x.path === inc.path && x.base === inc.base)) list.push(inc)
       }
       noteMacroCalls(invokers, templateCalls, relPath, items)
+      scansOf.set(relPath, items)
       // A reference to an in-tree crate pulls its root in (a crate root by role, whatever its
       // name -- `[lib] path` may point anywhere); the root's own `mod` edges follow next wave.
       const leads = new Set()

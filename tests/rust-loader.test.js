@@ -2255,17 +2255,20 @@ test('buildRustTree reads `extern crate self as x;` as the crate root from every
   t.assert.deepEqual(edges(resolutions.get('src/b.rs')), { 'gm1::X': 'src/lib.rs' })
 })
 
-test('buildRustTree places a template\'s mod at an invocation in its own crate, never in another crate\'s file', (t) => {
-  // Only the app invokes `a`'s `decl!`, with a `helper` of its own in scope: the `x` resolved
-  // beside a's lib.rs is still `a`'s module, where `a`'s helper is in scope -- not one standing in
-  // the app's file.
+test('buildRustTree places an exported template\'s mod at its invocation in another crate, as rustc expands it', (t) => {
+  // Only the app invokes `a`'s `decl!`, with a `helper` of its own in scope: rustc expands the
+  // `mod x;` in the app's root, so it is src/x.rs, where the app's helper is in scope -- not a's
+  // file beside its definition, which nothing compiles.
   const sources = new Map([
     ['src/lib.rs', '#[macro_use]\nextern crate a;\nmacro_rules! helper { () => {} }\ndecl!();\n'],
+    ['src/x.rs', 'fn f() { helper!(); }\n'],
     ['vendor/a/src/lib.rs', 'macro_rules! helper { () => {} }\n#[macro_export]\nmacro_rules! decl { () => { mod x; } }\n'],
     ['vendor/a/src/x.rs', 'fn f() { helper!(); }\n'],
   ])
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
-  t.assert.equal(edges(resolutions.get('vendor/a/src/x.rs'))['helper!'], 'vendor/a/src/lib.rs')
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod x'), 'src/x.rs')
+  t.assert.equal(edges(resolutions.get('src/x.rs'))['helper!'], 'src/lib.rs')
+  t.assert.equal(resolutions.get('vendor/a/src/lib.rs').get('mod x'), undefined)
 })
 
 // --- eighth review: nested macro_rules!, glob-provided names against local ones, cfg strings ---
@@ -2437,4 +2440,40 @@ test('buildRustTree finds another crate\'s macro as that crate\'s root does: und
     ['src/user.rs', 'fn f() { crate::helper(); crate::helper!(); }\n'],
   ])
   t.assert.deepEqual(edges(buildRustTree(own, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs')), { 'crate::helper': 'src/util.rs', 'crate::helper!': 'src/macros.rs' })
+})
+
+test('buildRustTree declares a template\'s mod and include where the macro is invoked by path, and in the inline module invoking it', (t) => {
+  const r = (sources) => buildRustTree(new Map(sources), { roots: ['src/lib.rs'] }).resolutions
+  // `crate::decl!()` from src/sub.rs: rustc looks for src/sub/inner.rs (src/inner.rs a decoy)
+  const decl = ['src/lib.rs', '#[macro_export]\nmacro_rules! decl { () => { pub mod inner; } }\npub mod sub;\n']
+  const byPath = r([decl, ['src/sub.rs', 'crate::decl!();\n'], ['src/sub/inner.rs', ''], ['src/inner.rs', '']])
+  t.assert.equal(byPath.get('src/sub.rs').get('mod inner'), 'src/sub/inner.rs')
+  t.assert.equal(byPath.get('src/lib.rs').get('mod inner'), undefined)
+  // through `$crate::decl!()` in another template, invoked bare
+  const nested = r([['src/lib.rs', '#[macro_export]\nmacro_rules! decl { () => { pub mod inner; } }\nmacro_rules! outer { () => { $crate::decl!(); } }\npub mod sub;\n'], ['src/sub.rs', 'outer!();\n'], ['src/sub/inner.rs', ''], ['src/inner.rs', '']])
+  t.assert.equal(nested.get('src/sub.rs').get('mod inner'), 'src/sub/inner.rs')
+  // an include in a macro invoked by path, relative to the invoking file
+  const embed = r([['src/lib.rs', '#[macro_export]\nmacro_rules! embed { () => { include_str!("data.txt") } }\npub mod sub;\n'], ['src/sub/mod.rs', 'pub fn f() -> &\'static str { crate::embed!() }\n'], ['src/sub/data.txt', '']])
+  t.assert.equal(embed.get('src/sub/mod.rs').get('include_str data.txt'), 'src/sub/data.txt')
+  // invoked inside an inline module: that module's (src/outer/inner.rs); defined in one: the invoker's
+  const inline = r([['src/lib.rs', 'macro_rules! decl { () => { pub mod inner; } }\npub mod outer { decl!(); }\n'], ['src/outer/inner.rs', ''], ['src/inner.rs', '']])
+  t.assert.deepEqual(edges(inline.get('src/lib.rs')), { 'mod outer::inner': 'src/outer/inner.rs' })
+  const definedInline = r([['src/lib.rs', '#[macro_use]\nmod defs { macro_rules! decl { () => { pub mod inner; } } }\ndecl!();\n'], ['src/inner.rs', ''], ['src/defs/inner.rs', '']])
+  t.assert.deepEqual(edges(definedInline.get('src/lib.rs')), { 'mod inner': 'src/inner.rs' })
+})
+
+test('buildRustTree declares and calls what a nested macro_rules! body holds where that inner macro is invoked', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod helpers;\nmacro_rules! outer { () => { macro_rules! inner { () => { pub mod x; embed!(); } } } }\nouter!();\npub mod sub;\n'],
+    ['src/helpers.rs', 'macro_rules! embed { () => { pub static S: &str = include_str!("data.txt"); } }\n'],
+    ['src/sub/mod.rs', 'inner!();\n'],
+    ['src/sub/x.rs', ''],
+    ['src/sub/data.txt', ''],
+    ['src/x.rs', ''], // decoys rustc never reads
+    ['src/data.txt', ''],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual(edges(resolutions.get('src/sub/mod.rs')), { 'mod x': 'src/sub/x.rs', 'include_str data.txt': 'src/sub/data.txt', 'inner!': 'src/lib.rs', 'embed!': 'src/helpers.rs' })
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod x'), undefined)
+  t.assert.equal(resolutions.get('src/lib.rs').get('include_str data.txt'), undefined)
 })

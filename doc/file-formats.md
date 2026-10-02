@@ -507,13 +507,17 @@ an `include!`d file is the including module's child, as rustc splices it, but
 its file is looked up beside the included file: `include!("gen/list.rs")` with
 `mod bar;` in it finds `gen/bar.rs`, whose own submodules sit under `gen/bar/`
 (checked against rustc). A `mod` a `macro_rules!` body declares is declared in
-each module of its package that invokes the macro by bare name -- through the
+each module of its package that invokes the macro, by bare name or by path
+(`crate::m!()`, a `$crate::m!()` in another macro's body) -- through the
 macros whose bodies invoke it, the outermost call -- and found beside that
-module's file, as rustc expands it (serde_core's `crate_root!`, defined in
-crate_root.rs and invoked in lib.rs, declares lib.rs's `de`: `src/de/mod.rs`),
-under the cfgs the invoking file mounts the definition's file with; one
-nothing in its package invokes by bare name (`crate::m!()` only) is looked up
-beside the definition. When several
+module's file, in the inline module the invocation sits in (not the ones
+around the definition), as rustc expands it (serde_core's `crate_root!`,
+defined in crate_root.rs and invoked in lib.rs, declares lib.rs's `de`:
+`src/de/mod.rs`), under the cfgs the invoking file mounts the definition's
+file with; a `#[macro_export]`ed macro's in every crate invoking it (`#[macro_use]
+extern crate a; decl!();` declares the app's module). A `mod` in a
+`macro_rules!` that another's body defines is that inner macro's, declared
+where it is invoked. One nothing invokes is looked up beside the definition. When several
 `#[path]` / `#[cfg_attr(<pred>, path = …)]` attributes sit on one `mod`, the
 first whose predicate holds decides the file and ends the list, and the default
 `name.rs` / `name/mod.rs` lookup is off; variants whose predicate is undecided
@@ -958,10 +962,10 @@ with `mod` or `include!` and another with `include_str!` is Rust: scanned and
 followed, never a resource. An include written inside a `macro_rules!` body
 resolves relative to each file that invokes the macro, as rustc expands it --
 through the macros whose bodies invoke it, the outermost call (the edge is
-that file's, at the invocation); so are the bare macro calls a body makes
-made and resolved where it is invoked -- the body's own, even past a
-`macro_rules!` it defines inside, whose own includes are its, resolved where it
-is invoked in turn. `<name>!` marks a `macro_rules!`
+that file's, at the invocation, by bare name or by path); so are the bare
+macro calls a body makes made and resolved where it is invoked -- the body's
+own, even past a `macro_rules!` it defines inside, whose own includes and
+calls are its, made where it is invoked in turn. `<name>!` marks a `macro_rules!`
 invoked by bare name and defined in another file the invocation can see -- in
 textual scope, as rustc has it: the files above it in the module tree, each up
 to the `mod` that mounts the next (a macro defined after `mod early;` is not
