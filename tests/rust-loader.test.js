@@ -2410,6 +2410,21 @@ test('buildRustTree lets a local module give way to a glob of its name only when
   t.assert.equal(r(new Map([...sources, ['src/lib.rs', 'mod other;\nuse crate::other::*;\n#[cfg(loom)]\nmod imp;\nfn f() { imp::X::real() }\n']])), 'src/other.rs')
 })
 
+test('buildRustTree brings a module a glob reaches in under its own cfgs: a #[cfg(windows)] mod is no answer on unix', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'mod a;\nmod b;\n#[cfg(unix)]\npub mod user;\npub mod any;\n'],
+    ['src/a.rs', '#[cfg(windows)]\npub mod net;\n'],
+    ['src/b.rs', '#[cfg(unix)]\npub mod net;\n'],
+    ['src/a/net.rs', 'pub struct X;\n'],
+    ['src/b/net.rs', 'pub struct X;\nimpl X { pub fn only_b() {} }\n'],
+    ['src/user.rs', 'use crate::a::*;\nuse crate::b::*;\npub fn f() { net::X::only_b() }\n'],
+    ['src/any.rs', 'use crate::a::*;\nuse crate::b::*;\npub fn g(_: net::X) {}\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.equal(resolutions.get('src/user.rs').get('net::X::only_b'), 'src/b/net.rs') // rustc on linux: `crate::a::*` is unused
+  t.assert.deepEqual(edges(resolutions.get('src/any.rs'))['net::X'], { windows: 'src/a/net.rs', unix: 'src/b/net.rs' })
+})
+
 test('buildRustTree finds another crate\'s macro as that crate\'s root does: under its files\' cfgs, through its re-exports', (t) => {
   const sources = new Map([
     ['src/lib.rs', 'mod a;\nmod b;\nuse dep::m;\nm!();\nfn f() { dep::m!(); }\n'],

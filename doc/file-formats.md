@@ -633,7 +633,10 @@ module has of the name, as such a candidate does to any other: serde's
 docsrs-only `mod de` to the `pub use serde_core::de` of every other build, a
 `#[cfg(loom)] mod imp` to the `imp` a `use other::*` brings in -- but only when
 none of its files may be there: a `#[cfg_attr(loom, path = "loom.rs")] mod
-imp;` falls back to imp.rs in every other build, and shadows the glob. With `--cargo-target`, every file compiled
+imp;` falls back to imp.rs in every other build, and shadows the glob. A module
+a glob brings in is under its own cfgs too, its files' (those they share, for
+one with cfg variants): a glob of a module whose `net` is `#[cfg(windows)]`
+brings no `net` in for a file under `unix`. With `--cargo-target`, every file compiled
 for the target is under the target's cfgs too, so a `windows` candidate is
 out for every file and a `target_os = "linux"` file takes the `any(android,
 linux)` branch over the `any(aix, solaris)` one (mio's `sys::Waker` is the

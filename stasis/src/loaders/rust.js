@@ -1911,11 +1911,12 @@ class Lazy {
 }
 
 // Everything module `at` has under `name` for one seeing `seeing` levels into it -- what a glob
-// into the module brings in -- as candidates in written order: a child module (visible that far),
-// the items it defines (the module's own tree file first: an inline `mod imp { }` under one cfg
-// beside a `mod imp;` file under another may both define it), at the crate root a `#[macro_export]`
-// macro (an item of the root's namespace: zerocopy's `use super::*;` from the root brings
-// `into_inner!` in), and its `use` items binding the name (importsOf).
+// into the module brings in -- as candidates in written order: a child module (visible that far,
+// under the cfgs it is there under: a glob of a module's `#[cfg(windows)] pub mod net;` brings
+// no `net` in on unix), the items it defines (the module's own tree file first: an inline `mod
+// imp { }` under one cfg beside a `mod imp;` file under another may both define it), at the crate
+// root a `#[macro_export]` macro (an item of the root's namespace: zerocopy's `use super::*;` from
+// the root brings `into_inner!` in), and its `use` items binding the name (importsOf).
 function hasAll(root, at, name, seeing, ctx) {
   // Asked for every module a closure reaches, most of which have nothing of the name.
   const child = ctx.children.get(root)?.get(at)?.has(name) === true
@@ -1926,7 +1927,7 @@ function hasAll(root, at, name, seeing, ctx) {
   const out = []
   if (child) {
     const sub = `${at}::${name}`
-    if ((ctx.modScope.get(root)?.get(sub) ?? 1) <= seeing) out.push({ answer: { kind: 'module', modulePath: sub, file: ctx.trees.get(root).get(sub) }, leaves: NO_LEAVES })
+    if ((ctx.modScope.get(root)?.get(sub) ?? 1) <= seeing) out.push({ answer: { kind: 'module', modulePath: sub, file: ctx.trees.get(root).get(sub) }, leaves: ctx.moduleLeaves.get(root).get(sub) })
   }
   if (defs !== undefined) {
     const own = ctx.trees.get(root).get(at)
@@ -2275,7 +2276,7 @@ function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, br
       // glob's name is the module's name. Only a module none of whose files may be there: one
       // with a variant the build compiles (`#[cfg_attr(loom, path = "loom.rs")] mod imp;` falls
       // back to imp.rs) is there, and shadows the glob.
-      const sets = (ctx.moduleFiles?.get(root)?.get(child) ?? [tree.get(child)]).map((f) => ctx.files.get(f)?.leaves).filter((set) => set !== undefined)
+      const sets = ctx.moduleSets.get(root).get(child)
       const away = sets.length > 0 && sets.every((set) => deadFor(asker, set) || doubtful(asker, set))
       p = away ? lookup(at, name, want) : null
       if (p === null || p === VALUE_ONLY) {
@@ -2791,12 +2792,25 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
     }
     children.set(root, byParent)
   }
-  // Per crate root, each module's files: a `mod` with cfg variants has several, any of which a
-  // build may compile (walkPath asks whether one of them may be there at all).
-  const moduleFiles = new Map()
-  for (const [path, f] of files) {
-    const byModule = moduleFiles.get(f.root) ?? moduleFiles.set(f.root, new Map()).get(f.root)
-    ;(byModule.get(f.modulePath) ?? byModule.set(f.modulePath, []).get(f.modulePath)).push(path)
+  const perRoot = (map, root) => map.get(root) ?? map.set(root, new Map()).get(root)
+  // Per crate root, the leaf sets of each module's files (`moduleSets`; an inline module's, those
+  // of the file holding it): a `mod` with cfg variants has several, any of which a build may
+  // compile (walkPath asks whether one of them may be there at all). And the leaves each module is
+  // there under (`moduleLeaves`): its file's, or those its files share -- a `mod` with cfg
+  // variants is there wherever it is declared, one of them a `path` fallback's.
+  const moduleSets = new Map()
+  for (const f of files.values()) {
+    const byModule = perRoot(moduleSets, f.root)
+    ;(byModule.get(f.modulePath) ?? byModule.set(f.modulePath, []).get(f.modulePath)).push(f.leaves)
+  }
+  const moduleLeaves = new Map()
+  for (const [root, tree] of trees) {
+    const byModule = perRoot(moduleSets, root)
+    for (const [modulePath, file] of tree) {
+      const sets = byModule.get(modulePath) ?? byModule.set(modulePath, [files.get(file).leaves]).get(modulePath)
+      const shared = sets.slice(1).map((set) => new Set(set.leaves.map(leafKey)))
+      perRoot(moduleLeaves, root).set(modulePath, sets.length === 1 ? sets[0] : leafSet(sets[0].leaves.filter((l) => shared.every((keys) => keys.has(leafKey(l)))), leafSets))
+    }
   }
   // Per crate root, what a path may continue along where a segment names no module: the imports
   // of each module (by module path: `named` by the name each binds, and `globs`; each with the
@@ -2817,7 +2831,6 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   const exportedMacros = new Map()
   const fileMacros = new Map()
   const externPrelude = new Map()
-  const perRoot = (map, root) => map.get(root) ?? map.set(root, new Map()).get(root)
   // An import's or item's leaves: those its file (`here`) was mounted under, its own cfg's, and
   // its gate macro's.
   const itemLeaves = (here, x, path) => unionLeaves(here.leaves, leafSet([...cfgLeaves(x.cfg), ...gateLeaves(x.macro, gatesOf(path))], leafSets), leafSets)
@@ -2990,7 +3003,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [root, byModule] of imports) for (const [module, of] of byModule) for (const name of of.named.keys()) note(having, root, name, module)
   for (const [root, byName] of exportedMacros) for (const name of byName.keys()) note(having, root, name, 'crate')
   const declaresCrate = (name, from) => ctx?.declaresCrate?.(name, from) === true
-  const pathCtx = { trees, children, moduleFiles, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), cratesMacros: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
+  const pathCtx = { trees, children, moduleSets, moduleLeaves, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), cratesMacros: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
   // Every path of every file, on top of the `mod` / include edges (`resolutions`): once, and once
   // more when the first pass left glob closures short of an import cycle (stabilizeClosures).
   const resolveAll = () => {
