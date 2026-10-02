@@ -1050,6 +1050,33 @@ test('buildSolidityBundle refuses a .sol file that isn\'t UTF-8, rather than bun
   t.assert.equal(bundle.sources.get('src/B.sol'), '\uFEFFcontract B {}\n')
 }))
 
+test('buildSolidityBundle fails on a package.json or config that is there but can\'t be read; one that leads nowhere is none, as Node reads it', withTmp(async (t, tmp) => {
+  writeProject(tmp, { 'foundry.toml': '[profile.default]\n', 'package.json': '{"name":"proj","version":"1.0.0"}', 'src/A.sol': 'import "dep/D.sol";\n', 'lib/dep/src/D.sol': 'contract D {}\n' })
+  const build = () => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
+  // A dependency's package.json that loops: walked past, the dependency's files would be bucketed
+  // as the project's.
+  symlinkSync('package.json', join(tmp, 'lib/dep/package.json'))
+  await t.assert.rejects(build, { message: "lib/dep/package.json: can't be read (ELOOP)" })
+  // A link to nothing is no package.json, as to Node.
+  rmSync(join(tmp, 'lib/dep/package.json'))
+  symlinkSync('gone.json', join(tmp, 'lib/dep/package.json'))
+  t.assert.deepEqual([...(await build()).sources.keys()].toSorted(), ['lib/dep/src/D.sol', 'src/A.sol'])
+  // The project's own config that loops: named from the root.
+  symlinkSync('remappings.txt', join(tmp, 'remappings.txt'))
+  await t.assert.rejects(build, { message: "remappings.txt: can't be read (ELOOP)" })
+}))
+
+test('buildBundle refuses a package.json it can\'t read on the walk up to a bucket\'s name, as it refuses a malformed one', withTmp(async (t, tmp) => {
+  // pkg/sub/package.json marks a type only: the bucket's name is pkg/package.json's.
+  writeProject(tmp, { '.git/HEAD': '', 'package.json': '{"name":"proj","version":"1.0.0"}', 'index.cjs': "require('./pkg/sub/a.js')\n", 'pkg/sub/package.json': '{"type":"commonjs"}', 'pkg/sub/a.js': '' })
+  const build = () => buildBundle({ cwd: tmp, entries: ['index.cjs'] })
+  writeFileSync(join(tmp, 'pkg/package.json'), '{ bad')
+  await t.assert.rejects(build, { code: 'ERR_INVALID_PACKAGE_CONFIG' })
+  rmSync(join(tmp, 'pkg/package.json'))
+  symlinkSync('package.json', join(tmp, 'pkg/package.json'))
+  await t.assert.rejects(build, { code: 'ERR_INVALID_PACKAGE_CONFIG' })
+}))
+
 test('buildSolidityBundle never stalls on a package.json that isn\'t a regular file', withTmp(async (t, tmp) => {
   writeProject(tmp, { 'contracts/A.sol': 'import "pkg/P.sol";\n', 'node_modules/pkg/P.sol': 'contract P {}\n' })
   // A FIFO: read blocking, it would wait for a writer forever.

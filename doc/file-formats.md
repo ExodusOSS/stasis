@@ -373,7 +373,10 @@ A `foundry.toml` or `extends` base that isn't TOML, a config that isn't UTF-8
   to a default (forge refuses these too, but quietly skips a dependency's
   `foundry.toml` it can't read). So is a config that isn't a regular file: a
   FIFO, a device or a link to one (`remappings.txt -> /dev/stdin`) is never
-  read, so the bundle can't stall on it or take the process's input as config. A `remappings.txt` line is trimmed as forge trims it, so a
+  read, so the bundle can't stall on it or take the process's input as config.
+  So is one there that can't be read, a link loop or a file in a directory that
+  may not be searched: only nothing there (a link to nothing included) is no
+  file, as `stat` tells them apart. A `remappings.txt` line is trimmed as forge trims it, so a
   byte-order mark stays part of the first remapping. A dependency's config forge
   rejects for its settings (a missing `extends` base, nested inheritance) is
   skipped with a warning, as forge skips it.
@@ -455,9 +458,13 @@ path, a dependency outside the root reads nothing, and a dir a dependency's
 `libs` names must be a dependency itself; a config refused says why. A
 `package.json` that decides a file's package is refused the same way when a
 dependency planted it as a link, and one that doesn't parse (a leading
-byte-order mark is skipped, as npm skips it) or isn't a regular file is an error
-naming it (not quoting it) rather than giving its files to the parent package; other bundles walk past
-a malformed one, as they always have. A
+byte-order mark is skipped, as npm skips it), isn't a regular file or can't be
+read (a link loop, a directory that may not be searched) is an error naming it
+(not quoting it) rather than giving its files to the parent package; a link to
+nothing is no `package.json`, as to Node. Other bundles walk past a malformed
+or unreadable one, as they always have, but the JS bundler's own lookups (its
+resolver and its packages' names, on disk and in a Vfs) refuse one they can't
+read as Node does (`ERR_INVALID_PACKAGE_CONFIG`). A
 link the project placed (a workspace package linked into `node_modules`, a
 linked `lib/` entry, `src/vendor`) may lead anywhere in the root, and so may one
 on the path the project was named by (a symlinked checkout); a workspace package

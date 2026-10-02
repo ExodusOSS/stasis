@@ -12,7 +12,7 @@ import { parseShard, serializeShard } from './shard.js'
 import { canonicalizePath, sha512integrity, readFileSyncMaybe, noupsert } from './state-util.js'
 import { brotliOptions } from './brotli.js'
 import { CODE_EXTENSIONS, canObserveExecuteBits, classifyFormat, erasedTypeScriptFormat, fileMapToObject, hasNodeModulesSegment, isBinaryPlist, isNativeArtifact, isStatFormat, moduleFileKey, narrowExecutable, objectToMaps, observeExecutable, pathExt, reconcileFormat, sortPaths, splitNodeModulesPath } from './util.js'
-import { detectRepo, packageJSONText, readModuleManifest } from './bundle-util.js'
+import { detectRepo, packageJSONStat, packageJSONText, readModuleManifest } from './bundle-util.js'
 import { diskHost } from './host.js'
 import corePackage from './package.cjs'
 
@@ -254,7 +254,8 @@ export class State {
     const potentialRoots = []
     let cursor = root
     while (cursor) {
-      if (this.#exists(join(cursor, 'package.json'))) {
+      // One there that can't be read is refused, not walked past to a root above (packageJSONStat).
+      if (packageJSONStat(this.#host, join(cursor, 'package.json')) !== null) {
         potentialRoots.push(cursor)
       } else if (
         this.#exists(join(cursor, FILE_CONFIG)) ||
@@ -731,12 +732,13 @@ export class State {
   }
 
   // Nearest package.json at or above a directory (findPackageJSON is unreliable for a directory
-  // URL, see #locateModule). Bounded by the project root.
+  // URL, see #locateModule), refusing one there that can't be read as findPackageJSON does
+  // (packageJSONStat). Bounded by the project root.
   #nearestPackageJsonFor(dirAbsolute) {
     let dir = dirAbsolute
     while (true) {
       const candidate = join(dir, 'package.json')
-      if (this.#host.stat(candidate)?.isFile()) return candidate
+      if (packageJSONStat(this.#host, candidate)?.isFile()) return candidate
       if (dir === this.root) break // checked the root's package.json; never escape root
       const parent = dirname(dir)
       if (parent === dir) break

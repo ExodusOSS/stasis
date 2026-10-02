@@ -1,7 +1,7 @@
 import { constants } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 
-import { packageJSONText, readJson } from '@exodus/stasis-core/bundle-util'
+import { packageJSONStat, packageJSONText, readJson } from '@exodus/stasis-core/bundle-util'
 import { byName } from '@exodus/stasis-core/host'
 import { hasNodeModulesSegment } from '@exodus/stasis-core/util'
 import { buildPnpmTree, findPnpmProjects } from '@preventive/deptree/pnpm.js'
@@ -442,13 +442,14 @@ export function vfsHost(vfs, { root, outside, installs = [], hides, cache = true
     realpath(p) {
       return realpath(abs(p))
     },
-    // As Node's: the nearest package.json above a file's real path, never out of a node_modules dir.
+    // As Node's: the nearest package.json above a file's real path, never out of a node_modules dir;
+    // one there that can't be read is refused (packageJSONStat).
     findPackageJSON(p) {
       let from = abs(p)
       if (host.stat(from)?.isFile()) from = realpath(from)
       for (let dir = dirname(from); basename(dir) !== 'node_modules'; dir = dirname(dir)) {
         const candidate = join(dir, 'package.json')
-        if (host.stat(candidate)?.isFile()) {
+        if (packageJSONStat(host, candidate)?.isFile()) {
           checkManifest(candidate)
           return candidate
         }

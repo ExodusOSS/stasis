@@ -44,36 +44,61 @@ export function findPackageMetadata(baseDir, fileRelPath, { strict = false, chec
 // The error codes that mean nothing is at a path.
 export const NO_ENTRY = new Set(['ENOENT', 'ENOTDIR'])
 
+// Why `file` can't be read, where `host.stat` gave null, or null when nothing is there (a missing
+// path, one through a file, a link to nothing). host.stat answers null for any failure, as Node's
+// module lookup does; real stat tells them apart: a link loop, a directory that may not be searched
+// or a name too long is something there that can't be read, and a read meets the same error.
+function readFailure(host, file) {
+  try {
+    host.readFile(file)
+  } catch (err) {
+    return NO_ENTRY.has(err.code) ? null : err
+  }
+  return new Error(`${file} could be read but not stat'ed`)
+}
+
+// host.stat as real stat answers: null only when nothing is there (readFailure); anything else that
+// can't be stat'ed throws, naming the file `label`.
+export function statStrict(host, file, label) {
+  const stat = host.stat(file)
+  if (stat !== null) return stat
+  const failure = readFailure(host, file)
+  if (failure === null) return null
+  throw new Error(`${label}: can't be read (${failure.code ?? failure.message})`, { cause: failure })
+}
+
+// host.stat for a package.json, as Node's lookups read one: null when nothing is there, and one that
+// can't be read (a link loop, a directory that may not be searched) throws ERR_INVALID_PACKAGE_CONFIG,
+// as Node refuses it.
+export function packageJSONStat(host, file) {
+  const stat = host.stat(file)
+  if (stat !== null) return stat
+  const cause = readFailure(host, file)
+  if (cause === null) return null
+  throw Object.assign(new Error(`Cannot read package config ${file}: ${cause.code ?? cause.message}.`, { cause }), { code: 'ERR_INVALID_PACKAGE_CONFIG' })
+}
+
 // `file`'s bytes, read through `host`, or null when there's no file (a directory counts as none).
 // It's read only when it's a regular file: a FIFO, a socket, a device or a link to one
-// (`/dev/stdin`) throws, naming it `label`, rather than stalling or reading the process's input.
-// What can't be stat'ed is read to say why: only a path with nothing there is no file, and a loop
-// or a directory that may not be searched throws.
+// (`/dev/stdin`) throws, naming it `label`, rather than stalling or reading the process's input, and
+// so does one there that can't be read (statStrict).
 export function readRegularFileOrNull(file, label, host = diskHost) {
-  const stat = host.stat(file)
-  if (stat === null) {
-    try {
-      host.readFile(file)
-    } catch (err) {
-      if (NO_ENTRY.has(err.code)) return null
-      throw err
-    }
-    throw new Error(`${label}: not a regular file`)
-  }
-  if (stat.isDirectory()) return null
+  const stat = statStrict(host, file, label)
+  if (stat === null || stat.isDirectory()) return null
   if (!stat.isFile()) throw new Error(`${label}: not a regular file`)
   return host.readFile(file)
 }
 
 // The package.json at `rel` (under `baseDir`), parsed (a leading byte-order mark skipped, as npm
 // and Node skip it), read through `host`; null when there's none (a directory counts as none), or
-// when it doesn't parse or isn't a regular file -- unless `strict`, then that throws, saying where
+// when it doesn't parse, isn't a regular file or can't be read -- unless `strict`, then that throws
+// (only nothing there is no package.json, as Node reads one: statStrict), saying where
 // with the parser's line and column but never its message, which quotes the text (a file that isn't
 // JSON may be anything, a secret included). `check(rel)`, when given, sees the path before it is
 // read, and may throw to refuse it.
 export function readPackageJson(baseDir, rel, { strict = false, check, host = diskHost } = {}) {
   const file = join(baseDir, rel)
-  const stat = host.stat(file)
+  const stat = strict ? statStrict(host, file, rel) : host.stat(file)
   if (stat === null || stat.isDirectory()) return null
   check?.(rel)
   try {
@@ -113,10 +138,11 @@ export function normalizeEntries(entries, cwd) {
   })
 }
 
-// Bytes of a bundled module's `package.json`, or null to skip when it's absent; non-UTF-8 aborts (never silently skipped).
+// Bytes of a bundled module's `package.json`, or null to skip when it's absent; one that can't be
+// read (statStrict) or isn't UTF-8 aborts (never silently skipped).
 export function readModuleManifest({ baseDir, realBase, rel, host = diskHost } = {}) {
   const absolute = join(baseDir, rel)
-  if (host.stat(absolute) === null) return null
+  if (statStrict(host, absolute, rel) === null) return null
   assertRealPathWithinBase(realBase, baseDir, rel, host)
   const buf = host.readFile(absolute)
   if (!isUtf8(buf)) throw new Error(`package.json is not valid UTF-8: ${rel}`)
