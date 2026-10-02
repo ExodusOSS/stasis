@@ -33,6 +33,7 @@
     "src/cmd/bundle.js",
     "src/cmd/build.js",
     "src/cmd/diff.js",
+    "src/cmd/github-bundle.js",
     "src/cmd/sbom.js",
     "src/diff.js",
     "src/esbuild.js",

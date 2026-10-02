@@ -5,10 +5,14 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { brotliDecompressSync } from 'node:zlib'
 
 import { compress } from '@preventive/archive/compression.js'
 import { pack } from '@preventive/archive/tar.js'
 
+import { Bundle } from '@exodus/stasis-core/bundle'
+import { Lockfile } from '@exodus/stasis-core/lockfile'
+import { githubBundleCommand } from '../stasis/src/cmd/github-bundle.js'
 import { buildGitHubBundle } from '../stasis/src/vfs-bundle.js'
 import { fakeClient, json, lockfile } from './vfs-bundle-github.helper.js'
 
@@ -243,4 +247,39 @@ test('buildGitHubBundle reads nothing from disk: the repo, its tree and every fi
   t.assert.deepEqual(built.mainFields.sources.toSorted(), ['packages/app/node_modules/p/index.js', 'packages/app/node_modules/p/package.json', 'packages/app/package.json', 'packages/app/src/main.js'], 'the tree is read in place')
   t.assert.deepEqual(built.mainFields.repo, { github: GITHUB, root: true, commit: SHA })
   for (const entry of otherLanguages) t.assert.match(refused[entry] ?? '', /only JS bundles are built with pnpm$/u, entry)
+})
+
+test('stasis github-bundle writes the bundle and lockfile of the repo at the commit', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'stasis-vfs-bundle-github-cli-'))
+  try {
+    const client = fakeClient({ 'package.json': json({ name: 'p', version: '1.0.0' }), 'pnpm-lock.yaml': lockfile('.'), 'src/a.js': 'module.exports = 1\n' })
+    await githubBundleCommand({ cwd: tmp, github: GITHUB, sha: SHA, packageManager: 'pnpm', client, entries: ['src/a.js'], output: 'out/b.br', lockfile: 'out/b.lock.json' })
+    const bundle = Bundle.parse(brotliDecompressSync(await readFile(join(tmp, 'out', 'b.br'))).toString('utf8'))
+    t.assert.deepEqual([...bundle.sources.keys()], ['src/a.js'])
+    t.assert.deepEqual({ ...bundle.repo }, { github: GITHUB, root: true, commit: SHA })
+    t.assert.deepEqual([...Lockfile.parse(await readFile(join(tmp, 'out', 'b.lock.json'), 'utf8')).entries], ['src/a.js'])
+    // A Solidity bundle has no lockfile, which is said before anything is fetched.
+    const none = fakeClient({})
+    await t.assert.rejects(githubBundleCommand({ cwd: tmp, github: GITHUB, sha: SHA, packageManager: 'soldeer', client: none, entries: ['src'], lockfile: 'x.json' }), /^Error: github-bundle: --lockfile is only valid for JS bundles$/u)
+    t.assert.deepEqual(none.calls, [])
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+})
+
+test('stasis github-bundle requires --github, --sha and --package-manager', async (t) => {
+  const usage = async (args) => {
+    const child = spawn(process.execPath, [join(here, '..', 'stasis', 'bin', 'stasis.js'), 'github-bundle', ...args, 'a.js'])
+    const stderr = []
+    child.stderr.on('data', (chunk) => stderr.push(chunk))
+    const [status] = await once(child, 'close')
+    return { status, error: Buffer.concat(stderr).toString('utf8').split('\n')[0] }
+  }
+  const cases = [
+    [[`--sha=${SHA}`, '--package-manager=pnpm'], 'Error: github-bundle requires --github=owner/name, the repo to bundle'],
+    [[`--github=${GITHUB}`, '--package-manager=pnpm'], 'Error: github-bundle requires --sha, the commit to bundle'],
+    [[`--github=${GITHUB}`, `--sha=${SHA}`], 'Error: github-bundle requires --package-manager=(pnpm|yarn1|soldeer)'],
+  ]
+  const results = await Promise.all(cases.map(([args]) => usage(args)))
+  t.assert.deepEqual(results, cases.map(([, error]) => ({ status: 1, error })))
 })
