@@ -41,11 +41,17 @@ function usage(prefix = '') {
  stasis bundle [--scope=(node_modules|full)] [--conditions=cond1,cond2] [--mainFields=field1,field2] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle --metro [--metro-resolver] --platforms=ios,android [--platforms=web] [--jsx] [--flow] [--typescript [--tsconfig=path/to/tsconfig.json]] [--resources=ext,ext] [--package-json] [--lockfile=path/to/stasis.lock.json] [--add] [--output=(path|-)] path/to/file.(js|ts) ...
  stasis bundle [--add] [--output=(path|-)] path/to/file.(sh|bash) ...
- stasis bundle [--cargo] [--cargo-features=a,b,pkg/c] [--cargo-no-default-features] [--cargo-all-features] [--add] [--output=(path|-)] path/to/file.rs ...
+ stasis bundle [--cargo] [--cargo-features=a,b,pkg/c] [--cargo-no-default-features] [--cargo-all-features] [--cargo-target=(triple|host)] [--cargo-manifests] [--add] [--output=(path|-)] path/to/file.rs ...
  (Rust: each crate's Cargo features are resolved from Cargo.toml/Cargo.lock like "cargo build" of the
-  entries' packages, so #[cfg(feature = ...)] code that is off stays out; --cargo takes the resolution
+  entries' packages, so #[cfg(feature = ...)] code that is off stays out -- by cargo's own resolver
+  when there is a Cargo.lock (version 3 or 4; an older one stops the build), --cargo-target and every
+  locked package in-tree, by replaying the manifests otherwise (said, with why); --cargo takes the resolution
   from "cargo metadata" instead -- it runs cargo, so only on a project you trust; the --cargo-*
-  flags are cargo's --features / --no-default-features / --all-features for those packages)
+  feature flags are cargo's --features / --no-default-features / --all-features for those packages;
+  --cargo-target asks rustc for the target's cfgs so #[cfg(unix)]-style code for other targets stays
+  out too, otherwise it is all kept; --cargo-manifests also bundles each bundled package's Cargo.toml
+  and build script (a vendored crate's .cargo-checksum.json too), the workspace Cargo.toml, Cargo.lock
+  and cargo configs, as written: tokens and URL credentials in them included)
  (writes to stasis.code.br by default; --output=- streams to stdout; --add merges into an
   existing bundle instead of replacing it (not with --output=-); --brotli-quality=0..11, default 9;
   --jsx parses JSX in .js/.cjs/.mjs files, e.g. React Native source (put JSX-in-TS in a .tsx file);
@@ -252,11 +258,13 @@ if (command === '-v' || command === '--version') {
     'cargo-features': { type: 'string', multiple: true },
     'cargo-no-default-features': { type: 'boolean' },
     'cargo-all-features': { type: 'boolean' },
+    'cargo-target': { type: 'string' },
+    'cargo-manifests': { type: 'boolean' },
     'brotli-quality': { type: 'string' },
     add: { type: 'boolean' },
   }
   const values = parseLeadingOptions(argv, options, {
-    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--cargo-features', '--brotli-quality', '-o'],
+    valueFlags: ['--mapping', '--output', '--scope', '--lockfile', '--conditions', '--mainFields', '--platforms', '--resources', '--tsconfig', '--cargo-features', '--cargo-target', '--brotli-quality', '-o'],
     onError: usage,
   })
   if (argv.length === 0) usage('Nothing to bundle: no entry file given')
@@ -290,10 +298,18 @@ if (command === '-v' || command === '--version') {
   }
   const cargoNoDefaultFeatures = Boolean(values['cargo-no-default-features'])
   const cargoAllFeatures = Boolean(values['cargo-all-features'])
+  // --cargo-target=<triple|host>: the build's target, whose cfgs (from `rustc --print cfg`) decide
+  // `#[cfg(unix)]`-style code. A triple is letters, digits, `-`, `_` and `.` (`x86_64-unknown-linux-gnu`).
+  const cargoTarget = values['cargo-target'] ?? null
+  if (cargoTarget !== null && !/^[\w.-]+$/u.test(cargoTarget)) {
+    usage('Error: --cargo-target must be a target triple or "host" (e.g. --cargo-target=aarch64-apple-darwin)')
+  }
+  // --cargo-manifests: carry each bundled package's Cargo.toml and build script, the workspace
+  // Cargo.toml, Cargo.lock and .cargo/config.toml too (the Rust counterpart of --package-json).
+  const cargoManifests = Boolean(values['cargo-manifests'])
   if (!allRust) {
-    if (cargoFeatures.length > 0) usage('Error: --cargo-features is only valid for Rust bundles')
-    if (cargoNoDefaultFeatures) usage('Error: --cargo-no-default-features is only valid for Rust bundles')
-    if (cargoAllFeatures) usage('Error: --cargo-all-features is only valid for Rust bundles')
+    const given = { 'cargo-features': cargoFeatures.length > 0, 'cargo-no-default-features': cargoNoDefaultFeatures, 'cargo-all-features': cargoAllFeatures, 'cargo-target': cargoTarget !== null, 'cargo-manifests': cargoManifests }
+    for (const [flag, on] of Object.entries(given)) if (on) usage(`Error: --${flag} is only valid for Rust bundles`)
   }
   if (values.scope && !allJs) usage('Error: --scope is only valid for JS bundles')
   if (values.scope && !['node_modules', 'full'].includes(values.scope)) {
@@ -413,6 +429,8 @@ if (command === '-v' || command === '--version') {
     cargoFeatures,
     cargoNoDefaultFeatures,
     cargoAllFeatures,
+    cargoTarget,
+    cargoManifests,
     brotliQuality,
     add,
   })

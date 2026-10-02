@@ -19,6 +19,7 @@ import {
   outermostDir,
 } from '../stasis/src/cmd/bundle.js'
 import { diffCommand } from '../stasis/src/cmd/diff.js'
+import { rustFixture } from './rust-fixtures.helper.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'stasis', 'bin', 'stasis.js')
@@ -3445,8 +3446,8 @@ test('CLI: bundle (JS) fails loudly when the oxc-parser dependency is missing', 
   // exited 0 with no warning at all. The setup error must propagate with its
   // install hint instead. Exercised against a copy of stasis whose node_modules
   // carries only the zero-dep @exodus/stasis-core (so the moved-module shims
-  // resolve), @preventive/lockfile (whose TOML and .gitmodules readers the loaders
-  // import) and @exodus/bytes (its dependency, and the loaders' UTF-8 decoder), so
+  // resolve), @preventive/lockfile (whose TOML, .gitmodules and Cargo readers the
+  // loaders import) and @exodus/bytes (its dependency, and the loaders' UTF-8 decoder), so
   // the bundle command loads, but no oxc-parser, so the lazy lookup (createRequire
   // from src/scan.js) genuinely misses.
   const stasisCopy = join(tmp, 'stasis')
@@ -3917,7 +3918,7 @@ test('buildRustBundle resolves a mod declared inside inline modules under their 
 
 test('buildRustBundle leaves test/doc-only modules and the dev-deps they reach out of the bundle', async (t) => {
   const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'cfg-test'), entries: ['src/lib.rs'] }))
-  t.assert.deepEqual(warnings, [])
+  t.assert.deepEqual(warnings, ["[stasis] Rust features from a replay of the manifests, not cargo's resolver: no --cargo-target"])
   // Not bundled: src/tests/mod.rs, src/prop/strategies.rs, src/doc_only.rs, src/sys/mock.rs, src/maybe.rs (its feature
   // is off), vendor/proptest, vendor/quickcheck, serde's test helpers.
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), [
@@ -3947,22 +3948,73 @@ test('CLI: bundle rejects the --cargo-* feature flags for a non-Rust bundle, and
   t.assert.match(runCli(['bundle', '--cargo-features=x', 'main.sh'], { cwd }).stderr, /--cargo-features is only valid for Rust bundles/u)
   t.assert.match(runCli(['bundle', '--cargo-no-default-features', 'main.sh'], { cwd }).stderr, /--cargo-no-default-features is only valid for Rust bundles/u)
   t.assert.match(runCli(['bundle', '--cargo-all-features', 'main.sh'], { cwd }).stderr, /--cargo-all-features is only valid for Rust bundles/u)
+  t.assert.match(runCli(['bundle', '--cargo-target=host', 'main.sh'], { cwd }).stderr, /--cargo-target is only valid for Rust bundles/u)
+  t.assert.match(runCli(['bundle', '--cargo-manifests', 'main.sh'], { cwd }).stderr, /--cargo-manifests is only valid for Rust bundles/u)
   const empty = runCli(['bundle', '--cargo-features=,', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
   t.assert.equal(empty.status, 1)
   t.assert.match(empty.stderr, /--cargo-features must list at least one feature/u)
+  const target = runCli(['bundle', '--cargo-target=x86_64 linux', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
+  t.assert.equal(target.status, 1)
+  t.assert.match(target.stderr, /--cargo-target must be a target triple or "host"/u)
 })
+
+test('buildBundle rejects --cargo-target and --cargo-manifests for a non-Rust bundle', async (t) => {
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'], cargoTarget: 'host' }),
+    /--cargo-target is only valid for Rust bundles/u,
+  )
+  await t.assert.rejects(
+    () => buildBundle({ cwd: join(bashFixtures, 'basic'), entries: ['main.sh'], cargoManifests: true }),
+    /--cargo-manifests is only valid for Rust bundles/u,
+  )
+})
+
+test('CLI: bundle --cargo-manifests adds the package manifest, lockfile and build script to a Rust bundle', withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const cwd = rustFixture('includes')
+  const plain = runCli(['bundle', '-o', outPath, 'src/lib.rs'], { cwd })
+  t.assert.equal(plain.status, 0, plain.stderr)
+  t.assert.match(plain.stderr, /Bundled 7 files in 1 package/u)
+  const withManifests = runCli(['bundle', '--cargo-manifests', '-o', outPath, 'src/lib.rs'], { cwd })
+  t.assert.equal(withManifests.status, 0, withManifests.stderr)
+  t.assert.match(withManifests.stderr, /Bundled 11 files in 1 package/u)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.deepEqual([...parsed.sources.keys()].toSorted(), [
+    'Cargo.lock', 'Cargo.toml', 'README.md', 'build.rs', 'build/helper.rs', 'data/blob.bin', 'data/table.txt',
+    'src/gated.rs', 'src/generated/consts.rs', 'src/lib.rs', 'src/macros.rs',
+  ])
+  t.assert.equal(parsed.formats.get('Cargo.toml'), 'resource')
+  t.assert.equal(parsed.formats.get('build.rs'), 'rust')
+  t.assert.equal(parsed.imports.get('rust').get('build.rs').get('mod helper'), 'build/helper.rs')
+  t.assert.deepEqual([...parsed.entries], ['src/lib.rs'])
+}))
+
+const hasRustc = spawnSync('rustc', ['--version'], { stdio: 'ignore' }).status === 0
+
+test('CLI: bundle --cargo-target keeps only the named target\'s #[cfg_attr(…, path)] variant', { skip: hasRustc ? false : 'rustc not on PATH' }, withTmp((t, tmp) => {
+  const outPath = join(tmp, 'out.stasis.code.br')
+  const r = runCli(['bundle', '--cargo-target=x86_64-unknown-linux-gnu', '-o', outPath, 'src/lib.rs'], { cwd: join(rustFixtures, 'path-attr') })
+  t.assert.equal(r.status, 0, r.stderr)
+  const parsed = Bundle.parse(brotliDecompressSync(readFileSync(outPath)).toString('utf8'))
+  t.assert.ok(parsed.sources.has('src/sys/unix.rs'))
+  // Neither the windows variant nor the default `src/sys.rs`: the unix `#[path]` applies outright.
+  t.assert.ok(!parsed.sources.has('src/sys/windows.rs'))
+  t.assert.ok(!parsed.sources.has('src/sys.rs'))
+  t.assert.equal(parsed.imports.get('rust').get('src/lib.rs').get('mod sys'), 'src/sys/unix.rs')
+}))
 
 test('CLI: EXODUS_STASIS_DEBUG=1 prints the resolved Rust features per package', (t) => {
   const r = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features'), env: { ...cleanEnv, EXODUS_STASIS_DEBUG: '1' } })
   t.assert.equal(r.status, 0, r.stderr)
-  t.assert.match(r.stderr, /^\[stasis\] Rust features \(Cargo\.toml \+ Cargo\.lock\), 6 packages:$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] Rust features \(manifest replay, target\), 6 packages:$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] Rust features \(manifest replay, host\), 0 packages:$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}app@0\.1\.0 \(\.\): default, fast$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}lib-a@0\.2\.0 \(crates\/lib-a\): default, extra, extra-dep, std$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}extra-dep@1\.0\.0 \(vendor\/extra-dep\): \(none\)$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}winnowish@0\.6\.1 \(vendor\/winnowish\): default, std$/mu)
   t.assert.match(r.stderr, /^\[stasis\] {3}winnowish@0\.5\.0 \(vendor\/winnowish-0\.5\.0\): default, std$/mu)
   const quiet = runCli(['bundle', '-o', '/dev/null', 'src/main.rs'], { cwd: join(rustFixtures, 'features') })
-  t.assert.doesNotMatch(quiet.stderr, /Rust features/u)
+  t.assert.doesNotMatch(quiet.stderr, /Rust features \(/u)
 })
 
 test('CLI: bundle --cargo-features enables a root feature (repeatable, comma-separated)', withTmp((t, tmp) => {
@@ -4040,8 +4092,8 @@ test('buildRustBundle bundles what is in-tree and hints at `cargo vendor` when d
   const { result: bundle, warnings } = await captureWarningsAsync(() => buildRustBundle({ cwd: join(rustFixtures, 'no-vendor'), entries: ['src/main.rs'] }))
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['src/a.rs', 'src/main.rs'])
   // Two short lines: the crates, then the remedy (no absolute path).
-  const listed = warnings.find((w) => w.includes('not found in the bundle root'))
-  t.assert.equal(listed, '[stasis] 2 crates referenced but not found in the bundle root: serde, syn') // not std, not the local module `a`
+  const listed = warnings.find((w) => w.includes('referenced but not in the bundle'))
+  t.assert.equal(listed, '[stasis] 2 crates referenced but not in the bundle: serde, syn') // not std, not the local module `a`
   const hint = warnings.find((w) => w.includes('cargo vendor'))
   t.assert.equal(hint, '[stasis] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first.')
 })
@@ -4050,7 +4102,7 @@ test('CLI: bundle (rust) prints the `cargo vendor` hint to stderr and still exit
   const outPath = join(tmp, 'out.stasis.code.br')
   const r = runCli(['bundle', '-o', outPath, 'src/main.rs'], { cwd: join(rustFixtures, 'no-vendor') })
   t.assert.equal(r.status, 0, r.stderr)
-  t.assert.match(r.stderr, /^\[stasis\] 2 crates referenced but not found in the bundle root: serde, syn$/mu)
+  t.assert.match(r.stderr, /^\[stasis\] 2 crates referenced but not in the bundle: serde, syn$/mu)
   t.assert.match(r.stderr, /^\[stasis\] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first\.$/mu)
   t.assert.match(r.stderr, /Bundled 2 files in 1 package/u)
 }))

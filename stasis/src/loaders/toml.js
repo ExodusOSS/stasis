@@ -51,14 +51,16 @@ export function splitTopLevel(text) {
 // The table tree of TOML `text` (parseToml): tables are null-prototype objects, arrays arrays, and
 // values strings, booleans, numbers (an integer past 2^53 a BigInt), TomlFloat and TomlDateTime.
 // Throws a TomlError on anything else, naming `file` when given.
-export function readToml(text, file = null) {
+export const readToml = (text, file = null) => nameErrors(file, () => parseToml(text))
+
+// `read()`, with an error of one of `classes` it throws (@preventive/lockfile's, whose message
+// leads with where it is) leading with `file` too, its fields kept; null `file` names none.
+export function nameErrors(file, read, classes = [TomlError]) {
   try {
-    return parseToml(text)
+    return read()
   } catch (err) {
-    if (file === null || !(err instanceof TomlError)) throw err
-    const named = new TomlError(`${file}: ${err.message}`)
-    named.line = err.line
-    throw named
+    if (file === null || !classes.some((c) => err instanceof c)) throw err
+    throw Object.assign(new err.constructor(`${file}: ${err.message}`), err)
   }
 }
 
