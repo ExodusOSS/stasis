@@ -512,11 +512,16 @@ export async function buildRustBundle({ cwd = process.cwd(), entries, cargo = fa
 
   // A crate the code names that the bundle doesn't hold: a registry dependency that isn't vendored
   // (or not in a version its requirement allows), a path or patch outside the bundle root (the
-  // loader warned of those), or a crate root the walk refused. Reported whatever the vendor dir
-  // holds; with none, the fix is one command.
+  // loader warned of those), or a crate root the walk refused -- and any other dependency a bundled
+  // package's build links that nothing in-tree answers, however the code names it, if at all.
+  // Reported whatever the vendor dir holds; with none, the fix is one command.
   const notLoaded = tree.wantedRoots.filter((r) => !sources.has(r)).map((r) => `${cargoCtx.packageInfo(r)?.name ?? r} (${r})`)
-  if (unresolvedCrates.size > 0 || notLoaded.length > 0) {
-    const names = [...unresolvedCrates, ...notLoaded].toSorted()
+  const bundledPackages = new Set([...sources.keys()].map((p) => cargoCtx.packageInfo(p)?.dir).filter((d) => d !== undefined))
+  const lacking = cargoCtx.lackingDependencies(bundledPackages, { buildScripts: cargoManifests })
+    .filter((d) => !unresolvedCrates.has(d.key))
+    .map((d) => `${d.name} (a dependency of ${d.from})`)
+  if (unresolvedCrates.size > 0 || notLoaded.length > 0 || lacking.length > 0) {
+    const names = [...new Set([...unresolvedCrates, ...notLoaded, ...lacking])].toSorted()
     const shown = names.slice(0, 10).join(', ') + (names.length > 10 ? `, ... and ${names.length - 10} more` : '')
     console.warn(`[stasis] ${names.length} crate${names.length === 1 ? '' : 's'} referenced but not in the bundle: ${shown}`)
     if (!existsSync(join(baseDir, cargoCtx.vendorDir))) console.warn('[stasis] Registry dependencies are bundled only when vendored in-tree: run `cargo vendor` first.')

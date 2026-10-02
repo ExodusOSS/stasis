@@ -1939,3 +1939,20 @@ test('createCargoContext stops the build where a vendored Cargo.toml it resolves
     await t.assert.rejects(buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }), { message: /^vendor\/foo\/Cargo\.toml isn't the file vendor\/foo\/\.cargo-checksum\.json lists/u })
   })
 })
+
+test('buildRustBundle reports every dependency the build links that the bundle lacks, whatever the code calls it', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\nmd-5 = "0.10"\nunused = "1"\n[dev-dependencies]\ndevonly = "1"\n[build-dependencies]\ncc = "1"\n[target.\'cfg(windows)\'.dependencies]\nwinonly = "1"\n',
+    'src/lib.rs': 'pub use foo::one;\npub fn h() { let _ = md5::compute(b"x"); }\n',
+    'build.rs': 'fn main() {}\n',
+    'vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'vendor/foo/src/lib.rs': 'pub fn one() {}\n',
+  }, async (tmp) => {
+    // md-5's lib is md5, which no manifest in the bundle says; `unused` is linked though nothing
+    // names it. The dev-dependency isn't linked into the lib, the build-dependency only into the
+    // build script (bundled with --cargo-manifests), the Windows one not into a Linux build.
+    const lacking = async (opts) => (await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], ...opts }))).warnings.find((w) => w.includes('not in the bundle'))
+    t.assert.equal(await lacking({ cargoTarget: LINUX }), '[stasis] 2 crates referenced but not in the bundle: md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0)')
+    t.assert.equal(await lacking({ cargoTarget: LINUX, cargoManifests: true }), '[stasis] 3 crates referenced but not in the bundle: cc (a dependency of app 0.1.0), md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0)')
+    t.assert.equal(await lacking({}), '[stasis] 3 crates referenced but not in the bundle: md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0), winonly (a dependency of app 0.1.0)')
+  })
+})

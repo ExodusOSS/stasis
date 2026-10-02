@@ -552,8 +552,14 @@ root, so they're never read: vendor them first (`cargo vendor`). Whenever a
 bundle references crates it lacks -- none in-tree, or one whose root the walk
 refused (a symlink leading out of the bundle root) -- `stasis bundle` lists
 them, `vendor/` dir or not, a dependency the package declares whether a `use`
-or only an expression (`serde_json::to_string(…)`) names it; with no `vendor/`
-dir it also suggests `cargo vendor`.
+or only an expression (`serde_json::to_string(…)`) names it. It lists too every
+dependency a bundled package's build links that nothing in-tree answers,
+however the code names it, if at all (`md-5`, used as `md5`: a crate's lib
+name is its manifest's, which the bundle then lacks), as `md-5 (a dependency
+of app 0.1.0)`: an active table of the build's platforms (one only maybe
+applying too), a dev-dependency only for a test, bench or example entry, a
+build-dependency only with `--cargo-manifests` and a build script. With no
+`vendor/` dir it also suggests `cargo vendor`.
 
 A path edge (`crate::a::b::Item`, `super::x`, a relative `child::y`) resolves
 module by module along the crate's tree, inline `mod x { … }` blocks included

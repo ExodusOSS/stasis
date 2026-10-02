@@ -325,13 +325,15 @@ function runCargoMetadata(dir, { features = [], noDefaultFeatures = false, allFe
   return JSON.parse(r.stdout)
 }
 
-// `cargo metadata` JSON → `{ enabled: Map<dir, Set<feature>>, deps: Map<dir, Map<useName, dir>> }`
-// over the packages the bundle can carry: those whose manifest lies inside the bundle root, plus
-// registry packages cargo read from `~/.cargo/registry` (no `.cargo/config.toml` redirecting
-// crates.io to `vendor/`) that `locate(name, version)` finds vendored in-tree -- `cargo vendor`
-// copies exactly the lockfile's versions, so name + version identify the dir. Anything else (an
-// unvendored registry crate, a path dep outside the root) can't be bundled and is dropped. `deps`
-// maps each package's dependencies by the name code refers to them with (renames applied, `-` → `_`).
+// `cargo metadata` JSON → `{ enabled: Map<dir, Set<feature>>, deps: Map<dir, Map<useName, dir>>,
+// lacking: Map<dir, [{ name, kinds }]> }` over the packages the bundle can carry: those whose
+// manifest lies inside the bundle root, plus registry packages cargo read from `~/.cargo/registry`
+// (no `.cargo/config.toml` redirecting crates.io to `vendor/`) that `locate(name, version)` finds
+// vendored in-tree -- `cargo vendor` copies exactly the lockfile's versions, so name + version
+// identify the dir. Anything else (an unvendored registry crate, a path dep outside the root)
+// can't be bundled: it is in `lacking`, under each package depending on it, with the kinds of the
+// tables naming it (`normal`, `dev`, `build`). `deps` maps each package's dependencies by the name
+// code refers to them with (renames applied, `-` → `_`).
 export function resolutionFromMetadata(metadata, baseDir, { locate = null } = {}) {
   let realBase = baseDir
   try {
@@ -352,8 +354,10 @@ export function resolutionFromMetadata(metadata, baseDir, { locate = null } = {}
     const dir = relDir(p.manifest_path) ?? locate?.(p.name, p.version) ?? null
     if (dir !== null) dirOf.set(p.id, dir)
   }
+  const nameOf = new Map((metadata.packages ?? []).map((p) => [p.id, p.name]))
   const enabled = new Map()
   const deps = new Map()
+  const lacking = new Map()
   for (const node of metadata.resolve?.nodes ?? []) {
     const dir = dirOf.get(node.id)
     if (dir === undefined) continue
@@ -362,10 +366,14 @@ export function resolutionFromMetadata(metadata, baseDir, { locate = null } = {}
     for (const d of node.deps ?? []) {
       const target = dirOf.get(d.pkg)
       if (target !== undefined && typeof d.name === 'string') byName.set(normName(d.name), target)
+      else if (target === undefined) {
+        const kinds = new Set((Array.isArray(d.dep_kinds) ? d.dep_kinds : [{ kind: null }]).map((k) => k?.kind ?? 'normal'))
+        ;(lacking.get(dir) ?? lacking.set(dir, []).get(dir)).push({ name: nameOf.get(d.pkg) ?? d.name, kinds })
+      }
     }
     deps.set(dir, byName)
   }
-  return { enabled, deps }
+  return { enabled, deps, lacking }
 }
 
 // The cargo config file in absolute directory `abs`: `.cargo/config` when it exists -- cargo
@@ -1033,7 +1041,8 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
   // code off -- `#[cfg(not(feature = "std"))]` -- so counting a table that may not apply is no
   // safe over-approximation). Dev-dependencies: a dependency's own are never built by anyone, so
   // they never count; the root packages' count under resolver 1, and for a test/bench entry.
-  const resolveFeatures = (includeMaybe) => {
+  // `lacking`, when given, collects the active tables no package in-tree answers (see ensureResolved).
+  const resolveFeatures = (includeMaybe, lacking = null) => {
     const enabled = new Map()
     // The entries' packages (manifests are memoized per dir, so identity dedupes them).
     const roots = [...new Set(entries.map(packageFor).filter(Boolean))]
@@ -1147,7 +1156,10 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
         for (const d of m.deps.values()) {
           for (const r of activeRequests(c, m, d)) {
             const t = resolveDep(m, d, r)
-            if (!t) continue
+            if (!t) {
+              lacking?.set(`${m.dir}\0${d.key}\0${r.kind}`, { m, d, r })
+              continue
+            }
             const dc = depCtx(c, r, t)
             inGraph(dc, t)
             if (r.defaultFeatures) enable(dc, t, 'default')
@@ -1346,15 +1358,22 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
 
   // Both resolutions, per (context, package dir): `sure` without the undecided tables, `all` with
   // them -- the exact resolution's where there is one, the replay's otherwise. `--cargo`: cargo
-  // metadata's features, the same in either context.
+  // metadata's features, the same in either context. `lacking` (the replay's): the active
+  // dependency tables no package in-tree answers, `dir key kind` → `{ m, d, r }` (see
+  // lackingDependencies).
   let resolved = null
+  let lacking = null
   const ensureResolved = () => {
     if (resolved !== null) return resolved
     if (metadata) {
       const byNode = new Map([...metadata.enabled].flatMap(([dir, set]) => [[nodeKey('target', dir), set], [nodeKey('host', dir), set]]))
       resolved = { sure: byNode, all: byNode }
     } else {
-      resolved = exact()?.resolved ?? { sure: resolveFeatures(false), all: resolveFeatures(true) }
+      resolved = exact()?.resolved ?? null
+      if (resolved === null) {
+        lacking = new Map()
+        resolved = { sure: resolveFeatures(false), all: resolveFeatures(true, lacking) }
+      }
     }
     return resolved
   }
@@ -1564,6 +1583,36 @@ export function createCargoContext(baseDir, { entries = [], features = [], noDef
       return metadata ? { mode: 'metadata', why: null } : (exact() === null ? { mode: 'replay', why: exactWhy } : { mode: 'cargo', why: null })
     },
     isTestTarget,
+    // The dependencies the build links that nothing in-tree answers, for the packages at `dirs` (the
+    // bundled ones): declared, and active in the build as far as the resolution tells (its tables
+    // for the build's platforms, an optional one turned on; maybe ones too), but a registry crate
+    // not vendored, a path outside the bundle root -- as `{ key, name, from }` (the dependency's
+    // key and name in its dependent's manifest, and that package as `name version`). Code may name
+    // such a crate by another name than the manifest's (`md-5` is used as `md5`), or not at all, so
+    // the bundle can't tell from the code that it lacks one. Dev-dependencies count only for a
+    // package an entry is a test, bench or example target of; build-dependencies only for a
+    // package with a build script, and with `buildScripts` (build scripts bundled). Cargo's
+    // resolver needs every locked package in-tree, so it has none.
+    lackingDependencies(dirs, { buildScripts = false } = {}) {
+      ensureResolved()
+      const devDirs = new Set(entries.filter((e) => linksDevDeps(e)).map((e) => packageFor(e)?.dir))
+      const counts = (kind, dir) => (kind === 'dev' ? devDirs.has(dir) : (kind !== 'build' || (buildScripts && buildScript(readManifest(dir)) !== null)))
+      const out = []
+      const seen = new Set()
+      const note = (key, name, from) => {
+        if (seen.has(`${from}\0${key}`)) return
+        seen.add(`${from}\0${key}`)
+        out.push({ key, name, from })
+      }
+      for (const { m, d, r } of lacking?.values() ?? []) {
+        if (dirs.has(m.dir) && counts(r.kind, m.dir)) note(d.key, d.name, `${m.package.name} ${version(m)}`)
+      }
+      for (const [dir, list] of metadata?.lacking ?? []) {
+        const m = dirs.has(dir) ? readManifest(dir) : null
+        if (m?.package) for (const { name, kinds } of list) if ([...kinds].some((k) => counts(k, dir))) note(normName(name), name, `${m.package.name} ${version(m)}`)
+      }
+      return out
+    },
     // Whether `fromFile`'s package declares a dependency of that name (in any table, by the key
     // code uses): then the name is that crate -- rustc refuses a `use` path whose lead a glob
     // import also provides, as ambiguous (E0659) -- in-tree or not.
