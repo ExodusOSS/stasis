@@ -369,7 +369,8 @@ A `foundry.toml` or `extends` base that isn't TOML, a config that isn't UTF-8
   or `{ path, strategy }`), and an invalid remapping (a `remappings.txt` line or
   `FOUNDRY_REMAPPINGS` entry that isn't `[context:]prefix=target`, or a
   `remappings` value that isn't an array of such strings), is an error naming
-  the file (from the root), whosever it is and in every mode: nothing falls back
+  the file (from the root) and the line or entry, never its text (a file named
+  as a mapping by mistake may hold a secret), whosever it is and in every mode: nothing falls back
   to a default (forge refuses these too, but quietly skips a dependency's
   `foundry.toml` it can't read). So is a config that isn't a regular file: a
   FIFO, a device or a link to one (`remappings.txt -> /dev/stdin`) is never

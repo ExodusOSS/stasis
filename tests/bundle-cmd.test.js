@@ -823,7 +823,7 @@ test('buildSolidityBundle fails on a foundry.toml that isn\'t TOML, naming the f
   ))
 }))
 
-test('buildSolidityBundle fails on an invalid remapping, the project\'s or a dependency\'s, naming the file and line', withTmp(async (t, tmp) => {
+test('buildSolidityBundle fails on an invalid remapping, the project\'s or a dependency\'s, naming the file and line but never quoting it', withTmp(async (t, tmp) => {
   writeProject(tmp, {
     'foundry.toml': '[profile.default]\n',
     'remappings.txt': 'dep/=lib/dep/src/\n# not a remapping\n',
@@ -831,15 +831,19 @@ test('buildSolidityBundle fails on an invalid remapping, the project\'s or a dep
     'lib/dep/src/D.sol': 'contract D {}\n',
   })
   const fails = (opts, message) => captureStderr(() => t.assert.rejects(() => buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {}, ...opts }), { message }))
-  await fails({}, 'remappings.txt:2: invalid remapping "# not a remapping"')
+  await fails({}, 'remappings.txt:2: invalid remapping, expected [context:]prefix=target')
   // As written for solc, and as a pinned mapping file, alike.
-  await fails({ mappingFile: 'remappings.txt' }, 'remappings.txt:2: invalid remapping "# not a remapping"')
+  await fails({ mappingFile: 'remappings.txt' }, 'remappings.txt:2: invalid remapping, expected [context:]prefix=target')
+  // A file named as a mapping by mistake: what it holds isn't echoed, a secret included.
+  writeFileSync(join(tmp, 'token.txt'), 'ghp_0123456789abcdefSECRET\n')
+  await fails({ mappingFile: 'token.txt' }, 'token.txt:1: invalid remapping, expected [context:]prefix=target')
+  await fails({ env: { FOUNDRY_REMAPPINGS: 'sk-live-SECRET' } }, 'FOUNDRY_REMAPPINGS:1: invalid remapping, expected [context:]prefix=target')
   writeFileSync(join(tmp, 'remappings.txt'), 'dep/=lib/dep/src/\n')
   // forge skips a dependency's config holding one; here it's an error, not a config left out.
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\nremappings = ["x"]\n' })
-  await fails({}, 'lib/dep/foundry.toml: `remappings`: invalid remapping "x"')
+  await fails({}, 'lib/dep/foundry.toml: `remappings` entry 1: invalid remapping, expected [context:]prefix=target')
   writeProject(tmp, { 'lib/dep/foundry.toml': '[profile.default]\n', 'lib/dep/remappings.txt': 'y/=src/\n=z\n' })
-  await fails({}, 'lib/dep/remappings.txt:2: invalid remapping "=z"')
+  await fails({}, 'lib/dep/remappings.txt:2: invalid remapping, expected [context:]prefix=target')
   writeFileSync(join(tmp, 'lib/dep/remappings.txt'), 'y/=src/\n')
   const bundle = await buildSolidityBundle({ cwd: tmp, entries: ['src'], env: {} })
   t.assert.deepEqual([...bundle.sources.keys()].toSorted(), ['lib/dep/src/D.sol', 'src/A.sol'])
