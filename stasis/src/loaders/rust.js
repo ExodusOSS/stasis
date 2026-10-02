@@ -370,8 +370,9 @@ export function parseUseTree(body) {
 //                 `cfg_attr` variants whose predicate can't hold in the build, `at` where the
 //                 declaration is written and `offset` where it stands (textual macro scope: what a
 //                 mounted file sees) -- the same, unless it sits in a `macro_rules!` body
-//                 (`template`, that macro's name): then the macro's first bare invocation in
-//                 this file, Infinity for none;
+//                 (`template`, that macro's name; `templateExported`, that it is
+//                 `#[macro_export]`ed): then the macro's first bare invocation in this file,
+//                 Infinity for none;
 //   refs:         path references `{ spec, segments, absolute, inlinePath, fromUse, macroCall }` --
 //                 flattened `use` trees plus expression-position `crate::`/`self::`/`super::`/
 //                 `lead::…` paths (`macroCall`: one invoked, `$crate::name!(…)`);
@@ -861,7 +862,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         mods.push({
           name, inlinePath: inlinePath(), inlineDirs: stack.map((s) => s.dir), cfg, conditional, paths, noDefault: applies !== -1, vis,
           macroUse: attrs.some((a) => a.macroUse === true), macro: i < macroUntil ? macroName : null, offset: i, at: i,
-          template: inTemplate(i) ? innermostDef(i).name : null, templateDepth: inTemplate(i) ? innermostEntry(i)?.depth ?? 0 : 0,
+          template: inTemplate(i) ? innermostDef(i).name : null, templateExported: inTemplate(i) && innermostDef(i).exported, templateDepth: inTemplate(i) ? innermostEntry(i)?.depth ?? 0 : 0,
         })
         i = k + 1
         continue
@@ -2440,16 +2441,30 @@ const cfgKey = (cfg) => (cfg ?? '*').replaceAll('/', '|')
 // `benches/*.rs` and their modules), judged against its package dir when a Cargo context knows it.
 const isTestTarget = (rel, ctx) => (ctx ? ctx.isTestTarget(rel) : isTestTargetPath('.', rel))
 
-// The files a macro is in effect invoked from, by name: those invoking it by bare name
-// (`invokers`: name → files), and -- since a bare call in a `macro_rules!` template is made where
-// that macro is invoked (`templateCalls`: name → the names its definitions' templates call) --
-// those invoking a macro whose template calls it, on up: what rustc resolves the macro's include
-// paths against, the outermost call site.
-function effectiveInvokers(name, invokers, templateCalls, seen = new Set()) {
-  if (seen.has(name)) return new Set()
-  seen.add(name)
-  const out = new Set(invokers.get(name) ?? [])
-  for (const [caller, called] of templateCalls) if (called.has(name)) for (const f of effectiveInvokers(caller, invokers, templateCalls, seen)) out.add(f)
+// The macros a call of macro `name` is in effect made from: `name` itself and -- since a bare
+// call in a `macro_rules!` template is made where that macro is invoked (`templateCalls`: name →
+// the names its definitions' templates call) -- each macro whose template calls one of them, on
+// up, depth-first. Kept in `memo`, one per pass over the calls known.
+function callersOf(name, templateCalls, memo) {
+  let names = memo.get(name)
+  if (names === undefined) {
+    names = new Set()
+    const visit = (n) => {
+      if (names.has(n)) return
+      names.add(n)
+      for (const [caller, called] of templateCalls) if (called.has(n)) visit(caller)
+    }
+    visit(name)
+    memo.set(name, names)
+  }
+  return names
+}
+// The files a macro is in effect invoked from, by name: those invoking it, or one of its callers
+// (callersOf), by bare name or by path (`invokers`: name → files) -- what rustc resolves the
+// macro's include paths against, the outermost call site.
+function effectiveInvokers(name, invokers, templateCalls, memo) {
+  const out = new Set()
+  for (const n of callersOf(name, templateCalls, memo)) for (const f of invokers.get(n) ?? []) out.add(f)
   return out
 }
 // Note what file `path`'s scan (`items`) invokes, by bare name or by path (`crate::m!()`, matched by
@@ -2459,21 +2474,16 @@ function noteMacroCalls(invokers, templateCalls, path, items) {
   for (const name of [...items.invocations, ...items.pathInvocations ?? []]) (invokers.get(name) ?? invokers.set(name, new Set()).get(name)).add(path)
   for (const m of items.macros) for (const name of [...m.calls, ...m.pathCalls ?? []]) (templateCalls.get(m.name) ?? templateCalls.set(m.name, new Set()).get(m.name)).add(name)
 }
-// The files in effect invoking macro `name` where a `mod` its template declares is declared: of
-// `from`'s package (`packageOf`: file → package) -- a macro of the same name elsewhere is likely
-// another -- or, for a `#[macro_export]` one (`packageOf` null), of any (see buildRustTree).
-const hostsOf = (name, from, invokers, templateCalls, packageOf) => [...effectiveInvokers(name, invokers, templateCalls)].filter((f) => packageOf === null || packageOf(f) === packageOf(from))
+// The files in effect invoking its macro where template `mod` `decl` (written in `from`) is
+// declared: those of `from`'s package (`packageOf`: file → package) -- a macro of the same name
+// elsewhere is likely another -- or, for a `#[macro_export]` one, of any (see buildRustTree).
+const hostsOf = (decl, from, invokers, templateCalls, packageOf, memo) => [...effectiveInvokers(decl.template, invokers, templateCalls, memo)].filter((f) => decl.templateExported || packageOf(f) === packageOf(from))
 // The copies of template `mod` `decl` (written in a `macro_rules!` body, see scanRustItems) a file
 // invoking the macro declares (`items`: its scan): one per inline module it invokes the macro, or a
-// macro whose template calls it, from -- the `mod` in that module, inside the inline modules the
-// body itself opens -- at that invocation (`offset`, for textual macro scope).
-function hostedCopies(decl, items, templateCalls) {
-  const names = new Set([decl.template])
-  for (let grew = true; grew;) {
-    grew = false
-    for (const [caller, called] of templateCalls) if (!names.has(caller) && [...called].some((n) => names.has(n))) grew = names.add(caller)
-  }
-  const sites = [...names].flatMap((n) => items.callSites?.get(n) ?? []).toSorted((a, b) => a.offset - b.offset)
+// macro whose template calls it (callersOf), from -- the `mod` in that module, inside the inline
+// modules the body itself opens -- at that invocation (`offset`, for textual macro scope).
+function hostedCopies(decl, items, templateCalls, memo) {
+  const sites = [...callersOf(decl.template, templateCalls, memo)].flatMap((n) => items.callSites?.get(n) ?? []).toSorted((a, b) => a.offset - b.offset)
   const byModule = new Map()
   for (const site of sites) if (!byModule.has(site.inlinePath.join('::'))) byModule.set(site.inlinePath.join('::'), site)
   if (byModule.size === 0) byModule.set('', { offset: Infinity, inlinePath: [], inlineDirs: [] })
@@ -2615,14 +2625,14 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   // core/crate_root.rs under `#[cfg(docsrs)]`).
   const hosted = new Map() // file → the template `mod`s it declares by invoking their macros
   const hostedAway = new Set() // the template `mod`s that moved to their invokers
+  const callers = new Map() // callersOf's
   for (const [path, items] of scanned) {
     for (const decl of items.mods) {
       if (decl.template === null) continue
-      const exported = items.macros.some((m) => m.name === decl.template && m.exported)
-      const hosts = hostsOf(decl.template, path, invokers, templateCalls, exported ? null : packageOf)
+      const hosts = hostsOf(decl, path, invokers, templateCalls, packageOf, callers)
       if (hosts.length === 0) continue
       hostedAway.add(decl)
-      for (const f of hosts) for (const copy of hostedCopies(decl, scanned.get(f), templateCalls)) (hosted.get(f) ?? hosted.set(f, []).get(f)).push({ ...copy, definedIn: path })
+      for (const f of hosts) for (const copy of hostedCopies(decl, scanned.get(f), templateCalls, callers)) (hosted.get(f) ?? hosted.set(f, []).get(f)).push({ ...copy, definedIn: path })
     }
   }
   const modsOf = (path) => [...scanned.get(path).mods.filter((d) => !hostedAway.has(d)), ...(hosted.get(path) ?? [])]
@@ -2663,7 +2673,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [, items] of scanned) {
     for (const m of items.macros) {
       if (m.includes.length === 0) continue
-      for (const f of effectiveInvokers(m.name, invokers, templateCalls)) {
+      for (const f of effectiveInvokers(m.name, invokers, templateCalls, callers)) {
         const list = includeEdges.get(f) ?? includeEdges.set(f, []).get(f)
         for (const inc of m.includes) list.push({ ...inc, conditional: true })
       }
@@ -3218,11 +3228,12 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
   // The include macros of every template, relative to every file in effect invoking it; its
   // `mod`s relative to those of its own package.
   const expandTemplates = () => {
+    const callers = new Map() // callersOf's, for the calls known so far
     for (const [name, incs] of templateIncludes) {
-      for (const f of effectiveInvokers(name, invokers, templateCalls)) for (const inc of incs) includeFrom(inc, f)
+      for (const f of effectiveInvokers(name, invokers, templateCalls, callers)) for (const inc of incs) includeFrom(inc, f)
     }
-    for (const [name, decls] of templateMods) {
-      for (const { decl, from, exported } of decls.values()) for (const f of hostsOf(name, from, invokers, templateCalls, exported ? null : packageOf)) for (const copy of hostedCopies(decl, scansOf.get(f), templateCalls)) modFrom(copy, f)
+    for (const decls of templateMods.values()) {
+      for (const { decl, from } of decls.values()) for (const f of hostsOf(decl, from, invokers, templateCalls, packageOf, callers)) for (const copy of hostedCopies(decl, scansOf.get(f), templateCalls, callers)) modFrom(copy, f)
     }
   }
 
@@ -3230,9 +3241,10 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
   // definition (see buildRustTree): walked once nothing else is left to, and what they name after.
   const placed = new Set()
   const placeUninvoked = () => {
-    for (const [name, decls] of templateMods) {
-      for (const { decl, from, exported } of decls.values()) {
-        if (placed.has(decl) || hostsOf(name, from, invokers, templateCalls, exported ? null : packageOf).length > 0) continue
+    const callers = new Map()
+    for (const decls of templateMods.values()) {
+      for (const { decl, from } of decls.values()) {
+        if (placed.has(decl) || hostsOf(decl, from, invokers, templateCalls, packageOf, callers).length > 0) continue
         placed.add(decl)
         modFrom(decl, from)
       }
@@ -3297,7 +3309,7 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
       // A template's `mod`s wait for the files invoking it (expandTemplates).
       for (const decl of mods) {
         if (decl.template === null) modFrom(decl, relPath)
-        else (templateMods.get(decl.template) ?? templateMods.set(decl.template, new Map()).get(decl.template)).set(`${relPath}\0${decl.at}`, { decl, from: relPath, exported: macros.some((m) => m.name === decl.template && m.exported) })
+        else (templateMods.get(decl.template) ?? templateMods.set(decl.template, new Map()).get(decl.template)).set(`${relPath}\0${decl.at}`, { decl, from: relPath })
       }
       // `include!("x.rs")` splices Rust source (scanned next wave, under this module); the asset
       // macros name a file to carry as it is. A build-output path (`concat!(env!("OUT_DIR"), …)`)
