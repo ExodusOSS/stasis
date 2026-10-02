@@ -285,10 +285,12 @@ export const isSolidityEntry = (entry, cwd = process.cwd(), host = diskHost) => 
 // What's wrong with `entries`' directory entries (resolved against `cwd`), or null: a directory
 // entry stands for the .sol files under it, so it goes with Solidity entries only; and entries
 // that are all missing extensionless paths are a mistyped file, not a project without those dirs.
-export function directoryEntryError(entries, cwd = process.cwd(), host = diskHost) {
+// `fetched` false: `host` is an empty tree standing in for one not fetched yet, which can't say
+// what is missing.
+export function directoryEntryError(entries, cwd = process.cwd(), host = diskHost, { fetched = true } = {}) {
   const dirs = entries.filter((e) => isDirEntry(resolve(cwd, e), host))
-  const absent = dirs.filter((e) => host.stat(resolve(cwd, e)) === null)
-  if (absent.length === entries.length) return `no such file or directory: ${absent[0]}`
+  const absent = fetched ? dirs.filter((e) => host.stat(resolve(cwd, e)) === null) : []
+  if (absent.length > 0 && absent.length === entries.length) return `no such file or directory: ${absent[0]}`
   if (dirs.length === 0 || entries.every((e) => e.endsWith('.sol') || dirs.includes(e))) return null
   return absent.length > 0
     ? `no such file or directory: ${absent[0]}`
@@ -1035,11 +1037,11 @@ async function buildResolvedJsBundle({ cwd = process.cwd(), entries, mainFields,
 
 // Classify entries into their single shared language and check option applicability; `name` prefixes
 // errors. A directory entry (resolved against `cwd`, on `host`) stands for the .sol files under it: Solidity only.
-function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, host = diskHost }) {
+function classifyEntries(name, { cwd = process.cwd(), entries, mappingFile, manifests, scope, lockfile, conditions, mainFields, platforms, metro, metroResolver, jsx, flow, typescript, tsconfig, resources, packageJSON, cargo, cargoFeatures, cargoNoDefaultFeatures, cargoAllFeatures, host = diskHost, fetched }) {
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error(`${name}: at least one entry file is required`)
   }
-  const dirError = directoryEntryError(entries, cwd, host)
+  const dirError = directoryEntryError(entries, cwd, host, { fetched })
   if (dirError !== null) throw new Error(`${name}: ${dirError}`)
   let kind
   if (entries.every((e) => isSolidityEntry(e, cwd, host))) kind = 'sol'
@@ -1161,7 +1163,8 @@ async function buildJs({ mainFields, platforms, metro, metroResolver, ...options
 }
 
 // buildVfsBundle's options for the package manager `pm`, checked before anything is fetched (`host`
-// the project's): its kind alone, and no metro-resolver, which reads the disk.
+// the project's, or an empty tree's with `fetched: false`, before the project is fetched): its kind
+// alone, and no metro-resolver, which reads the disk.
 export function checkVfsOptions(name, pm, packageManager, options) {
   if (classifyEntries(name, options) !== pm.kind) throw new Error(`${name}: only ${pm.kind === 'sol' ? 'Solidity' : 'JS'} bundles are built with ${packageManager}`)
   if (options.metroResolver) throw new Error(`${name}: metroResolver is not supported`)

@@ -60,7 +60,7 @@ export async function suggestedEntries({ vfs, cwd = '/', conditions, mainFields,
   if (vfs === undefined && repo.github === undefined) throw new Error('suggestedEntries: a vfs or a github repo is required')
   if (vfs !== undefined && repo.github !== undefined) throw new Error('suggestedEntries: takes a vfs or a github repo, not both')
   // Over a JS entry, as each suggested one is.
-  checkVfsOptions('suggestedEntries', { kind: 'js' }, undefined, { ...resolution, entries: ['index.js'], cwd: '/', host: vfsHost(new Vfs()) })
+  checkVfsOptions('suggestedEntries', { kind: 'js' }, undefined, { ...resolution, entries: ['index.js'], cwd: '/', host: vfsHost(new Vfs()), fetched: false })
   if (vfs === undefined) return suggestedRepoEntries({ ...repo, ...resolution })
   checkVfs('suggestedEntries', vfs)
   return packageEntries(vfsHost(vfs), posix.resolve('/', cwd), resolution)
