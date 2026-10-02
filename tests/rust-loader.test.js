@@ -2255,17 +2255,20 @@ test('buildRustTree reads `extern crate self as x;` as the crate root from every
   t.assert.deepEqual(edges(resolutions.get('src/b.rs')), { 'gm1::X': 'src/lib.rs' })
 })
 
-test('buildRustTree places a template\'s mod at an invocation in its own crate, never in another crate\'s file', (t) => {
-  // Only the app invokes `a`'s `decl!`, with a `helper` of its own in scope: the `x` resolved
-  // beside a's lib.rs is still `a`'s module, where `a`'s helper is in scope -- not one standing in
-  // the app's file.
+test('buildRustTree places an exported template\'s mod at its invocation in another crate, as rustc expands it', (t) => {
+  // Only the app invokes `a`'s `decl!`, with a `helper` of its own in scope: rustc expands the
+  // `mod x;` in the app's root, so it is src/x.rs, where the app's helper is in scope -- not a's
+  // file beside its definition, which nothing compiles.
   const sources = new Map([
     ['src/lib.rs', '#[macro_use]\nextern crate a;\nmacro_rules! helper { () => {} }\ndecl!();\n'],
+    ['src/x.rs', 'fn f() { helper!(); }\n'],
     ['vendor/a/src/lib.rs', 'macro_rules! helper { () => {} }\n#[macro_export]\nmacro_rules! decl { () => { mod x; } }\n'],
     ['vendor/a/src/x.rs', 'fn f() { helper!(); }\n'],
   ])
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
-  t.assert.equal(edges(resolutions.get('vendor/a/src/x.rs'))['helper!'], 'vendor/a/src/lib.rs')
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod x'), 'src/x.rs')
+  t.assert.equal(edges(resolutions.get('src/x.rs'))['helper!'], 'src/lib.rs')
+  t.assert.equal(resolutions.get('vendor/a/src/lib.rs').get('mod x'), undefined)
 })
 
 // --- eighth review: nested macro_rules!, glob-provided names against local ones, cfg strings ---
@@ -2367,4 +2370,147 @@ test('buildRustTree resolves through a dense cycle of cfg-gated globs in time: e
   const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
   t.assert.ok(performance.now() - started < 10_000, `${Math.round(performance.now() - started)} ms`)
   t.assert.equal(resolutions.get('src/lib.rs').get('crate::m0::item0'), 'src/m0.rs')
+})
+
+// --- resolver fixes: undecided cfgs, modules beside globs, other crates' macros ---
+
+const MANY_OSES = ['macos', 'ios', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'solaris', 'illumos', 'haiku', 'aix', 'hurd', 'redox', 'fuchsia', 'android', 'emscripten', 'nto', 'vxworks']
+
+test('buildRustTree keeps every candidate under an any(…) of more alternatives than it tells apart: none is certain', (t) => {
+  const any = `any(${MANY_OSES.map((os) => `target_os = "${os}"`).join(', ')})`
+  const files = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
+  // 17 platforms one way, every other the other: linux builds a.rs
+  const listed = new Map([
+    ['src/lib.rs', `mod a;\nmod b;\n#[cfg(${any})]\npub use b::T;\n#[cfg(not(${any}))]\npub use a::T;\nmod user;\n`],
+    ['src/a.rs', 'pub struct T;\n'],
+    ['src/b.rs', 'pub struct T;\n'],
+    ['src/user.rs', 'fn f(_: crate::T) {}\n'],
+  ])
+  t.assert.deepEqual(files(buildRustTree(listed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/a.rs', 'src/b.rs'])
+  // a module 17 cfg-gated glob paths reach, beside the named import linux builds
+  const globbed = new Map([
+    ['src/lib.rs', `mod common;\nmod lin;\n${MANY_OSES.map((os, k) => `mod v${k};\n#[cfg(target_os = "${os}")]\npub use crate::v${k}::*;\n`).join('')}#[cfg(target_os = "linux")]\npub use lin::T;\nmod user;\n`],
+    ['src/common.rs', 'pub struct T;\n'],
+    ['src/lin.rs', 'pub struct T;\n'],
+    ['src/user.rs', 'fn f(_: crate::T) {}\n'],
+    ...MANY_OSES.map((_, k) => [`src/v${k}.rs`, 'pub use crate::common::*;\n']),
+  ])
+  t.assert.deepEqual(files(buildRustTree(globbed, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs').get('crate::T')), ['src/common.rs', 'src/lin.rs'])
+})
+
+test('buildRustTree lets a local module give way to a glob of its name only when none of its files may be there', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'mod other;\nuse crate::other::*;\n#[cfg_attr(loom, path = "loom_imp.rs")]\nmod imp;\nfn f() { imp::X::real() }\n'],
+    ['src/other.rs', 'pub mod imp { pub struct X; }\n'],
+    ['src/imp.rs', 'pub struct X;\n'],
+    ['src/loom_imp.rs', 'pub struct X;\n'],
+  ])
+  const r = (s) => edges(buildRustTree(s, { roots: ['src/lib.rs'] }).resolutions.get('src/lib.rs'))['imp::X::real']
+  t.assert.equal(r(sources), 'src/imp.rs') // there in every build, loom.rs or imp.rs: it shadows the glob
+  t.assert.equal(r(new Map([...sources, ['src/lib.rs', 'mod other;\nuse crate::other::*;\n#[cfg(loom)]\nmod imp;\nfn f() { imp::X::real() }\n']])), 'src/other.rs')
+})
+
+test('buildRustTree finds another crate\'s macro as that crate\'s root does: under its files\' cfgs, through its re-exports', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', 'mod a;\nmod b;\nuse dep::m;\nm!();\nfn f() { dep::m!(); }\n'],
+    ['src/a.rs', 'use dep::{dep, mk};\nmk!();\ndep!();\n'],
+    ['src/b.rs', 'fn f() { dep::plat!(); }\n'],
+    // serde: a docsrs-only copy of serde_core's macros beside the re-export of every other build
+    ['vendor/dep/src/lib.rs', '#[cfg(docsrs)]\n#[macro_use]\n#[path = "alt.rs"]\nmod alt;\n#[cfg(not(docsrs))]\npub use inner::m;\n#[macro_use]\nmod mac;\n#[cfg(unix)]\n#[macro_use]\nmod unix;\n#[cfg(windows)]\n#[macro_use]\nmod windows;\n'],
+    ['vendor/dep/src/alt.rs', '#[macro_export]\nmacro_rules! m { () => {} }\n'],
+    ['vendor/dep/src/mac.rs', '#[macro_export]\nmacro_rules! mk { () => {} }\n#[macro_export]\nmacro_rules! dep { () => {} }\n'],
+    ['vendor/dep/src/unix.rs', '#[macro_export]\nmacro_rules! plat { () => {} }\n'],
+    ['vendor/dep/src/windows.rs', '#[macro_export]\nmacro_rules! plat { () => {} }\n'],
+    ['vendor/inner/src/lib.rs', '#[macro_use]\nmod macros;\n'],
+    ['vendor/inner/src/macros.rs', '#[macro_export]\nmacro_rules! m { () => {} }\n'],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.equal(resolutions.get('src/lib.rs').get('m!'), 'vendor/inner/src/macros.rs')
+  t.assert.equal(resolutions.get('src/lib.rs').get('dep::m!'), 'vendor/inner/src/macros.rs')
+  // `use dep::{dep, mk}`: the lead of `dep::mk` is the crate, not the macro `dep` beside it
+  t.assert.equal(resolutions.get('src/a.rs').get('mk!'), 'vendor/dep/src/mac.rs')
+  t.assert.equal(resolutions.get('src/a.rs').get('dep!'), 'vendor/dep/src/mac.rs')
+  // one definition per platform, neither certain: both
+  t.assert.deepEqual(edges(resolutions.get('src/b.rs'))['dep::plat!'], { unix: 'vendor/dep/src/unix.rs', windows: 'vendor/dep/src/windows.rs' })
+  // the root's `pub use util::helper;` of a fn is no `helper!`: the exported macro is
+  const own = new Map([
+    ['src/lib.rs', 'mod util;\n#[macro_use]\nmod macros;\nmod user;\npub use util::helper;\n'],
+    ['src/util.rs', 'pub fn helper() {}\n'],
+    ['src/macros.rs', '#[macro_export]\nmacro_rules! helper { () => {} }\n'],
+    ['src/user.rs', 'fn f() { crate::helper(); crate::helper!(); }\n'],
+  ])
+  t.assert.deepEqual(edges(buildRustTree(own, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs')), { 'crate::helper': 'src/util.rs', 'crate::helper!': 'src/macros.rs' })
+})
+
+test('buildRustTree declares a template\'s mod and include where the macro is invoked by path, and in the inline module invoking it', (t) => {
+  const r = (sources) => buildRustTree(new Map(sources), { roots: ['src/lib.rs'] }).resolutions
+  // `crate::decl!()` from src/sub.rs: rustc looks for src/sub/inner.rs (src/inner.rs a decoy)
+  const decl = ['src/lib.rs', '#[macro_export]\nmacro_rules! decl { () => { pub mod inner; } }\npub mod sub;\n']
+  const byPath = r([decl, ['src/sub.rs', 'crate::decl!();\n'], ['src/sub/inner.rs', ''], ['src/inner.rs', '']])
+  t.assert.equal(byPath.get('src/sub.rs').get('mod inner'), 'src/sub/inner.rs')
+  t.assert.equal(byPath.get('src/lib.rs').get('mod inner'), undefined)
+  // through `$crate::decl!()` in another template, invoked bare
+  const nested = r([['src/lib.rs', '#[macro_export]\nmacro_rules! decl { () => { pub mod inner; } }\nmacro_rules! outer { () => { $crate::decl!(); } }\npub mod sub;\n'], ['src/sub.rs', 'outer!();\n'], ['src/sub/inner.rs', ''], ['src/inner.rs', '']])
+  t.assert.equal(nested.get('src/sub.rs').get('mod inner'), 'src/sub/inner.rs')
+  // an include in a macro invoked by path, relative to the invoking file
+  const embed = r([['src/lib.rs', '#[macro_export]\nmacro_rules! embed { () => { include_str!("data.txt") } }\npub mod sub;\n'], ['src/sub/mod.rs', 'pub fn f() -> &\'static str { crate::embed!() }\n'], ['src/sub/data.txt', '']])
+  t.assert.equal(embed.get('src/sub/mod.rs').get('include_str data.txt'), 'src/sub/data.txt')
+  // invoked inside an inline module: that module's (src/outer/inner.rs); defined in one: the invoker's
+  const inline = r([['src/lib.rs', 'macro_rules! decl { () => { pub mod inner; } }\npub mod outer { decl!(); }\n'], ['src/outer/inner.rs', ''], ['src/inner.rs', '']])
+  t.assert.deepEqual(edges(inline.get('src/lib.rs')), { 'mod outer::inner': 'src/outer/inner.rs' })
+  const definedInline = r([['src/lib.rs', '#[macro_use]\nmod defs { macro_rules! decl { () => { pub mod inner; } } }\ndecl!();\n'], ['src/inner.rs', ''], ['src/defs/inner.rs', '']])
+  t.assert.deepEqual(edges(definedInline.get('src/lib.rs')), { 'mod inner': 'src/inner.rs' })
+})
+
+test('buildRustTree declares and calls what a nested macro_rules! body holds where that inner macro is invoked', (t) => {
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod helpers;\nmacro_rules! outer { () => { macro_rules! inner { () => { pub mod x; embed!(); } } } }\nouter!();\npub mod sub;\n'],
+    ['src/helpers.rs', 'macro_rules! embed { () => { pub static S: &str = include_str!("data.txt"); } }\n'],
+    ['src/sub/mod.rs', 'inner!();\n'],
+    ['src/sub/x.rs', ''],
+    ['src/sub/data.txt', ''],
+    ['src/x.rs', ''], // decoys rustc never reads
+    ['src/data.txt', ''],
+  ])
+  const { resolutions } = buildRustTree(sources, { roots: ['src/lib.rs'] })
+  t.assert.deepEqual(edges(resolutions.get('src/sub/mod.rs')), { 'mod x': 'src/sub/x.rs', 'include_str data.txt': 'src/sub/data.txt', 'inner!': 'src/lib.rs', 'embed!': 'src/helpers.rs' })
+  t.assert.equal(resolutions.get('src/lib.rs').get('mod x'), undefined)
+  t.assert.equal(resolutions.get('src/lib.rs').get('include_str data.txt'), undefined)
+})
+
+test('buildRustTree follows a path through every module a segment may name: aliases, glob-reached modules, a module beside an alias', (t) => {
+  const values = (target) => (target instanceof Map ? [...target.values()].toSorted() : [target])
+  const sources = new Map([
+    ['src/lib.rs', '#[cfg(windows)]\nmod windows;\n#[cfg(unix)]\nmod unix;\n#[cfg(windows)]\nuse windows as imp;\n#[cfg(unix)]\nuse unix as imp;\nmod sys;\nmod user;\n'],
+    ['src/sys.rs', '#[cfg(windows)]\npub use crate::windows::*;\n#[cfg(unix)]\npub use crate::unix::*;\n'],
+    ['src/unix.rs', 'pub mod net { pub struct X; }\npub struct X;\n'],
+    ['src/windows.rs', 'pub mod net { pub struct X; }\npub struct X;\n'],
+    ['src/user.rs', 'fn f(_: crate::imp::X, _: crate::sys::net::X) {}\n'],
+  ])
+  const user = buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/user.rs')
+  t.assert.deepEqual(values(user.get('crate::imp::X')), ['src/unix.rs', 'src/windows.rs'])
+  t.assert.deepEqual(values(user.get('crate::sys::net::X')), ['src/unix.rs', 'src/windows.rs'])
+  // `#[cfg(not(unix))] mod sys;` beside `#[cfg(unix)] use fallback as sys;`: a unix build takes the alias
+  const beside = new Map([
+    ['src/lib.rs', '#[cfg(not(unix))]\nmod sys;\nmod fallback;\n#[cfg(unix)]\nuse fallback as sys;\nfn g() { sys::X::f() }\n'],
+    ['src/sys.rs', 'pub struct X;\n'],
+    ['src/fallback.rs', 'pub struct X;\n'],
+  ])
+  t.assert.deepEqual(values(buildRustTree(beside, { roots: ['src/lib.rs'] }).resolutions.get('src/lib.rs').get('sys::X::f')), ['src/fallback.rs', 'src/sys.rs'])
+})
+
+test('buildRustTree resolves a file no build compiles -- its own cfgs contradict each other -- to every candidate', (t) => {
+  // tokio's atomic_u64_static_once_cell.rs: under `not(all(test, loom))` (its `mod std`) and `all(loom, test)` both
+  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\nmacro_rules! cfg_loom_test { ($($i:item)*) => { $( #[cfg(all(loom, test))] $i )* } }\n'
+  const sources = new Map([
+    ['src/lib.rs', '#[macro_use]\nmod macros;\n#[cfg(not(all(test, loom)))]\nmod atomic;\n'],
+    ['src/macros.rs', gates],
+    ['src/atomic.rs', 'cfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\n'],
+    ['src/native.rs', 'pub(crate) use std::sync::atomic::AtomicU64;\n'],
+    ['src/as_mutex.rs', 'cfg_loom_test! { mod once_cell; }\npub(crate) struct AtomicU64;\n'],
+    ['src/once_cell.rs', 'use super::AtomicU64;\n'],
+  ])
+  const target = buildRustTree(sources, { roots: ['src/lib.rs'] }).resolutions.get('src/once_cell.rs').get('super::AtomicU64')
+  t.assert.ok(target instanceof Map)
+  t.assert.deepEqual([...target.values()].toSorted(), ['src/as_mutex.rs', 'src/native.rs'])
 })

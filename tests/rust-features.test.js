@@ -332,6 +332,17 @@ test('createCargoContext picks the feature resolver from a workspace-inherited e
   withProject(files('2018'), (tmp) => t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['src/main.rs'] })), { '.': [], 'vendor/devdep': [] }))
 })
 
+test('createCargoContext takes the feature resolver from the build\'s workspace, never from a vendored crate an entry is in', (t) => {
+  // cargo runs in app/ (edition 2021: resolver 2), whatever the edition of the vendored crate the
+  // first entry is in (2015: resolver 1): the root's dev-dependencies stay out of a normal build
+  withProject({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nold = "1"\n[dev-dependencies]\ndevdep = "1"\n',
+    'src/main.rs': '',
+    'vendor/old/Cargo.toml': '[package]\nname = "old"\nversion = "1.0.0"\nedition = "2015"\n', 'vendor/old/src/lib.rs': '',
+    'vendor/devdep/Cargo.toml': '[package]\nname = "devdep"\nversion = "1.0.0"\n', 'vendor/devdep/src/lib.rs': '',
+  }, (tmp) => t.assert.deepEqual(enabledOf(createCargoContext(tmp, { entries: ['vendor/old/src/lib.rs', 'src/main.rs'] })), { '.': [], 'vendor/old': [] }))
+})
+
 test('createCargoContext applies a weak `dep?/feat` once the dependency is active, whichever table activates it', (t) => {
   const files = (deps) => ({
     'Cargo.toml': ['[package]', 'name = "app"', 'version = "0.1.0"', 'edition = "2021"',
@@ -486,8 +497,9 @@ test('createCargoContext({ cargo: true }) takes the resolution from a real `carg
   try {
     cpSync(join(fixtures, 'workspace'), tmp, { recursive: true })
     const cargo = createCargoContext(tmp, { entries: ['crates/app/src/main.rs'], cargo: true })
-    const enabled = enabledOf(cargo)
-    t.assert.deepEqual(Object.keys(enabled).toSorted(), ['crates/app', 'crates/tools', 'crates/util'])
+    t.assert.deepEqual([...cargo.featureResolution().keys()].toSorted(), ['crates/app', 'crates/tools', 'crates/util'])
+    // metadata's one feature set per package is every build's union: each feature in it on only maybe
+    t.assert.deepEqual(enabledOf(cargo), {})
     t.assert.equal(cargo.resolveCrate('util', 'crates/app/src/main.rs'), 'crates/util/src/util_lib.rs')
     t.assert.equal(cargo.resolveCrate('tools', 'crates/app/src/main.rs'), 'crates/tools/src/lib.rs')
   } finally {
@@ -1712,8 +1724,13 @@ test('createCargoContext reads the workspace a member bundled from its own direc
     // dev-dependency's feature out of the build, which resolver 1 of the member's edition wouldn't
     t.assert.deepEqual(files, ['dep/src/lib.rs', 'dep/src/plain.rs', 'src/fast.rs', 'src/lib.rs'])
     t.assert.equal(createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs').version, '0.3.0')
-    // a [workspace] above that doesn't take the package is none of its
+    // a [workspace] above whose `members` don't list the package is still its own (cargo refuses
+    // the build: "current package believes it's in a workspace when it's not"), and what the
+    // package inherits but the workspace lacks stops the bundle
     writeFileSync(join(tmp, 'ws', 'Cargo.toml'), '[workspace]\nmembers = ["other"]\n[workspace.package]\nversion = "0.3.0"\nedition = "2015"\n')
+    t.assert.throws(() => createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs'), { name: 'LockfileError', message: /"dep" is not in \[workspace\.dependencies\]/u })
+    // one that excludes it isn't: it is outside any workspace
+    writeFileSync(join(tmp, 'ws', 'Cargo.toml'), '[workspace]\nmembers = ["crates/*"]\nexclude = ["crates/app"]\n[workspace.package]\nversion = "0.3.0"\nedition = "2015"\n')
     t.assert.throws(() => createCargoContext(root, { entries: ['src/lib.rs'] }).packageInfo('src/lib.rs'), { name: 'LockfileError', message: /no workspace root is given/u })
   })
 })
@@ -1838,5 +1855,199 @@ test('collectRustBundle warns once of a crate root it refuses, however often the
     symlinkSync('../../../secret.rs', join(tmp, 'vendor/foo/src/lib.rs'))
     const { warnings } = await captureWarningsAsync(() => crateEdges(tmp, ['src/lib.rs']))
     t.assert.deepEqual(warnings.filter((w) => w.includes('Refusing file outside its package')), ['[loader.rust] Refusing file outside its package: vendor/foo/src/lib.rs (a link out of vendor/foo)'])
+  })
+})
+
+// --- eleventh round: one directory cargo runs in, workspaces above, vendored manifests, what the build lacks ---
+
+const VENDORED_SOURCES = '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n'
+
+test('createCargoContext reads every cargo config setting from the configs cargo reads in the entries\' package directory', async (t) => {
+  // A member's own config: cargo, run there, takes its [source], its [patch] and its rustflags --
+  // all of them, never one without the others (`cargo build` in app/ compiles fork/src/lib.rs).
+  const files = {
+    'Cargo.toml': '[workspace]\nmembers = ["app"]\nresolver = "2"\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'app/src/lib.rs': 'pub use foo::one;\nmod fast;\nmod slow;\nmod user;\n#[cfg(fast)] pub use fast::F;\n#[cfg(not(fast))] pub use slow::F;\n',
+    'app/src/fast.rs': 'pub struct F;\n', 'app/src/slow.rs': 'pub struct F;\n', 'app/src/user.rs': 'fn f() { crate::F; }\n',
+    'app/.cargo/config.toml': '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "../third"\n[patch.crates-io]\nfoo = { path = "../fork" }\n[build]\nrustflags = ["--cfg", "fast"]\n',
+    'third/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'third/foo/src/lib.rs': 'pub fn one() {}\n',
+    'fork/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'fork/src/lib.rs': 'pub fn one() {}\n',
+  }
+  await withProjectAsync(files, async (tmp) => {
+    const { edges, tree } = await crateEdges(tmp, ['app/src/lib.rs'])
+    t.assert.equal(edges['app/src/lib.rs']['use foo'], 'fork/src/lib.rs')
+    t.assert.deepEqual([...tree.resolutions.get('app/src/user.rs').get('crate::F')], [['fast', 'app/src/fast.rs'], ['not(fast)', 'app/src/slow.rs']])
+    const cargo = createCargoContext(tmp, { entries: ['app/src/lib.rs'] })
+    t.assert.equal(cargo.vendorDir, 'third')
+    t.assert.deepEqual(cargo.buildFilesFor('app/src/lib.rs').map((f) => f.path), ['app/Cargo.toml', 'Cargo.toml', 'app/.cargo/config.toml'])
+  })
+})
+
+test('createCargoContext merges the [source] tables of the cargo configs key by key, the nearest first, as cargo does', async (t) => {
+  // The bundle root's config replaces crates.io; the nested workspace's names the directory, its
+  // own: `cargo build` in ws/ compiles ws/third/foo (1.0.0), not vendor/foo (1.5.0).
+  await withProjectAsync({
+    '.cargo/config.toml': VENDORED_SOURCES,
+    'vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.5.0"\n', 'vendor/foo/src/lib.rs': '',
+    'ws/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'ws/src/lib.rs': 'pub use foo::one;\n',
+    'ws/.cargo/config.toml': '[source.vendored-sources]\ndirectory = "third"\n',
+    'ws/third/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'ws/third/foo/src/lib.rs': '',
+  }, async (tmp) => {
+    t.assert.equal(createCargoContext(tmp, { entries: ['ws/src/lib.rs'] }).vendorDir, 'ws/third')
+    t.assert.deepEqual((await crateEdges(tmp, ['ws/src/lib.rs'])).files, ['ws/src/lib.rs', 'ws/third/foo/src/lib.rs'])
+  })
+})
+
+test('createCargoContext takes the workspace above the bundle root of a member only a member\'s path dependency makes, and its [patch]', async (t) => {
+  // lib2 is a member as app's path dependency: `cargo build` in lib2/ takes the virtual
+  // workspace's resolver 1, which unifies the dev-dependency's feature (foo/src/dev.rs).
+  await withProjectAsync({
+    'Cargo.toml': '[workspace]\nmembers = ["app"]\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlib2 = { path = "../lib2" }\n',
+    'app/src/lib.rs': '',
+    'lib2/Cargo.toml': '[package]\nname = "lib2"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = { path = "foo" }\n[dev-dependencies]\nfoo = { path = "foo", features = ["dev"] }\n',
+    'lib2/src/lib.rs': 'pub use foo::f;\n',
+    'lib2/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "0.1.0"\nedition = "2021"\n[features]\ndev = []\n',
+    'lib2/foo/src/lib.rs': '#[cfg(feature = "dev")]\nmod dev;\n#[cfg(not(feature = "dev"))]\nmod nodev;\npub fn f() {}\n',
+    'lib2/foo/src/dev.rs': '', 'lib2/foo/src/nodev.rs': '',
+  }, async (tmp) => {
+    t.assert.deepEqual((await crateEdges(join(tmp, 'lib2'), ['src/lib.rs'])).files, ['foo/src/dev.rs', 'foo/src/lib.rs', 'src/lib.rs'])
+  })
+  // The workspace root's [patch] applies when cargo builds the member from its own directory
+  // (`cargo build` in app/ compiles app/fork/src/lib.rs), and its lockfile is cargo's, not one beside the member.
+  await withProjectAsync({
+    'Cargo.toml': '[workspace]\nmembers = ["app"]\nresolver = "2"\n[patch.crates-io]\nfoo = { path = "app/fork" }\n',
+    'app/Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'app/Cargo.lock': 'version = 4\n', // stale, from before the workspace: cargo never reads it
+    'app/src/lib.rs': 'pub use foo::one;\n',
+    'app/.cargo/config.toml': VENDORED_SOURCES,
+    'app/vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'app/vendor/foo/src/lib.rs': 'pub fn one() {}\n',
+    'app/fork/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'app/fork/src/lib.rs': 'pub fn one() {}\n',
+  }, async (tmp) => {
+    const root = join(tmp, 'app')
+    t.assert.equal((await crateEdges(root, ['src/lib.rs'])).edges['src/lib.rs']['use foo'], 'fork/src/lib.rs')
+    const cargo = createCargoContext(root, { entries: ['src/lib.rs'], target: LINUX })
+    t.assert.deepEqual(cargo.resolution(), { mode: 'replay', why: 'the workspace root lies above the bundle root' })
+    t.assert.deepEqual(cargo.buildFilesFor('src/lib.rs').map((f) => f.path), ['Cargo.toml', '.cargo/config.toml'])
+  })
+})
+
+test('createCargoContext stops the build where a vendored Cargo.toml it resolves with isn\'t the one .cargo-checksum.json lists', async (t) => {
+  const manifest = '[package]\nname = "foo"\nversion = "1.0.0"\n'
+  const files = {
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\n',
+    'src/main.rs': 'fn main() { foo::f() }\n',
+    'vendor/foo/Cargo.toml': manifest,
+    'vendor/foo/.cargo-checksum.json': JSON.stringify({ files: { 'Cargo.toml': createHash('sha256').update(manifest).digest('hex') }, package: sha('a') }),
+    'vendor/foo/src/lib.rs': '#[cfg(feature = "x")]\nmod x;\npub fn f() {}\n', 'vendor/foo/src/x.rs': '',
+  }
+  await withProjectAsync(files, async (tmp) => {
+    t.assert.ok(!(await buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] })).sources.has('vendor/foo/src/x.rs'))
+    // edited after `cargo vendor` (cargo: "the listed checksum of … Cargo.toml has changed"): what
+    // it says would turn `x` on, and the bundle stops before it does -- --cargo-manifests or not
+    writeFileSync(join(tmp, 'vendor/foo/Cargo.toml'), `${manifest}[features]\ndefault = ["x"]\nx = []\n`)
+    await t.assert.rejects(buildRustBundle({ cwd: tmp, entries: ['src/main.rs'] }), { message: /^vendor\/foo\/Cargo\.toml isn't the file vendor\/foo\/\.cargo-checksum\.json lists/u })
+    // and so does an entry of its own: whatever reads the copy's manifest checks it first
+    await t.assert.rejects(buildRustBundle({ cwd: tmp, entries: ['vendor/foo/src/lib.rs'] }), { message: /^vendor\/foo\/Cargo\.toml isn't the file/u })
+  })
+})
+
+test('buildRustBundle reports every dependency the build links that the bundle lacks, whatever the code calls it', async (t) => {
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nfoo = "1"\nmd-5 = "0.10"\nunused = "1"\n[dev-dependencies]\ndevonly = "1"\n[build-dependencies]\ncc = "1"\n[target.\'cfg(windows)\'.dependencies]\nwinonly = "1"\n',
+    'src/lib.rs': 'pub use foo::one;\npub fn h() { let _ = md5::compute(b"x"); }\n',
+    'build.rs': 'fn main() {}\n',
+    'vendor/foo/Cargo.toml': '[package]\nname = "foo"\nversion = "1.0.0"\n', 'vendor/foo/src/lib.rs': 'pub fn one() {}\n',
+  }, async (tmp) => {
+    // md-5's lib is md5, which no manifest in the bundle says; `unused` is linked though nothing
+    // names it. The dev-dependency isn't linked into the lib, the build-dependency only into the
+    // build script (bundled with --cargo-manifests), the Windows one not into a Linux build.
+    const lacking = async (opts) => (await captureWarningsAsync(() => buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], ...opts }))).warnings.find((w) => w.includes('not in the bundle'))
+    t.assert.equal(await lacking({ cargoTarget: LINUX }), '[stasis] 2 crates referenced but not in the bundle: md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0)')
+    t.assert.equal(await lacking({ cargoTarget: LINUX, cargoManifests: true }), '[stasis] 3 crates referenced but not in the bundle: cc (a dependency of app 0.1.0), md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0)')
+    t.assert.equal(await lacking({}), '[stasis] 3 crates referenced but not in the bundle: md-5 (a dependency of app 0.1.0), unused (a dependency of app 0.1.0), winonly (a dependency of app 0.1.0)')
+  })
+})
+
+test('createCargoContext({ cargo: true }) keeps what any build compiles: metadata\'s feature union is only maybe', { skip: hasCargo ? false : 'cargo not on PATH' }, async (t) => {
+  // shared is a dependency with `t` and a build-dependency with `h`: cargo's target build compiles
+  // lib.rs, t.rs and noth.rs, its host build lib.rs and h.rs; metadata reports `h` and `t` on.
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nshared = { path = "shared", features = ["t"] }\n[build-dependencies]\nshared = { path = "shared", features = ["h"] }\n',
+    'build.rs': 'fn main() { shared::f(); }\n',
+    'src/lib.rs': 'pub use shared::f;\n',
+    'shared/Cargo.toml': '[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2021"\n[features]\nt = []\nh = []\n',
+    'shared/src/lib.rs': '#[cfg(feature = "t")]\nmod t;\n#[cfg(feature = "h")]\nmod h;\n#[cfg(not(feature = "h"))]\nmod noth;\n#[cfg(feature = "other")]\nmod other;\npub fn f() {}\n',
+    'shared/src/t.rs': '', 'shared/src/h.rs': '', 'shared/src/noth.rs': '', 'shared/src/other.rs': '',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargo: true, cargoManifests: true })
+    t.assert.deepEqual([...bundle.sources.keys()].filter((p) => p.startsWith('shared/src/')).toSorted(), ['shared/src/h.rs', 'shared/src/lib.rs', 'shared/src/noth.rs', 'shared/src/t.rs'])
+  })
+})
+
+test('buildRustBundle does not presume off a cfg a build-dependency may print, or one the build script formats part of', async (t) => {
+  const project = (extra) => ({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[build-dependencies]\nhelper = { path = "helper" }\n',
+    'src/lib.rs': 'mod fast;\nmod slow;\nmod user;\n#[cfg(fast)] pub use fast::F;\n#[cfg(not(fast))] pub use slow::F;\n',
+    'src/fast.rs': 'pub struct F;\n', 'src/slow.rs': 'pub struct F;\n', 'src/user.rs': 'fn f() { crate::F; }\n',
+    'helper/Cargo.toml': '[package]\nname = "helper"\nversion = "0.1.0"\n',
+    'helper/src/lib.rs': '/// Does nothing: no `cargo:rustc-cfg=` here, but in this comment.\npub fn noop() {}\n',
+    'build.rs': 'fn main() { helper::noop(); }\n',
+    ...extra,
+  })
+  const target = async (extra) => withProjectAsync(project(extra), async (tmp) => (await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'] })).imports.get('rust').get('src/user.rs').get('crate::F'))
+  const either = new Map([['fast', 'src/fast.rs'], ['not(fast)', 'src/slow.rs']])
+  // a build-dependency printing nothing leaves `fast` presumed off
+  t.assert.equal(await target({}), 'src/slow.rs')
+  // cfg_aliases' way: the helper prints the names its macro's input gives (`cfg_aliases! { fast: … }`)
+  t.assert.deepEqual(await target({
+    'helper/src/lib.rs': '#[macro_export]\nmacro_rules! alias {\n    ($name:ident) => { println!("cargo:rustc-cfg={}", stringify!($name)); };\n}\n',
+    'build.rs': 'use helper::alias;\nfn main() { alias!(fast); }\n',
+  }), either)
+  // build-rs's way: the directive written apart from the name it is given
+  t.assert.deepEqual(await target({
+    'helper/src/lib.rs': 'pub fn rustc_cfg(key: &str) { emit("rustc-cfg", key) }\nfn emit(directive: &str, value: &str) { println!("cargo::{directive}={value}") }\n',
+    'build.rs': 'fn main() { helper::rustc_cfg("fast"); }\n',
+  }), either)
+  // a helper printing one name it writes out sets that one only
+  const fixed = (name) => ({ 'helper/src/lib.rs': `pub fn go() { println!("cargo:rustc-cfg=${name}"); }\n`, 'build.rs': 'fn main() { helper::go(); }\n' })
+  t.assert.equal(await target(fixed('other')), 'src/slow.rs')
+  t.assert.deepEqual(await target(fixed('fast')), either)
+  // a build-dependency the bundle lacks may print one too
+  t.assert.deepEqual(await target({ 'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n[build-dependencies]\nhelper = "1"\n' }), either)
+  // a name the build script formats in part: `os_{}` may be `os_linux`, and so may `fast` be anything
+  t.assert.deepEqual(await target({ 'build.rs': 'fn main() { let os = "linux"; println!("cargo::rustc-cfg=os_{}", os); }\n' }), either)
+})
+
+test('buildRustBundle keeps a module whose first variant the target rules out ahead of a glob of its name', async (t) => {
+  // tokio's `cfg_has_atomic_u64! { #[path = "…native.rs"] mod imp; }` and its `cfg_not_…!` twin, beside a glob bringing an `imp` in
+  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\n'
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': `${gates}mod other;\nuse crate::other::*;\ncfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\nfn f() { imp::X::real() }\n`,
+    'src/other.rs': 'pub mod imp { pub struct X; }\n',
+    'src/native.rs': 'pub struct X;\n',
+    'src/as_mutex.rs': 'pub struct X;\n',
+  }, async (tmp) => {
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargoTarget: LINUX }) // no 64-bit atomics in this cfg set
+    t.assert.equal(bundle.imports.get('rust').get('src/lib.rs').get('imp::X::real'), 'src/as_mutex.rs')
+  })
+})
+
+test('buildRustBundle resolves a file the target rules out as it would where it is compiled', async (t) => {
+  // tokio's atomic_u64_as_mutex.rs and its static_*.rs under a 64-bit target: their `super` is as_mutex's module
+  const gates = 'macro_rules! cfg_has64 { ($($i:item)*) => { $( #[cfg(target_has_atomic = "64")] $i )* } }\nmacro_rules! cfg_not_has64 { ($($i:item)*) => { $( #[cfg(not(target_has_atomic = "64"))] $i )* } }\n'
+  await withProjectAsync({
+    'Cargo.toml': '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n',
+    'src/lib.rs': `${gates}cfg_has64! { #[path = "native.rs"] mod imp; }\ncfg_not_has64! { #[path = "as_mutex.rs"] mod imp; }\n`,
+    'src/native.rs': 'pub(crate) use std::sync::atomic::AtomicU64;\n',
+    'src/as_mutex.rs': 'mod static_macro;\npub(crate) struct AtomicU64;\n',
+    'src/as_mutex/static_macro.rs': 'use super::AtomicU64;\n',
+  }, async (tmp) => {
+    const target = { ...LINUX, cfgs: new Set([...LINUX.cfgs, 'target_has_atomic="64"']) }
+    const bundle = await buildRustBundle({ cwd: tmp, entries: ['src/lib.rs'], cargoTarget: target })
+    t.assert.equal(bundle.imports.get('rust').get('src/as_mutex/static_macro.rs').get('super::AtomicU64'), 'src/as_mutex.rs')
   })
 })

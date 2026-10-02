@@ -425,6 +425,8 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   const macros = []
   const invocations = new Set()
   const calls = new Map() // macro name → the offsets of its bare invocations, in order
+  const pathInvocations = new Set() // the macros invoked by path (`crate::m!()`), by their last segment
+  const callSites = new Map() // macro name → each invocation, bare or by path: `{ offset, inlinePath, inlineDirs }`
   const includes = []
   const defined = []
   const skipped = new Set() // the template macros whose bodies were skipped
@@ -523,14 +525,16 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   // such a `mod` takes the offset of the macro's first bare invocation in this file (`calls`).
   let templateName = null
   let templateMacro = null // the top-level `macro_rules!` whose body the scan is in: what its body calls is its own, nested definitions' too
-  // The `macro_rules!` bodies the scan is in, outermost first, `{ macro, end }`: an include in a
-  // nested one's is that one's, resolved where it is invoked (which may be another directory than
-  // where the outer one is).
+  // The `macro_rules!` bodies the scan is in, outermost first, `{ macro, end, depth }`: what a
+  // nested one's body calls, includes and declares is that one's, made where it is invoked (which
+  // may be another directory than where the outer one is); `depth`, the inline modules around
+  // its definition, which a `mod` its body declares is not in where it is invoked.
   const defs = []
-  const innermostDef = (at) => {
+  const innermostEntry = (at) => {
     while (defs.length > 0 && defs.at(-1).end < at) defs.pop()
-    return defs.at(-1)?.macro ?? templateMacro
+    return defs.at(-1)
   }
+  const innermostDef = (at) => innermostEntry(at)?.macro ?? templateMacro
 
   // Whether the token at `at` sits in a `macro_rules!` body: a template, expanded where the
   // macro is invoked.
@@ -649,7 +653,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         const attr = parseAttr(code.slice(open + 1, close), masked.slice(open + 1, close))
         // (An inner attribute inside a macro invocation's body is the macro's business.)
         if (attr.cfg !== null && verdict(attr.cfg) === false && i >= macroUntil) {
-          if (depth === 0) return { mods: [], refs: [], externCrates: [], bindings: new Set(), imports: [], macros: [], invocations: new Set(), calls: new Map(), includes: [], unfollowed: 0, defined: [], inlineModules: [], inlineModuleVis: new Map(), skipped }
+          if (depth === 0) return { mods: [], refs: [], externCrates: [], bindings: new Set(), imports: [], macros: [], invocations: new Set(), calls: new Map(), pathInvocations: new Set(), callSites: new Map(), includes: [], unfollowed: 0, defined: [], inlineModules: [], inlineModuleVis: new Map(), skipped }
           const top = stack.at(-1)
           if (top !== undefined && top.depth === depth) {
             const end = matchClose(masked, top.start - 1)
@@ -734,7 +738,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         if (name !== null) {
           open = skipWs(open + name.length)
           const gate = GATE_MACRO_RE.test(name) && masked[open] === '{' ? gatePredicate(code, masked, open, matchClose(masked, open)) : undefined
-          macros.push({ name, exported: pending.some((a) => a.macroExport === true), includes: [], calls: new Set(), offset: i, at: i, template: inTemplate(i) ? templateName : null, gate })
+          macros.push({ name, exported: pending.some((a) => a.macroExport === true), includes: [], calls: new Set(), pathCalls: new Set(), offset: i, at: i, template: inTemplate(i) ? templateName : null, gate, cfg, macro: i < macroUntil ? macroName : null })
           definition = macros.at(-1)
           if (i >= macroUntil) {
             templateName = name
@@ -746,7 +750,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         const close = matchClose(masked, open)
         if (definition !== null) {
           innermostDef(i)
-          defs.push({ macro: definition, end: close })
+          defs.push({ macro: definition, end: close, depth: stack.length })
         }
         if (templates.has(word) && !localMacros.has(word)) {
           // serde_derive's `quote! { use #path as _serde; … _serde::__private::Ok(…) }`, bare or as
@@ -766,12 +770,18 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
           // `macro_rules!` template is the template's (`calls` on the definition): rustc resolves
           // it where the macro is invoked, not where it is written -- and a recursive arm's
           // `m!(…)` is no invocation of this file's.
-          if (!pathQualified) {
-            if (inTemplate(i) && templateMacro !== null) templateMacro.calls.add(word)
+          // A call by path (`crate::m!()`, `$crate::m!()`, `dep::m!()`) is no name to resolve in
+          // scope, but an invocation of a macro of that name all the same, for where what its
+          // template declares and includes is made (`pathInvocations`, `pathCalls`); each call
+          // outside templates is also kept with the inline modules around it (`callSites`).
+          if (inTemplate(i) && templateMacro !== null) (pathQualified ? innermostDef(i).pathCalls : innermostDef(i).calls).add(word)
+          else {
+            if (pathQualified) pathInvocations.add(word)
             else {
               invocations.add(word)
               ;(calls.get(word) ?? calls.set(word, []).get(word)).push(i)
             }
+            ;(callSites.get(word) ?? callSites.set(word, []).get(word)).push({ offset: i, inlinePath: inlinePath(), inlineDirs: stack.map((s) => s.dir) })
           }
           if (INCLUDE_MACROS.has(word)) {
             const text = code.slice(open + 1, close)
@@ -851,7 +861,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
         mods.push({
           name, inlinePath: inlinePath(), inlineDirs: stack.map((s) => s.dir), cfg, conditional, paths, noDefault: applies !== -1, vis,
           macroUse: attrs.some((a) => a.macroUse === true), macro: i < macroUntil ? macroName : null, offset: i, at: i,
-          template: inTemplate(i) ? templateName : null,
+          template: inTemplate(i) ? innermostDef(i).name : null, templateDepth: inTemplate(i) ? innermostEntry(i)?.depth ?? 0 : 0,
         })
         i = k + 1
         continue
@@ -973,7 +983,7 @@ export function scanRustItems(content, { features = null, maybeFeatures = null, 
   const inlineModuleVis = new Map()
   for (const s of spans) if (!inlineModuleVis.has(s.path.join('::'))) inlineModuleVis.set(s.path.join('::'), s.vis)
   const inlineModules = [...inlineModuleVis.keys()].map((p) => p.split('::'))
-  return { mods, refs: [...refs.values()], externCrates, bindings, imports, macros, invocations, calls, includes, unfollowed, defined, inlineModules, inlineModuleVis, skipped }
+  return { mods, refs: [...refs.values()], externCrates, bindings, imports, macros, invocations, calls, pathInvocations, callSites, includes, unfollowed, defined, inlineModules, inlineModuleVis, skipped }
 }
 
 // Whether a `use` import binds a name that is not the crate of that name: `use std::io;` binds
@@ -1296,9 +1306,10 @@ function cfgLeaves(pred) {
 }
 // The leaves holding when any of `alts` (conjunctions) does: the one alternative when there is
 // one (the same twice counts once, and one holding whenever another does adds nothing: `a ∨ (a ∧
-// b)` is `a`), an `any` leaf of them, nothing when one decides nothing -- or when there are more
-// than MAX_ALTERNATIVES, which a module reached along every path of a dense glob cycle may be:
-// that many decide too little to be worth telling apart.
+// b)` is `a`), an `any` leaf of them, nothing when one decides nothing -- or, for more than
+// MAX_ALTERNATIVES (a module reached along every path of a dense glob cycle, a cfg listing a
+// score of platforms) or one undecided already, the undecided leaf: too many to tell apart along
+// every path, and never to be taken for holding (see UNDECIDED_KEY).
 const MAX_ALTERNATIVES = 16
 const anyOf = (alts) => {
   const uniq = new Map()
@@ -1311,10 +1322,17 @@ const anyOf = (alts) => {
     const keys = list.map((alt) => new Set(alt.map(leafKey)))
     list = list.filter((_, i) => !keys.some((other, j) => j !== i && other.size < keys[i].size && other.isSubsetOf(keys[i])))
   }
-  if (list.length > MAX_ALTERNATIVES) return []
+  if (list.length > 1 && (list.length > MAX_ALTERNATIVES || list.some((alt) => alt.some((l) => l.many !== undefined)))) return [{ key: UNDECIDED_KEY, value: null, neg: false, many: list }]
   if (list.length <= 1) return list[0] ?? []
   return [{ key: 'any', value: null, neg: false, alts: list }]
 }
+// The key of the leaf an `any` the loader doesn't follow is kept as (`many`: its alternatives,
+// for its cfg text, see leafText): one no build decides (leafFalse), no asker holds -- itself
+// under one included (holds) -- that is no custom cfg (doubtful) and never exclusive with
+// anything (prepared), its negation too. So a candidate under it is only maybe the answer, beside
+// the others (withAlternatives), and never certain; and an `any` with one among its alternatives
+// is undecided too, which keeps the sets along a dense glob cycle few.
+const UNDECIDED_KEY = 'any(…)!'
 // The leaves of a conjunction's negation: one leaf flips, an `any` leaf's negation is every
 // alternative's, several leaves negate to any of their negations.
 const negated = (leaves) => {
@@ -1402,6 +1420,7 @@ function prepared(leaves) {
       prep.anys.push(l)
       continue
     }
+    if (l.many !== undefined) continue // undecided: exclusive with nothing
     const k = leafKey(l)
     prep.keys.add(k)
     prep.negKeys.push(l.neg ? k.slice(1) : `!${k}`)
@@ -1466,7 +1485,7 @@ const eitherLeaves = (a, b, sets) => {
 // target's cfgs (`unix`, `target_os = "linux"`, …: what every file of the build is compiled
 // under) -- against a candidate's: exclusive candidates are skipped; no asker (an internal query)
 // skips nothing. The verdict is kept per pair of sets in `compat`, shared by the askers of one set.
-const compatible = (asker, set) => asker === undefined || set.key === '' || cached(asker.compat, set.key, () => !cfgExclusive(asker.set.leaves, set.leaves))
+const compatible = (asker, set) => asker === undefined || set.key === '' || asker.contradictory || cached(asker.compat, set.key, () => !cfgExclusive(asker.set.leaves, set.leaves))
 // `map`'s value for `key`, computed on the first ask (the verdicts per pair of leaf sets here).
 function cached(map, key, compute) {
   let value = map.get(key)
@@ -1499,8 +1518,8 @@ const deadFor = (asker, set) => asker !== undefined && !asker.deadHere && set.ke
 // of a custom cfg (`not(loom)`: presumably off, see doubtful). An asker under no cfg holds nothing
 // else: for it, candidates under cfgs of their own are each only maybe the answer, and all of
 // them are (see withAlternatives), not the first in written order.
-const holds = (l, keys, custom) => keys.has(leafKey(l)) || (l.alts === undefined ? l.neg && custom(l.key) : l.alts.some((alt) => alt.every((m) => holds(m, keys, custom))))
-const entailed = (asker, set) => asker === undefined || set.key === '' || cached(asker.sure, set.key, () => set.leaves.every((l) => holds(l, asker.keys, asker.custom)))
+const holds = (l, keys, custom) => l.many === undefined && (keys.has(leafKey(l)) || (l.alts === undefined ? l.neg && custom(l.key) : l.alts.some((alt) => alt.every((m) => holds(m, keys, custom)))))
+const entailed = (asker, set) => asker === undefined || set.key === '' || (!asker.contradictory && cached(asker.sure, set.key, () => set.leaves.every((l) => holds(l, asker.keys, asker.custom))))
 // The cfgs rustc and cargo set: anything else in a positive leaf is a custom `--cfg` (`loom`,
 // `docsrs`, `tokio_unstable`, mio's `mio_unsupported_force_poll_poll`), off in a default build
 // unless a build script or the rustflags set it -- so a candidate under one is `doubtful`: taken
@@ -1673,7 +1692,7 @@ function pick(candidates, root, ctx, asker, ns = null) {
       valueOnly = true
       continue
     }
-    if (ns === 'macro' && (c.ns !== undefined || c.answer?.kind === 'module')) continue
+    if (ns === 'macro' ? (c.ns !== undefined && c.ns !== 'macro') || c.answer?.kind === 'module' : c.ns === 'macro') continue
     const dead = deadFor(asker, c.leaves)
     const doubt = !dead && doubtful(asker, c.leaves)
     const sure = !dead && !doubt && entailed(asker, c.leaves)
@@ -1701,6 +1720,10 @@ function pick(candidates, root, ctx, asker, ns = null) {
         ctx.hits.delete(depth)
         if (minHit(ctx) > depth) (im.answers ??= new Map()).set(key, r)
       }
+      // Followed as a macro to a file defining no macro of the name (`pub use util::helper;` of
+      // a `fn helper` beside the root's `#[macro_export] macro_rules! helper`), it binds no macro:
+      // what it imports lives in another namespace.
+      if (ns === 'macro' && r?.kind === 'item' && ctx.fileMacros.get(r.file)?.has(r.macroName) !== true) continue
       // An import leading out of the bundle (`pub(crate) use std::sync::atomic::AtomicU64;`, a
       // crate that isn't vendored) binds the name all the same: an item of its own file, as far
       // as the bundle knows, under its cfgs. One naming a crate outright (`use serde;`) answers
@@ -1731,8 +1754,20 @@ function pick(candidates, root, ctx, asker, ns = null) {
 // macro), and only when nothing else tells the candidates apart. Null for no leaves.
 const leafText = (l) => {
   if (l.alts !== undefined) return `any(${l.alts.map((alt) => cfgTextOf(alt) ?? '*').join(', ')})`
-  const plain = l.value === null ? l.key : `${l.key} = "${l.value}"`
+  const plain = l.many !== undefined ? manyText(l) : (l.value === null ? l.key : `${l.key} = "${l.value}"`)
   return l.neg ? `not(${plain})` : plain
+}
+// An undecided leaf's text (see UNDECIDED_KEY): the `any(…)` of its alternatives, kept per leaf, or
+// its count when that runs long (undecided leaves within undecided leaves).
+const manyTexts = new WeakMap()
+const manyText = (l) => {
+  let text = manyTexts.get(l)
+  if (text === undefined) {
+    text = `any(${l.many.map((alt) => cfgTextOf(alt) ?? '*').join(', ')})`
+    if (text.length > 4096) text = `any(${l.many.length} alternatives)`
+    manyTexts.set(l, text)
+  }
+  return text
 }
 function cfgTextOf(leaves) {
   const own = leaves.filter((l) => l.key !== 'variant')
@@ -1748,25 +1783,29 @@ function cfgTextOf(leaves) {
 // applies under cfgs of its own -- a file under no platform cfg asking libc's `crate::sockaddr`,
 // defined per platform -- so the first in written order is no answer. The first, carrying
 // `alternatives`: cfg key → file, each distinct file under the leaves of its first candidate
-// that the asker doesn't hold itself (a module a path goes on through takes the first; only a
-// path's target is recorded as the lot). One file, or a module first: that answer alone.
+// that the asker doesn't hold itself. A module first -- one a path may go on through -- carries
+// `branches` instead, cfg key → each distinct answer (its own included), for walkPath to follow
+// the rest of the path through each (`use unix as imp;` beside `use windows as imp;`). One file
+// or module: that answer alone.
 function withAlternatives(found, asker) {
   const [first] = found
-  const files = new Set(found.map((f) => f.answer.file).filter((f) => f !== undefined))
-  if (found.length === 1 || files.size < 2 || first.answer.kind === 'module') return first.answer
-  const alternatives = new Map()
+  const idOf = (answer) => (answer.kind === 'module' ? `mod ${answer.modulePath}` : answer.file)
+  if (found.length === 1 || new Set(found.map((f) => idOf(f.answer)).filter((id) => id !== undefined)).size < 2) return first.answer
+  const keyed = new Map()
   const seen = new Set()
   for (const { answer, leaves } of found) {
-    if (answer.file === undefined || seen.has(answer.file)) continue
-    seen.add(answer.file)
+    const id = idOf(answer)
+    if (id === undefined || seen.has(id)) continue
+    seen.add(id)
     // Kept per asker set (the text leaves out what the asker holds itself).
     const textOf = () => cfgTextOf(leaves.leaves.filter((l) => asker === undefined || !asker.keys.has(leafKey(l))))
     const base = cfgKey(asker === undefined ? textOf() : cached(asker.texts, leaves.key, textOf))
     let key = base
-    for (let k = 2; alternatives.has(key); k++) key = `${base}#${k}`
-    alternatives.set(key, answer.file)
+    for (let k = 2; keyed.has(key); k++) key = `${base}#${k}`
+    keyed.set(key, answer)
   }
-  return { ...first.answer, alternatives }
+  if (first.answer.kind === 'module') return { ...first.answer, branches: keyed }
+  return { ...first.answer, alternatives: new Map([...keyed].filter(([, answer]) => answer.file !== undefined).map(([key, answer]) => [key, answer.file])) }
 }
 
 // Every candidate module `at`'s imports offer for `name` as seen `seeing` levels into it, in
@@ -1787,6 +1826,10 @@ function providedAll(root, at, name, seeing, ctx) {
     ctx.walking--
     list = new Lazy(function* () {
       yield* importsOf(root, at, name, seeing, ctx)
+      // At the crate root, a `#[macro_export]` macro is a binding of the name too, in the macro
+      // namespace (`ns`): a `pub use inner::m;` of another build beside it (serde's docsrs-only
+      // copy of serde_core's macros) is ranked against it by their cfgs.
+      if (at === 'crate') for (const m of ctx.exportedMacros?.get(root)?.get(name) ?? NONE) yield { answer: { kind: 'item', file: m.file }, leaves: m.leaves, ns: 'macro' }
       // The module's own items rank with its named imports -- two explicit bindings of one name
       // are rustc's error unless their cfgs differ (tokio's `imp` re-exports std's `AtomicU64` in
       // one variant file and defines its own in the other) -- ahead of what globs bring in, which
@@ -1872,9 +1915,9 @@ function hasAll(root, at, name, seeing, ctx) {
   // Asked for every module a closure reaches, most of which have nothing of the name.
   const child = ctx.children.get(root)?.get(at)?.has(name) === true
   const defs = ctx.defined.get(root)?.get(at)?.get(name)
-  const macro = at === 'crate' ? ctx.macros.get(root)?.get(name) : undefined
+  const macros = at === 'crate' ? ctx.exportedMacros?.get(root)?.get(name) : undefined
   const imports = importsOf(root, at, name, seeing, ctx)
-  if (!child && defs === undefined && macro === undefined && imports.length === 0) return NONE
+  if (!child && defs === undefined && macros === undefined && imports.length === 0) return NONE
   const out = []
   if (child) {
     const sub = `${at}::${name}`
@@ -1885,7 +1928,7 @@ function hasAll(root, at, name, seeing, ctx) {
     for (const d of defs) if (d.scopeDepth <= seeing && d.file === own) out.push({ answer: { kind: 'item', file: d.file }, leaves: d.leaves, ns: d.ns })
     for (const d of defs) if (d.scopeDepth <= seeing && d.file !== own) out.push({ answer: { kind: 'item', file: d.file }, leaves: d.leaves, ns: d.ns })
   }
-  if (macro !== undefined) out.push({ answer: { kind: 'item', file: macro }, leaves: NO_LEAVES })
+  for (const m of macros ?? NONE) out.push({ answer: { kind: 'item', file: m.file }, leaves: m.leaves })
   out.push(...imports)
   return out
 }
@@ -2057,16 +2100,38 @@ function globSource(im, root, ctx) {
 function followImport(im, root, ctx, asker, ns = null) {
   if (!im.absolute) {
     const r = walkPath(im.segments, root, im.module, ctx, { file: im.file, asker, ns })
+    // A path into another crate by a name the module binds to it -- the crate itself, through
+    // its `use dep::{dep, mac}` too (`dep` the macro of the same name) -- followed as a macro:
+    // the macro there (macroOfCrate).
+    if (r !== null && ns === 'macro' && r.kind === 'crate' && r.rest?.length > 0) return macroOfCrate(r.file, r.rest, ctx) ?? r
     if (r !== null) return r
   }
   const head = im.segments[0]
   if (NON_CRATE_LEADS.has(head)) return { kind: 'item', file: im.file }
   const target = ctx.resolveCrate(head, im.file)
   if (!target) return null
-  // A macro of another crate (`use dep::mac;`), followed as one: the file defining it, where
-  // `#[macro_export]` puts it at that crate's root.
-  const macro = ns === 'macro' && im.segments.length === 2 ? ctx.macros.get(target)?.get(im.segments[1]) : undefined
-  return macro === undefined ? { kind: 'crate', name: head, file: target } : { kind: 'item', file: macro, macroName: im.segments[1] }
+  // A macro of another crate (`use dep::mac;`), followed as one: the file defining it (macroOfCrate).
+  const macro = ns === 'macro' && im.segments.length > 1 ? macroOfCrate(target, im.segments.slice(1), ctx) : null
+  return macro ?? { kind: 'crate', name: head, file: target }
+}
+
+// The macro `rest` names in the in-tree crate whose root is `target` (`use dep::mac;`,
+// `dep::mac!(…)`, a `#[macro_use] extern crate`'s): looked up from that crate's root as a path
+// there is, in the macro namespace -- each `#[macro_export]` definition under its file's cfgs
+// (serde's docsrs-only copies), a `pub use inner::mac;` followed on into `inner` -- the cfgs
+// judged by that root's own build. `{ kind: 'item', file, macroName, alternatives? }`, the file
+// defining it by the name it defines it under, or null when none does.
+function macroOfCrate(target, rest, ctx) {
+  if (!ctx.trees.has(target)) {
+    const file = rest.length === 1 ? ctx.macros.get(target)?.get(rest[0]) : undefined
+    return file === undefined ? null : { kind: 'item', file, macroName: rest[0] }
+  }
+  const r = walkPath(['crate', ...rest], target, 'crate', ctx, { ns: 'macro', file: target, asker: ctx.files.get(target)?.asker })
+  if (r === null || r === VALUE_ONLY || r.kind !== 'item') return null
+  const macroName = r.macroName ?? rest.at(-1)
+  if (ctx.fileMacros.get(r.file)?.has(macroName) !== true) return null
+  const alternatives = r.alternatives === undefined ? undefined : new Map([...r.alternatives].filter(([, f]) => ctx.fileMacros.get(f)?.has(macroName) === true))
+  return { kind: 'item', file: r.file, macroName, ...(alternatives?.size > 1 ? { alternatives } : {}) }
 }
 
 // An item answer for what definedIn found.
@@ -2097,7 +2162,40 @@ const onlyValues = (root, at, name, ctx) => {
 // written in, `file`'s own imports come first: the module's other files, if any, are cfg variants
 // (providedFrom). `asker` (see cfg compatibility) rules out what can't be compiled together with
 // the path.
-function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
+function walkPath(segments, root, from, ctx, options = {}) {
+  const branches = []
+  const r = walkOnce(segments, root, from, ctx, options, branches)
+  return branches.length === 0 || r === null || r === VALUE_ONLY || r.file === undefined ? r : throughBranches(r, branches, root, from, ctx, options)
+}
+// The rest of a path through each module a segment may name (`branches`, see withAlternatives:
+// `{ keyed, rest }`, the segments after it): `r`, the answer through the first, with the files the
+// others lead to as its `alternatives` -- each module's walked on from the crate root, an item's
+// the item's file -- under the key of the module they go through.
+function throughBranches(r, branches, root, from, ctx, options) {
+  const alternatives = new Map()
+  const note = (key, answer) => {
+    for (const [k, f] of answer.alternatives ?? [[null, answer.file]]) {
+      if (f === undefined || [...alternatives.values()].includes(f)) continue
+      const base = k === null ? key : `${key}, ${k}`
+      let unique = base
+      for (let n = 2; alternatives.has(unique); n++) unique = `${base}#${n}`
+      alternatives.set(unique, f)
+    }
+  }
+  const [{ keyed: firstKeyed }] = branches
+  note([...firstKeyed.keys()][0], r)
+  for (const { keyed, rest } of branches) {
+    for (const [key, answer] of [...keyed].slice(1)) {
+      if (answer.kind !== 'module') note(key, answer)
+      else {
+        const there = walkPath(['crate', ...answer.modulePath.split('::').slice(1), ...rest], root, from, ctx, options)
+        if (there !== null && there !== VALUE_ONLY) note(key, there)
+      }
+    }
+  }
+  return alternatives.size > 1 ? { ...r, alternatives } : r
+}
+function walkOnce(segments, root, from, ctx, { ns = null, file, asker } = {}, branches = []) {
   const tree = ctx.trees.get(root)
   const head = segments[0]
   // A segment with more after it names a module or type-namespace item: a `fn log` doesn't lead
@@ -2125,7 +2223,9 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
       return segments.length === 1 && file !== undefined && ctx.fileMacros.get(file)?.has(head) === true ? { kind: 'item', file } : null
     }
     via = { modulePath: from, consumed: 0, through: p.through }
+    if (p.kind === 'crate') return { ...p, via, rest: segments.slice(1) } // what the path names in that crate (followImport)
     if (p.kind !== 'module') return { ...p, via }
+    if (p.branches !== undefined) branches.push({ keyed: p.branches, rest: segments.slice(1) })
     cur = p.modulePath.split('::')
     i = 1
   }
@@ -2138,8 +2238,9 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
     const at = cur.join('::')
     const name = segments[i]
     const last = i === segments.length - 1
-    const macro = at === 'crate' && last ? ctx.macros.get(root)?.get(name) : undefined
-    if (macro !== undefined && ns === 'macro') return { kind: 'item', file: macro, via }
+    // (A macro is looked up as any name is: the crate root's `#[macro_export]` definitions are
+    // among its bindings, each under its cfgs -- see providedAll.)
+    const macro = at === 'crate' && last && ns !== 'macro' ? ctx.macros.get(root)?.get(name) : undefined
     const child = `${at}::${name}`
     const want = nsOf(last)
     let p
@@ -2149,10 +2250,22 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
       // custom cfg, doubtful: serde's docsrs-only `mod de` beside the `pub use serde_core::de` of
       // every other build; a `#[cfg(loom)] mod imp` beside the `use other::*` that brings `imp`
       // in), as a doubtful candidate gives way to any other: where the module isn't there, a
-      // glob's name is the module's name.
-      const set = ctx.files.get(tree.get(child))?.leaves
-      p = set === undefined || !(deadFor(asker, set) || doubtful(asker, set)) ? null : lookup(at, name, want)
+      // glob's name is the module's name. Only a module none of whose files may be there: one
+      // with a variant the build compiles (`#[cfg_attr(loom, path = "loom.rs")] mod imp;` falls
+      // back to imp.rs) is there, and shadows the glob.
+      const sets = (ctx.moduleFiles?.get(root)?.get(child) ?? [tree.get(child)]).map((f) => ctx.files.get(f)?.leaves).filter((set) => set !== undefined)
+      const away = sets.length > 0 && sets.every((set) => deadFor(asker, set) || doubtful(asker, set))
+      p = away ? lookup(at, name, want) : null
       if (p === null || p === VALUE_ONLY) {
+        // One file there only under cfgs the asker doesn't hold (`#[cfg(not(unix))] mod sys;`
+        // beside `#[cfg(unix)] use fallback as sys;`): what else the module binds the name to is a
+        // branch of the path too (see throughBranches), under no key of its own. (A `mod` with cfg
+        // variants is taken to be there in every build: one of them, a `path` fallback's; and one
+        // under a custom cfg the build may set is there, as above.)
+        if (!away && sets.length === 1 && !entailed(asker, sets[0]) && !hasCustom(sets[0].leaves, customKey)) {
+          const other = lookup(at, name, want)
+          if (other !== null && other !== VALUE_ONLY && !(other.kind === 'module' && other.modulePath === child)) branches.push({ keyed: new Map([[cfgKey(cfgTextOf(sets[0].leaves)), { kind: 'module', modulePath: child, file: tree.get(child) }], ['*', other]]), rest: segments.slice(i + 1) })
+        }
         cur.push(name)
         i++
         continue
@@ -2166,7 +2279,9 @@ function walkPath(segments, root, from, ctx, { ns = null, file, asker } = {}) {
       return { kind: 'item', file: tree.get(at), via }
     }
     via ??= { modulePath: at, consumed: i, through: p.through }
+    if (p.kind === 'crate') return { ...p, via, rest: segments.slice(i + 1) }
     if (p.kind !== 'module') return { ...p, via }
+    if (p.branches !== undefined) branches.push({ keyed: p.branches, rest: segments.slice(i + 1) })
     cur = p.modulePath.split('::')
     i++
   }
@@ -2270,6 +2385,7 @@ function resolvePathRef(ref, file, bindings, ctx) {
   if (!absolute && here) {
     const r = walkPath(segments, here.root, from, ctx, { ns: ref.macroCall ? 'macro' : null, file, asker: here.asker })
     if (r === VALUE_ONLY) valueOnly = true // the lead is bound here, but as a value: `log::…` names the crate
+    else if (r !== null && r.kind === 'crate' && ref.macroCall && r.rest?.length > 0) return { ...r, macro: macroOfCrate(r.file, r.rest, ctx) ?? undefined } // `d::mac!(…)` with `use dep as d;`
     else if (r !== null) return r
   }
   const lead = crateLead(ref, valueOnly ? NO_BINDINGS : bindings)
@@ -2280,8 +2396,8 @@ function resolvePathRef(ref, file, bindings, ctx) {
     return r === VALUE_ONLY ? null : r
   }
   const target = ctx.resolveCrate(name, file)
-  // `dep::mac!(…)`: the crate, and the file defining its exported macro.
-  if (target) return { kind: 'crate', name, file: target, alternatives: ctx.crateAlternatives?.(name, file), macro: ref.macroCall && segments.length === 2 ? ctx.macros.get(target)?.get(segments[1]) : undefined }
+  // `dep::mac!(…)`: the crate, and the macro it names there (macroOfCrate).
+  if (target) return { kind: 'crate', name, file: target, alternatives: ctx.crateAlternatives?.(name, file), macro: ref.macroCall && segments.length > 1 ? macroOfCrate(target, segments.slice(1), ctx) ?? undefined : undefined }
   const macro = segments.length === 1 && from === 'crate' ? ctx.macros.get(here.root)?.get(lead) : undefined
   if (macro !== undefined) return { kind: 'item', file: macro }
   // A glob into a crate that isn't in-tree (`use serde::*;`) may bring the lead in -- unless the
@@ -2315,16 +2431,34 @@ function effectiveInvokers(name, invokers, templateCalls, seen = new Set()) {
   for (const [caller, called] of templateCalls) if (called.has(name)) for (const f of effectiveInvokers(caller, invokers, templateCalls, seen)) out.add(f)
   return out
 }
-// Note what file `path`'s scan (`items`) invokes by bare name, and what its `macro_rules!`
-// templates call, for effectiveInvokers.
+// Note what file `path`'s scan (`items`) invokes, by bare name or by path (`crate::m!()`, matched by
+// name: a `$crate::m!` resolves where the macro is invoked as surely as `m!`), and what its
+// `macro_rules!` templates call, for effectiveInvokers.
 function noteMacroCalls(invokers, templateCalls, path, items) {
-  for (const name of items.invocations) (invokers.get(name) ?? invokers.set(name, new Set()).get(name)).add(path)
-  for (const m of items.macros) for (const name of m.calls) (templateCalls.get(m.name) ?? templateCalls.set(m.name, new Set()).get(m.name)).add(name)
+  for (const name of [...items.invocations, ...items.pathInvocations ?? []]) (invokers.get(name) ?? invokers.set(name, new Set()).get(name)).add(path)
+  for (const m of items.macros) for (const name of [...m.calls, ...m.pathCalls ?? []]) (templateCalls.get(m.name) ?? templateCalls.set(m.name, new Set()).get(m.name)).add(name)
 }
-// The files of `from`'s package in effect invoking macro `name` (`packageOf`: file → package):
-// where a `mod` its template declares is declared -- a macro of the same name elsewhere is likely
-// another (see buildRustTree).
-const hostsOf = (name, from, invokers, templateCalls, packageOf) => [...effectiveInvokers(name, invokers, templateCalls)].filter((f) => packageOf(f) === packageOf(from))
+// The files in effect invoking macro `name` where a `mod` its template declares is declared: of
+// `from`'s package (`packageOf`: file → package) -- a macro of the same name elsewhere is likely
+// another -- or, for a `#[macro_export]` one (`packageOf` null), of any (see buildRustTree).
+const hostsOf = (name, from, invokers, templateCalls, packageOf) => [...effectiveInvokers(name, invokers, templateCalls)].filter((f) => packageOf === null || packageOf(f) === packageOf(from))
+// The copies of template `mod` `decl` (written in a `macro_rules!` body, see scanRustItems) a file
+// invoking the macro declares (`items`: its scan): one per inline module it invokes the macro, or a
+// macro whose template calls it, from -- the `mod` in that module, inside the inline modules the
+// body itself opens -- at that invocation (`offset`, for textual macro scope).
+function hostedCopies(decl, items, templateCalls) {
+  const names = new Set([decl.template])
+  for (let grew = true; grew;) {
+    grew = false
+    for (const [caller, called] of templateCalls) if (!names.has(caller) && [...called].some((n) => names.has(n))) grew = names.add(caller)
+  }
+  const sites = [...names].flatMap((n) => items.callSites?.get(n) ?? []).toSorted((a, b) => a.offset - b.offset)
+  const byModule = new Map()
+  for (const site of sites) if (!byModule.has(site.inlinePath.join('::'))) byModule.set(site.inlinePath.join('::'), site)
+  if (byModule.size === 0) byModule.set('', { offset: Infinity, inlinePath: [], inlineDirs: [] })
+  const own = (list) => list.slice(decl.templateDepth ?? 0)
+  return [...byModule.values()].map((site) => ({ ...decl, inlinePath: [...site.inlinePath, ...own(decl.inlinePath)], inlineDirs: [...site.inlineDirs, ...own(decl.inlineDirs)], offset: site.offset }))
+}
 // TEMPLATE_MACROS less the ones a package defines itself (`own`), one object per set of them.
 const templatesLessMemo = new Map()
 const templatesLess = (own) => {
@@ -2451,10 +2585,11 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [path, items] of scanned) noteMacroCalls(invokers, templateCalls, path, items)
   // A `mod` a `macro_rules!` template declares is declared in each module invoking the macro, and
   // its file found from there (serde_core's src/crate_root.rs holds `crate_root! { … pub mod de;
-  // … }`, which lib.rs invokes: src/de/mod.rs). Only its own package's invocations count -- a
-  // macro of the same name elsewhere is likely another -- and one nothing there invokes by bare
-  // name (`crate::m!()` only) stays beside its definition. A hosted `mod` stands at the host's
-  // first invocation (`offset`), for textual macro scope, and keeps the file defining it
+  // … }`, which lib.rs invokes: src/de/mod.rs), in the inline module the invocation is in, by
+  // bare name or by path (`crate::m!()`, `$crate::m!()` in another template). Only its own
+  // package's invocations count -- a macro of the same name elsewhere is likely another -- unless
+  // the macro is `#[macro_export]`ed, and one nothing invokes stays beside its definition. A
+  // hosted `mod` stands at the host's invocation (`offset`), for textual macro scope, and keeps the file defining it
   // (`definedIn`): the host's cfgs on mounting that file are its own too (serde's lib.rs mounts
   // core/crate_root.rs under `#[cfg(docsrs)]`).
   const hosted = new Map() // file → the template `mod`s it declares by invoking their macros
@@ -2462,10 +2597,11 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [path, items] of scanned) {
     for (const decl of items.mods) {
       if (decl.template === null) continue
-      const hosts = hostsOf(decl.template, path, invokers, templateCalls, packageOf)
+      const exported = items.macros.some((m) => m.name === decl.template && m.exported)
+      const hosts = hostsOf(decl.template, path, invokers, templateCalls, exported ? null : packageOf)
       if (hosts.length === 0) continue
       hostedAway.add(decl)
-      for (const f of hosts) (hosted.get(f) ?? hosted.set(f, []).get(f)).push({ ...decl, offset: scanned.get(f).calls.get(decl.template)?.[0] ?? Infinity, definedIn: path })
+      for (const f of hosts) for (const copy of hostedCopies(decl, scanned.get(f), templateCalls)) (hosted.get(f) ?? hosted.set(f, []).get(f)).push({ ...copy, definedIn: path })
     }
   }
   const modsOf = (path) => [...scanned.get(path).mods.filter((d) => !hostedAway.has(d)), ...(hosted.get(path) ?? [])]
@@ -2598,12 +2734,18 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [path, f] of files) {
     f.leaves = leafSet(f.leaves, leafSets)
     const cfgs = platformCfgsOf(path)
-    const set = cfgs === null ? f.leaves : unionLeaves(f.leaves, leavesOfCfgs(cfgs), leafSets)
+    const joined = cfgs === null ? f.leaves : unionLeaves(f.leaves, leavesOfCfgs(cfgs), leafSets)
+    // A file the target rules out (tokio's atomic_u64_as_mutex.rs and its submodules under a
+    // 64-bit target) asks as it would where it is compiled: under its own cfgs, which the target's
+    // contradict. One whose own contradict each other (under `not(all(test, loom))` and `all(loom,
+    // test)` both) is compiled nowhere: every candidate is compatible with it, none certain
+    // (`contradictory`), so its paths map all of them.
+    const set = joined !== f.leaves && cfgExclusive(joined.leaves, joined.leaves) && !cfgExclusive(f.leaves.leaves, f.leaves.leaves) ? f.leaves : joined
     // What the askers of one leaf set, build and settable cfgs share (one object each).
     const build = buildOf(path, ctx, units)
     const settable = ctx?.cfgsSetFor(path) ?? null
     const sharedKey = `${set.key}\0${idOf(build)}\0${settable === null ? '' : idOf(settable)}`
-    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), texts: new Map(), build, deadHere: deadUnder(set.leaves, build), custom: customFor(settable) }).get(sharedKey)
+    const shared = askerSets.get(sharedKey) ?? askerSets.set(sharedKey, { keys: new Set(set.leaves.map(leafKey)), compat: new Map(), sure: new Map(), doubt: new Map(), dead: new Map(), texts: new Map(), build, deadHere: deadUnder(set.leaves, build), contradictory: cfgExclusive(set.leaves, set.leaves), custom: customFor(settable) }).get(sharedKey)
     f.asker = { file: path, set, ...shared }
   }
   // Per crate root, each module's child modules by name (every module's parent is in its tree).
@@ -2618,6 +2760,13 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
     }
     children.set(root, byParent)
   }
+  // Per crate root, each module's files: a `mod` with cfg variants has several, any of which a
+  // build may compile (walkPath asks whether one of them may be there at all).
+  const moduleFiles = new Map()
+  for (const [path, f] of files) {
+    const byModule = moduleFiles.get(f.root) ?? moduleFiles.set(f.root, new Map()).get(f.root)
+    ;(byModule.get(f.modulePath) ?? byModule.set(f.modulePath, []).get(f.modulePath)).push(path)
+  }
   // Per crate root, what a path may continue along where a segment names no module: the imports
   // of each module (by module path: `named` by the name each binds, and `globs`; each with the
   // `file` holding it, its `module`, how deep in the tree the module its visibility reaches sits,
@@ -2626,12 +2775,15 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   // [{ file, scopeDepth, ns, leaves }], `ns` the namespace: `value` for a fn/const/static, which no
   // path continues past, `type` for the rest), how far each module's own visibility reaches (`modScope`:
   // module → scopeDepth, for what a glob may bring in) and the `#[macro_export]` macros (by name →
-  // file). `fileMacros` is file → the `macro_rules!` names it defines. `externPrelude` (root →
+  // the first file; `exportedMacros`: name → each definition, `{ file, leaves }`, its file's leaves
+  // and its own cfg's -- serde's docsrs-only copies of serde_core's macros, a crate's per-platform
+  // ones). `fileMacros` is file → the `macro_rules!` names it defines. `externPrelude` (root →
   // alias → crate) holds the root's `extern crate x as y;`, in scope crate-wide.
   const imports = new Map()
   const defined = new Map()
   const modScope = new Map()
   const macros = new Map()
+  const exportedMacros = new Map() // root -> name -> every `#[macro_export]` definition, `{ file, leaves }`
   const fileMacros = new Map()
   const externPrelude = new Map()
   const perRoot = (map, root) => map.get(root) ?? map.set(root, new Map()).get(root)
@@ -2698,6 +2850,8 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
       if (!m.exported) continue
       const byName = perRoot(macros, here.root)
       if (!byName.has(m.name)) byName.set(m.name, path)
+      const defs = perRoot(exportedMacros, here.root)
+      ;(defs.get(m.name) ?? defs.set(m.name, []).get(m.name)).push({ file: path, leaves: itemLeaves(here, m, path) })
     }
     if (here.modulePath === 'crate') {
       const prelude = perRoot(externPrelude, here.root)
@@ -2807,7 +2961,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
   for (const [root, byModule] of imports) for (const [module, of] of byModule) for (const name of of.named.keys()) note(having, root, name, module)
   for (const [root, byName] of macros) for (const name of byName.keys()) note(having, root, name, 'crate')
   const declaresCrate = (name, from) => ctx?.declaresCrate?.(name, from) === true
-  const pathCtx = { trees, children, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, macros, fileMacros, externPrelude, leafSets, having, provided: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
+  const pathCtx = { trees, children, moduleFiles, files, resolveCrate, crateAlternatives, declaresCrate, imports, defined, modScope, macros, exportedMacros, fileMacros, externPrelude, leafSets, having, provided: new Map(), closures: new Map(), opaque: new Map(), opaqueGlobs: new Map(), walking: 0, hits: new Set() }
   // Every path of every file, on top of the `mod` / include edges (`resolutions`): once, and once
   // more when the first pass left glob closures short of an import cycle (stabilizeClosures).
   const resolveAll = () => {
@@ -2863,7 +3017,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
       if (r === null) continue
       if (r.kind === 'crate') {
         addCrate(r.name, r.file, r.alternatives)
-        if (r.macro !== undefined) add(`${ref.spec}!`, r.macro)
+        if (r.macro !== undefined) add(`${ref.spec}!`, r.macro.file, r.macro.alternatives)
       }
       else if (r.kind === 'unresolved') {
         // Only a `use` reliably says its lead names a crate (see scanRustItems' `fromUse`) -- or
@@ -2905,10 +3059,13 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
         if (inScope !== undefined) return { file: inScope, name }
         const byPath = walkPath([name], here.root, here.modulePath, pathCtx, { ns: 'macro', file: path, asker: here.asker })
         const as = byPath?.macroName ?? name
-        if (byPath?.file !== undefined && fileMacros.get(byPath.file)?.has(as) === true) return { file: byPath.file, name: as }
+        if (byPath?.file !== undefined && fileMacros.get(byPath.file)?.has(as) === true) {
+          const alternatives = byPath.alternatives === undefined ? undefined : new Map([...byPath.alternatives].filter(([, f]) => fileMacros.get(f)?.has(as) === true))
+          return { file: byPath.file, name: as, alternatives: alternatives?.size > 1 ? alternatives : undefined }
+        }
         for (const crate of macroUseCrates(here.root)) {
-          const file = macros.get(crate)?.get(name)
-          if (file !== undefined) return { file, name }
+          const macro = macroOfCrate(crate, [name], pathCtx)
+          if (macro !== null) return { file: macro.file, name: macro.macroName, alternatives: macro.alternatives }
         }
         return undefined
       }
@@ -2917,7 +3074,7 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
         // earlier `#[macro_use] mod` handed an earlier call. The bare calls in the invoked
         // macro's template, and in theirs on down, are made here too -- resolved in this file's
         // scope at this call, as rustc expands them.
-        const found = new Set()
+        const found = new Map() // `name!\0file` -> the cfg-keyed files, when several may define it
         for (const offset of offsets) {
           const seen = new Set()
           const expand = (called) => {
@@ -2925,14 +3082,14 @@ export function buildRustTree(sources, { roots = [], baseDir = null, cargo = nul
             seen.add(called)
             const macro = macroFileAt(called, offset)
             if (macro === undefined) return
-            found.add(`${called}!\0${macro.file}`)
+            found.set(`${called}!\0${macro.file}`, macro.alternatives)
             for (const m of scanned.get(macro.file)?.macros ?? []) if (m.name === macro.name) for (const inner of m.calls) expand(inner)
           }
           expand(name)
         }
-        for (const edge of found) {
+        for (const [edge, alternatives] of found) {
           const cut = edge.indexOf('\0')
-          add(edge.slice(0, cut), edge.slice(cut + 1))
+          add(edge.slice(0, cut), edge.slice(cut + 1), alternatives)
         }
       }
     }
@@ -2984,7 +3141,8 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
   const templateIncludes = new Map() // macro name → its bodies' includes
   const templateMods = new Map() // macro name → its bodies' `mod`s, each `{ decl, from }` (see buildRustTree)
   const templateCalls = new Map() // macro name → the names its bodies call by bare name
-  const invokers = new Map() // macro name → the files invoking it by bare name
+  const invokers = new Map() // macro name → the files invoking it, by bare name or by path
+  const scansOf = new Map() // file → its scan, for where it invokes what (hostedCopies)
   // A package defining a `macro_rules!` of a template macro's name (its own `quote!`) invokes that
   // one everywhere in the package (see buildRustTree): its files are scanned without the name in
   // the template set -- again, for the ones scanned before the definition was met.
@@ -3049,7 +3207,9 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
     for (const [name, incs] of templateIncludes) {
       for (const f of effectiveInvokers(name, invokers, templateCalls)) for (const inc of incs) includeFrom(inc, f)
     }
-    for (const [name, decls] of templateMods) for (const { decl, from } of decls.values()) for (const f of hostsOf(name, from, invokers, templateCalls, packageOf)) modFrom(decl, f)
+    for (const [name, decls] of templateMods) {
+      for (const { decl, from, exported } of decls.values()) for (const f of hostsOf(name, from, invokers, templateCalls, exported ? null : packageOf)) for (const copy of hostedCopies(decl, scansOf.get(f), templateCalls)) modFrom(copy, f)
+    }
   }
 
   // A template's `mod`s that nothing in its package invokes by bare name stand beside its
@@ -3057,8 +3217,8 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
   const placed = new Set()
   const placeUninvoked = () => {
     for (const [name, decls] of templateMods) {
-      for (const { decl, from } of decls.values()) {
-        if (placed.has(decl) || hostsOf(name, from, invokers, templateCalls, packageOf).length > 0) continue
+      for (const { decl, from, exported } of decls.values()) {
+        if (placed.has(decl) || hostsOf(name, from, invokers, templateCalls, exported ? null : packageOf).length > 0) continue
         placed.add(decl)
         modFrom(decl, from)
       }
@@ -3123,7 +3283,7 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
       // A template's `mod`s wait for the files invoking it (expandTemplates).
       for (const decl of mods) {
         if (decl.template === null) modFrom(decl, relPath)
-        else (templateMods.get(decl.template) ?? templateMods.set(decl.template, new Map()).get(decl.template)).set(`${relPath}\0${decl.at}`, { decl, from: relPath })
+        else (templateMods.get(decl.template) ?? templateMods.set(decl.template, new Map()).get(decl.template)).set(`${relPath}\0${decl.at}`, { decl, from: relPath, exported: macros.some((m) => m.name === decl.template && m.exported) })
       }
       // `include!("x.rs")` splices Rust source (scanned next wave, under this module); the asset
       // macros name a file to carry as it is. A build-output path (`concat!(env!("OUT_DIR"), …)`)
@@ -3136,6 +3296,7 @@ export async function collectRustFilesFromDisk(baseDir, entries, { cargo = null,
         for (const inc of m.includes) if (!list.some((x) => x.kind === inc.kind && x.path === inc.path && x.base === inc.base)) list.push(inc)
       }
       noteMacroCalls(invokers, templateCalls, relPath, items)
+      scansOf.set(relPath, items)
       // A reference to an in-tree crate pulls its root in (a crate root by role, whatever its
       // name -- `[lib] path` may point anywhere); the root's own `mod` edges follow next wave.
       const leads = new Set()

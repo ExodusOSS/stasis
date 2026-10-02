@@ -130,13 +130,17 @@ const DROPPABLE = ['branch', 'url']
 
 // `.gitmodules` text the library refused as a whole, read as git reads it (readGitConfig) a
 // submodule at a time: a key of `submodule.<name>.<key>`, from `[submodule "name"]` or
-// `[submodule.name]`, its first `path`, `url` and `branch` (the first, as git's submodule commands
-// read it; the sections of one name merged), each submodule then read by the library alone. One that
-// still doesn't read loses its branch, then its url; one whose path doesn't read fails closed: its
+// `[submodule.name]`, its last `path`, `url` and `branch` (the sections of one name merged), as git
+// reads the checkout's .gitmodules -- a value replaces an earlier one, but for a path or url git
+// ignores, one starting with `-` -- each submodule then read by the library alone. One that still
+// doesn't read loses its branch, then its url; one whose path doesn't read fails closed: its
 // directory, when the path names one inside the repository (`./lib/x`, `lib/x/`), is still a
-// dependency, just unnamed, and else the submodule is skipped. `notes` say what was dropped.
+// dependency, just unnamed, and else the submodule is skipped. Every other path given it is a
+// dependency too: git reads the first of two where it reads .gitmodules from a commit, so no path a
+// submodule is given may name the project's own code. `notes` say what was dropped.
 function gitmodulesLeniently(text) {
   const sections = new Map() // a submodule's name -> Map<key, its entry>
+  const paths = new Map() // a submodule's name -> every `path` given it
   const notes = []
   for (const { section, subsection, header, keys } of readGitConfig(text)) {
     const variable = subsection === undefined ? section : `${section}.${subsection}`
@@ -144,10 +148,17 @@ function gitmodulesLeniently(text) {
     const name = variable.slice('submodule.'.length)
     if (section !== 'submodule') notes.push(`${header}, a section git reads as [submodule "${name}"]; reading it as that`)
     const kept = sections.get(name) ?? sections.set(name, new Map()).get(name)
-    for (const entry of keys) if (SUBMODULE_KEYS.has(entry.key) && !kept.has(entry.key)) kept.set(entry.key, entry)
+    const given = paths.get(name) ?? paths.set(name, []).get(name)
+    for (const entry of keys) {
+      if (!SUBMODULE_KEYS.has(entry.key)) continue
+      if (entry.key === 'path') given.push(entry.value)
+      if (entry.key !== 'branch' && kept.has(entry.key) && entry.value?.startsWith('-')) continue
+      kept.set(entry.key, entry)
+    }
   }
   const submodules = []
   for (const [name, kept] of sections) {
+    const before = submodules.length
     const header = `[submodule "${name.replaceAll(/["\\]/gu, '\\$&')}"]`
     const read = () => Object.values(parseGitmodules([header, ...[...kept.values()].map((entry) => entry.text), ''].join('\n'), { checkUrls: false }))
     let first = null
@@ -175,6 +186,13 @@ function gitmodulesLeniently(text) {
         }
         break
       }
+    }
+    const taken = new Set(submodules.slice(before).map((s) => s.path))
+    for (const path of paths.get(name).map(normalSubmodulePath)) {
+      if (path === null || taken.has(path)) continue
+      taken.add(path)
+      submodules.push({ path, url: undefined, branch: undefined })
+      notes.push(`${header}: path ${path} too, which git reads where it reads .gitmodules from a commit; still taking it as a dependency, unnamed`)
     }
   }
   return { submodules, notes }
